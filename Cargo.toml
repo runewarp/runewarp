@@ -1,0 +1,17 @@
+[package]
+name = "runewarp"
+version = "0.1.0"
+edition = "2024"
+description = "Private tunneling for TLS passthrough"
+readme = "README.md"
+homepage = "https://runewarp.com"
+repository = "https://github.com/runewarp/runewarp"
+license = "Apache-2.0"
+keywords = ["tunnel", "port-forwarding", "remote-access", "tls-passthrough", "nat-traversal"]
+categories = ["network-programming", "command-line-utilities"]
+
+[dependencies]
+
+[[bin]]
+name = "runewarp"
+path = "src/main.rs"

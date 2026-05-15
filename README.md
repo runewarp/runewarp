@@ -9,9 +9,20 @@
   </p>
 </div>
 
-Runewarp is a self-hostable tunnel for TLS passthrough. The public server routes by SNI and forwards the original encrypted stream to a client running beside your TLS backend.
+Runewarp is a self-hostable tunnel for TLS passthrough. A public Runewarp Server reads enough of the Visitor's TLS ClientHello to route by SNI, then forwards the original encrypted stream to a Runewarp Client beside the operator's TLS-terminating backend.
 
-The repository now implements the core phase-1 data path as a library-first runtime with end-to-end tests. Config loading, operator-facing `server` / `client` / `keygen` commands, and tunnel authentication hardening still land in later phases.
+## Current status
+
+The repository currently ships the phase-1 data path as a library-first runtime with end-to-end tests.
+
+Today that means:
+
+- public TCP passthrough works end to end
+- the Client connects to the Server over QUIC
+- the current implementation keeps a single active Client connection
+- the binary is not operator-ready yet: config loading, CLI subcommands, ACME, and Client authentication land in later phases
+
+Phase 1 is not ready for public deployment without the planned authentication hardening.
 
 ## Getting started
 
@@ -21,15 +32,24 @@ cargo test
 ./target/release/runewarp
 ```
 
-The current binary only reports the repository status. The working phase-1 implementation lives in the library and is exercised by the test suite while config-driven operator flows are still phase-2 work.
+The current binary only reports the repository status. The working implementation lives in the library and is exercised by the test suite.
+
+## Design boundaries
+
+- TLS passthrough is the product boundary; Runewarp does not terminate customer TLS on public hostnames
+- The Server is the routing authority for Public hostnames
+- Hostname mirroring is intentional: operators repeat Public hostnames on both sides so the Server can choose a Tunnel and the Client can choose a Service from the forwarded ClientHello
+- Plain HTTP backends and edge TLS termination are out of scope
 
 ## Documentation
 
+- [`CONTEXT.md`](CONTEXT.md)
 - [`docs/configuration.md`](docs/configuration.md)
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/protocol.md`](docs/protocol.md)
 - [`docs/security.md`](docs/security.md)
 - [`docs/roadmap.md`](docs/roadmap.md)
+- [`docs/adr/0001-server-authoritative-routing-with-hostname-mirroring.md`](docs/adr/0001-server-authoritative-routing-with-hostname-mirroring.md)
 - [`AGENTS.md`](AGENTS.md)
 
 ## Inspiration

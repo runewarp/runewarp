@@ -1,59 +1,57 @@
 # Security
 
-Runewarp keeps customer TLS termination on the operator's own backend, not on the public edge. The server still sees routing metadata, so the security model is "private tunneling for TLS passthrough," not zero knowledge.
+Runewarp keeps customer TLS termination on the operator's own Local backend, not on the public edge. The Server still sees routing metadata, so the security model is private tunneling for TLS passthrough, not zero knowledge.
 
-## Status
+## Current status
 
-These docs describe the full intended design. Future items are called out where needed.
+The current repository ships only the phase-1 library runtime. It authenticates the Server side of the Tunnel connection but does **not** yet authenticate Clients. Do not expose the current build to the public internet until Client authentication lands.
 
-## What the server can and cannot see
+## What the Server can and cannot see
 
-| Visible to the server | Not visible to the server |
+| Visible to the Server | Not visible to the Server |
 | --- | --- |
-| SNI hostname | HTTP headers and bodies |
+| Public hostname from SNI | HTTP headers and bodies |
 | Visitor source IP and port | Application plaintext |
-| Connection timing and byte counts | Backend TLS private keys |
-| Client public-key fingerprint | Decrypted customer traffic |
+| Connection timing and byte counts | Local backend TLS private keys |
+| Authenticated Client identity in the committed baseline | Decrypted customer traffic |
 
 ## Public traffic invariants
 
-- Customer TLS is never terminated on public hostnames.
-- The server reads only enough of the ClientHello to route.
-- Public traffic must be TLS.
-- Non-TLS traffic and TLS without SNI are dropped.
+- customer TLS is never terminated on public hostnames
+- the Server reads only enough of the ClientHello to route
+- public traffic must be TLS
+- non-TLS traffic and TLS without SNI are dropped
+- Local backends must terminate TLS
 
 ## Tunnel authentication
 
-Phase 1 authenticates the server side of the QUIC tunnel and keeps client authentication for phase 2:
+The committed baseline for Tunnel connections is:
 
-1. the server presents a certificate for `server.hostname`
-2. the client validates that certificate
+1. the Server presents a certificate for `server.hostname`
+2. the Client validates that certificate
+3. the Client presents its own certificate
+4. the Server verifies the pinned Client identity from the Client public key
 
-Phase 2 adds:
+The pinned value is the Client public key, not the certificate lifetime or serial number.
 
-3. the client presents its own certificate
-4. the server verifies the client's pinned public-key fingerprint
+Current code status: only steps 1 and 2 are implemented.
 
-The pinned value is the client's public key, not the certificate lifetime or serial number.
+## Client identity and certificate lifecycle
 
-## Client certificate lifecycle
-
-`runewarp keygen` creates a client keypair and an initial self-signed certificate.
+`runewarp keygen` creates a Client keypair and an initial self-signed certificate.
 
 Recommended behavior:
 
 - certificates are valid for **90 days**
-- the client renews them at **60 days**
-- renewal happens on startup and periodically while the client is running
-- renewal reuses the same key by default, so the server fingerprint does not change
+- the Client renews them at **60 days**
+- renewal happens on startup and periodically while the Client is running
+- renewal reuses the same key by default, so the Client identity does not change
 
-That means normal certificate renewal should not require a server config change.
-
-Explicit key rotation is different: changing the key changes the fingerprint. Later phases may allow multiple fingerprints per tunnel entry to make rotation and mixed pools easier.
+That means ordinary certificate renewal should not require a Server config change. Explicit key rotation is different: changing the key changes the Client identity.
 
 ## Server certificate lifecycle
 
-The server certificate protects the tunnel endpoint itself:
+The Server certificate protects the tunnel endpoint itself:
 
 - it covers `server.hostname`
 - it is used for QUIC on `443/udp`
@@ -65,21 +63,21 @@ Server certificate renewal does **not** cause an immediate hard cutover. Existin
 
 Runewarp uses `instant-acme` in **TLS-ALPN-01 only** mode.
 
-- ACME is only for the server hostname.
-- ACME never provisions certificates for customer hostnames routed through the tunnel.
-- ACME cache data must be writable by the server and protected like any other secret-bearing material.
+- ACME is only for the Server hostname
+- ACME never provisions certificates for customer Public hostnames
+- ACME cache data must be writable by the Server and protected like any other secret-bearing material
 
 ## Operational risks
 
-- The server cannot prove that every replica in a tunnel pool serves the same hostname set.
-- A misconfigured replica can accept load-balanced traffic and then fail it locally.
-- There is no backend health check in early phases.
+- Hostname mirroring can drift between Server Tunnels and Client Services
+- the runtime does not validate cross-side hostname coverage
+- there is no Local backend health check in the committed baseline
 
 Those are known limitations, not hidden guarantees.
 
 ## Future security work
 
-- ECH for public and client connections
-- multiple fingerprints per tunnel entry
+- multiple Client identities per Tunnel
+- ECH for public and Client connections
 - health-aware routing decisions
 - richer abuse controls and metrics

@@ -1,14 +1,14 @@
 # Roadmap
 
-Runewarp is being built as a self-hosted TLS passthrough tunnel first. This is the only document that uses MVP terminology directly; other docs describe the full intended design and call out future work where needed.
+Runewarp is being built as a self-hosted TLS passthrough tunnel. The core docs describe the committed baseline; this document owns sequencing and longer-range expansion.
 
 ## Current state
 
-- the core phase-1 data path is implemented in code
+- the phase-1 data path is implemented in code
 - the repository is still library-first rather than operator-ready
-- self-hosting is the priority
+- the current implementation uses a Catch-all Tunnel, a Catch-all Service, and one active Client connection
 
-## Phase 1 - MVP data path
+## Phase 1 - Library data path
 
 Goal: prove the tunnel works end to end.
 
@@ -16,50 +16,48 @@ Status: implemented as the core library runtime and end-to-end test path.
 
 Scope:
 
-- one public server
-- one client
-- one catch-all tunnel on the server
-- one catch-all service on the client
+- one public Server
+- one Client
+- one Catch-all Tunnel on the Server
+- one Catch-all Service on the Client
 - public TLS passthrough on `443/tcp`
-- client QUIC tunnel on `443/udp`
-- no multi-hostname routing yet
+- Client QUIC tunnel on `443/udp`
 
-## Phase 2 - MVP config and authentication
+## Phase 2 - Operator runtime and Client authentication
 
-Goal: make the single-tunnel design usable by operators.
+Goal: make the single-Tunnel design usable by operators.
 
 Scope:
 
 - TOML config loading
 - boot-time config validation
 - `runewarp server`, `runewarp client`, and `runewarp keygen`
-- pinned client public-key fingerprints
-- client certificate auto-renewal with stable keys
-- manual server certs and ACME TLS-ALPN-01
+- pinned Client identities
+- Client certificate auto-renewal with stable keys
+- manual Server certs and ACME TLS-ALPN-01
 - human-readable logs
 
-## Phase 3 - Multi-hostname routing
+## Phase 3 - Exact-match hostname routing
 
-Goal: move beyond the catch-all form.
-
-Scope:
-
-- multiple server tunnel entries
-- multiple client service entries
-- exact-match hostname routing
-- stronger hostname overlap validation
-- clearer operator docs and DNS examples
-
-## Phase 4 - Tunnel pools and balancing
-
-Goal: scale one routed hostname set across multiple clients.
+Goal: move beyond Catch-all mode without changing the transparent data path.
 
 Scope:
 
-- least-active balancing
+- multiple Server Tunnels
+- multiple Client Services
+- exact-match Public hostname routing
+- clearer Hostname mirroring guidance
+- stronger intra-side hostname validation
+
+## Phase 4 - Tunnel pools and availability
+
+Goal: scale one routed hostname set across multiple Clients.
+
+Scope:
+
+- Tunnel pools with least-active balancing
 - round-robin tie-breaking
-- same-fingerprint client pools
-- later in this phase: multiple fingerprints per tunnel entry
+- same-identity Client pools
 - clearer handling for misconfigured replicas
 
 ## Phase 5 - Packaging and release engineering
@@ -76,17 +74,17 @@ Scope:
 
 ## Phase 6 - Protocol growth
 
-Goal: expand the data plane without changing the core model.
+Goal: expand the data plane without changing the product boundary.
 
 Scope:
 
 - public QUIC and HTTP/3 on `443/udp`
-- wildcard hostnames
+- wildcard Public hostnames
 - HTTP/3-based remote configuration instead of a custom control protocol
 - structured JSON logging
 - IPv6 support
 
-## Phase 7 - Advanced operations
+## Phase 7 - Operations and safety
 
 Goal: support larger and more dynamic deployments.
 
@@ -96,8 +94,8 @@ Scope:
 - backend health-aware routing
 - metrics for Prometheus and StatsD
 - configurable public and tunnel ports
+- lint and doctor tooling for Hostname mirroring drift
 - eventual per-hostname public port support
-- downstream connection reuse or pooling where it proves worthwhile
 
 ## Phase 8 - Advanced network features
 
@@ -105,32 +103,27 @@ Goal: handle more demanding edge and privacy requirements.
 
 Scope:
 
-- ECH for public and client connections
+- ECH for public and Client connections
 - clustered multi-node mode
+- multiple Client identities per Tunnel
 - better key-rotation workflows
 - deeper HTTP/3 and QUIC passthrough work
+
+## Deliberate non-goals
+
+- edge TLS termination for customer traffic
+- plain HTTP backend support
 
 ## Testing priorities
 
 - unit tests for ClientHello parsing, config validation, auth, and stream accounting
-- integration tests for routing, reconnects, and tunnel pools
-- end-to-end tests with a local TLS terminator behind the client
+- integration tests for routing, reconnects, and Tunnel pools
+- end-to-end tests with a local TLS terminator behind the Client
 - benchmarks for parsing, forwarding, and allocation-sensitive paths
 - stronger property testing and fuzzing for security-critical code
 
-## Dependency guide
-
-Core crates for the current design:
-
-- `tokio`
-- `quinn`
-- `rustls`
-- `instant-acme`
-
-Module layout can change. The important thing is keeping the data path simple, fast, and well-tested.
-
 ## Open questions worth tracking
 
-- how public QUIC passthrough should coexist with client tunnels on `443/udp`
-- how clustered mode should route requests to the correct tunnel without centralizing the data path
+- how public QUIC passthrough should coexist with Client tunnels on `443/udp`
+- how clustered mode should route requests to the correct Tunnel without centralizing the data path
 - whether downstream connection reuse materially improves performance without hurting correctness

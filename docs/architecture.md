@@ -1,85 +1,78 @@
 # Architecture
 
-Runewarp is a self-hostable tunnel for private TLS services. The public edge inspects only enough of the ClientHello to route by SNI, then forwards the original encrypted byte stream to a client running beside the real TLS endpoint.
+This document describes the committed Runewarp design. The current repository is still narrower: phase 1 ships only the library data path, one active Client connection, and no config-driven CLI, ACME, or Client authentication yet.
 
-## Status
-
-These docs describe the full intended design. Features that land later are marked as future work. Early phases start with one catch-all tunnel on the server and one catch-all service on the client.
-
-## System roles
+## Roles
 
 | Component | Responsibility |
 | --- | --- |
-| Server | Accept public traffic, authenticate client tunnels, choose a tunnel pool, forward bytes, handle ACME for its own hostname |
-| Client | Maintain the outbound QUIC tunnel, choose the local backend, forward bytes to the service |
+| Visitor | Connect to a Public hostname over TLS |
+| Server | Accept Visitor traffic, select a Tunnel, and forward the original encrypted stream |
+| Client | Maintain Tunnel connections, choose a Service locally, and forward traffic to a Local backend |
 | Local backend | Terminate TLS and serve the application |
 
 ## Core routing model
 
-Runewarp keeps routing authority on the server:
+Runewarp keeps routing authority on the Server:
 
-- The server decides which public hostnames belong to which tunnel entry.
-- The client does not register hostnames with the server.
-- Hostnames are the routing identity. There is no separate tunnel or service name field.
-- Exact hostname overlap is a boot-time validation error on both server and client.
+- the Server decides which Public hostnames belong to which Tunnel
+- the Client does not register hostnames with the Server
+- Public hostnames are the routing identity; there is no separate Tunnel or Service name field
+- exact hostname overlap is rejected within Server Tunnels and within Client Services
 
-Early phases use a single catch-all tunnel and a single catch-all service:
+Runewarp deliberately uses **Hostname mirroring**:
 
-- one `[[server.tunnels]]` entry, with `hostnames` omitted
-- one `[[client.services]]` entry, with `hostnames` omitted
+- operators repeat Public hostnames on both sides
+- the Server uses them to select a Tunnel
+- the Client uses the forwarded ClientHello to select a Service
+- the public data path stays transparent because no extra routing header is added
 
-Later phases expand that model to multiple tunnel entries and multiple service entries, while keeping server-owned routing.
+## Catch-all mode
 
-## Listener model
+When each side has exactly one entry, `hostnames` may be omitted:
 
-### Early phases
+- the sole `[[server.tunnels]]` entry becomes a Catch-all Tunnel
+- the sole `[[client.services]]` entry becomes a Catch-all Service
 
-| Endpoint | Purpose |
-| --- | --- |
-| `443/tcp` | Public TLS passthrough and ACME TLS-ALPN-01 for the server hostname |
-| `443/udp` | Client QUIC tunnels only |
+Catch-all mode matches every routed Public hostname except the Server hostname.
 
-### Future phases
+## Data path
 
-Later phases may also accept public QUIC and HTTP/3 on `443/udp`. At that point the server will need to distinguish public QUIC from client tunnel QUIC using SNI and ALPN during handshake handling.
+1. A Visitor connects to `443/tcp` on the Server.
+2. The Server buffers enough of the ClientHello to extract SNI.
+3. The Server rejects non-TLS traffic, missing-SNI traffic, and application traffic addressed to the Server hostname.
+4. The Server selects a Tunnel by Public hostname.
+5. The Server forwards the original encrypted bytes over an existing Tunnel connection.
+6. The Client re-reads the forwarded ClientHello, selects a Service, and connects to the Local backend.
+7. The Local backend terminates TLS and serves the application.
 
-## Tunnel pools
+Runewarp adds no framing header to public traffic. The forwarded byte stream begins with the Visitor's original ClientHello.
 
-A tunnel pool is the set of live client connections accepted for the same configured client public-key fingerprint.
+## Trust and validation
 
-- New public streams are assigned with least-active balancing.
-- Ties are broken round-robin.
-- Existing streams stay on the connection that accepted them.
-- The server cannot verify that every replica in a pool serves the same hostnames.
+- the Server hostname identifies the public edge itself
+- each Tunnel trusts one Client identity in the base design
+- a Client identity is the pinned public key, not a certificate serial or lifetime
+- intra-side hostname uniqueness is enforced at boot
+- cross-side hostname coverage is **not** validated at runtime; drift under Hostname mirroring is an operator responsibility
 
-That last point is an operational risk: if one replica is missing a hostname, the server can still send traffic there, and the failure only shows up on the client side.
+The current code authenticates only the Server side of the Tunnel connection. Client authentication is part of the committed operator design, but it has not landed in the phase-1 runtime yet.
 
-## Routing expansion
+## Product boundaries
 
-The long-term routing model is broader than the early-phase catch-all form:
+- TLS passthrough is the product boundary
+- customer TLS is terminated only on the Local backend
+- plain HTTP backends are out of scope
+- edge TLS termination for customer traffic is out of scope
 
-- exact-match hostname routing after the single-entry phase
-- wildcard hostname support in a later phase
-- multiple client fingerprints per tunnel entry in a later phase
-- remote server configuration in a later phase
+## Current implementation note
 
-Subdomain routing under the server hostname is allowed. For example, `api.tunnel.example.com` may be routed as an application hostname. Wildcards covering the server hostname space, such as `*.tunnel.example.com`, should be rejected.
+The current code keeps one active Client connection. Scaling a Tunnel across multiple live Tunnel connections is future work, so load-balanced Tunnel pools are intentionally left out of the committed baseline docs.
 
-## No framing on public streams
+## Future work
 
-Runewarp does not add a custom framing header to public traffic. The forwarded stream already begins with the visitor's TLS ClientHello, so:
-
-1. the server can extract SNI to choose a tunnel pool
-2. the client can read the same ClientHello to choose `local-addr`
-3. the public data path stays transparent
-
-If client/server coordination is needed later, prefer HTTP/3 on the existing QUIC connection over inventing a custom protocol.
-
-## Future architecture work
-
-- public QUIC and HTTP/3 passthrough on `443/udp`
-- ECH support for both public and client connections
-- clustered multi-node routing
-- live config updates without dropping active connections
-- IPv6 support
-- configurable public and tunnel ports
+- load-balanced Tunnel pools
+- wildcard Public hostnames
+- public QUIC and HTTP/3 passthrough
+- ECH
+- clustered routing and live config distribution

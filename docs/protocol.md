@@ -2,6 +2,8 @@
 
 This document describes the intended wire behavior for Runewarp. Early phases begin with a smaller subset: one catch-all tunnel, one catch-all service, public TLS over TCP, and client tunnels over QUIC on UDP.
 
+Current code status: phase 1 implements the core catch-all TCP-to-QUIC-to-TCP data path and validates the public-side ClientHello. Client-certificate authentication and fingerprint pinning land in phase 2.
+
 ## Port 443 handling
 
 ### Early phases
@@ -10,7 +12,7 @@ This document describes the intended wire behavior for Runewarp. Early phases be
 | --- | --- | --- |
 | `443/tcp` | Public TLS | Read ClientHello, extract SNI, route raw bytes without TLS termination |
 | `443/tcp` | ACME for the server hostname | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
-| `443/udp` | Client tunnels | QUIC/TLS with ALPN `runewarp/1` and mTLS |
+| `443/udp` | Client tunnels | QUIC/TLS with ALPN `runewarp/1`; phase 2 adds client auth and fingerprint pinning |
 
 ### Future phases
 
@@ -41,6 +43,9 @@ The client establishes one long-lived QUIC connection to `server-hostname:443` o
 2. Dial UDP port `443`.
 3. Negotiate QUIC with ALPN `runewarp/1`.
 4. Validate the server certificate.
+
+Phase 2 extends that handshake with client authentication:
+
 5. Present the client certificate for mTLS.
 6. Verify the pinned client public-key fingerprint on the server.
 

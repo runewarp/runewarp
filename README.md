@@ -11,20 +11,17 @@
 
 Runewarp is a self-hostable tunnel for TLS passthrough. The public server routes by SNI and forwards the original encrypted stream to a client running beside your TLS backend.
 
-The codebase is early. Use the docs in `docs/` and the roadmap to track what is already implemented versus what is still planned.
+The repository now implements the core phase-1 data path as a library-first runtime with end-to-end tests. Config loading, operator-facing `server` / `client` / `keygen` commands, and tunnel authentication hardening still land in later phases.
 
 ## Getting started
 
 ```bash
 cargo build --release
-./target/release/runewarp --help
-./target/release/runewarp keygen --out-dir ./certs
+cargo test
+./target/release/runewarp
 ```
 
-1. Point your public hostname at the tunnel server, for example `app.example.com CNAME tunnel.example.com`.
-2. Write your server and client config files.
-3. Run `runewarp server --config config.toml` on the public host.
-4. Run `runewarp client --config config.toml` beside your local TLS backend.
+The current binary only reports the repository status. The working phase-1 implementation lives in the library and is exercised by the test suite while config-driven operator flows are still phase-2 work.
 
 ## Documentation
 

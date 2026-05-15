@@ -14,3 +14,4 @@
 - All code must be formatted and linted with Clippy.
 - Run relevant tests after changes. Run the full suite before any commit.
 - Keep comments and doc-comments useful, detailed where needed, and not excessive.
+- Always use TDD during implementation.

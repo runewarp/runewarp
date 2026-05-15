@@ -11,6 +11,13 @@ keywords = ["tunnel", "port-forwarding", "remote-access", "tls-passthrough", "na
 categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
+quinn = { version = "0.11.9", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23.35", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+rcgen = "0.14.8"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 
 [[bin]]
 name = "runewarp"

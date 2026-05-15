@@ -4,13 +4,15 @@ Runewarp is being built as a self-hosted TLS passthrough tunnel first. This is t
 
 ## Current state
 
-- the docs are ahead of the code
-- the implementation is still minimal
+- the core phase-1 data path is implemented in code
+- the repository is still library-first rather than operator-ready
 - self-hosting is the priority
 
 ## Phase 1 - MVP data path
 
 Goal: prove the tunnel works end to end.
+
+Status: implemented as the core library runtime and end-to-end test path.
 
 Scope:
 

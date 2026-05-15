@@ -24,10 +24,13 @@ These docs describe the full intended design. Future items are called out where 
 
 ## Tunnel authentication
 
-Runewarp authenticates client tunnels with mutual TLS:
+Phase 1 authenticates the server side of the QUIC tunnel and keeps client authentication for phase 2:
 
 1. the server presents a certificate for `server.hostname`
 2. the client validates that certificate
+
+Phase 2 adds:
+
 3. the client presents its own certificate
 4. the server verifies the client's pinned public-key fingerprint
 

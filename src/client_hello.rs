@@ -4,6 +4,8 @@ use std::io::Cursor;
 use rustls::server::Acceptor;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use crate::hostname::normalize_public_hostname;
+
 pub const CLIENT_HELLO_BUFFER_LIMIT: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +107,7 @@ where
 
                 return Ok(ParsedClientHello {
                     buffered_bytes,
-                    server_name,
+                    server_name: normalize_public_hostname(&server_name),
                 });
             }
             Ok(None) => {}
@@ -153,6 +155,15 @@ mod tests {
 
         assert_eq!(parsed.server_name(), "app.example.test");
         assert_eq!(parsed.buffered_bytes(), buffered.as_slice());
+    }
+
+    #[tokio::test]
+    async fn normalizes_the_parsed_server_name_for_routing() {
+        let client_hello = build_client_hello(ServerName::try_from("App.Example.Test").unwrap());
+
+        let parsed = parse_from_chunks(vec![client_hello]).await.unwrap();
+
+        assert_eq!(parsed.server_name(), "app.example.test");
     }
 
     #[tokio::test]

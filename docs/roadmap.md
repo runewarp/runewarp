@@ -4,7 +4,7 @@ Runewarp is being built as a self-hosted TLS passthrough tunnel. The core docs d
 
 ## Current state
 
-- the phase-1 data path is implemented in code
+- the phase-1 data path is implemented as a library-first `Server` and `Client` runtime
 - the repository is still library-first rather than operator-ready
 - the current implementation uses a Catch-all Tunnel, a Catch-all Service, and one active Client instance with one Tunnel connection
 

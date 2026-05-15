@@ -13,7 +13,7 @@ Runewarp is a self-hostable tunnel for TLS passthrough. A public Runewarp Server
 
 ## Current status
 
-The repository currently ships the phase-1 data path as a library-first runtime with end-to-end tests.
+The repository currently ships the phase-1 data path as a library-first `Server` and `Client` runtime with end-to-end tests.
 
 Today that means:
 
@@ -32,7 +32,7 @@ cargo test
 ./target/release/runewarp
 ```
 
-The current binary only reports the repository status. The working implementation lives in the library and is exercised by the test suite.
+The current binary only reports the repository status. The working implementation lives in the library API and is exercised by the test suite.
 
 ## Design boundaries
 

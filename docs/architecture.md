@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the committed Runewarp design. The current repository is still narrower: phase 1 ships only the library data path, one active Client connection, and no config-driven CLI, ACME, or Client authentication yet.
+This document describes the committed Runewarp design. The current repository is still narrower: phase 1 ships only the library data path, one active Client instance with one Tunnel connection, and no config-driven CLI, ACME, or Client authentication yet.
 
 ## Roles
 
@@ -8,7 +8,7 @@ This document describes the committed Runewarp design. The current repository is
 | --- | --- |
 | Visitor | Connect to a Public hostname over TLS |
 | Server | Accept Visitor traffic, select a Tunnel, and forward the original encrypted stream |
-| Client | Maintain Tunnel connections, choose a Service locally, and forward traffic to a Local backend |
+| Client instance | Maintain one Tunnel connection, choose a Service locally, and forward traffic to a Local backend |
 | Local backend | Terminate TLS and serve the application |
 
 ## Core routing model
@@ -43,7 +43,7 @@ Catch-all mode matches every routed Public hostname except the Server hostname.
 3. The Server rejects non-TLS traffic, missing-SNI traffic, and application traffic addressed to the Server hostname.
 4. The Server selects a Tunnel by Public hostname.
 5. The Server forwards the original encrypted bytes over an existing Tunnel connection.
-6. The Client re-reads the forwarded ClientHello, selects a Service, and connects to the Local backend.
+6. The receiving Client instance re-reads the forwarded ClientHello, selects a Service, and connects to the Local backend.
 7. The Local backend terminates TLS and serves the application.
 
 Runewarp adds no framing header to public traffic. The forwarded byte stream begins with the Visitor's original ClientHello.
@@ -67,11 +67,11 @@ The current code authenticates only the Server side of the Tunnel connection. Cl
 
 ## Current implementation note
 
-The current code keeps one active Client connection. Scaling a Tunnel across multiple live Tunnel connections is future work, so load-balanced Tunnel pools are intentionally left out of the committed baseline docs.
+Each Client instance establishes one Tunnel connection. The current code keeps only one active Client instance at a time, and supporting multiple Client instances per Tunnel is future work, so load-balanced Tunnel pools are intentionally left out of the committed baseline docs.
 
 ## Future work
 
-- load-balanced Tunnel pools
+- load-balanced Tunnel pools across multiple Client instances
 - wildcard Public hostnames
 - public QUIC and HTTP/3 passthrough
 - ECH

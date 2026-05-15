@@ -77,7 +77,7 @@ Those are known limitations, not hidden guarantees.
 
 ## Future security work
 
-- multiple Client identities per Tunnel
+- multiple Client instances per Tunnel, with shared or separate Client identities
 - ECH for public and Client connections
 - health-aware routing decisions
 - richer abuse controls and metrics

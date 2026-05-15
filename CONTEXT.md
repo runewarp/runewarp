@@ -13,12 +13,16 @@ A configured routing and trust unit that owns one slice of public traffic.
 _Avoid_: Connection, session
 
 **Tunnel connection**:
-A live session accepted under a **Tunnel** and used to carry proxied public streams.
+A live session opened by one **Client instance** and accepted under one **Tunnel**.
 _Avoid_: Tunnel, route
 
 **Client**:
-The operator-run Runewarp component that stays connected to the **Server** and forwards traffic to local backends.
+The operator-run Runewarp component responsible for forwarding traffic between the **Server** and local backends.
 _Avoid_: Visitor, browser, caller
+
+**Client instance**:
+One running copy of the **Client** component.
+_Avoid_: Client, connection, replica
 
 **Visitor**:
 The outside party that connects to a routed **Public hostname** through Runewarp.
@@ -41,11 +45,11 @@ The operator-run TLS-terminating process or endpoint that a **Client** connects 
 _Avoid_: Service, tunnel
 
 **Client identity**:
-The stable trust identity of a **Client**, defined by its pinned public key rather than a certificate lifetime.
+The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime.
 _Avoid_: Certificate, serial number
 
 **Tunnel pool**:
-The set of live **Tunnel connections** currently serving one **Tunnel** under one **Client identity**.
+The set of live **Tunnel connections** and their serving **Client instances** currently available for one **Tunnel**.
 _Avoid_: Tunnel, cluster
 
 **Catch-all Tunnel**:
@@ -63,27 +67,30 @@ _Avoid_: Duplicate hostname config, registration
 ## Relationships
 
 - A **Server** selects exactly one **Tunnel** for each routed **Public hostname**
+- A **Client** can run as one or more **Client instances**
 - A **Tunnel** can have zero or more live **Tunnel connections**
 - Each **Tunnel connection** belongs to exactly one **Tunnel**
-- A **Client** can establish zero or more **Tunnel connections**
+- Each **Tunnel connection** belongs to exactly one **Client instance**
+- A **Client instance** establishes exactly one **Tunnel connection**
 - A **Visitor** reaches a **Local backend** only through a **Tunnel**
 - A **Server hostname** identifies the public edge, not an operator application
 - A **Public hostname** is routed through exactly one **Tunnel** at a time
 - A **Service** maps traffic from one or more **Public hostnames** to one **Local backend**
-- A **Client** forwards proxied traffic from a **Tunnel connection** to a **Local backend** through a selected **Service**
-- A **Tunnel** trusts exactly one **Client identity** in the base model
-- A **Tunnel pool** contains only **Tunnel connections** accepted under that **Client identity**
+- A **Client instance** forwards proxied traffic from its **Tunnel connection** to a **Local backend** through a selected **Service**
+- A **Client instance** uses exactly one **Client identity** at a time
+- A **Client identity** can be used by one or more **Client instances**
+- A **Tunnel pool** belongs to exactly one **Tunnel**
 - A **Catch-all Tunnel** is valid only when there is exactly one configured **Tunnel**
 - A **Catch-all Service** is valid only when there is exactly one configured **Service**
 - **Hostname mirroring** repeats one set of **Public hostnames** across **Tunnels** and **Services**
 
 ## Example dialogue
 
-> **Dev:** "The client reconnected — did we create a new **Tunnel**?"
-> **Domain expert:** "No. We created a new **Tunnel connection** for the same **Tunnel**."
+> **Dev:** "I started a second **Client instance** — did that create a second **Tunnel connection**?"
+> **Domain expert:** "Yes. Each **Client instance** owns exactly one **Tunnel connection**."
 >
 > **Dev:** "The **Visitor** hit the public hostname, but which **Client** served it?"
-> **Domain expert:** "Whichever **Client** currently had the selected **Tunnel connection** for that **Tunnel**."
+> **Domain expert:** "Whichever **Client instance** owned the selected **Tunnel connection** for that **Tunnel**."
 >
 > **Dev:** "Can `tunnel.example.com` also be a **Public hostname** for an app?"
 > **Domain expert:** "No. That is the **Server hostname**. Application traffic uses separate **Public hostnames**."
@@ -91,8 +98,8 @@ _Avoid_: Duplicate hostname config, registration
 > **Dev:** "Is the `caddy.local:443` target the **Service**?"
 > **Domain expert:** "No. The **Service** is the routing rule in client config. `caddy.local:443` is the **Local backend** it selects."
 >
-> **Dev:** "The certificate renewed — did the **Client identity** change?"
-> **Domain expert:** "No. The **Client identity** is the pinned public key. Renewal keeps the same identity unless the key changes."
+> **Dev:** "If I start two **Client instances**, do they need different **Client identities**?"
+> **Domain expert:** "No. They may share one **Client identity** or use separate ones."
 >
 > **Dev:** "Why do both sides list `app.example.com`?"
 > **Domain expert:** "That's **Hostname mirroring**. The **Server** uses it to choose the **Tunnel** and the **Client** uses it to choose the **Service**."
@@ -104,6 +111,7 @@ _Avoid_: Duplicate hostname config, registration
 
 - "tunnel" was used to mean both a configured routing entry and a live QUIC session — resolved: **Tunnel** is the configured unit; **Tunnel connection** is the live session.
 - "client" was used to mean both the operator-run component and the outside network peer — resolved: **Client** is the operator-run component; **Visitor** is the outside public caller.
+- "client" was also used to blur the component and one running process — resolved: **Client** is the component; **Client instance** is one running copy.
 - "server hostname" and routed application hostnames were easy to blur — resolved: **Server hostname** names the Runewarp edge; **Public hostname** names operator application traffic.
 - "service" and "backend" were used interchangeably — resolved: **Service** is the client-side config unit; **Local backend** is the actual TLS endpoint the **Client** dials.
 - "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key, while certificates can rotate without changing that identity.

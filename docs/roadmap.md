@@ -6,7 +6,7 @@ Runewarp is being built as a self-hosted TLS passthrough tunnel. The core docs d
 
 - the phase-1 data path is implemented in code
 - the repository is still library-first rather than operator-ready
-- the current implementation uses a Catch-all Tunnel, a Catch-all Service, and one active Client connection
+- the current implementation uses a Catch-all Tunnel, a Catch-all Service, and one active Client instance with one Tunnel connection
 
 ## Phase 1 - Library data path
 
@@ -17,7 +17,7 @@ Status: implemented as the core library runtime and end-to-end test path.
 Scope:
 
 - one public Server
-- one Client
+- one Client instance
 - one Catch-all Tunnel on the Server
 - one Catch-all Service on the Client
 - public TLS passthrough on `443/tcp`
@@ -49,15 +49,16 @@ Scope:
 - clearer Hostname mirroring guidance
 - stronger intra-side hostname validation
 
-## Phase 4 - Tunnel pools and availability
+## Phase 4 - Multi-instance tunnels and availability
 
-Goal: scale one routed hostname set across multiple Clients.
+Goal: in a much later phase, scale one routed hostname set across multiple Client instances.
 
 Scope:
 
+- multiple Client instances per Tunnel
 - Tunnel pools with least-active balancing
 - round-robin tie-breaking
-- same-identity Client pools
+- shared-identity or separate-identity Client instances
 - clearer handling for misconfigured replicas
 
 ## Phase 5 - Packaging and release engineering
@@ -105,7 +106,6 @@ Scope:
 
 - ECH for public and Client connections
 - clustered multi-node mode
-- multiple Client identities per Tunnel
 - better key-rotation workflows
 - deeper HTTP/3 and QUIC passthrough work
 
@@ -117,7 +117,7 @@ Scope:
 ## Testing priorities
 
 - unit tests for ClientHello parsing, config validation, auth, and stream accounting
-- integration tests for routing, reconnects, and Tunnel pools
+- integration tests for routing, reconnects, and multi-instance Tunnel pools
 - end-to-end tests with a local TLS terminator behind the Client
 - benchmarks for parsing, forwarding, and allocation-sensitive paths
 - stronger property testing and fuzzing for security-critical code
@@ -126,4 +126,6 @@ Scope:
 
 - how public QUIC passthrough should coexist with Client tunnels on `443/udp`
 - how clustered mode should route requests to the correct Tunnel without centralizing the data path
+- whether the Server should keep one coordinating accept loop or move to a clearer supervision model as the runtime grows
+- whether Server-side Tunnel selection and Client-side Service selection should eventually share a routing abstraction once exact-match routing is real on both sides
 - whether downstream connection reuse materially improves performance without hurting correctness

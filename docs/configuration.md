@@ -207,7 +207,7 @@ The committed baseline keeps the public TCP port and Client UDP port at `443`. M
 ## Future work
 
 - wildcard Public hostnames
-- multiple Client identities per Tunnel
+- multiple Client instances per Tunnel, with shared or separate Client identities
 - remote configuration
 - lint and doctor tooling for Hostname mirroring
 - IPv6-first deployment support

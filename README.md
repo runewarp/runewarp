@@ -18,8 +18,8 @@ The repository currently ships the phase-1 data path as a library-first runtime 
 Today that means:
 
 - public TCP passthrough works end to end
-- the Client connects to the Server over QUIC
-- the current implementation keeps a single active Client connection
+- each Client instance connects to the Server over QUIC using one Tunnel connection
+- the current implementation only keeps one Client instance active at a time
 - the binary is not operator-ready yet: config loading, CLI subcommands, ACME, and Client authentication land in later phases
 
 Phase 1 is not ready for public deployment without the planned authentication hardening.

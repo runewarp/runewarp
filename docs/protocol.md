@@ -1,6 +1,6 @@
 # Protocol
 
-This document describes the committed Runewarp wire behavior. The current code implements only the phase-1 catch-all TCP-to-QUIC-to-TCP data path with Server-authenticated Tunnel connections.
+This document describes the committed Runewarp wire behavior. The current code implements only the phase-1 catch-all TCP-to-QUIC-to-TCP data path with one active Client instance and Server-authenticated Tunnel connections.
 
 ## Listener model
 
@@ -31,7 +31,7 @@ The buffered ClientHello must never be logged or echoed back in diagnostics.
 
 ## Tunnel connection handshake
 
-The Client establishes one long-lived QUIC connection to `server-hostname:443` over UDP:
+Each Client instance establishes one long-lived QUIC connection to `server-hostname:443` over UDP:
 
 1. Resolve `client.server-hostname`.
 2. Dial UDP port `443`.
@@ -89,13 +89,14 @@ When a QUIC connection drops, all streams on that connection are lost. They are 
 
 ## Operational limits
 
+- each Client instance has exactly one Tunnel connection
 - the runtime does not validate cross-side hostname coverage under Hostname mirroring
 - there is no pre-flight Local backend health check
-- the current implementation keeps one active Client connection
+- the current implementation keeps only one active Client instance at a time
 
 ## Future protocol work
 
-- load-balanced Tunnel pools
+- load-balanced Tunnel pools across multiple Client instances
 - public QUIC and HTTP/3 passthrough on `443/udp`
 - wildcard hostname routing
 - ECH for public and Client connections

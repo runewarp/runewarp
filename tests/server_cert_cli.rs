@@ -196,3 +196,80 @@ fn server_cert_renew_reissues_the_leaf_without_changing_the_server_ca() {
         "renew should preserve the stored normalized hostname",
     );
 }
+
+#[test]
+fn server_cert_rotate_ca_replaces_the_ca_and_updates_the_stored_hostname() {
+    let temp_dir = tempdir().expect("create temporary directory");
+    let cert_directory = temp_dir.path().join("server-cert");
+
+    assert_cmd::Command::cargo_bin("runewarp")
+        .expect("binary path")
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--directory",
+            cert_directory.to_str().expect("utf-8 certificate directory"),
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    let original_server_certificate =
+        fs::read(cert_directory.join("server.crt")).expect("original server certificate");
+    let original_server_key = fs::read(cert_directory.join("server.key")).expect("original server key");
+    let original_server_ca =
+        fs::read(cert_directory.join("server-ca.crt")).expect("original server CA certificate");
+    let original_server_ca_key = fs::read(cert_directory.join("state/manual/server-ca.key"))
+        .expect("original server CA key");
+    let original_hostname = fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
+        .expect("original stored hostname");
+
+    assert_cmd::Command::cargo_bin("runewarp")
+        .expect("binary path")
+        .args([
+            "server",
+            "cert",
+            "rotate-ca",
+            "--directory",
+            cert_directory.to_str().expect("utf-8 certificate directory"),
+            "--hostname",
+            "Rotated.EXAMPLE.test",
+        ])
+        .assert()
+        .success();
+
+    assert_ne!(
+        fs::read(cert_directory.join("server.crt")).expect("rotated server certificate"),
+        original_server_certificate,
+        "rotate-ca should replace the server leaf certificate",
+    );
+    assert_ne!(
+        fs::read(cert_directory.join("server.key")).expect("rotated server key"),
+        original_server_key,
+        "rotate-ca should replace the server leaf private key",
+    );
+    assert_ne!(
+        fs::read(cert_directory.join("server-ca.crt")).expect("rotated server CA certificate"),
+        original_server_ca,
+        "rotate-ca should replace the server CA certificate",
+    );
+    assert_ne!(
+        fs::read(cert_directory.join("state/manual/server-ca.key")).expect("rotated server CA key"),
+        original_server_ca_key,
+        "rotate-ca should replace the server CA private key",
+    );
+    assert_ne!(
+        fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
+            .expect("rotated stored hostname"),
+        original_hostname,
+        "rotate-ca should replace the stored hostname",
+    );
+    assert_eq!(
+        fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
+            .expect("rotated stored hostname"),
+        "rotated.example.test",
+        "rotate-ca should normalize the stored hostname",
+    );
+}

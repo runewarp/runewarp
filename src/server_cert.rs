@@ -127,6 +127,43 @@ pub fn renew_manual_server_certificate(directory: &Path) -> Result<(), ServerCer
     Ok(())
 }
 
+pub fn rotate_manual_server_certificate_authority(
+    directory: &Path,
+    hostname: &str,
+) -> Result<(), ServerCertError> {
+    let hostname = normalize_public_hostname(hostname);
+    let manual_state_directory = manual_state_directory(directory);
+    let generated = generate_manual_server_cert_material(&hostname)?;
+
+    replace_file_atomically_with_mode(
+        &directory.join(SERVER_CERT_FILENAME),
+        generated.server_cert_pem.as_bytes(),
+        0o644,
+    )?;
+    replace_file_atomically_with_mode(
+        &directory.join(SERVER_KEY_FILENAME),
+        generated.server_key_pem.as_bytes(),
+        0o600,
+    )?;
+    replace_file_atomically_with_mode(
+        &directory.join(SERVER_CA_FILENAME),
+        generated.server_ca_pem.as_bytes(),
+        0o644,
+    )?;
+    replace_file_atomically_with_mode(
+        &manual_state_directory.join(SERVER_CA_KEY_FILENAME),
+        generated.server_ca_key_pem.as_bytes(),
+        0o600,
+    )?;
+    replace_file_atomically_with_mode(
+        &manual_state_directory.join(SERVER_HOSTNAME_FILENAME),
+        hostname.as_bytes(),
+        0o644,
+    )?;
+
+    Ok(())
+}
+
 struct GeneratedServerCertMaterial {
     server_cert_pem: String,
     server_key_pem: String,

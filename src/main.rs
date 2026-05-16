@@ -13,6 +13,7 @@ use runewarp::{
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, PreparedClient, PreparedServer,
     generate_client_identity, initialize_manual_server_certificate, load_client_settings,
     load_server_settings, renew_manual_server_certificate,
+    rotate_manual_server_certificate_authority,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
@@ -127,6 +128,11 @@ fn run_server_cert_command(mut args: impl Iterator<Item = String>) -> Result<(),
         "renew" => {
             let directory = parse_directory_arg(args)?;
             renew_manual_server_certificate(&directory)?;
+            Ok(())
+        }
+        "rotate-ca" => {
+            let (directory, hostname) = parse_directory_and_hostname_args(args)?;
+            rotate_manual_server_certificate_authority(&directory, &hostname)?;
             Ok(())
         }
         _ => Err(format!("unrecognized server cert command: {command}").into()),

@@ -26,6 +26,7 @@ pub use quic::{
 };
 pub use server_cert::{
     SERVER_CA_FILENAME, initialize_manual_server_certificate, renew_manual_server_certificate,
+    rotate_manual_server_certificate_authority,
 };
 pub use server::{Server, ServerConfig};
 pub use settings::{

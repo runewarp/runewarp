@@ -1,6 +1,6 @@
 # Protocol
 
-This document describes the committed Runewarp wire behavior. The current code implements only the phase-1 catch-all TCP-to-QUIC-to-TCP data path with one active Client instance and Server-authenticated Tunnel connections. The agreed next phase-2 operator surface renames `retry-interval` to `reconnect-interval` and tightens Client trust of manual Server CAs, but those changes are not implemented yet.
+This document describes the committed Runewarp wire behavior. The current code implements only the phase-1 legacy Catch-all TCP-to-QUIC-to-TCP data path with one active Client instance and Server-authenticated Tunnel connections. The agreed next phase-2 operator surface renames `retry-interval` to `reconnect-interval` and tightens Client trust of manual Server CAs. The committed phase-3 model also removes Server Catch-all, routes by exact Server-authorized Public hostname, and keeps one active Tunnel connection per Tunnel, but those changes are not implemented yet.
 
 ## Listener model
 
@@ -22,12 +22,12 @@ For each inbound TCP connection on port `443`:
 4. If TLS is valid but SNI is missing, drop the connection.
 5. If SNI equals `server.hostname` and ALPN is `acme-tls/1`, handle the ACME challenge.
 6. If SNI equals `server.hostname` and ALPN is anything else, drop the connection.
-7. Otherwise, select a Tunnel by Public hostname:
-   - in Catch-all mode, the single Tunnel matches every routed Public hostname except the Server hostname
-   - with multiple Tunnels, use exact hostname matching
-8. Open a bidirectional stream on the selected Tunnel connection, forward the buffered ClientHello bytes, then continue streaming in both directions.
+7. Otherwise, select a Tunnel by exact normalized Public hostname from the configured `server.tunnels[].public-hostnames`.
+8. If no Tunnel owns that hostname, drop the connection.
+9. If the selected Tunnel has no active connection, drop the connection.
+10. Open a bidirectional stream on the selected Tunnel connection, forward the buffered ClientHello bytes, then continue streaming in both directions.
 
-The buffered ClientHello must never be logged or echoed back in diagnostics.
+The buffered ClientHello must never be logged or echoed back in diagnostics. When logs are enabled, diagnostics may log the normalized Public hostname and the routing outcome only.
 
 ## Tunnel connection handshake
 
@@ -56,10 +56,11 @@ When the Client receives a new QUIC stream:
 2. Otherwise, buffer the forwarded ClientHello and parse it using the same **16 KB** cap.
 3. Extract and normalize the SNI hostname.
 4. Match the hostname to `client.services[*].public-hostnames`.
-5. Open a TCP connection to the selected `backend-address`.
-6. Forward bytes in both directions.
+5. If no Service matches, reject the stream immediately.
+6. Open a TCP connection to the selected `backend-address`.
+7. Forward bytes in both directions.
 
-Hostname mirroring is why both sides may list the same Public hostname: the Server uses it to choose a Tunnel and the Client uses it to choose a Service.
+Hostname mirroring is why both sides may list the same Public hostname: the Server uses it to choose a Tunnel and the Client uses it to choose a Service. In One-sided Catch-all, only the Server lists explicit Public hostnames and the sole Client Service accepts every hostname that Server has already authorized for that Tunnel.
 
 Notes:
 
@@ -86,13 +87,15 @@ Client reconnect behavior is:
 `reconnect-interval` must be at least **1 second**.
 
 When a QUIC connection drops, all streams on that connection are lost. They are not migrated elsewhere.
+If a new authenticated connection replaces an older connection for the same Tunnel, the older connection closes and any streams on it are lost.
 
 ## Operational limits
 
 - each Client instance has exactly one Tunnel connection
+- the committed phase-3 model keeps one active Tunnel connection per Tunnel
 - the runtime does not validate cross-side hostname coverage under Hostname mirroring
 - there is no pre-flight Local backend health check
-- the current implementation keeps only one active Client instance at a time
+- the current implementation still keeps only one active Client instance at a time
 
 ## Future protocol work
 

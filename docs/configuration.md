@@ -1,12 +1,13 @@
 # Configuration
 
-This document describes the agreed Runewarp configuration model. The current binary still ships the earlier phase-2 Catch-all surface (`runewarp keygen`, flat `cert-file` / `key-file`, additive `server-ca-file`, `local-addr`, and `retry-interval`). The changes below are the corrected operator surface to implement next, and they are intended as a clean break from that earlier shape.
+This document describes the agreed Runewarp configuration model. The current binary still ships the earlier phase-2 Catch-all surface (`runewarp keygen`, flat `cert-file` / `key-file`, additive `server-ca-file`, `local-addr`, and `retry-interval`). The changes below are the corrected operator surface to implement next, and they are intended as a clean break from that earlier shape. The committed phase-3 model also removes Server Catch-all: every Server Tunnel must list explicit `public-hostnames`, while the Client either lists explicit `public-hostnames` too or uses one Catch-all Service.
 
 ## Principles
 
 - Server config owns public routing
 - Client config owns local Service selection
-- Hostname mirroring is intentional: operators repeat Public hostnames on both sides
+- the Server routes only explicitly authorized Public hostnames into a Tunnel
+- Hostname mirroring and One-sided Catch-all are the two intended routing topologies
 - TLS passthrough is the product boundary, so Local backends must terminate TLS
 - config keys should name the concept, not the current encoding detail
 - keep the surface structural and singular: avoid mode flags and duplicate ways to express the same thing
@@ -31,7 +32,7 @@ runewarp client identity rotate --directory ./client-identity
 
 Today the binary supports:
 
-- one Catch-all Tunnel on the Server
+- one legacy Catch-all Tunnel on the Server
 - one Catch-all Service on the Client
 - flat manual TLS keys: `cert-file` and `key-file`
 - additive `server-ca-file` behavior on the Client
@@ -42,12 +43,17 @@ The current binary still does **not** implement:
 - `runewarp server cert ...`
 - `runewarp client identity ...`
 - directory-based certificate or identity material
+- required explicit `server.tunnels[].public-hostnames`
+- multiple Server Tunnels and one active Tunnel connection per Tunnel
+- multiple Client instances, with one Client instance per Tunnel
+- multiple Client Services with exact-match selection
+- per-role `logs` booleans
 - exclusive Client trust when `server-ca-file` is configured
 - Client authentication enforcement
 - Client certificate renewal
 - ACME
 
-## Catch-all mode
+## Server exact-match mode
 
 ### Server with manual/private-CA certificates
 
@@ -59,6 +65,7 @@ hostname = "tunnel.example.com"
 directory = "/etc/runewarp/server"
 
 [[server.tunnels]]
+public-hostnames = ["app.example.com", "api.example.com"]
 client-identity = "4f7b6f7a9b0f0d2b..."
 ```
 
@@ -73,10 +80,33 @@ email = "admin@example.com"
 state-directory = "/var/lib/runewarp/acme"
 
 [[server.tunnels]]
+public-hostnames = ["app.example.com", "api.example.com"]
 client-identity = "4f7b6f7a9b0f0d2b..."
 ```
 
-### Client
+Every Server Tunnel must list explicit `public-hostnames`. Server Catch-all is not part of the committed model.
+
+## Client exact-match mode
+
+```toml
+[client]
+server-hostname = "tunnel.example.com"
+identity-directory = "/etc/runewarp/client"
+server-ca-file = "/etc/runewarp/server-ca.crt"
+reconnect-interval = 5
+
+[[client.services]]
+public-hostnames = ["app.example.com", "api.example.com"]
+backend-address = "caddy.local:443"
+
+[[client.services]]
+public-hostnames = ["plex.example.com", "pihole.example.com"]
+backend-address = "nginx.local:443"
+```
+
+Client exact-match mode is used when the Client also needs per-host local routing decisions.
+
+## Client Catch-all mode
 
 ```toml
 [client]
@@ -89,15 +119,9 @@ reconnect-interval = 5
 backend-address = "127.0.0.1:443"
 ```
 
-In catch-all mode:
+Client Catch-all is valid only when there is exactly one Service. It receives any traffic the Server has already authorized to the connected Tunnel.
 
-- the sole Tunnel matches every routed Public hostname except the Server hostname
-- the sole Service receives every proxied Public hostname
-- `public-hostnames` may be omitted only because there is exactly one entry on each side
-
-## Exact-match mode
-
-### Server
+## Server with multiple Tunnels
 
 ```toml
 [server]
@@ -116,7 +140,9 @@ public-hostnames = ["plex.example.com", "pihole.example.com"]
 client-identity = "2a6cc0f0a14b4b21..."
 ```
 
-### Client
+Each `client-identity` names exactly one Tunnel. If an operator needs different trust or lifecycle boundaries, they create different Tunnels and run different Client instances.
+
+## Client with multiple Services
 
 ```toml
 [client]
@@ -134,17 +160,18 @@ public-hostnames = ["plex.example.com", "pihole.example.com"]
 backend-address = "caddy.local:8443"
 ```
 
-Exact-match mode keeps routing authority on the Server while the Client uses mirrored `public-hostnames` only for local Service selection. The current binary still implements Catch-all mode only.
+The grouping of hostnames into Tunnels and Services may differ. One Tunnel can serve multiple Services, and one Service can own multiple Public hostnames when they share one Local backend.
 
 ## Server reference
 
 | Key | Required | Notes |
 | --- | --- | --- |
 | `server.hostname` | yes | Server hostname for the Runewarp edge itself. Used for TLS validation and ACME. |
+| `server.logs` | no | Boolean controlling human-readable Server runtime logs. Defaults to `true` when omitted. |
 | `server.cert.directory` | with manual/private-CA Server certificates | Directory containing the deployed Server leaf material. In the simple manual path, this directory also contains `server-ca.crt` and an internal `state/` subdirectory for renewal state. |
 | `server.acme.email` | with ACME | ACME contact address. TLS-ALPN-01 only. |
 | `server.acme.state-directory` | with ACME | Writable path for durable ACME account and certificate state. |
-| `server.tunnels[].public-hostnames` | when more than one Tunnel exists | Exact Public hostnames routed through this Tunnel. Omit only in Catch-all mode. |
+| `server.tunnels[].public-hostnames` | yes | One or more exact Public hostnames routed through this Tunnel. This field is required on every Server Tunnel and must contain DNS hostnames only. |
 | `server.tunnels[].client-identity` | yes | Lowercase hex SHA-256 fingerprint of the Client public key's SubjectPublicKeyInfo. This names the trust concept rather than the old `client-public-key-fingerprint` encoding detail. |
 
 ## Client reference
@@ -152,21 +179,33 @@ Exact-match mode keeps routing authority on the Server while the Client uses mir
 | Key | Required | Notes |
 | --- | --- | --- |
 | `client.server-hostname` | yes | Server hostname the Client dials on UDP port `443`. Re-resolved on every reconnect attempt. |
+| `client.logs` | no | Boolean controlling human-readable Client runtime logs. Defaults to `true` when omitted. |
 | `client.identity-directory` | yes | Directory containing the Client keypair, certificate, and `client-identity.txt`. |
 | `client.server-ca-file` | no | Exclusive trust bundle for the Server hostname. When present, trust only the PEM certificates in this file; do not also use system roots. This file may contain more than one CA certificate during a planned CA rotation. |
 | `client.reconnect-interval` | no | Fixed reconnect delay after the first immediate retry. Minimum `1` second. |
-| `client.services[].public-hostnames` | when more than one Service exists | Exact Public hostnames this Service accepts locally. Omit only in Catch-all mode. |
+| `client.services[].public-hostnames` | when exact-match local routing is desired | Exact Public hostnames this Service accepts locally. Omit only on the sole Catch-all Service. |
 | `client.services[].backend-address` | yes | TCP endpoint for the forwarded traffic. This backend must terminate TLS. Hostnames are allowed; the value is an address because it includes a port. |
 
 ## Hostname mirroring
 
-Runewarp intentionally repeats Public hostnames in Server Tunnels and Client Services:
+Runewarp intentionally supports a both-sides-explicit topology:
 
 - the Server uses them to select a Tunnel
 - the Client uses them to select a Service after re-reading the forwarded ClientHello
+- the same explicit hostname set is repeated on both sides, even if the grouping into Tunnels and Services differs
 - the runtime does not negotiate or register those hostnames between the two sides
 
 This is a deliberate trade-off to preserve transparent TLS passthrough without adding a routing header to public traffic.
+
+## One-sided Catch-all
+
+Runewarp also supports Server exact-match with one Client Catch-all Service:
+
+- the Server still lists the explicit Public hostnames authorized for each Tunnel
+- the Client omits `public-hostnames` only on its sole Service
+- a single Local backend, such as Caddy, can then make the final per-host decision locally
+
+Client Catch-all does not widen ingress authority because the Server has already limited the hostname set that can enter the Tunnel.
 
 ## Trust model
 
@@ -212,12 +251,16 @@ Runewarp should reject config that violates any of these rules:
 
 - the selected mode must have a matching `[server]` or `[client]` section
 - `server.hostname` must be present
+- `server.logs`, when present, must be a boolean
 - exactly one of `[server.acme]` or `[server.cert]` must be present for Server mode
 - `client.server-hostname` must be present
+- `client.logs`, when present, must be a boolean
 - `client.identity-directory` must be present
 - there must be at least one `[[server.tunnels]]` entry
 - there must be at least one `[[client.services]]` entry
+- every `server.tunnels[].public-hostnames` field must be present and contain at least one hostname
 - all `client-identity` values must be lowercase hex without colons
+- all `client-identity` values must be unique across Server Tunnels
 - `reconnect-interval` must be at least `1`
 - required directories and files must exist and be readable
 - `backend-address` must parse as a TCP address or host:port pair
@@ -226,16 +269,26 @@ Runewarp should reject config that violates any of these rules:
 
 Runewarp enforces these rules independently on each side:
 
-- `public-hostnames` may be omitted only in Catch-all mode
-- any exact hostname overlap across Tunnel entries is an error
-- any exact hostname overlap across Service entries is an error
+- `server.tunnels[].public-hostnames` is always required
+- `client.services[].public-hostnames` may be omitted only when there is exactly one Service
+- `public-hostnames = []` is an error on either side
+- hostnames are normalized to lowercase and a trailing dot is stripped before comparison
+- `public-hostnames` must be DNS hostnames, including punycode A-labels; raw Unicode, IP literals, and wildcards are rejected
+- any exact hostname overlap across Tunnel entries after normalization is an error
+- any exact hostname overlap across Service entries after normalization is an error
 - `server.hostname` itself must not be reused as a routed Public hostname
+- `client.server-hostname` overlap on the Client side is permitted; the Client stays agnostic about Server-side routability
 - exact subdomains such as `api.tunnel.example.com` are allowed
-- wildcards covering the Server hostname space, such as `*.tunnel.example.com`, should be rejected
+- single-entry exact-match is valid: one Tunnel or one Service may still use explicit `public-hostnames`
 
 ### Cross-side hostname coverage
 
-Runewarp does **not** validate that Server Tunnel `public-hostnames` match Client Service `public-hostnames` at runtime. Under Hostname mirroring, that coverage is an operator responsibility. A future lint or doctor workflow may help detect drift, but the runtime does not turn it into handshake-time registration.
+Runewarp does **not** validate cross-side hostname coverage at runtime:
+
+- under Hostname mirroring, repeating the explicit hostname set on both sides is an operator responsibility
+- under One-sided Catch-all, the Server carries the explicit hostname set while the Client intentionally does not
+
+A future lint or doctor workflow may help detect drift, but the runtime does not turn hostname coverage into handshake-time registration.
 
 ## Automation and rotation
 

@@ -1,10 +1,10 @@
 # Security
 
-Runewarp keeps customer TLS termination on the operator's own Local backend, not on the public edge. The Server still sees routing metadata, so the security model is private tunneling for TLS passthrough, not zero knowledge.
+Runewarp keeps customer TLS termination on the operator's own Local backend, not on the public edge. The Server still sees routing metadata, so the security model is private tunneling for TLS passthrough, not zero knowledge. The committed routing model also treats explicit Server-side `public-hostnames` as a security boundary: the Server should only route Public hostnames that an operator has authorized on a Tunnel.
 
 ## Current status
 
-The current repository still ships the earlier phase-2 surface (`runewarp keygen`, flat cert/key config, additive `server-ca-file`) on top of the phase-1 data path. It authenticates the Server side of the Tunnel connection but does **not** yet authenticate Clients. The agreed next operator surface replaces that with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, and stricter trust semantics, but those changes are not implemented yet. Do not expose the current build to the public internet until Client authentication lands.
+The current repository still ships the earlier phase-2 surface (`runewarp keygen`, flat cert/key config, additive `server-ca-file`) on top of the phase-1 data path. It authenticates the Server side of the Tunnel connection but does **not** yet authenticate Clients. The agreed next operator surface replaces that with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, stricter trust semantics, and explicit Server-authorized hostname routing, but those changes are not implemented yet. Do not expose the current build to the public internet until Client authentication lands.
 
 ## What the Server can and cannot see
 
@@ -19,9 +19,30 @@ The current repository still ships the earlier phase-2 surface (`runewarp keygen
 
 - customer TLS is never terminated on public hostnames
 - the Server reads only enough of the ClientHello to route
+- the Server routes only Public hostnames explicitly authorized on the matched Tunnel
 - public traffic must be TLS
 - non-TLS traffic and TLS without SNI are dropped
 - Local backends must terminate TLS
+
+## Server-side routing authorization
+
+Runewarp keeps hostname authorization on the Server:
+
+- every Server Tunnel lists its explicit `public-hostnames`
+- Server Catch-all is not part of the committed model
+- if no Tunnel owns the inbound Public hostname, the Server drops the connection
+- if the selected Tunnel has no active Client connection, the Server still drops the connection rather than rerouting elsewhere
+
+This prevents random public traffic from being sent down a Tunnel merely because some Client happens to be connected.
+
+## Client-side routing shape
+
+Once the Server has authorized traffic into a Tunnel, the Client has two valid shapes:
+
+- exact-match Services, where the Client also matches the forwarded Public hostname
+- one Catch-all Service, where one Local backend handles every hostname the Server already admitted to that Tunnel
+
+Client Catch-all is acceptable because it does **not** widen ingress authority. The Server has already constrained which Public hostnames can reach that Tunnel. If a Client is using exact-match Services and none matches the forwarded Public hostname, the Client should reject the stream.
 
 ## Tunnel authentication
 
@@ -96,7 +117,7 @@ Runewarp uses `instant-acme` in **TLS-ALPN-01 only** mode.
 
 ## Operational risks
 
-- Hostname mirroring can drift between Server Tunnels and Client Services
+- Hostname mirroring can drift between Server Tunnels and Client Services in both-sides-explicit configs
 - the runtime does not validate cross-side hostname coverage
 - there is no Local backend health check in the committed baseline
 - the simple manual/private-CA Server path may keep private CA material on the public Server

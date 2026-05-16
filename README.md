@@ -42,8 +42,8 @@ cargo test
 ## Design boundaries
 
 - TLS passthrough is the product boundary; Runewarp does not terminate customer TLS on public hostnames
-- The Server is the routing authority for Public hostnames
-- Hostname mirroring is intentional: operators repeat Public hostnames on both sides so the Server can choose a Tunnel and the Client can choose a Service from the forwarded ClientHello
+- The Server is the routing authority for Public hostnames and should only route hostnames explicitly authorized on a Tunnel
+- Client-side routing can use Hostname mirroring or one Catch-all Service, depending on whether the Client also needs per-host local routing
 - Plain HTTP backends and edge TLS termination are out of scope
 
 ## Documentation

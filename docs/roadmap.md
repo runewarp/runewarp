@@ -5,9 +5,10 @@ Runewarp is being built as a self-hosted TLS passthrough tunnel. The core docs d
 ## Current state
 
 - the phase-1 data path is implemented as a library-first `Server` and `Client` runtime
-- the current phase-2 Catch-all operator surface is implemented with `runewarp keygen`, flat cert/key config, and additive `server-ca-file`
+- the current phase-2 legacy Catch-all operator surface is implemented with `runewarp keygen`, flat cert/key config, and additive `server-ca-file`
 - the agreed next phase-2 surface replaces that with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, and tighter trust semantics
-- the current implementation uses a Catch-all Tunnel, a Catch-all Service, and one active Client instance with one Tunnel connection
+- the current implementation still uses a legacy Server Catch-all Tunnel, a Client Catch-all Service, and one active Client instance with one Tunnel connection
+- the committed phase-3 model removes Server Catch-all: every Server Tunnel must list explicit `public-hostnames`, while the Client either uses explicit `public-hostnames` too or one Catch-all Service
 
 ## Phase 1 - Library data path
 
@@ -19,8 +20,8 @@ Scope:
 
 - one public Server
 - one Client instance
-- one Catch-all Tunnel on the Server
-- one Catch-all Service on the Client
+- one Server Tunnel
+- one Client Service
 - public TLS passthrough on `443/tcp`
 - Client QUIC tunnel on `443/udp`
 
@@ -45,39 +46,52 @@ Scope:
 
 ## Phase 3 - Exact-match hostname routing
 
-Goal: move beyond Catch-all mode without changing the transparent data path.
+Goal: make Server-side Public hostname authorization explicit while adding Client-side routing flexibility without changing the transparent data path.
 
 Scope:
 
+- required `server.tunnels[].public-hostnames`; Server Catch-all is removed from the intended model
 - multiple Server Tunnels
+- multiple Client instances, with one Client instance per Tunnel
+- one active Tunnel connection per Tunnel, with per-Tunnel isolation and latest-wins replacement
 - multiple Client Services
-- exact-match Public hostname routing
-- clearer Hostname mirroring guidance
-- stronger intra-side hostname validation
+- exact-match Public hostname routing on the Server
+- explicit Client exact-match Services and Client Catch-all as the two valid client-side routing shapes
+- `Hostname mirroring` for both-sides explicit configs and `One-sided Catch-all` for Server exact-match plus Client Catch-all
+- no runtime cross-side hostname validation; mirrored coverage remains an operator responsibility
+- stronger hostname validation and normalization, including duplicate rejection, wildcard rejection, required server hostnames, and explicit single-entry exact-match
+- fail-closed routing when no authorized or connected Tunnel or Service is available
+- per-role `logs` booleans controlling human-readable routing diagnostics
 
-## Phase 4 - Multi-instance tunnels and availability
+## Phase 4 - Packaging and release engineering
 
-Goal: in a much later phase, scale one routed hostname set across multiple Client instances.
+Goal: make Runewarp easy to evaluate, ship, and run as an operator-focused technical preview.
 
 Scope:
 
-- multiple Client instances per Tunnel
+- customer/operator-facing documentation uplift
+- a rewritten README focused on operator outcomes and product boundaries instead of project status
+- `docs/usage.md`
+- common usage examples, including Docker Compose and Caddy
+- changelog
+- Clippy, fmt, docs, tests, and release-path checks in CI
+- crates.io release
+- release binaries
+- Docker Hub and GHCR images
+- minimal container images, ideally distroless and non-root where practical
+
+## Phase 5 - Multi-instance tunnels and availability
+
+Goal: scale one routed hostname set across multiple Client instances of the same Tunnel.
+
+Scope:
+
+- multiple Client instances per single Tunnel
 - Tunnel pools with least-active balancing
 - round-robin tie-breaking
 - one shared `client-identity` per Tunnel by default, with separate identities as a later advanced case
 - clearer handling for misconfigured replicas
 
-## Phase 5 - Packaging and release engineering
-
-Goal: make Runewarp easy to ship and run.
-
-Scope:
-
-- unit, integration, and end-to-end tests
-- Clippy, fmt, docs, and audit checks in CI
-- release binaries
-- Docker Hub and GHCR images
-- minimal container images, ideally distroless and non-root where practical
 
 ## Phase 6 - Protocol growth
 
@@ -122,8 +136,8 @@ Scope:
 
 ## Testing priorities
 
-- unit tests for ClientHello parsing, config validation, auth, and stream accounting
-- integration tests for routing, reconnects, and multi-instance Tunnel pools
+- unit tests for ClientHello parsing, config validation, hostname normalization, auth, and stream accounting
+- integration tests for exact-match routing, per-Tunnel isolation, reconnects, and later multi-instance Tunnel pools
 - end-to-end tests with a local TLS terminator behind the Client
 - benchmarks for parsing, forwarding, and allocation-sensitive paths
 - stronger property testing and fuzzing for security-critical code

@@ -60,17 +60,17 @@ _Avoid_: Certificate, serial number
 The set of live **Tunnel connections** and their serving **Client instances** currently available for one **Tunnel**.
 _Avoid_: Tunnel, cluster
 
-**Catch-all Tunnel**:
-The only configured **Tunnel** in a Server config, which matches every routed **Public hostname** except the **Server hostname**.
-_Avoid_: Default tunnel, wildcard tunnel
-
 **Catch-all Service**:
-The only configured **Service** in a Client config, which receives every proxied **Public hostname**.
+The only configured **Service** in a Client config, which receives every proxied **Public hostname**; this is determined by the Client side alone.
 _Avoid_: Default service, wildcard service
 
 **Hostname mirroring**:
-The operator practice of repeating **Public hostnames** in Server **Tunnels** and Client **Services** so both sides can route the same traffic without extra protocol metadata.
+The operator practice of repeating **Public hostnames** in Server **Tunnels** and Client **Services** when both sides use explicit hostname matching, so both sides can route the same traffic without extra protocol metadata even when their grouping differs.
 _Avoid_: Duplicate hostname config, registration
+
+**One-sided Catch-all**:
+A routing topology where the Server uses explicit **Public hostnames** and the Client uses a **Catch-all Service**.
+_Avoid_: Mixed mode, asymmetric routing
 
 ## Relationships
 
@@ -90,9 +90,10 @@ _Avoid_: Duplicate hostname config, registration
 - A **Client instance** uses exactly one **Client identity** at a time
 - A **Client identity** can be used by one or more **Client instances**
 - A **Tunnel pool** belongs to exactly one **Tunnel**
-- A **Catch-all Tunnel** is valid only when there is exactly one configured **Tunnel**
+- A **Tunnel** owns one or more explicit **Public hostnames**
 - A **Catch-all Service** is valid only when there is exactly one configured **Service**
-- **Hostname mirroring** repeats one set of **Public hostnames** across **Tunnels** and **Services**
+- **Hostname mirroring** repeats one set of **Public hostnames** across **Tunnels** and **Services**, but the grouping does not have to line up one-to-one
+- **One-sided Catch-all** combines explicit **Public hostnames** on the Server with a **Catch-all Service** on the Client
 
 ## Example dialogue
 
@@ -121,7 +122,16 @@ _Avoid_: Duplicate hostname config, registration
 > **Domain expert:** "That's **Hostname mirroring**. The **Server** uses it to choose the **Tunnel** and the **Client** uses it to choose the **Service**."
 >
 > **Dev:** "Why did omitting the **Public hostnames** suddenly change routing behavior?"
-> **Domain expert:** "Because this config uses a **Catch-all Tunnel** and a **Catch-all Service**, which are only valid when each side has exactly one entry."
+> **Domain expert:** "Because this config uses a **Catch-all Service**. The Server still has to list explicit **Public hostnames** on its **Tunnels**."
+>
+> **Dev:** "If the **Server** uses exact-match **Tunnels**, does the **Client** also have to use exact-match **Services**?"
+> **Domain expert:** "No. A **Catch-all Service** is still valid when the Client has exactly one **Service**. Catch-all vs exact-match is decided independently on each side."
+>
+> **Dev:** "Is that still **Hostname mirroring** if the **Client** uses a **Catch-all Service**?"
+> **Domain expert:** "No. That is **One-sided Catch-all**. **Hostname mirroring** is only when both sides repeat explicit **Public hostnames**."
+>
+> **Dev:** "If the **Server** puts `app.example.com` and `api.example.com` in one **Tunnel**, but the **Client** splits them across two **Services**, is that still **Hostname mirroring**?"
+> **Domain expert:** "Yes. **Hostname mirroring** repeats the hostname set across both sides; the grouping into **Tunnels** and **Services** can differ."
 
 ## Flagged ambiguities
 
@@ -132,5 +142,8 @@ _Avoid_: Duplicate hostname config, registration
 - "service" and "backend" were used interchangeably — resolved: **Service** is the client-side config unit; **Local backend** is the actual TLS endpoint the **Client** dials.
 - "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key, while certificates can rotate without changing that identity.
 - "server certificate" and the trust anchor behind it were easy to conflate — resolved: **Server certificate** is the presented leaf; **Server CA** is the private issuer in the manual Server path.
-- "catch-all" looked like casual prose, but it changes config semantics — resolved: **Catch-all Tunnel** and **Catch-all Service** are explicit single-entry modes.
+- "catch-all" looked like casual prose, but it changes config semantics — resolved: only **Catch-all Service** remains a valid product term; Server **Tunnels** always require explicit **Public hostnames**.
+- "catch-all mode" could sound like one cross-side mode — resolved: **One-sided Catch-all** means Server exact-match with a Client **Catch-all Service**.
+- "Hostname mirroring" could sound like it covered every valid routing topology — resolved: **Hostname mirroring** means both-sides explicit hostname matching; **One-sided Catch-all** is the mixed topology.
+- "Hostname mirroring" could sound like Tunnel and Service groups had to line up exactly — resolved: the mirrored unit is the explicit hostname set, not a one-to-one grouping.
 - "duplicate hostname config" sounded accidental — resolved: **Hostname mirroring** is the deliberate routing pattern.

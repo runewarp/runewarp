@@ -83,6 +83,23 @@ pub fn make_client_quic_config(
     Ok(client_config)
 }
 
+pub fn make_client_quic_config_with_client_auth(
+    roots: RootCertStore,
+    cert_chain: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+) -> Result<quinn::ClientConfig, QuicConfigError> {
+    let mut client_crypto = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(cert_chain, private_key)?;
+    client_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
+
+    let mut client_config =
+        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
+    client_config.transport_config(Arc::new(client_transport_config()));
+
+    Ok(client_config)
+}
+
 fn configure_server_transport(transport_config: &mut TransportConfig) {
     transport_config.max_concurrent_bidi_streams(0_u8.into());
     transport_config.max_concurrent_uni_streams(0_u8.into());

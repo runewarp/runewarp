@@ -11,12 +11,12 @@ pub struct ClientConfig {
     pub local_bind_addr: SocketAddr,
     pub server_addr: SocketAddr,
     pub server_name: String,
-    pub backend_addr: SocketAddr,
+    pub backend_addr: String,
     pub quic_client_config: quinn::ClientConfig,
 }
 
 pub struct Client {
-    backend_addr: SocketAddr,
+    backend_addr: String,
     endpoint: Endpoint,
     connection: Connection,
 }
@@ -77,7 +77,7 @@ impl Client {
         loop {
             match self.connection.accept_bi().await {
                 Ok((send, recv)) => {
-                    let backend_addr = self.backend_addr;
+                    let backend_addr = self.backend_addr.clone();
                     tokio::spawn(async move {
                         let _ = backend::handle_tunnel_stream(send, recv, backend_addr).await;
                     });

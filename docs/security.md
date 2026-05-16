@@ -4,7 +4,7 @@ Runewarp keeps customer TLS termination on the operator's own Local backend, not
 
 ## Current status
 
-The current repository ships only the phase-1 library runtime. It authenticates the Server side of the Tunnel connection but does **not** yet authenticate Clients. Do not expose the current build to the public internet until Client authentication lands.
+The current repository ships the phase-1 data path plus config-driven Catch-all startup and `runewarp keygen`. It authenticates the Server side of the Tunnel connection but does **not** yet authenticate Clients. Do not expose the current build to the public internet until Client authentication lands.
 
 ## What the Server can and cannot see
 

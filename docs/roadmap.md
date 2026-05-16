@@ -5,7 +5,7 @@ Runewarp is being built as a self-hosted TLS passthrough tunnel. The core docs d
 ## Current state
 
 - the phase-1 data path is implemented as a library-first `Server` and `Client` runtime
-- the repository is still library-first rather than operator-ready
+- the phase-2 Catch-all operator surface is implemented for manual TLS and `runewarp keygen`
 - the current implementation uses a Catch-all Tunnel, a Catch-all Service, and one active Client instance with one Tunnel connection
 
 ## Phase 1 - Library data path
@@ -26,6 +26,8 @@ Scope:
 ## Phase 2 - Operator runtime and Client authentication
 
 Goal: make the single-Tunnel design usable by operators.
+
+Status: config loading, `runewarp server`, `runewarp client`, and `runewarp keygen` are implemented for the Catch-all manual-TLS path. Client-identity enforcement, certificate renewal, and ACME remain.
 
 Scope:
 

@@ -1,6 +1,6 @@
 # Configuration
 
-This document describes the committed Runewarp configuration model. The current binary does not load config yet; phase 1 is still library-first. The shape below defines the operator-facing baseline that later phases implement.
+This document describes the committed Runewarp configuration model. The current binary now implements the phase-2 Catch-all operator surface with manual TLS material and `runewarp keygen`. Exact-match routing, ACME, and pinned Client-identity enforcement are still future work.
 
 ## Principles
 
@@ -18,7 +18,28 @@ runewarp client --config config.toml
 runewarp keygen --out-dir ./certs
 ```
 
-These commands are part of the committed operator interface. The current binary has not reached that stage yet.
+Current defaults:
+
+- `runewarp server` reads `./config.toml` when `--config` is omitted
+- `runewarp client` reads `./config.toml` when `--config` is omitted
+- `runewarp keygen` writes into `./certs` when `--out-dir` is omitted
+
+## Current implementation status
+
+Today the binary supports:
+
+- one Catch-all Tunnel on the Server
+- one Catch-all Service on the Client
+- manual Server certificate and key loading
+- optional extra Client CA material layered on top of the system trust store
+- generated Client key, certificate, and fingerprint material through `runewarp keygen`
+
+The current binary still rejects:
+
+- multiple Tunnel entries
+- multiple Service entries
+- `hostnames` on Tunnel or Service entries
+- `[server.acme]`
 
 ## Catch-all mode
 
@@ -54,7 +75,7 @@ In catch-all mode:
 - the sole Service receives every proxied Public hostname
 - `hostnames` may be omitted only because there is exactly one entry on each side
 
-## Exact-match mode
+## Future exact-match mode
 
 ### Server
 
@@ -94,7 +115,7 @@ hostnames = ["plex.example.com", "pihole.example.com"]
 local-addr = "caddy.local:8443"
 ```
 
-Exact-match mode keeps routing authority on the Server while the Client uses the mirrored hostnames only for local Service selection.
+Exact-match mode keeps routing authority on the Server while the Client uses the mirrored hostnames only for local Service selection. This is the committed design for a later phase; the current binary still implements Catch-all mode only.
 
 ## Server reference
 
@@ -176,15 +197,16 @@ The exact record type is up to the operator. The important part is that Public h
 
 `runewarp keygen --out-dir ./certs` should write:
 
-- a Client private key
-- an initial self-signed Client certificate
-- the Client public-key fingerprint in lowercase hex, without colons, using SHA-256 over the DER-encoded public key
+- `client.key`
+- `client.crt`
+- `client-fingerprint.txt`, containing the Client public-key fingerprint in lowercase hex, without colons, using SHA-256 over the DER-encoded public key
 
 Recommended defaults:
 
 - initial certificate lifetime: `90` days
 - renewal target: `60` days
 - the same key is reused during ordinary certificate renewal
+- rerunning `keygen` into an existing output directory fails instead of overwriting the current Client identity
 
 ## Backend behavior
 

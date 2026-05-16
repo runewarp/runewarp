@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the committed Runewarp design. The current repository is still narrower: phase 1 ships only the library-first `Server` and `Client` data path, one active Client instance with one Tunnel connection, and no config-driven CLI, ACME, or Client authentication yet.
+This document describes the committed Runewarp design. The current repository now includes the phase-1 `Server` and `Client` data path plus config-driven `runewarp server`, `runewarp client`, and `runewarp keygen` for the Catch-all manual-TLS path. Exact-match routing, ACME, and Client authentication enforcement are still not implemented.
 
 ## Roles
 

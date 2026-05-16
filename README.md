@@ -13,26 +13,30 @@ Runewarp is a self-hostable tunnel for TLS passthrough. A public Runewarp Server
 
 ## Current status
 
-The repository currently ships the phase-1 data path as a library-first `Server` and `Client` runtime with end-to-end tests.
+The repository now ships the phase-1 data path plus the first phase-2 operator surface.
 
 Today that means:
 
 - public TCP passthrough works end to end
+- `runewarp keygen` generates a Client private key, an initial self-signed Client certificate, and the pinned Client-identity fingerprint
+- `runewarp server` and `runewarp client` load `./config.toml` by default and boot the Catch-all single-Tunnel design with manual TLS material
 - each Client instance connects to the Server over QUIC using one Tunnel connection
 - the current implementation only keeps one Client instance active at a time
-- the binary is not operator-ready yet: config loading, CLI subcommands, ACME, and Client authentication land in later phases
+- exact-match routing, ACME, Client certificate renewal, and pinned Client-identity enforcement still land in later phases
 
-Phase 1 is not ready for public deployment without the planned authentication hardening.
+The current build is still not ready for public deployment without Client authentication hardening.
 
 ## Getting started
 
 ```bash
 cargo build --release
 cargo test
-./target/release/runewarp
+./target/release/runewarp keygen
+./target/release/runewarp server --config ./config.toml
+./target/release/runewarp client --config ./config.toml
 ```
 
-The current binary only reports the repository status. The working implementation lives in the library API and is exercised by the test suite.
+`runewarp server` and `runewarp client` default to `./config.toml` when `--config` is omitted. `runewarp keygen` defaults `--out-dir` to `./certs`.
 
 ## Design boundaries
 

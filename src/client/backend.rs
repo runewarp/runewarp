@@ -1,7 +1,5 @@
-use std::io;
-use std::net::SocketAddr;
-
 use quinn::{RecvStream, SendStream};
+use std::io;
 use tokio::net::TcpStream;
 
 use crate::proxy::{proxy_stream_error_code, proxy_tcp_over_quic};
@@ -9,9 +7,9 @@ use crate::proxy::{proxy_stream_error_code, proxy_tcp_over_quic};
 pub(crate) async fn handle_tunnel_stream(
     send: SendStream,
     recv: RecvStream,
-    backend_addr: SocketAddr,
+    backend_addr: String,
 ) -> io::Result<()> {
-    let backend_stream = match TcpStream::connect(backend_addr).await {
+    let backend_stream = match TcpStream::connect(backend_addr.as_str()).await {
         Ok(stream) => stream,
         Err(error) => {
             let mut send = send;

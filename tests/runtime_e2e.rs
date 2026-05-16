@@ -59,7 +59,7 @@ async fn forwards_tls_passthrough_end_to_end() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr,
+        backend_addr: backend_addr.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -156,7 +156,7 @@ async fn library_constructors_expose_addresses_before_running() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: available_local_addr().await,
+        backend_addr: available_local_addr().await.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -208,7 +208,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend_one.0,
+        backend_addr: backend_one.0.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -226,7 +226,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend_two.0,
+        backend_addr: backend_two.0.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -280,7 +280,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend.0,
+        backend_addr: backend.0.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -330,7 +330,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: closed_backend_addr,
+        backend_addr: closed_backend_addr.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await

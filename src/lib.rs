@@ -25,7 +25,8 @@ pub use quic::{
 };
 pub use server::{Server, ServerConfig};
 pub use settings::{
-    ClientServiceSettings, ClientSettings, DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, ServerSettings,
-    ServerTunnelSettings, SettingsError, load_client_settings, load_server_settings,
+    ClientServiceSettings, ClientSettings, DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS,
+    ServerCertificateSettings, ServerSettings, ServerTunnelSettings, SettingsError,
+    load_client_settings, load_server_settings,
 };
 pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};

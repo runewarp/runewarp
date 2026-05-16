@@ -7,6 +7,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::quic::{QuicConfigError, make_server_quic_config};
 
+pub(crate) const SERVER_CERT_FILENAME: &str = "server.crt";
+pub(crate) const SERVER_KEY_FILENAME: &str = "server.key";
+
 #[derive(Debug)]
 pub(crate) enum TlsMaterialError {
     ReadFile { path: PathBuf, source: io::Error },

@@ -21,9 +21,14 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 async fn prepared_server_binds_the_existing_runtime_from_validated_settings() {
     let tempdir = tempdir().unwrap();
     let cert = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
-    fs::write(tempdir.path().join("server.crt"), cert.cert.pem()).unwrap();
+    fs::create_dir(tempdir.path().join("server-cert")).unwrap();
     fs::write(
-        tempdir.path().join("server.key"),
+        tempdir.path().join("server-cert/server.crt"),
+        cert.cert.pem(),
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("server-cert/server.key"),
         cert.signing_key.serialize_pem(),
     )
     .unwrap();
@@ -32,11 +37,12 @@ async fn prepared_server_binds_the_existing_runtime_from_validated_settings() {
         r#"
 [server]
 hostname = "tunnel.example.test"
-cert-file = "server.crt"
-key-file = "server.key"
+
+[server.cert]
+directory = "server-cert"
 
 [[server.tunnels]]
-client-public-key-fingerprint = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 "#,
     )
     .unwrap();
@@ -58,9 +64,14 @@ fn localhost(port: u16) -> SocketAddr {
 async fn prepared_server_drops_public_tls_addressed_to_the_server_hostname() {
     let tempdir = tempdir().unwrap();
     let server_cert = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
-    fs::write(tempdir.path().join("server.crt"), server_cert.cert.pem()).unwrap();
+    fs::create_dir(tempdir.path().join("server-cert")).unwrap();
     fs::write(
-        tempdir.path().join("server.key"),
+        tempdir.path().join("server-cert/server.crt"),
+        server_cert.cert.pem(),
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("server-cert/server.key"),
         server_cert.signing_key.serialize_pem(),
     )
     .unwrap();
@@ -88,11 +99,12 @@ async fn prepared_server_drops_public_tls_addressed_to_the_server_hostname() {
             r#"
 [server]
 hostname = "tunnel.example.test"
-cert-file = "server.crt"
-key-file = "server.key"
+
+[server.cert]
+directory = "server-cert"
 
 [[server.tunnels]]
-client-public-key-fingerprint = "{}"
+client-identity = "{}"
 "#,
             client_identity.client_identity
         ),
@@ -156,6 +168,35 @@ backend-address = "__BACKEND_ADDR__"
     let _ = backend.2.await;
     let _ = server_task.await;
     let _ = client_task.await;
+}
+
+#[tokio::test]
+async fn prepared_server_rejects_acme_settings_until_acme_is_implemented() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("acme-state")).unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.acme]
+email = "admin@example.test"
+state-directory = "acme-state"
+
+[[server.tunnels]]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
+    let error = match PreparedServer::bind(&settings, localhost(0), localhost(0)).await {
+        Ok(_) => panic!("expected ACME startup to remain unavailable"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("ACME startup is not implemented yet"));
 }
 
 async fn spawn_tls_backend(

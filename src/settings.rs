@@ -6,7 +6,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::tls_material::validate_server_tls_material;
+use crate::tls_material::{
+    SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, validate_server_tls_material,
+};
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
     hostname::normalize_public_hostname,
@@ -17,14 +19,19 @@ pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerSettings {
     pub hostname: String,
-    pub cert_file: PathBuf,
-    pub key_file: PathBuf,
+    pub certificate: ServerCertificateSettings,
     pub tunnels: Vec<ServerTunnelSettings>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerTunnelSettings {
     pub client_identity: ClientIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerCertificateSettings {
+    Manual { directory: PathBuf },
+    Acme { email: String, state_directory: PathBuf },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,19 +161,25 @@ fn validate_server_settings(
             String::new()
         });
 
-    if raw.acme.is_some() {
-        messages.push("server.acme is not supported in Catch-all mode yet".to_owned());
+    let manual_present = raw.cert.is_some();
+    let acme_present = raw.acme.is_some();
+    if manual_present == acme_present {
+        messages.push("exactly one of [server.cert] or [server.acme] must be configured".to_owned());
     }
-
-    let cert_file =
-        validate_required_path("server.cert-file", raw.cert_file, config_dir, &mut messages);
-    let key_file =
-        validate_required_path("server.key-file", raw.key_file, config_dir, &mut messages);
-    if let (Some(cert_file), Some(key_file)) = (cert_file.as_deref(), key_file.as_deref())
-        && let Err(error) = validate_server_tls_material(cert_file, key_file)
-    {
-        messages.push(format!("server TLS material is invalid: {error}"));
-    }
+    let manual = raw
+        .cert
+        .and_then(|cert| validate_server_manual_cert_settings(cert, config_dir, &mut messages));
+    let acme = raw
+        .acme
+        .and_then(|acme| validate_server_acme_settings(acme, config_dir, &mut messages));
+    let certificate = match (manual_present, acme_present) {
+        (true, false) => manual.map(|directory| ServerCertificateSettings::Manual { directory }),
+        (false, true) => acme.map(|(email, state_directory)| ServerCertificateSettings::Acme {
+            email,
+            state_directory,
+        }),
+        _ => None,
+    };
 
     let tunnel_count = raw.tunnels.len();
     let tunnels = raw
@@ -181,8 +194,7 @@ fn validate_server_settings(
     if messages.is_empty() {
         Ok(ServerSettings {
             hostname,
-            cert_file: cert_file.expect("validated server.cert-file"),
-            key_file: key_file.expect("validated server.key-file"),
+            certificate: certificate.expect("validated server certificate settings"),
             tunnels,
         })
     } else {
@@ -225,19 +237,19 @@ fn validate_client_settings(
         &mut messages,
     );
     if let Some(identity_directory) = identity_directory.as_deref() {
-        validate_directory_file(
+        let _ = validate_directory_file(
             "client.identity-directory",
             identity_directory,
             CLIENT_CERT_FILENAME,
             &mut messages,
         );
-        validate_directory_file(
+        let _ = validate_directory_file(
             "client.identity-directory",
             identity_directory,
             CLIENT_KEY_FILENAME,
             &mut messages,
         );
-        validate_directory_file(
+        let _ = validate_directory_file(
             "client.identity-directory",
             identity_directory,
             CLIENT_IDENTITY_FILENAME,
@@ -277,19 +289,6 @@ fn validate_client_settings(
             messages,
         })
     }
-}
-
-fn validate_required_path(
-    field_name: &str,
-    raw_path: Option<PathBuf>,
-    config_dir: &Path,
-    messages: &mut Vec<String>,
-) -> Option<PathBuf> {
-    let Some(raw_path) = raw_path else {
-        messages.push(format!("{field_name} is required"));
-        return None;
-    };
-    validate_optional_path(field_name, raw_path, config_dir, messages)
 }
 
 fn validate_optional_path(
@@ -335,33 +334,86 @@ fn validate_directory_file(
     directory: &Path,
     filename: &str,
     messages: &mut Vec<String>,
-) {
+) -> Option<PathBuf> {
     let path = directory.join(filename);
     if !path.is_file() {
         messages.push(format!("{field_name} file not found: {}", path.display()));
+        return None;
     }
+    Some(path)
+}
+
+fn validate_server_manual_cert_settings(
+    raw: RawServerCertConfig,
+    config_dir: &Path,
+    messages: &mut Vec<String>,
+) -> Option<PathBuf> {
+    let directory =
+        validate_required_directory("server.cert.directory", raw.directory, config_dir, messages)?;
+    let cert_path = validate_directory_file(
+        "server.cert.directory",
+        &directory,
+        SERVER_CERT_FILENAME,
+        messages,
+    );
+    let key_path = validate_directory_file(
+        "server.cert.directory",
+        &directory,
+        SERVER_KEY_FILENAME,
+        messages,
+    );
+    if let (Some(cert_path), Some(key_path)) = (cert_path.as_deref(), key_path.as_deref())
+        && let Err(error) = validate_server_tls_material(cert_path, key_path)
+    {
+        messages.push(format!("server TLS material is invalid: {error}"));
+        return None;
+    }
+
+    Some(directory)
+}
+
+fn validate_server_acme_settings(
+    raw: RawServerAcmeConfig,
+    config_dir: &Path,
+    messages: &mut Vec<String>,
+) -> Option<(String, PathBuf)> {
+    let email = raw.email.unwrap_or_else(|| {
+        messages.push("server.acme.email is required".to_owned());
+        String::new()
+    });
+    let state_directory = match raw.state_directory {
+        Some(state_directory) => resolve_path(config_dir, &state_directory),
+        None => {
+            messages.push("server.acme.state-directory is required".to_owned());
+            PathBuf::new()
+        }
+    };
+
+    if email.is_empty() || state_directory.as_os_str().is_empty() {
+        return None;
+    }
+
+    Some((email, state_directory))
 }
 
 fn validate_server_tunnel(
     raw: RawServerTunnelConfig,
     messages: &mut Vec<String>,
 ) -> Option<ServerTunnelSettings> {
-    if raw.hostnames.is_some() {
+    if raw.public_hostnames.is_some() {
         messages.push("phase-2 server mode only supports a Catch-all Tunnel".to_owned());
     }
 
-    let client_identity = match raw.client_public_key_fingerprint {
+    let client_identity = match raw.client_identity {
         Some(client_identity) => match client_identity.parse::<ClientIdentity>() {
             Ok(client_identity) => Some(client_identity),
             Err(error) => {
-                messages.push(format!(
-                    "server.tunnels[].client-public-key-fingerprint is invalid: {error}"
-                ));
+                messages.push(format!("server.tunnels[].client-identity is invalid: {error}"));
                 None
             }
         },
         None => {
-            messages.push("server.tunnels[].client-public-key-fingerprint is required".to_owned());
+            messages.push("server.tunnels[].client-identity is required".to_owned());
             None
         }
     };
@@ -417,18 +469,30 @@ fn resolve_path(config_dir: &Path, path: &Path) -> PathBuf {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawServerConfig {
     hostname: Option<String>,
-    cert_file: Option<PathBuf>,
-    key_file: Option<PathBuf>,
-    acme: Option<toml::Table>,
+    cert: Option<RawServerCertConfig>,
+    acme: Option<RawServerAcmeConfig>,
     #[serde(default)]
     tunnels: Vec<RawServerTunnelConfig>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawServerCertConfig {
+    directory: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct RawServerAcmeConfig {
+    email: Option<String>,
+    state_directory: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawServerTunnelConfig {
-    hostnames: Option<Vec<String>>,
-    client_public_key_fingerprint: Option<String>,
+    public_hostnames: Option<Vec<String>>,
+    client_identity: Option<String>,
 }
 
 #[derive(Deserialize)]

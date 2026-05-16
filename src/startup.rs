@@ -6,11 +6,14 @@ use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use tokio::net::lookup_host;
 
-use crate::tls_material::{TlsMaterialError, load_certificate_chain, load_private_key};
+use crate::tls_material::{
+    SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, TlsMaterialError, load_certificate_chain,
+    load_private_key,
+};
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig, ClientConnectError,
-    ClientIdentity, ClientSettings, QuicConfigError, Server, ServerConfig, ServerSettings,
-    make_client_quic_config_with_client_auth, make_server_quic_config,
+    ClientIdentity, ClientSettings, QuicConfigError, Server, ServerCertificateSettings,
+    ServerConfig, ServerSettings, make_client_quic_config_with_client_auth, make_server_quic_config,
 };
 
 pub struct PreparedServer {
@@ -24,8 +27,15 @@ impl PreparedServer {
         public_bind_addr: SocketAddr,
         tunnel_bind_addr: SocketAddr,
     ) -> Result<Self, ServerStartupError> {
-        let cert_chain = load_certificate_chain(&settings.cert_file)?;
-        let private_key = load_private_key(&settings.key_file)?;
+        let (cert_chain, private_key) = match &settings.certificate {
+            ServerCertificateSettings::Manual { directory } => (
+                load_certificate_chain(&directory.join(SERVER_CERT_FILENAME))?,
+                load_private_key(&directory.join(SERVER_KEY_FILENAME))?,
+            ),
+            ServerCertificateSettings::Acme { .. } => {
+                return Err(ServerStartupError::AcmeNotImplemented);
+            }
+        };
         let quic_server_config = make_server_quic_config(cert_chain, private_key)
             .map_err(ServerStartupError::QuicConfig)?;
         let server = Server::bind(ServerConfig {
@@ -150,6 +160,7 @@ pub enum ServerStartupError {
     },
     QuicConfig(QuicConfigError),
     Bind(io::Error),
+    AcmeNotImplemented,
 }
 
 impl fmt::Display for ServerStartupError {
@@ -173,6 +184,7 @@ impl fmt::Display for ServerStartupError {
             }
             Self::QuicConfig(source) => write!(formatter, "{source}"),
             Self::Bind(source) => write!(formatter, "failed to bind server listeners: {source}"),
+            Self::AcmeNotImplemented => formatter.write_str("ACME startup is not implemented yet"),
         }
     }
 }
@@ -184,7 +196,9 @@ impl std::error::Error for ServerStartupError {
             Self::ParsePem { source, .. } => Some(source),
             Self::QuicConfig(source) => Some(source),
             Self::Bind(source) => Some(source),
-            Self::MissingCertificate { .. } | Self::MissingPrivateKey { .. } => None,
+            Self::MissingCertificate { .. }
+            | Self::MissingPrivateKey { .. }
+            | Self::AcmeNotImplemented => None,
         }
     }
 }

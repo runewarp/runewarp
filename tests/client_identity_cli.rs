@@ -102,6 +102,96 @@ fn client_identity_init_matches_the_generated_certificate_subject_public_key_inf
     assert_eq!(stored_identity.trim(), derived_identity.to_string());
 }
 
+#[test]
+fn client_identity_renew_reuses_the_existing_key_and_identity() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--directory", "client-identity"])
+        .assert()
+        .success();
+
+    let original_private_key =
+        fs::read(tempdir.path().join("client-identity/client.key")).unwrap();
+    let original_certificate =
+        fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
+    let original_identity =
+        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "renew", "--directory", "client-identity"])
+        .assert()
+        .success();
+
+    let renewed_private_key = fs::read(tempdir.path().join("client-identity/client.key")).unwrap();
+    let renewed_certificate = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
+    let renewed_identity =
+        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
+    let renewed_certificate_der = certs(&mut Cursor::new(renewed_certificate.clone()))
+        .next()
+        .expect("renewed certificate")
+        .expect("parse renewed certificate");
+
+    assert_eq!(renewed_private_key, original_private_key);
+    assert_ne!(renewed_certificate, original_certificate);
+    assert_eq!(renewed_identity, original_identity);
+    assert_eq!(
+        client_identity_from_certificate_der(renewed_certificate_der.as_ref())
+            .unwrap()
+            .to_string(),
+        renewed_identity.trim(),
+    );
+}
+
+#[test]
+fn client_identity_rotate_replaces_the_key_and_client_identity() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--directory", "client-identity"])
+        .assert()
+        .success();
+
+    let original_private_key =
+        fs::read(tempdir.path().join("client-identity/client.key")).unwrap();
+    let original_certificate =
+        fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
+    let original_identity =
+        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "rotate", "--directory", "client-identity"])
+        .assert()
+        .success();
+
+    let rotated_private_key = fs::read(tempdir.path().join("client-identity/client.key")).unwrap();
+    let rotated_certificate = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
+    let rotated_identity =
+        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
+    let rotated_certificate_der = certs(&mut Cursor::new(rotated_certificate.clone()))
+        .next()
+        .expect("rotated certificate")
+        .expect("parse rotated certificate");
+
+    assert_ne!(rotated_private_key, original_private_key);
+    assert_ne!(rotated_certificate, original_certificate);
+    assert_ne!(rotated_identity, original_identity);
+    assert_eq!(
+        client_identity_from_certificate_der(rotated_certificate_der.as_ref())
+            .unwrap()
+            .to_string(),
+        rotated_identity.trim(),
+    );
+}
+
 fn assert_exists(path: &Path) {
     assert!(
         path.exists(),

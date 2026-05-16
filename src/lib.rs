@@ -16,9 +16,11 @@ pub use client_hello::{
 };
 pub use identity::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
-    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
+    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientCertificateState,
+    ClientCertificateRenewalDecision, ClientIdentity, ClientIdentityMaterialError,
     GeneratedClientIdentity, ParseClientIdentityCertificateError, ParseClientIdentityError,
-    client_identity_from_certificate_der, generate_client_identity,
+    client_identity_from_certificate_der, decide_client_certificate_renewal, generate_client_identity,
+    inspect_client_certificate_renewal, renew_client_identity_certificate, rotate_client_identity,
 };
 pub use quic::{
     IDLE_TIMEOUT, KEEPALIVE_INTERVAL, MAX_SERVER_OPENED_BIDI_STREAMS, QuicConfigError,

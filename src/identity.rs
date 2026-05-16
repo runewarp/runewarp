@@ -128,7 +128,9 @@ pub enum ParseClientIdentityCertificateError {
 impl fmt::Display for ParseClientIdentityCertificateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ParseCertificate => formatter.write_str("client certificate is not valid X.509 DER"),
+            Self::ParseCertificate => {
+                formatter.write_str("client certificate is not valid X.509 DER")
+            }
         }
     }
 }
@@ -150,9 +152,17 @@ pub fn generate_client_identity() -> Result<GeneratedClientIdentity, rcgen::Erro
 
 #[derive(Debug)]
 pub enum ClientIdentityMaterialError {
-    ReadFile { path: PathBuf, source: io::Error },
-    WriteFile { path: PathBuf, source: io::Error },
-    ParseCertificate { path: PathBuf },
+    ReadFile {
+        path: PathBuf,
+        source: io::Error,
+    },
+    WriteFile {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ParseCertificate {
+        path: PathBuf,
+    },
     ParseKey(rcgen::Error),
     Generate(rcgen::Error),
     IdentityMismatch {
@@ -171,10 +181,20 @@ impl fmt::Display for ClientIdentityMaterialError {
                 write!(formatter, "failed to write {}: {source}", path.display())
             }
             Self::ParseCertificate { path } => {
-                write!(formatter, "failed to parse a client certificate from {}", path.display())
+                write!(
+                    formatter,
+                    "failed to parse a client certificate from {}",
+                    path.display()
+                )
             }
-            Self::ParseKey(source) => write!(formatter, "failed to parse the client private key: {source}"),
-            Self::Generate(source) => write!(formatter, "failed to generate a client certificate: {source}"),
+            Self::ParseKey(source) => write!(
+                formatter,
+                "failed to parse the client private key: {source}"
+            ),
+            Self::Generate(source) => write!(
+                formatter,
+                "failed to generate a client certificate: {source}"
+            ),
             Self::IdentityMismatch { stored, derived } => write!(
                 formatter,
                 "stored client identity {stored} does not match the current key or certificate identity {derived}"
@@ -197,8 +217,9 @@ pub fn renew_client_identity_certificate(
     directory: &Path,
 ) -> Result<ClientCertificateState, ClientIdentityMaterialError> {
     let material = load_client_identity_material(directory)?;
-    let certificate_pem = issue_client_certificate(&material.signing_key, OffsetDateTime::now_utc())
-        .map_err(ClientIdentityMaterialError::Generate)?;
+    let certificate_pem =
+        issue_client_certificate(&material.signing_key, OffsetDateTime::now_utc())
+            .map_err(ClientIdentityMaterialError::Generate)?;
     let certificate_path = directory.join(CLIENT_CERT_FILENAME);
     replace_file_atomically_with_mode(&certificate_path, certificate_pem.as_bytes(), 0o644)?;
     let updated_material = load_client_identity_material(directory)?;
@@ -266,7 +287,10 @@ pub fn client_identity_from_certificate_der(
     ))
 }
 
-fn issue_client_certificate(signing_key: &KeyPair, now: OffsetDateTime) -> Result<String, rcgen::Error> {
+fn issue_client_certificate(
+    signing_key: &KeyPair,
+    now: OffsetDateTime,
+) -> Result<String, rcgen::Error> {
     let not_before = now - Duration::minutes(1);
     let mut certificate_params = CertificateParams::new(vec!["runewarp-client".to_owned()])?;
     certificate_params.not_before = not_before;
@@ -286,10 +310,11 @@ fn load_client_identity_material(
     directory: &Path,
 ) -> Result<LoadedClientIdentityMaterial, ClientIdentityMaterialError> {
     let key_path = directory.join(CLIENT_KEY_FILENAME);
-    let key_pem = fs::read_to_string(&key_path).map_err(|source| ClientIdentityMaterialError::ReadFile {
-        path: key_path.clone(),
-        source,
-    })?;
+    let key_pem =
+        fs::read_to_string(&key_path).map_err(|source| ClientIdentityMaterialError::ReadFile {
+            path: key_path.clone(),
+            source,
+        })?;
     let signing_key = KeyPair::from_pem(&key_pem).map_err(ClientIdentityMaterialError::ParseKey)?;
     let key_identity =
         ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
@@ -302,7 +327,9 @@ fn load_client_identity_material(
         })?
         .trim()
         .parse::<ClientIdentity>()
-        .map_err(|_| ClientIdentityMaterialError::ParseCertificate { path: identity_path })?;
+        .map_err(|_| ClientIdentityMaterialError::ParseCertificate {
+            path: identity_path,
+        })?;
     if stored_identity != key_identity {
         return Err(ClientIdentityMaterialError::IdentityMismatch {
             stored: stored_identity,
@@ -311,10 +338,11 @@ fn load_client_identity_material(
     }
 
     let certificate_path = directory.join(CLIENT_CERT_FILENAME);
-    let certificate_pem = fs::read(&certificate_path).map_err(|source| ClientIdentityMaterialError::ReadFile {
-        path: certificate_path.clone(),
-        source,
-    })?;
+    let certificate_pem =
+        fs::read(&certificate_path).map_err(|source| ClientIdentityMaterialError::ReadFile {
+            path: certificate_path.clone(),
+            source,
+        })?;
     let certificate_der = certs(&mut Cursor::new(certificate_pem))
         .next()
         .transpose()
@@ -336,12 +364,13 @@ fn load_client_identity_material(
         });
     }
 
-    let (_, certificate) = parse_x509_certificate(certificate_der.as_ref())
-        .map_err(|_| ClientIdentityMaterialError::ParseCertificate {
+    let (_, certificate) = parse_x509_certificate(certificate_der.as_ref()).map_err(|_| {
+        ClientIdentityMaterialError::ParseCertificate {
             path: certificate_path.clone(),
-        })?;
-    let renew_at =
-        certificate.validity().not_before.to_datetime() + Duration::days(CLIENT_CERT_RENEW_AFTER_DAYS as i64);
+        }
+    })?;
+    let renew_at = certificate.validity().not_before.to_datetime()
+        + Duration::days(CLIENT_CERT_RENEW_AFTER_DAYS as i64);
     let expires_at = certificate.validity().not_after.to_datetime();
 
     Ok(LoadedClientIdentityMaterial {
@@ -424,7 +453,9 @@ pub fn decide_client_certificate_renewal(
     now: OffsetDateTime,
 ) -> ClientCertificateRenewalDecision {
     if now >= expires_at {
-        ClientCertificateRenewalDecision::Expired { expired_at: expires_at }
+        ClientCertificateRenewalDecision::Expired {
+            expired_at: expires_at,
+        }
     } else if now >= renew_at {
         ClientCertificateRenewalDecision::Due {
             renew_at,
@@ -526,7 +557,9 @@ mod tests {
                 expires_at,
                 OffsetDateTime::UNIX_EPOCH + Duration::days(90),
             ),
-            ClientCertificateRenewalDecision::Expired { expired_at: expires_at }
+            ClientCertificateRenewalDecision::Expired {
+                expired_at: expires_at
+            }
         );
     }
 }

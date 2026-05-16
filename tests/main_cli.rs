@@ -37,5 +37,9 @@ fn keygen_is_rejected_as_an_unrecognized_command() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
     assert!(stdout.contains("unrecognized command: keygen"));
-    assert!(stdout.lines().any(|line| line == "Available commands: server, client"));
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "Available commands: server, client")
+    );
 }

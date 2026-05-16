@@ -22,6 +22,7 @@ async fn prepared_client_connects_from_validated_settings() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![server_cert],
             private_key_from_der(&server_key),
@@ -96,6 +97,7 @@ async fn prepared_client_rejects_settings_without_a_catch_all_service() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![server_cert],
             private_key_from_der(&server_key),

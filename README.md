@@ -13,19 +13,17 @@ Runewarp is a self-hostable tunnel for TLS passthrough. A public Runewarp Server
 
 ## Current status
 
-The repository now ships the phase-1 data path plus the first phase-2 operator surface.
+The repository now ships the phase-1 data path plus the phase-2 Catch-all operator surface.
 
 Today that means:
 
 - public TCP passthrough works end to end
 - `runewarp client identity init --directory ...` currently generates a Client private key, an initial self-signed Client certificate, and `client-identity.txt`
-- `runewarp server` and `runewarp client` still load `./config.toml` by default and boot the Catch-all single-Tunnel design using the corrected runtime config names and `[server.cert].directory` manual mode
-- the remaining corrected phase-2 operator work still needs the working ACME path
+- `runewarp server` and `runewarp client` still load `./config.toml` by default and boot the Catch-all single-Tunnel design using the corrected runtime config names plus either `[server.cert].directory` or `[server.acme]`
+- ACME TLS-ALPN-01 now provisions and refreshes the Server hostname certificate from `server.acme.state-directory`
 - each Client instance connects to the Server over QUIC using one Tunnel connection
 - the current implementation only keeps one Client instance active at a time
-- exact-match routing, ACME, and the rest of the corrected operator surface still land in later phase-2 work
-
-The current build still needs ACME to complete the planned phase-2 operator story.
+- exact-match routing and later multi-Tunnel operator work still land in later phases
 
 ## Getting started
 
@@ -37,7 +35,7 @@ cargo test
 ./target/release/runewarp client --config ./config.toml
 ```
 
-`runewarp server` and `runewarp client` default to `./config.toml` when `--config` is omitted. Client identity provisioning now uses `runewarp client identity init --directory ...`, while the remaining corrected phase-2 runtime surface still lands in follow-on work.
+`runewarp server` and `runewarp client` default to `./config.toml` when `--config` is omitted. Client identity provisioning uses `runewarp client identity init --directory ...`, and Server operators can choose either `[server.cert]` manual certificates or `[server.acme]` for the Server hostname.
 
 ## Design boundaries
 

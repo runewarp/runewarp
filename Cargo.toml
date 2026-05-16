@@ -11,6 +11,9 @@ keywords = ["tunnel", "port-forwarding", "remote-access", "tls-passthrough", "na
 categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
+futures-util = "0.3.32"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
+rustls-acme = { version = "0.15.2", default-features = false, features = ["ring", "tokio", "tls12", "webpki-roots"] }
 rcgen = "0.14.8"
 quinn = { version = "0.11.9", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23.35", default-features = false, features = ["logging", "ring", "std", "tls12"] }
@@ -24,7 +27,6 @@ toml = "1.1.2"
 x509-parser = "0.18.1"
 
 [dev-dependencies]
-tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 assert_cmd = "2.2.2"
 tempfile = "3.27.0"
 

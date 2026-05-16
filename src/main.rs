@@ -12,9 +12,8 @@ use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, PreparedClient, PreparedServer,
     generate_client_identity, initialize_manual_server_certificate, load_client_settings,
-    load_server_settings, renew_manual_server_certificate,
-    renew_client_identity_certificate, rotate_client_identity,
-    rotate_manual_server_certificate_authority,
+    load_server_settings, renew_client_identity_certificate, renew_manual_server_certificate,
+    rotate_client_identity, rotate_manual_server_certificate_authority,
 };
 use time::OffsetDateTime;
 
@@ -39,12 +38,8 @@ async fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
     };
 
     match command.as_str() {
-        "server" => {
-            run_server_command_from_args(args).await
-        }
-        "client" => {
-            run_client_command_from_args(args).await
-        }
+        "server" => run_server_command_from_args(args).await,
+        "client" => run_client_command_from_args(args).await,
         _ => {
             print_available_commands(Some(&command));
             Ok(())
@@ -99,7 +94,9 @@ async fn run_client_command(
     }
 }
 
-fn ensure_client_identity_fresh(directory: &Path) -> Result<(), runewarp::ClientIdentityMaterialError> {
+fn ensure_client_identity_fresh(
+    directory: &Path,
+) -> Result<(), runewarp::ClientIdentityMaterialError> {
     match runewarp::inspect_client_certificate_renewal(directory, OffsetDateTime::now_utc())? {
         runewarp::ClientCertificateRenewalDecision::NotDue { .. } => Ok(()),
         runewarp::ClientCertificateRenewalDecision::Due { .. }
@@ -220,7 +217,9 @@ async fn run_client_command_from_args(
     run_client_command(&settings, wildcard(0)).await
 }
 
-fn run_client_identity_command(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+fn run_client_identity_command(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
     let Some(command) = args.next() else {
         return Err("missing client identity command".into());
     };
@@ -499,8 +498,14 @@ mod tests {
 
         ensure_client_identity_fresh(tempdir.path()).unwrap();
 
-        assert_eq!(fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap(), original_private_key);
-        assert_ne!(fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap(), original_certificate);
+        assert_eq!(
+            fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap(),
+            original_private_key
+        );
+        assert_ne!(
+            fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap(),
+            original_certificate
+        );
         assert_eq!(
             fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap(),
             original_identity
@@ -525,8 +530,14 @@ mod tests {
         ));
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        assert_eq!(fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap(), original_private_key);
-        assert_ne!(fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap(), original_certificate);
+        assert_eq!(
+            fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap(),
+            original_private_key
+        );
+        assert_ne!(
+            fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap(),
+            original_certificate
+        );
         assert_eq!(
             fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap(),
             original_identity
@@ -548,8 +559,16 @@ mod tests {
         let client_identity =
             ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
 
-        fs::write(directory.join(CLIENT_KEY_FILENAME), signing_key.serialize_pem()).unwrap();
+        fs::write(
+            directory.join(CLIENT_KEY_FILENAME),
+            signing_key.serialize_pem(),
+        )
+        .unwrap();
         fs::write(directory.join(CLIENT_CERT_FILENAME), certificate.pem()).unwrap();
-        fs::write(directory.join(CLIENT_IDENTITY_FILENAME), client_identity.to_string()).unwrap();
+        fs::write(
+            directory.join(CLIENT_IDENTITY_FILENAME),
+            client_identity.to_string(),
+        )
+        .unwrap();
     }
 }

@@ -11,6 +11,9 @@ use runewarp::{
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, ServerName};
+use rustls_acme::CertCache;
+use rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY;
+use rustls_acme::caches::DirCache;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -273,7 +276,7 @@ backend-address = "__BACKEND_ADDR__"
 }
 
 #[tokio::test]
-async fn prepared_server_rejects_acme_settings_until_acme_is_implemented() {
+async fn prepared_server_binds_acme_settings_without_cached_tls_material() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("acme-state")).unwrap();
     fs::write(
@@ -293,12 +296,110 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     .unwrap();
 
     let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
-    let error = match PreparedServer::bind(&settings, localhost(0), localhost(0)).await {
-        Ok(_) => panic!("expected ACME startup to remain unavailable"),
-        Err(error) => error,
-    };
+    let server = PreparedServer::bind(&settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
 
-    assert!(error.to_string().contains("ACME startup is not implemented yet"));
+    assert_ne!(server.public_addr().unwrap().port(), 0);
+    assert_ne!(server.tunnel_addr().unwrap().port(), 0);
+}
+
+#[tokio::test]
+async fn prepared_server_loads_cached_acme_certificates_from_state_directory() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("acme-state")).unwrap();
+    let cached_server_cert =
+        generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+    let cached_server_pem = format!(
+        "{}\n{}",
+        cached_server_cert.signing_key.serialize_pem(),
+        cached_server_cert.cert.pem()
+    );
+    DirCache::new(tempdir.path().join("acme-state"))
+        .store_cert(
+            &["tunnel.example.test".to_owned()],
+            LETS_ENCRYPT_PRODUCTION_DIRECTORY,
+            cached_server_pem.as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let client_identity = generate_client_identity().unwrap();
+    fs::write(
+        tempdir.path().join("client.crt"),
+        client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client.key"),
+        client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("server-ca.pem"),
+        cached_server_cert.cert.pem(),
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.acme]
+email = "admin@example.test"
+state-directory = "acme-state"
+
+[[server.tunnels]]
+client-identity = "{}"
+"#,
+            client_identity.client_identity
+        ),
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-ca.pem"
+identity-directory = "."
+
+[[client.services]]
+backend-address = "127.0.0.1:1"
+"#,
+    )
+    .unwrap();
+
+    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client = timeout(Duration::from_secs(1), async {
+        loop {
+            match PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr).await {
+                Ok(client) => return client,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the cached ACME certificate to load");
+
+    assert_ne!(client.local_addr().unwrap().port(), 0);
+
+    server_task.abort();
+    let _ = server_task.await;
 }
 
 async fn spawn_tls_backend(

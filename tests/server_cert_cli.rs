@@ -29,7 +29,12 @@ fn server_cert_init_writes_the_manual_server_ca_layout() {
     assert_exists(tempdir.path().join("server-cert/server.crt").as_path());
     assert_exists(tempdir.path().join("server-cert/server.key").as_path());
     assert_exists(tempdir.path().join("server-cert/server-ca.crt").as_path());
-    assert_exists(tempdir.path().join("server-cert/state/manual/server-ca.key").as_path());
+    assert_exists(
+        tempdir
+            .path()
+            .join("server-cert/state/manual/server-ca.key")
+            .as_path(),
+    );
     assert_exists(
         tempdir
             .path()
@@ -40,9 +45,12 @@ fn server_cert_init_writes_the_manual_server_ca_layout() {
     let server_cert = fs::read_to_string(tempdir.path().join("server-cert/server.crt")).unwrap();
     let server_key = fs::read_to_string(tempdir.path().join("server-cert/server.key")).unwrap();
     let server_ca = fs::read_to_string(tempdir.path().join("server-cert/server-ca.crt")).unwrap();
-    let server_hostname =
-        fs::read_to_string(tempdir.path().join("server-cert/state/manual/server-hostname.txt"))
-            .unwrap();
+    let server_hostname = fs::read_to_string(
+        tempdir
+            .path()
+            .join("server-cert/state/manual/server-hostname.txt"),
+    )
+    .unwrap();
 
     assert!(server_cert.starts_with("-----BEGIN CERTIFICATE-----"));
     assert!(server_key.starts_with("-----BEGIN PRIVATE KEY-----"));
@@ -110,10 +118,14 @@ fn server_cert_init_writes_private_keys_with_owner_only_permissions() {
         .permissions()
         .mode()
         & 0o777;
-    let ca_key_mode = fs::metadata(tempdir.path().join("server-cert/state/manual/server-ca.key"))
-        .unwrap()
-        .permissions()
-        .mode()
+    let ca_key_mode = fs::metadata(
+        tempdir
+            .path()
+            .join("server-cert/state/manual/server-ca.key"),
+    )
+    .unwrap()
+    .permissions()
+    .mode()
         & 0o777;
 
     assert_eq!(server_key_mode, 0o600);
@@ -140,7 +152,9 @@ fn server_cert_renew_reissues_the_leaf_without_changing_the_server_ca() {
             "cert",
             "init",
             "--directory",
-            cert_directory.to_str().expect("utf-8 certificate directory"),
+            cert_directory
+                .to_str()
+                .expect("utf-8 certificate directory"),
             "--hostname",
             "Tunnel.EXAMPLE.test",
         ])
@@ -149,13 +163,15 @@ fn server_cert_renew_reissues_the_leaf_without_changing_the_server_ca() {
 
     let original_server_certificate =
         fs::read(cert_directory.join("server.crt")).expect("original server certificate");
-    let original_server_key = fs::read(cert_directory.join("server.key")).expect("original server key");
+    let original_server_key =
+        fs::read(cert_directory.join("server.key")).expect("original server key");
     let original_server_ca =
         fs::read(cert_directory.join("server-ca.crt")).expect("original server CA certificate");
     let original_server_ca_key = fs::read(cert_directory.join("state/manual/server-ca.key"))
         .expect("original server CA key");
-    let original_hostname = fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
-        .expect("original stored hostname");
+    let original_hostname =
+        fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
+            .expect("original stored hostname");
 
     assert_cmd::Command::cargo_bin("runewarp")
         .expect("binary path")
@@ -164,7 +180,9 @@ fn server_cert_renew_reissues_the_leaf_without_changing_the_server_ca() {
             "cert",
             "renew",
             "--directory",
-            cert_directory.to_str().expect("utf-8 certificate directory"),
+            cert_directory
+                .to_str()
+                .expect("utf-8 certificate directory"),
         ])
         .assert()
         .success();
@@ -209,7 +227,9 @@ fn server_cert_rotate_ca_replaces_the_ca_and_updates_the_stored_hostname() {
             "cert",
             "init",
             "--directory",
-            cert_directory.to_str().expect("utf-8 certificate directory"),
+            cert_directory
+                .to_str()
+                .expect("utf-8 certificate directory"),
             "--hostname",
             "tunnel.example.test",
         ])
@@ -218,13 +238,15 @@ fn server_cert_rotate_ca_replaces_the_ca_and_updates_the_stored_hostname() {
 
     let original_server_certificate =
         fs::read(cert_directory.join("server.crt")).expect("original server certificate");
-    let original_server_key = fs::read(cert_directory.join("server.key")).expect("original server key");
+    let original_server_key =
+        fs::read(cert_directory.join("server.key")).expect("original server key");
     let original_server_ca =
         fs::read(cert_directory.join("server-ca.crt")).expect("original server CA certificate");
     let original_server_ca_key = fs::read(cert_directory.join("state/manual/server-ca.key"))
         .expect("original server CA key");
-    let original_hostname = fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
-        .expect("original stored hostname");
+    let original_hostname =
+        fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
+            .expect("original stored hostname");
 
     assert_cmd::Command::cargo_bin("runewarp")
         .expect("binary path")
@@ -233,7 +255,9 @@ fn server_cert_rotate_ca_replaces_the_ca_and_updates_the_stored_hostname() {
             "cert",
             "rotate-ca",
             "--directory",
-            cert_directory.to_str().expect("utf-8 certificate directory"),
+            cert_directory
+                .to_str()
+                .expect("utf-8 certificate directory"),
             "--hostname",
             "Rotated.EXAMPLE.test",
         ])

@@ -3,6 +3,7 @@ mod ingress;
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use quinn::Endpoint;
 use tokio::net::TcpListener;
@@ -13,11 +14,13 @@ pub struct ServerConfig {
     pub public_bind_addr: SocketAddr,
     pub tunnel_bind_addr: SocketAddr,
     pub server_hostname: String,
+    pub public_tls_config: Option<Arc<rustls::ServerConfig>>,
     pub quic_server_config: quinn::ServerConfig,
 }
 
 pub struct Server {
     public_listener: TcpListener,
+    public_tls_config: Option<Arc<rustls::ServerConfig>>,
     server_hostname: String,
     tunnel_endpoint: Endpoint,
     active_client_slot: ActiveClientSlot,
@@ -30,6 +33,7 @@ impl Server {
 
         Ok(Self {
             public_listener,
+            public_tls_config: config.public_tls_config,
             server_hostname: config.server_hostname,
             tunnel_endpoint,
             active_client_slot: ActiveClientSlot::new(),
@@ -50,12 +54,14 @@ impl Server {
                 accept_result = self.public_listener.accept() => {
                     let (visitor_stream, _) = accept_result?;
                     let active_client_slot = self.active_client_slot.clone();
+                    let public_tls_config = self.public_tls_config.clone();
                     let server_hostname = self.server_hostname.clone();
                     tokio::spawn(async move {
                         let _ = ingress::handle_visitor_connection(
                             visitor_stream,
                             active_client_slot,
                             server_hostname,
+                            public_tls_config,
                         ).await;
                     });
                 }

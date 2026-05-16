@@ -6,10 +6,15 @@ use std::time::Duration;
 use quinn::TransportConfig;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::client::danger::HandshakeSignatureValid;
-use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
-use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::{CertificateError, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme};
+use rustls::crypto::{
+    CryptoProvider, WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::ResolvesServerCert;
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{
+    CertificateError, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
+};
 
 use crate::{ClientIdentity, client_identity_from_certificate_der};
 
@@ -88,6 +93,30 @@ pub fn make_server_quic_config_with_client_auth(
         .with_safe_default_protocol_versions()?
         .with_client_cert_verifier(Arc::new(verifier))
         .with_single_cert(cert_chain, private_key)?;
+    server_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
+
+    let mut server_config =
+        quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
+    let transport_config = Arc::get_mut(&mut server_config.transport)
+        .expect("newly created QUIC server configs should expose a unique transport config");
+    configure_server_transport(transport_config);
+
+    Ok(server_config)
+}
+
+pub fn make_server_quic_config_with_client_auth_resolver(
+    cert_resolver: Arc<dyn ResolvesServerCert>,
+    trusted_client_identities: &[ClientIdentity],
+) -> Result<quinn::ServerConfig, QuicConfigError> {
+    let provider = server_crypto_provider();
+    let verifier = PinnedClientCertVerifier::new(
+        trusted_client_identities,
+        provider.signature_verification_algorithms,
+    );
+    let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_client_cert_verifier(Arc::new(verifier))
+        .with_cert_resolver(cert_resolver);
     server_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
 
     let mut server_config =

@@ -30,8 +30,13 @@ pub struct ServerTunnelSettings {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerCertificateSettings {
-    Manual { directory: PathBuf },
-    Acme { email: String, state_directory: PathBuf },
+    Manual {
+        directory: PathBuf,
+    },
+    Acme {
+        email: String,
+        state_directory: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,7 +169,8 @@ fn validate_server_settings(
     let manual_present = raw.cert.is_some();
     let acme_present = raw.acme.is_some();
     if manual_present == acme_present {
-        messages.push("exactly one of [server.cert] or [server.acme] must be configured".to_owned());
+        messages
+            .push("exactly one of [server.cert] or [server.acme] must be configured".to_owned());
     }
     let manual = raw
         .cert
@@ -408,7 +414,9 @@ fn validate_server_tunnel(
         Some(client_identity) => match client_identity.parse::<ClientIdentity>() {
             Ok(client_identity) => Some(client_identity),
             Err(error) => {
-                messages.push(format!("server.tunnels[].client-identity is invalid: {error}"));
+                messages.push(format!(
+                    "server.tunnels[].client-identity is invalid: {error}"
+                ));
                 None
             }
         },

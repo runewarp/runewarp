@@ -45,8 +45,14 @@ impl fmt::Display for ServerCertError {
             Self::WriteFile { path, source } => {
                 write!(formatter, "failed to write {}: {source}", path.display())
             }
-            Self::Generate(source) => write!(formatter, "failed to generate server certificates: {source}"),
-            Self::ParseState(source) => write!(formatter, "failed to parse stored server certificate state: {source}"),
+            Self::Generate(source) => write!(
+                formatter,
+                "failed to generate server certificates: {source}"
+            ),
+            Self::ParseState(source) => write!(
+                formatter,
+                "failed to parse stored server certificate state: {source}"
+            ),
         }
     }
 }
@@ -201,7 +207,8 @@ fn generate_server_leaf_cert_material(
     hostname: &str,
     issuer: &Issuer<'_, KeyPair>,
 ) -> Result<GeneratedServerLeafCertMaterial, rcgen::Error> {
-    let leaf_params = server_leaf_params(hostname, OffsetDateTime::now_utc() - Duration::minutes(1))?;
+    let leaf_params =
+        server_leaf_params(hostname, OffsetDateTime::now_utc() - Duration::minutes(1))?;
     let leaf_key = KeyPair::generate()?;
     let leaf_key_pem = leaf_key.serialize_pem();
     let leaf_cert = leaf_params.signed_by(&leaf_key, issuer)?;
@@ -237,8 +244,12 @@ fn server_leaf_params(
         .distinguished_name
         .push(DnType::CommonName, hostname.to_owned());
     leaf_params.use_authority_key_identifier_extension = true;
-    leaf_params.key_usages.push(KeyUsagePurpose::DigitalSignature);
-    leaf_params.key_usages.push(KeyUsagePurpose::KeyEncipherment);
+    leaf_params
+        .key_usages
+        .push(KeyUsagePurpose::DigitalSignature);
+    leaf_params
+        .key_usages
+        .push(KeyUsagePurpose::KeyEncipherment);
     leaf_params
         .extended_key_usages
         .push(ExtendedKeyUsagePurpose::ServerAuth);
@@ -246,25 +257,29 @@ fn server_leaf_params(
 }
 
 fn manual_state_directory(directory: &Path) -> PathBuf {
-    directory.join(SERVER_STATE_DIR).join(SERVER_MANUAL_STATE_DIR)
+    directory
+        .join(SERVER_STATE_DIR)
+        .join(SERVER_MANUAL_STATE_DIR)
 }
 
 fn load_stored_hostname(directory: &Path) -> Result<String, ServerCertError> {
     let path = manual_state_directory(directory).join(SERVER_HOSTNAME_FILENAME);
-    let hostname = fs::read_to_string(&path)
-        .map_err(|source| ServerCertError::ReadFile {
-            path: path.clone(),
-            source,
-        })?;
-    Ok(normalize_public_hostname(hostname.trim()))
-}
-
-fn load_manual_server_ca_issuer(directory: &Path) -> Result<Issuer<'static, KeyPair>, ServerCertError> {
-    let path = manual_state_directory(directory).join(SERVER_CA_KEY_FILENAME);
-    let server_ca_key_pem = fs::read_to_string(&path).map_err(|source| ServerCertError::ReadFile {
+    let hostname = fs::read_to_string(&path).map_err(|source| ServerCertError::ReadFile {
         path: path.clone(),
         source,
     })?;
+    Ok(normalize_public_hostname(hostname.trim()))
+}
+
+fn load_manual_server_ca_issuer(
+    directory: &Path,
+) -> Result<Issuer<'static, KeyPair>, ServerCertError> {
+    let path = manual_state_directory(directory).join(SERVER_CA_KEY_FILENAME);
+    let server_ca_key_pem =
+        fs::read_to_string(&path).map_err(|source| ServerCertError::ReadFile {
+            path: path.clone(),
+            source,
+        })?;
     let ca_key = KeyPair::from_pem(&server_ca_key_pem).map_err(ServerCertError::ParseState)?;
     Ok(Issuer::new(
         server_ca_params(OffsetDateTime::now_utc() - Duration::minutes(1))
@@ -286,7 +301,11 @@ fn create_directory(path: &Path, mode: u32) -> Result<(), ServerCertError> {
         })
 }
 
-fn write_new_file_with_mode(path: &Path, contents: &[u8], mode: u32) -> Result<(), ServerCertError> {
+fn write_new_file_with_mode(
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+) -> Result<(), ServerCertError> {
     let mut file = open_new_file_with_mode(path, mode)?;
     file.write_all(contents)
         .map_err(|source| ServerCertError::WriteFile {
@@ -323,7 +342,9 @@ fn replace_file_atomically_with_mode(
         ));
         let mut file = match open_new_file_with_mode(&temporary_path, mode) {
             Ok(file) => file,
-            Err(ServerCertError::WriteFile { source, .. }) if source.kind() == ErrorKind::AlreadyExists => {
+            Err(ServerCertError::WriteFile { source, .. })
+                if source.kind() == ErrorKind::AlreadyExists =>
+            {
                 continue;
             }
             Err(error) => return Err(error),
@@ -360,8 +381,10 @@ fn open_new_file_with_mode(path: &Path, mode: u32) -> Result<std::fs::File, Serv
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(mode);
-    options.open(path).map_err(|source| ServerCertError::WriteFile {
-        path: path.to_path_buf(),
-        source,
-    })
+    options
+        .open(path)
+        .map_err(|source| ServerCertError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        })
 }

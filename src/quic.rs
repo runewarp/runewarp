@@ -1,11 +1,17 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use quinn::TransportConfig;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use rustls::RootCertStore;
+use rustls::client::danger::HandshakeSignatureValid;
+use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{CertificateError, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+use crate::{ClientIdentity, client_identity_from_certificate_der};
 
 pub const RUNEWARP_ALPN: &[u8] = b"runewarp/1";
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -56,6 +62,31 @@ pub fn make_server_quic_config(
 ) -> Result<quinn::ServerConfig, QuicConfigError> {
     let mut server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
+        .with_single_cert(cert_chain, private_key)?;
+    server_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
+
+    let mut server_config =
+        quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
+    let transport_config = Arc::get_mut(&mut server_config.transport)
+        .expect("newly created QUIC server configs should expose a unique transport config");
+    configure_server_transport(transport_config);
+
+    Ok(server_config)
+}
+
+pub fn make_server_quic_config_with_client_auth(
+    cert_chain: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+    trusted_client_identities: &[ClientIdentity],
+) -> Result<quinn::ServerConfig, QuicConfigError> {
+    let provider = server_crypto_provider();
+    let verifier = PinnedClientCertVerifier::new(
+        trusted_client_identities,
+        provider.signature_verification_algorithms,
+    );
+    let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_client_cert_verifier(Arc::new(verifier))
         .with_single_cert(cert_chain, private_key)?;
     server_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
 
@@ -122,6 +153,85 @@ fn client_transport_config() -> TransportConfig {
     ));
     transport_config.keep_alive_interval(Some(KEEPALIVE_INTERVAL));
     transport_config
+}
+
+fn server_crypto_provider() -> Arc<CryptoProvider> {
+    CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()))
+}
+
+#[derive(Debug)]
+struct PinnedClientCertVerifier {
+    trusted_client_identities: HashSet<ClientIdentity>,
+    supported_algorithms: WebPkiSupportedAlgorithms,
+    root_hint_subjects: Vec<DistinguishedName>,
+}
+
+impl PinnedClientCertVerifier {
+    fn new(
+        trusted_client_identities: &[ClientIdentity],
+        supported_algorithms: WebPkiSupportedAlgorithms,
+    ) -> Self {
+        Self {
+            trusted_client_identities: trusted_client_identities.iter().cloned().collect(),
+            supported_algorithms,
+            root_hint_subjects: Vec::new(),
+        }
+    }
+}
+
+impl ClientCertVerifier for PinnedClientCertVerifier {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        true
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &self.root_hint_subjects
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        let client_identity = client_identity_from_certificate_der(end_entity.as_ref())
+            .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        if self.trusted_client_identities.contains(&client_identity) {
+            Ok(ClientCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                CertificateError::ApplicationVerificationFailure,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.supported_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.supported_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.supported_algorithms.supported_schemes()
+    }
 }
 
 #[cfg(test)]

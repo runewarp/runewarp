@@ -1,7 +1,10 @@
 use std::fs;
+use std::io::Cursor;
 use std::path::Path;
 
 use assert_cmd::Command;
+use runewarp::client_identity_from_certificate_der;
+use rustls_pemfile::certs;
 use tempfile::tempdir;
 
 #[test]
@@ -72,6 +75,31 @@ fn client_identity_init_refuses_to_overwrite_existing_identity_artifacts() {
         .args(["client", "identity", "init", "--directory", "client-identity"])
         .assert()
         .failure();
+}
+
+#[test]
+fn client_identity_init_matches_the_generated_certificate_subject_public_key_info() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--directory", "client-identity"])
+        .assert()
+        .success();
+
+    let certificate_pem = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
+    let certificate = certs(&mut Cursor::new(certificate_pem))
+        .next()
+        .expect("generated certificate")
+        .expect("parse generated certificate");
+    let stored_identity =
+        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
+
+    let derived_identity = client_identity_from_certificate_der(certificate.as_ref())
+        .expect("derive client identity from certificate");
+
+    assert_eq!(stored_identity.trim(), derived_identity.to_string());
 }
 
 fn assert_exists(path: &Path) {

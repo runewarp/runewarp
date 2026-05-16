@@ -4,6 +4,7 @@ use std::str::FromStr;
 use rcgen::{CertificateParams, KeyPair, PublicKeyData};
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
+use x509_parser::parse_x509_certificate;
 
 pub const CLIENT_CERT_LIFETIME_DAYS: u64 = 90;
 pub const CLIENT_CERT_RENEW_AFTER_DAYS: u64 = 60;
@@ -91,6 +92,21 @@ pub struct GeneratedClientIdentity {
     pub client_identity: ClientIdentity,
 }
 
+#[derive(Debug)]
+pub enum ParseClientIdentityCertificateError {
+    ParseCertificate,
+}
+
+impl fmt::Display for ParseClientIdentityCertificateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ParseCertificate => formatter.write_str("client certificate is not valid X.509 DER"),
+        }
+    }
+}
+
+impl std::error::Error for ParseClientIdentityCertificateError {}
+
 pub fn generate_client_identity() -> Result<GeneratedClientIdentity, rcgen::Error> {
     let signing_key = KeyPair::generate()?;
     let mut certificate_params = CertificateParams::new(vec!["runewarp-client".to_owned()])?;
@@ -106,6 +122,20 @@ pub fn generate_client_identity() -> Result<GeneratedClientIdentity, rcgen::Erro
         certificate_pem: certificate.pem(),
         client_identity,
     })
+}
+
+pub fn client_identity_from_certificate_der(
+    certificate_der: &[u8],
+) -> Result<ClientIdentity, ParseClientIdentityCertificateError> {
+    let (remainder, certificate) = parse_x509_certificate(certificate_der)
+        .map_err(|_| ParseClientIdentityCertificateError::ParseCertificate)?;
+    if !remainder.is_empty() {
+        return Err(ParseClientIdentityCertificateError::ParseCertificate);
+    }
+
+    Ok(ClientIdentity::from_subject_public_key_info(
+        certificate.tbs_certificate.subject_pki.raw,
+    ))
 }
 
 #[cfg(test)]

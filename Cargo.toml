@@ -21,12 +21,12 @@ sha2 = "0.11.0"
 time = "0.3.47"
 tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "1.1.2"
+x509-parser = "0.18.1"
 
 [dev-dependencies]
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 assert_cmd = "2.2.2"
 tempfile = "3.27.0"
-x509-parser = "0.18.1"
 
 [[bin]]
 name = "runewarp"

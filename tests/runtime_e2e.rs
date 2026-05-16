@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    Client, ClientConfig, Server, ServerConfig, make_client_quic_config, make_server_quic_config,
+    Client, ClientConfig, Server, ServerConfig, generate_client_identity, make_client_quic_config,
+    make_server_quic_config, make_server_quic_config_with_client_auth,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -130,6 +131,66 @@ async fn drops_public_tls_when_no_client_is_connected() {
     assert!(handshake.is_err());
 
     server_task.abort();
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
+    let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let backend = spawn_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"pong",
+    )
+    .await;
+    let trusted_client = generate_client_identity().unwrap();
+    let server = Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        quic_server_config: make_server_quic_config_with_client_auth(
+            vec![tunnel_cert.clone()],
+            private_key_from_der(&tunnel_key),
+            &[trusted_client.client_identity],
+        )
+        .unwrap(),
+    })
+    .await
+    .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client = Client::connect(ClientConfig {
+        local_bind_addr: localhost(0),
+        server_addr: tunnel_addr,
+        server_name: "tunnel.example.test".to_owned(),
+        backend_addr: backend.0.to_string(),
+        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+    })
+    .await;
+
+    let client_task = client.ok().map(|client| tokio::spawn(client.run()));
+    sleep(Duration::from_millis(50)).await;
+
+    let visitor_result = timeout(
+        Duration::from_secs(1),
+        request_tls_response(public_addr, &backend_cert, "app.example.test"),
+    )
+    .await;
+    assert!(
+        matches!(visitor_result, Ok(Err(_))),
+        "an unauthenticated client must never become the active tunnel"
+    );
+
+    backend.1.abort();
+    server_task.abort();
+    if let Some(client_task) = client_task {
+        client_task.abort();
+        let _ = client_task.await;
+    }
+    let _ = backend.1.await;
     let _ = server_task.await;
 }
 

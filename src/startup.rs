@@ -13,7 +13,8 @@ use crate::tls_material::{
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig, ClientConnectError,
     ClientIdentity, ClientSettings, QuicConfigError, Server, ServerCertificateSettings,
-    ServerConfig, ServerSettings, make_client_quic_config_with_client_auth, make_server_quic_config,
+    ServerConfig, ServerSettings, make_client_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth,
 };
 
 pub struct PreparedServer {
@@ -36,7 +37,16 @@ impl PreparedServer {
                 return Err(ServerStartupError::AcmeNotImplemented);
             }
         };
-        let quic_server_config = make_server_quic_config(cert_chain, private_key)
+        let trusted_client_identities = settings
+            .tunnels
+            .iter()
+            .map(|tunnel| tunnel.client_identity.clone())
+            .collect::<Vec<_>>();
+        let quic_server_config = make_server_quic_config_with_client_auth(
+            cert_chain,
+            private_key,
+            &trusted_client_identities,
+        )
             .map_err(ServerStartupError::QuicConfig)?;
         let server = Server::bind(ServerConfig {
             public_bind_addr,
@@ -49,11 +59,7 @@ impl PreparedServer {
 
         Ok(Self {
             server,
-            trusted_client_identities: settings
-                .tunnels
-                .iter()
-                .map(|tunnel| tunnel.client_identity.clone())
-                .collect(),
+            trusted_client_identities,
         })
     }
 

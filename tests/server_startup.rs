@@ -76,6 +76,11 @@ async fn prepared_server_drops_public_tls_addressed_to_the_server_hostname() {
         client_identity.private_key_pem,
     )
     .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
 
     fs::write(
         tempdir.path().join("server.toml"),
@@ -110,11 +115,10 @@ client-public-key-fingerprint = "{}"
 [client]
 server-hostname = "tunnel.example.test"
 server-ca-file = "server-ca.pem"
-cert-file = "client.crt"
-key-file = "client.key"
+identity-directory = "."
 
 [[client.services]]
-local-addr = "__BACKEND_ADDR__"
+backend-address = "__BACKEND_ADDR__"
 "#
         .replace("__BACKEND_ADDR__", &backend.0.to_string()),
     )

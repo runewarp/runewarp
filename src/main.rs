@@ -9,13 +9,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use runewarp::{
-    CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS, PreparedClient, PreparedServer,
+    CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
+    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, PreparedClient, PreparedServer,
     generate_client_identity, load_client_settings, load_server_settings,
 };
 
-const CLIENT_KEY_FILENAME: &str = "client.key";
-const CLIENT_CERT_FILENAME: &str = "client.crt";
-const CLIENT_IDENTITY_FILENAME: &str = "client-identity.txt";
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 
 #[tokio::main]
@@ -69,7 +67,7 @@ async fn run_client_command(
 ) -> Result<(), Box<dyn Error>> {
     loop {
         let client = retry_with_immediate_retry(
-            settings.retry_interval,
+            settings.reconnect_interval,
             should_retry_client_connect_error,
             || async {
                 let client = PreparedClient::connect(settings, local_bind_addr).await?;

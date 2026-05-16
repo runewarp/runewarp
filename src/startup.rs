@@ -8,9 +8,9 @@ use tokio::net::lookup_host;
 
 use crate::tls_material::{TlsMaterialError, load_certificate_chain, load_private_key};
 use crate::{
-    Client, ClientConfig, ClientConnectError, ClientIdentity, ClientSettings, QuicConfigError,
-    Server, ServerConfig, ServerSettings, make_client_quic_config_with_client_auth,
-    make_server_quic_config,
+    CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig, ClientConnectError,
+    ClientIdentity, ClientSettings, QuicConfigError, Server, ServerConfig, ServerSettings,
+    make_client_quic_config_with_client_auth, make_server_quic_config,
 };
 
 pub struct PreparedServer {
@@ -96,9 +96,9 @@ impl PreparedClient {
             ));
         };
         let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
-        let cert_chain = load_certificate_chain(&settings.cert_file)
+        let cert_chain = load_certificate_chain(&settings.identity_directory.join(CLIENT_CERT_FILENAME))
             .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
-        let private_key = load_private_key(&settings.key_file)
+        let private_key = load_private_key(&settings.identity_directory.join(CLIENT_KEY_FILENAME))
             .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
         let quic_client_config =
             make_client_quic_config_with_client_auth(loaded_roots.roots, cert_chain, private_key)
@@ -107,7 +107,7 @@ impl PreparedClient {
             local_bind_addr,
             server_addr,
             server_name: settings.server_hostname.clone(),
-            backend_addr: service.local_addr.clone(),
+            backend_addr: service.backend_addr.clone(),
             quic_client_config,
         })
         .await

@@ -35,14 +35,20 @@ async fn prepared_client_connects_from_validated_settings() {
 
     let client_identity = generate_client_identity().unwrap();
     fs::write(tempdir.path().join("server-ca.pem"), server_cert_pem).unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client.crt"),
+        tempdir.path().join("client-identity/client.crt"),
         client_identity.certificate_pem,
     )
     .unwrap();
     fs::write(
-        tempdir.path().join("client.key"),
+        tempdir.path().join("client-identity/client.key"),
         client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        client_identity.client_identity.to_string(),
     )
     .unwrap();
     fs::write(
@@ -51,11 +57,10 @@ async fn prepared_client_connects_from_validated_settings() {
 [client]
 server-hostname = "tunnel.example.test"
 server-ca-file = "server-ca.pem"
-cert-file = "client.crt"
-key-file = "client.key"
+identity-directory = "client-identity"
 
 [[client.services]]
-local-addr = "localhost:443"
+backend-address = "localhost:443"
 "#,
     )
     .unwrap();
@@ -114,13 +119,17 @@ async fn prepared_client_rejects_settings_without_a_catch_all_service() {
         client_identity.private_key_pem,
     )
     .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
 
     let settings = ClientSettings {
         server_hostname: "tunnel.example.test".to_owned(),
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
-        cert_file: tempdir.path().join("client.crt"),
-        key_file: tempdir.path().join("client.key"),
-        retry_interval: Duration::from_secs(5),
+        identity_directory: tempdir.path().to_path_buf(),
+        reconnect_interval: Duration::from_secs(5),
         services: Vec::new(),
     };
 

@@ -7,9 +7,12 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::tls_material::validate_server_tls_material;
-use crate::{ClientIdentity, hostname::normalize_public_hostname};
+use crate::{
+    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
+    hostname::normalize_public_hostname,
+};
 
-pub const DEFAULT_CLIENT_RETRY_INTERVAL_SECS: u64 = 5;
+pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerSettings {
@@ -28,15 +31,14 @@ pub struct ServerTunnelSettings {
 pub struct ClientSettings {
     pub server_hostname: String,
     pub server_ca_file: Option<PathBuf>,
-    pub cert_file: PathBuf,
-    pub key_file: PathBuf,
-    pub retry_interval: Duration,
+    pub identity_directory: PathBuf,
+    pub reconnect_interval: Duration,
     pub services: Vec<ClientServiceSettings>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientServiceSettings {
-    pub local_addr: String,
+    pub backend_addr: String,
 }
 
 #[derive(Debug)]
@@ -216,16 +218,38 @@ fn validate_client_settings(
         ),
         None => None,
     };
-    let cert_file =
-        validate_required_path("client.cert-file", raw.cert_file, config_dir, &mut messages);
-    let key_file =
-        validate_required_path("client.key-file", raw.key_file, config_dir, &mut messages);
+    let identity_directory = validate_required_directory(
+        "client.identity-directory",
+        raw.identity_directory,
+        config_dir,
+        &mut messages,
+    );
+    if let Some(identity_directory) = identity_directory.as_deref() {
+        validate_directory_file(
+            "client.identity-directory",
+            identity_directory,
+            CLIENT_CERT_FILENAME,
+            &mut messages,
+        );
+        validate_directory_file(
+            "client.identity-directory",
+            identity_directory,
+            CLIENT_KEY_FILENAME,
+            &mut messages,
+        );
+        validate_directory_file(
+            "client.identity-directory",
+            identity_directory,
+            CLIENT_IDENTITY_FILENAME,
+            &mut messages,
+        );
+    }
 
-    let retry_interval_secs = raw
-        .retry_interval
-        .unwrap_or(DEFAULT_CLIENT_RETRY_INTERVAL_SECS);
-    if retry_interval_secs < 1 {
-        messages.push("client.retry-interval must be at least 1".to_owned());
+    let reconnect_interval_secs = raw
+        .reconnect_interval
+        .unwrap_or(DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS);
+    if reconnect_interval_secs < 1 {
+        messages.push("client.reconnect-interval must be at least 1".to_owned());
     }
 
     let service_count = raw.services.len();
@@ -242,9 +266,8 @@ fn validate_client_settings(
         Ok(ClientSettings {
             server_hostname,
             server_ca_file,
-            cert_file: cert_file.expect("validated client.cert-file"),
-            key_file: key_file.expect("validated client.key-file"),
-            retry_interval: Duration::from_secs(retry_interval_secs),
+            identity_directory: identity_directory.expect("validated client.identity-directory"),
+            reconnect_interval: Duration::from_secs(reconnect_interval_secs),
             services,
         })
     } else {
@@ -286,6 +309,39 @@ fn validate_optional_path(
     Some(resolved)
 }
 
+fn validate_required_directory(
+    field_name: &str,
+    raw_path: Option<PathBuf>,
+    config_dir: &Path,
+    messages: &mut Vec<String>,
+) -> Option<PathBuf> {
+    let Some(raw_path) = raw_path else {
+        messages.push(format!("{field_name} is required"));
+        return None;
+    };
+    let resolved = resolve_path(config_dir, &raw_path);
+    if !resolved.is_dir() {
+        messages.push(format!(
+            "{field_name} directory not found: {}",
+            resolved.display()
+        ));
+        return None;
+    }
+    Some(resolved)
+}
+
+fn validate_directory_file(
+    field_name: &str,
+    directory: &Path,
+    filename: &str,
+    messages: &mut Vec<String>,
+) {
+    let path = directory.join(filename);
+    if !path.is_file() {
+        messages.push(format!("{field_name} file not found: {}", path.display()));
+    }
+}
+
 fn validate_server_tunnel(
     raw: RawServerTunnelConfig,
     messages: &mut Vec<String>,
@@ -317,34 +373,34 @@ fn validate_client_service(
     raw: RawClientServiceConfig,
     messages: &mut Vec<String>,
 ) -> Option<ClientServiceSettings> {
-    if raw.hostnames.is_some() {
+    if raw.public_hostnames.is_some() {
         messages.push("phase-2 client mode only supports a Catch-all Service".to_owned());
     }
 
-    let local_addr = match raw.local_addr {
-        Some(local_addr) => {
-            if !is_valid_local_addr(&local_addr) {
+    let backend_addr = match raw.backend_address {
+        Some(backend_addr) => {
+            if !is_valid_backend_addr(&backend_addr) {
                 messages.push(
-                    "client.services[].local-addr must be a TCP address or host:port pair"
+                    "client.services[].backend-address must be a TCP address or host:port pair"
                         .to_owned(),
                 );
                 None
             } else {
-                Some(local_addr)
+                Some(backend_addr)
             }
         }
         None => {
-            messages.push("client.services[].local-addr is required".to_owned());
+            messages.push("client.services[].backend-address is required".to_owned());
             None
         }
     };
 
-    local_addr.map(|local_addr| ClientServiceSettings { local_addr })
+    backend_addr.map(|backend_addr| ClientServiceSettings { backend_addr })
 }
 
-fn is_valid_local_addr(local_addr: &str) -> bool {
-    local_addr.parse::<std::net::SocketAddr>().is_ok()
-        || local_addr
+fn is_valid_backend_addr(backend_addr: &str) -> bool {
+    backend_addr.parse::<std::net::SocketAddr>().is_ok()
+        || backend_addr
             .rsplit_once(':')
             .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
 }
@@ -380,9 +436,8 @@ struct RawServerTunnelConfig {
 struct RawClientConfig {
     server_hostname: Option<String>,
     server_ca_file: Option<PathBuf>,
-    cert_file: Option<PathBuf>,
-    key_file: Option<PathBuf>,
-    retry_interval: Option<u64>,
+    identity_directory: Option<PathBuf>,
+    reconnect_interval: Option<u64>,
     #[serde(default)]
     services: Vec<RawClientServiceConfig>,
 }
@@ -390,15 +445,15 @@ struct RawClientConfig {
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct RawClientServiceConfig {
-    hostnames: Option<Vec<String>>,
-    local_addr: Option<String>,
+    public_hostnames: Option<Vec<String>>,
+    backend_address: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::{is_valid_local_addr, resolve_path};
+    use super::{is_valid_backend_addr, resolve_path};
 
     #[test]
     fn resolves_relative_paths_against_the_config_directory() {
@@ -413,8 +468,8 @@ mod tests {
 
     #[test]
     fn accepts_host_port_local_backend_pairs() {
-        assert!(is_valid_local_addr("caddy.local:443"));
-        assert!(is_valid_local_addr("127.0.0.1:443"));
-        assert!(!is_valid_local_addr("caddy.local"));
+        assert!(is_valid_backend_addr("caddy.local:443"));
+        assert!(is_valid_backend_addr("127.0.0.1:443"));
+        assert!(!is_valid_backend_addr("caddy.local"));
     }
 }

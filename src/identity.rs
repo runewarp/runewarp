@@ -7,6 +7,9 @@ use time::{Duration, OffsetDateTime};
 
 pub const CLIENT_CERT_LIFETIME_DAYS: u64 = 90;
 pub const CLIENT_CERT_RENEW_AFTER_DAYS: u64 = 60;
+pub const CLIENT_CERT_FILENAME: &str = "client.crt";
+pub const CLIENT_KEY_FILENAME: &str = "client.key";
+pub const CLIENT_IDENTITY_FILENAME: &str = "client-identity.txt";
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ClientIdentity([u8; 32]);

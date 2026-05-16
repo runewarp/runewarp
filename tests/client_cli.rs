@@ -14,11 +14,10 @@ acme = {}
 
 [client]
 server-hostname = "tunnel.example.test"
-cert-file = "missing-client.crt"
-key-file = "missing-client.key"
+identity-directory = "missing-client"
 
 [[client.services]]
-local-addr = "127.0.0.1:443"
+backend-address = "127.0.0.1:443"
 "#,
     )
     .unwrap();
@@ -31,7 +30,7 @@ local-addr = "127.0.0.1:443"
         .failure();
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    assert!(stderr.contains("missing-client.crt"));
+    assert!(stderr.contains("missing-client"));
     assert!(!stderr.contains("acme"));
 }
 
@@ -43,11 +42,10 @@ fn client_uses_a_custom_config_path_when_requested() {
         r#"
 [client]
 server-hostname = "tunnel.example.test"
-cert-file = "missing-client.crt"
-key-file = "missing-client.key"
+identity-directory = "missing-client"
 
 [[client.services]]
-local-addr = "127.0.0.1:443"
+backend-address = "127.0.0.1:443"
 "#,
     )
     .unwrap();
@@ -60,5 +58,5 @@ local-addr = "127.0.0.1:443"
         .failure();
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    assert!(stderr.contains("missing-client.crt"));
+    assert!(stderr.contains("missing-client"));
 }

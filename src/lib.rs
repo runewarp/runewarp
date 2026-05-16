@@ -14,7 +14,8 @@ pub use client_hello::{
     CLIENT_HELLO_BUFFER_LIMIT, ClientHelloError, ParsedClientHello, read_client_hello,
 };
 pub use identity::{
-    CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS, ClientIdentity,
+    CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
+    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
     GeneratedClientIdentity, ParseClientIdentityError, generate_client_identity,
 };
 pub use quic::{
@@ -24,7 +25,7 @@ pub use quic::{
 };
 pub use server::{Server, ServerConfig};
 pub use settings::{
-    ClientServiceSettings, ClientSettings, DEFAULT_CLIENT_RETRY_INTERVAL_SECS, ServerSettings,
+    ClientServiceSettings, ClientSettings, DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, ServerSettings,
     ServerTunnelSettings, SettingsError, load_client_settings, load_server_settings,
 };
 pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};

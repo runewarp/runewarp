@@ -20,7 +20,7 @@ Today that means:
 - public TCP passthrough works end to end
 - `runewarp client identity init --directory ...` currently generates a Client private key, an initial self-signed Client certificate, and `client-identity.txt`
 - `runewarp server` and `runewarp client` still load `./config.toml` by default and boot the Catch-all single-Tunnel design using the corrected runtime config names and `[server.cert].directory` manual mode
-- the remaining corrected operator surface still needs `runewarp server cert renew|rotate-ca`, Client authentication, Client certificate renewal, and the working ACME path
+- the remaining corrected operator surface still needs `runewarp server cert rotate-ca`, Client authentication, Client certificate renewal, and the working ACME path
 - each Client instance connects to the Server over QUIC using one Tunnel connection
 - the current implementation only keeps one Client instance active at a time
 - exact-match routing, ACME, Client certificate renewal, pinned Client-identity enforcement, and the rest of the corrected operator surface still land in later phase-2 work

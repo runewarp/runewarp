@@ -12,7 +12,7 @@ use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, PreparedClient, PreparedServer,
     generate_client_identity, initialize_manual_server_certificate, load_client_settings,
-    load_server_settings,
+    load_server_settings, renew_manual_server_certificate,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
@@ -122,6 +122,11 @@ fn run_server_cert_command(mut args: impl Iterator<Item = String>) -> Result<(),
         "init" => {
             let (directory, hostname) = parse_directory_and_hostname_args(args)?;
             initialize_manual_server_certificate(&directory, &hostname)?;
+            Ok(())
+        }
+        "renew" => {
+            let directory = parse_directory_arg(args)?;
+            renew_manual_server_certificate(&directory)?;
             Ok(())
         }
         _ => Err(format!("unrecognized server cert command: {command}").into()),

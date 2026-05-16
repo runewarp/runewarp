@@ -303,14 +303,7 @@ fn build_root_store(
 ) -> Result<LoadedRootStore, ClientStartupError> {
     let mut roots = RootCertStore::empty();
     let mut loaded_root_count = 0;
-
-    for cert in native_roots.certs {
-        roots
-            .add(cert)
-            .map_err(ClientStartupError::AddRootCertificate)?;
-        loaded_root_count += 1;
-    }
-    if let Some(server_ca_file) = server_ca_file {
+    let native_root_error_count = if let Some(server_ca_file) = server_ca_file {
         for cert in load_certificate_chain(server_ca_file)
             .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?
         {
@@ -319,16 +312,25 @@ fn build_root_store(
                 .map_err(ClientStartupError::AddRootCertificate)?;
             loaded_root_count += 1;
         }
-    }
+        0
+    } else {
+        for cert in native_roots.certs {
+            roots
+                .add(cert)
+                .map_err(ClientStartupError::AddRootCertificate)?;
+            loaded_root_count += 1;
+        }
+        native_roots.error_count
+    };
     if loaded_root_count == 0 {
         return Err(ClientStartupError::NativeRoots {
-            errors: native_roots.error_count,
+            errors: native_root_error_count,
         });
     }
 
     Ok(LoadedRootStore {
         roots,
-        native_root_error_count: native_roots.error_count,
+        native_root_error_count,
         #[cfg(test)]
         loaded_root_count,
     })
@@ -339,11 +341,12 @@ mod tests {
     use std::fs;
 
     use rcgen::generate_simple_self_signed;
+    use rustls::pki_types::CertificateDer;
 
     use super::{ClientStartupError, NativeRootsLoad, build_root_store};
 
     #[test]
-    fn extra_ca_material_still_loads_when_native_trust_loading_is_partially_degraded() {
+    fn configured_server_ca_file_still_loads_without_native_roots() {
         let tempdir = tempfile::tempdir().unwrap();
         let extra_ca = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
         fs::write(tempdir.path().join("server-ca.pem"), extra_ca.cert.pem()).unwrap();
@@ -357,7 +360,27 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(loaded.native_root_error_count, 2);
+        assert_eq!(loaded.native_root_error_count, 0);
+        assert_eq!(loaded.loaded_root_count, 1);
+    }
+
+    #[test]
+    fn configured_server_ca_file_replaces_native_roots() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let native_ca = generate_simple_self_signed(vec!["native.example.test".to_owned()]).unwrap();
+        let extra_ca = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+        fs::write(tempdir.path().join("server-ca.pem"), extra_ca.cert.pem()).unwrap();
+
+        let loaded = build_root_store(
+            NativeRootsLoad {
+                certs: vec![CertificateDer::from(native_ca.cert)],
+                error_count: 1,
+            },
+            Some(tempdir.path().join("server-ca.pem").as_path()),
+        )
+        .unwrap();
+
+        assert_eq!(loaded.native_root_error_count, 0);
         assert_eq!(loaded.loaded_root_count, 1);
     }
 

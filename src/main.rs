@@ -11,7 +11,8 @@ use std::time::Duration;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, PreparedClient, PreparedServer,
-    generate_client_identity, load_client_settings, load_server_settings,
+    generate_client_identity, initialize_manual_server_certificate, load_client_settings,
+    load_server_settings,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
@@ -36,13 +37,7 @@ async fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
 
     match command.as_str() {
         "server" => {
-            let config_path = parse_config_path(args)?;
-            let settings = load_server_settings(&config_path)?;
-            PreparedServer::bind(&settings, wildcard(443), wildcard(443))
-                .await?
-                .run()
-                .await?;
-            Ok(())
+            run_server_command_from_args(args).await
         }
         "client" => {
             run_client_command_from_args(args).await
@@ -90,6 +85,46 @@ async fn run_client_command(
         }
 
         return Ok(());
+    }
+}
+
+async fn run_server_command_from_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let Some(argument) = args.next() else {
+        let settings = load_server_settings(Path::new(DEFAULT_CONFIG_PATH))?;
+        PreparedServer::bind(&settings, wildcard(443), wildcard(443))
+            .await?
+            .run()
+            .await?;
+        return Ok(());
+    };
+
+    if argument == "cert" {
+        return run_server_cert_command(args);
+    }
+
+    let config_path = parse_config_path(std::iter::once(argument).chain(args))?;
+    let settings = load_server_settings(&config_path)?;
+    PreparedServer::bind(&settings, wildcard(443), wildcard(443))
+        .await?
+        .run()
+        .await?;
+    Ok(())
+}
+
+fn run_server_cert_command(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let Some(command) = args.next() else {
+        return Err("missing server cert command".into());
+    };
+
+    match command.as_str() {
+        "init" => {
+            let (directory, hostname) = parse_directory_and_hostname_args(args)?;
+            initialize_manual_server_certificate(&directory, &hostname)?;
+            Ok(())
+        }
+        _ => Err(format!("unrecognized server cert command: {command}").into()),
     }
 }
 
@@ -180,6 +215,40 @@ fn parse_directory_arg(
     }
 
     Ok(value.into())
+}
+
+fn parse_directory_and_hostname_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(std::path::PathBuf, String), Box<dyn Error>> {
+    let mut directory = None;
+    let mut hostname = None;
+
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--directory" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value for --directory".into());
+                };
+                directory = Some(value.into());
+            }
+            "--hostname" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value for --hostname".into());
+                };
+                hostname = Some(value);
+            }
+            _ => return Err(format!("unrecognized command argument: {argument}").into()),
+        }
+    }
+
+    let Some(directory) = directory else {
+        return Err("missing --directory".into());
+    };
+    let Some(hostname) = hostname else {
+        return Err("missing --hostname".into());
+    };
+
+    Ok((directory, hostname))
 }
 
 fn parse_config_path(

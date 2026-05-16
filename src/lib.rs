@@ -4,6 +4,7 @@ mod hostname;
 mod identity;
 mod proxy;
 mod quic;
+mod server_cert;
 mod server;
 mod settings;
 mod startup;
@@ -23,6 +24,7 @@ pub use quic::{
     RUNEWARP_ALPN, make_client_quic_config, make_client_quic_config_with_client_auth,
     make_server_quic_config,
 };
+pub use server_cert::{SERVER_CA_FILENAME, initialize_manual_server_certificate};
 pub use server::{Server, ServerConfig};
 pub use settings::{
     ClientServiceSettings, ClientSettings, DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS,

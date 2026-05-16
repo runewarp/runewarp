@@ -5,7 +5,8 @@ Runewarp is being built as a self-hosted TLS passthrough tunnel. The core docs d
 ## Current state
 
 - the phase-1 data path is implemented as a library-first `Server` and `Client` runtime
-- the phase-2 Catch-all operator surface is implemented for manual TLS and `runewarp keygen`
+- the current phase-2 Catch-all operator surface is implemented with `runewarp keygen`, flat cert/key config, and additive `server-ca-file`
+- the agreed next phase-2 surface replaces that with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, and tighter trust semantics
 - the current implementation uses a Catch-all Tunnel, a Catch-all Service, and one active Client instance with one Tunnel connection
 
 ## Phase 1 - Library data path
@@ -27,16 +28,19 @@ Scope:
 
 Goal: make the single-Tunnel design usable by operators.
 
-Status: config loading, `runewarp server`, `runewarp client`, and `runewarp keygen` are implemented for the Catch-all manual-TLS path. Client-identity enforcement, certificate renewal, and ACME remain.
+Status: config loading, `runewarp server`, `runewarp client`, and the older `runewarp keygen` surface are implemented for the Catch-all manual-TLS path. The corrected phase-2 follow-up still needs the role-first `server cert` / `client identity` operator surface, directory-based material, tighter Client trust semantics, Client-identity enforcement, certificate renewal, and ACME.
 
 Scope:
 
 - TOML config loading
 - boot-time config validation
-- `runewarp server`, `runewarp client`, and `runewarp keygen`
-- pinned Client identities
-- Client certificate auto-renewal with stable keys
-- manual Server certs and ACME TLS-ALPN-01
+- `runewarp server`, `runewarp client`, `runewarp server cert ...`, and `runewarp client identity ...`
+- directory-based Server cert and Client identity material
+- one shared `client-identity` per Tunnel
+- exclusive Client trust of a configured manual Server CA file
+- Client certificate auto-renewal with stable keys and explicit identity rotation
+- manual/private-CA Server certs with explicit `renew` and `rotate-ca`
+- ACME TLS-ALPN-01 for the Server hostname
 - human-readable logs
 
 ## Phase 3 - Exact-match hostname routing
@@ -60,7 +64,7 @@ Scope:
 - multiple Client instances per Tunnel
 - Tunnel pools with least-active balancing
 - round-robin tie-breaking
-- shared-identity or separate-identity Client instances
+- one shared `client-identity` per Tunnel by default, with separate identities as a later advanced case
 - clearer handling for misconfigured replicas
 
 ## Phase 5 - Packaging and release engineering
@@ -108,7 +112,7 @@ Scope:
 
 - ECH for public and Client connections
 - clustered multi-node mode
-- better key-rotation workflows
+- zero-downtime identity and CA rotation workflows
 - deeper HTTP/3 and QUIC passthrough work
 
 ## Deliberate non-goals

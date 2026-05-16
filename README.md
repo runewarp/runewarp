@@ -18,11 +18,12 @@ The repository now ships the phase-1 data path plus the first phase-2 operator s
 Today that means:
 
 - public TCP passthrough works end to end
-- `runewarp keygen` generates a Client private key, an initial self-signed Client certificate, and the pinned Client-identity fingerprint
-- `runewarp server` and `runewarp client` load `./config.toml` by default and boot the Catch-all single-Tunnel design with manual TLS material
+- `runewarp keygen` currently generates a Client private key, an initial self-signed Client certificate, and the pinned Client-identity fingerprint
+- `runewarp server` and `runewarp client` load `./config.toml` by default and boot the Catch-all single-Tunnel design with the older flat cert/key config surface
+- the agreed next operator surface replaces `runewarp keygen` with `runewarp client identity ...`, adds `runewarp server cert ...`, moves certificate material to directory-based config, and tightens Client trust of manual Server CAs
 - each Client instance connects to the Server over QUIC using one Tunnel connection
 - the current implementation only keeps one Client instance active at a time
-- exact-match routing, ACME, Client certificate renewal, and pinned Client-identity enforcement still land in later phases
+- exact-match routing, ACME, Client certificate renewal, pinned Client-identity enforcement, and the corrected operator surface still land in later phase-2 work
 
 The current build is still not ready for public deployment without Client authentication hardening.
 
@@ -36,7 +37,7 @@ cargo test
 ./target/release/runewarp client --config ./config.toml
 ```
 
-`runewarp server` and `runewarp client` default to `./config.toml` when `--config` is omitted. `runewarp keygen` defaults `--out-dir` to `./certs`.
+`runewarp server` and `runewarp client` default to `./config.toml` when `--config` is omitted. The current binary still uses `runewarp keygen` with `--out-dir`, but the intended next operator surface replaces it with `runewarp client identity init --directory ...`.
 
 ## Design boundaries
 
@@ -54,6 +55,7 @@ cargo test
 - [`docs/security.md`](docs/security.md)
 - [`docs/roadmap.md`](docs/roadmap.md)
 - [`docs/adr/0001-server-authoritative-routing-with-hostname-mirroring.md`](docs/adr/0001-server-authoritative-routing-with-hostname-mirroring.md)
+- [`docs/adr/0002-manual-server-ca-and-exclusive-client-trust.md`](docs/adr/0002-manual-server-ca-and-exclusive-client-trust.md)
 - [`AGENTS.md`](AGENTS.md)
 
 ## Inspiration

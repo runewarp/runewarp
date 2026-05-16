@@ -32,6 +32,14 @@ _Avoid_: Client, user agent
 The hostname that identifies the Runewarp public edge itself.
 _Avoid_: Public hostname, app hostname
 
+**Server certificate**:
+The certificate the **Server** presents for the **Server hostname** on the tunnel endpoint.
+_Avoid_: Public hostname certificate, app certificate
+
+**Server CA**:
+The operator-managed private certificate authority used to issue a **Server certificate** in the manual Server-certificate path.
+_Avoid_: public CA, app CA
+
 **Public hostname**:
 An operator-owned application hostname that the **Server** routes through a **Tunnel**.
 _Avoid_: Server hostname, tunnel hostname
@@ -45,7 +53,7 @@ The operator-run TLS-terminating process or endpoint that a **Client** connects 
 _Avoid_: Service, tunnel
 
 **Client identity**:
-The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime.
+The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime; ordinary renewal preserves it, while rotation changes it.
 _Avoid_: Certificate, serial number
 
 **Tunnel pool**:
@@ -74,6 +82,8 @@ _Avoid_: Duplicate hostname config, registration
 - A **Client instance** establishes exactly one **Tunnel connection**
 - A **Visitor** reaches a **Local backend** only through a **Tunnel**
 - A **Server hostname** identifies the public edge, not an operator application
+- A **Server certificate** belongs to exactly one **Server hostname**
+- A **Server CA** can issue one or more **Server certificates**
 - A **Public hostname** is routed through exactly one **Tunnel** at a time
 - A **Service** maps traffic from one or more **Public hostnames** to one **Local backend**
 - A **Client instance** forwards proxied traffic from its **Tunnel connection** to a **Local backend** through a selected **Service**
@@ -101,10 +111,16 @@ _Avoid_: Duplicate hostname config, registration
 > **Dev:** "If I start two **Client instances**, do they need different **Client identities**?"
 > **Domain expert:** "No. They may share one **Client identity** or use separate ones."
 >
+> **Dev:** "If I renew the **Client** certificate, did the **Client identity** change?"
+> **Domain expert:** "No. Ordinary renewal keeps the same key, so the **Client identity** stays the same. Rotation is the identity-changing action."
+>
+> **Dev:** "Why does the manual Server path trust a **Server CA** instead of the leaf cert directly?"
+> **Domain expert:** "Because the **Server CA** signs the **Server certificate**, so the Server leaf can renew without changing the Client's trust anchor."
+>
 > **Dev:** "Why do both sides list `app.example.com`?"
 > **Domain expert:** "That's **Hostname mirroring**. The **Server** uses it to choose the **Tunnel** and the **Client** uses it to choose the **Service**."
 >
-> **Dev:** "Why did omitting `hostnames` suddenly change routing behavior?"
+> **Dev:** "Why did omitting the **Public hostnames** suddenly change routing behavior?"
 > **Domain expert:** "Because this config uses a **Catch-all Tunnel** and a **Catch-all Service**, which are only valid when each side has exactly one entry."
 
 ## Flagged ambiguities
@@ -115,5 +131,6 @@ _Avoid_: Duplicate hostname config, registration
 - "server hostname" and routed application hostnames were easy to blur — resolved: **Server hostname** names the Runewarp edge; **Public hostname** names operator application traffic.
 - "service" and "backend" were used interchangeably — resolved: **Service** is the client-side config unit; **Local backend** is the actual TLS endpoint the **Client** dials.
 - "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key, while certificates can rotate without changing that identity.
+- "server certificate" and the trust anchor behind it were easy to conflate — resolved: **Server certificate** is the presented leaf; **Server CA** is the private issuer in the manual Server path.
 - "catch-all" looked like casual prose, but it changes config semantics — resolved: **Catch-all Tunnel** and **Catch-all Service** are explicit single-entry modes.
 - "duplicate hostname config" sounded accidental — resolved: **Hostname mirroring** is the deliberate routing pattern.

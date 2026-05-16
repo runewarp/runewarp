@@ -4,7 +4,7 @@ Runewarp keeps customer TLS termination on the operator's own Local backend, not
 
 ## Current status
 
-The current repository ships the phase-1 data path plus config-driven Catch-all startup and `runewarp keygen`. It authenticates the Server side of the Tunnel connection but does **not** yet authenticate Clients. Do not expose the current build to the public internet until Client authentication lands.
+The current repository still ships the earlier phase-2 surface (`runewarp keygen`, flat cert/key config, additive `server-ca-file`) on top of the phase-1 data path. It authenticates the Server side of the Tunnel connection but does **not** yet authenticate Clients. The agreed next operator surface replaces that with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, and stricter trust semantics, but those changes are not implemented yet. Do not expose the current build to the public internet until Client authentication lands.
 
 ## What the Server can and cannot see
 
@@ -28,17 +28,19 @@ The current repository ships the phase-1 data path plus config-driven Catch-all 
 The committed baseline for Tunnel connections is:
 
 1. the Server presents a certificate for `server.hostname`
-2. the Client validates that certificate
+2. the Client validates that certificate either through system trust (ACME/public-CA path) or through the exclusive configured Server CA file (manual/private-CA path)
 3. the Client presents its own certificate
-4. the Server verifies the pinned Client identity from the Client public key
+4. the Server verifies the pinned `client-identity` from the Client public key
 
 The pinned value is the Client public key, not the certificate lifetime or serial number.
 
-Current code status: only steps 1 and 2 are implemented.
+One shared `client-identity` per Tunnel remains the default phase-2 trust model.
+
+Current code status: only steps 1 and 2 are implemented, and the current `server-ca-file` behavior still augments system trust instead of replacing it.
 
 ## Client identity and certificate lifecycle
 
-`runewarp keygen` creates a Client keypair and an initial self-signed certificate.
+`runewarp client identity init` is the intended operator entry point for the Client side. It creates a Client keypair, an initial self-signed certificate, and `client-identity.txt`.
 
 Recommended behavior:
 
@@ -49,7 +51,14 @@ Recommended behavior:
 
 That means ordinary certificate renewal should not require a Server config change. Explicit key rotation is different: changing the key changes the Client identity.
 
+`runewarp client identity rotate` is therefore a distinct coordinated cutover, not a variant of ordinary renewal.
+
 ## Server certificate lifecycle
+
+Runewarp supports two Server-certificate paths:
+
+- ACME for the Server hostname
+- a manual/private-CA path through `runewarp server cert init`, `renew`, and `rotate-ca`
 
 The Server certificate protects the tunnel endpoint itself:
 
@@ -59,24 +68,46 @@ The Server certificate protects the tunnel endpoint itself:
 
 Server certificate renewal does **not** cause an immediate hard cutover. Existing QUIC connections continue with the certificate from their original handshake until they reconnect.
 
+In the manual/private-CA path:
+
+- `runewarp server cert init` creates a private Server CA and the initial issued Server leaf
+- `runewarp server cert renew` reissues the Server leaf from the same Server CA, so Clients do not need a new trust anchor
+- `runewarp server cert rotate-ca` changes the trust anchor itself, so Clients must trust a new CA
+
+To keep the simple manual path easy to operate, the private Server CA key may live in `server.cert.directory/state/` on the public Server. That is a deliberate trade-off: compromise of the public Server can also compromise the private Server CA. ACME remains the expected default for most operators.
+
+## Client trust material
+
+When `client.server-ca-file` is configured:
+
+- trust only the certificates in that file for the Server hostname
+- do **not** also trust system roots for that Tunnel connection
+- the file may contain a PEM bundle of one or more Server CA certificates during `rotate-ca` transitions
+
+When `client.server-ca-file` is omitted, the Client uses the system trust store for the ACME or public-CA path.
+
 ## ACME scope
 
 Runewarp uses `instant-acme` in **TLS-ALPN-01 only** mode.
 
 - ACME is only for the Server hostname
 - ACME never provisions certificates for customer Public hostnames
-- ACME cache data must be writable by the Server and protected like any other secret-bearing material
+- ACME state data must be writable by the Server and protected like any other secret-bearing material
 
 ## Operational risks
 
 - Hostname mirroring can drift between Server Tunnels and Client Services
 - the runtime does not validate cross-side hostname coverage
 - there is no Local backend health check in the committed baseline
+- the simple manual/private-CA Server path may keep private CA material on the public Server
+- the current runtime still lacks Client auth, renewal, ACME, and the tightened exclusive-trust model
 
 Those are known limitations, not hidden guarantees.
 
 ## Future security work
 
+- zero-downtime Client-identity rotation
+- zero-downtime Server CA rotation
 - multiple Client instances per Tunnel, with shared or separate Client identities
 - ECH for public and Client connections
 - health-aware routing decisions

@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the committed Runewarp design. The current repository now includes the phase-1 `Server` and `Client` data path plus config-driven `runewarp server`, `runewarp client`, and `runewarp keygen` for the Catch-all manual-TLS path. Exact-match routing, ACME, and Client authentication enforcement are still not implemented.
+This document describes the committed Runewarp design. The current repository includes the phase-1 `Server` and `Client` data path plus an earlier phase-2 operator surface built around `runewarp server`, `runewarp client`, and `runewarp keygen` with flat cert/key config. The agreed next operator surface replaces that with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, and tighter trust semantics. Exact-match routing, ACME, renewal, and Client authentication enforcement are still not implemented.
 
 ## Roles
 
@@ -29,7 +29,7 @@ Runewarp deliberately uses **Hostname mirroring**:
 
 ## Catch-all mode
 
-When each side has exactly one entry, `hostnames` may be omitted:
+When each side has exactly one entry, `public-hostnames` may be omitted:
 
 - the sole `[[server.tunnels]]` entry becomes a Catch-all Tunnel
 - the sole `[[client.services]]` entry becomes a Catch-all Service
@@ -51,12 +51,14 @@ Runewarp adds no framing header to public traffic. The forwarded byte stream beg
 ## Trust and validation
 
 - the Server hostname identifies the public edge itself
-- each Tunnel trusts one Client identity in the base design
+- each Tunnel trusts one shared Client identity in the base design
 - a Client identity is the pinned public key, not a certificate serial or lifetime
+- manual Server certificates use a private Server CA that issues the Server leaf for `server.hostname`
+- when the Client is configured with a Server CA file, that file replaces system trust for the Tunnel connection and may contain a CA bundle during `rotate-ca` transitions
 - intra-side hostname uniqueness is enforced at boot
 - cross-side hostname coverage is **not** validated at runtime; drift under Hostname mirroring is an operator responsibility
 
-The current code authenticates only the Server side of the Tunnel connection. Client authentication is part of the committed operator design, but it has not landed in the phase-1 runtime yet.
+The current code authenticates only the Server side of the Tunnel connection, still uses additive extra CA material on the Client, and still exposes the older flat-key operator surface. Client authentication, the tightened trust model, renewal, and ACME are part of the committed design but have not landed in the runtime yet.
 
 ## Product boundaries
 

@@ -1,6 +1,6 @@
 # Protocol
 
-This document describes the committed Runewarp wire behavior. The current code implements only the phase-1 catch-all TCP-to-QUIC-to-TCP data path with one active Client instance and Server-authenticated Tunnel connections.
+This document describes the committed Runewarp wire behavior. The current code implements only the phase-1 catch-all TCP-to-QUIC-to-TCP data path with one active Client instance and Server-authenticated Tunnel connections. The agreed next phase-2 operator surface renames `retry-interval` to `reconnect-interval` and tightens Client trust of manual Server CAs, but those changes are not implemented yet.
 
 ## Listener model
 
@@ -36,10 +36,10 @@ Each Client instance establishes one long-lived QUIC connection to `server-hostn
 1. Resolve `client.server-hostname`.
 2. Dial UDP port `443`.
 3. Negotiate QUIC with ALPN `runewarp/1`.
-4. Validate the Server certificate for the Server hostname.
-5. In the committed baseline, present the Client certificate and authenticate the pinned Client identity from its public key.
+4. Validate the Server certificate for the Server hostname, using either system trust or the exclusive configured Server CA file.
+5. In the committed baseline, present the Client certificate and authenticate the pinned `client-identity` from its public key. One shared `client-identity` per Tunnel remains the default phase-2 model.
 
-Current code status: step 5 is not implemented yet.
+Current code status: step 5 is not implemented yet, and the current Client still loads `server-ca-file` alongside the system trust store instead of replacing it.
 
 Rules:
 
@@ -52,11 +52,11 @@ Rules:
 
 When the Client receives a new QUIC stream:
 
-1. If it has exactly one configured Service and that Service omits `hostnames`, send the stream directly to that `local-addr`.
+1. If it has exactly one configured Service and that Service omits `public-hostnames`, send the stream directly to that `backend-address`.
 2. Otherwise, buffer the forwarded ClientHello and parse it using the same **16 KB** cap.
 3. Extract and normalize the SNI hostname.
-4. Match the hostname to `client.services[*].hostnames`.
-5. Open a TCP connection to the selected `local-addr`.
+4. Match the hostname to `client.services[*].public-hostnames`.
+5. Open a TCP connection to the selected `backend-address`.
 6. Forward bytes in both directions.
 
 Hostname mirroring is why both sides may list the same Public hostname: the Server uses it to choose a Tunnel and the Client uses it to choose a Service.
@@ -65,7 +65,7 @@ Notes:
 
 - the ClientHello may span multiple reads on both TCP and QUIC streams
 - the parser must accumulate bytes until the TLS record is complete before attempting to extract SNI
-- `local-addr` must point at a TLS-terminating backend
+- `backend-address` must point at a TLS-terminating backend
 
 ## Closure semantics
 
@@ -80,10 +80,10 @@ Runewarp uses symmetric close behavior:
 Client reconnect behavior is:
 
 1. retry immediately once after disconnect
-2. if that fails, wait `retry-interval`
-3. keep retrying every `retry-interval` seconds
+2. if that fails, wait `reconnect-interval`
+3. keep retrying every `reconnect-interval` seconds
 
-`retry-interval` must be at least **1 second**.
+`reconnect-interval` must be at least **1 second**.
 
 When a QUIC connection drops, all streams on that connection are lost. They are not migrated elsewhere.
 

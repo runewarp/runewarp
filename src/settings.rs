@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use crate::tls_material::validate_server_tls_material;
 use crate::{ClientIdentity, hostname::normalize_public_hostname};
 
 pub const DEFAULT_CLIENT_RETRY_INTERVAL_SECS: u64 = 5;
@@ -159,16 +160,21 @@ fn validate_server_settings(
         validate_required_path("server.cert-file", raw.cert_file, config_dir, &mut messages);
     let key_file =
         validate_required_path("server.key-file", raw.key_file, config_dir, &mut messages);
+    if let (Some(cert_file), Some(key_file)) = (cert_file.as_deref(), key_file.as_deref())
+        && let Err(error) = validate_server_tls_material(cert_file, key_file)
+    {
+        messages.push(format!("server TLS material is invalid: {error}"));
+    }
 
-    let tunnels = if raw.tunnels.len() != 1 {
+    let tunnel_count = raw.tunnels.len();
+    let tunnels = raw
+        .tunnels
+        .into_iter()
+        .filter_map(|tunnel| validate_server_tunnel(tunnel, &mut messages))
+        .collect();
+    if tunnel_count != 1 {
         messages.push("phase-2 server mode requires exactly one Catch-all Tunnel".to_owned());
-        Vec::new()
-    } else {
-        raw.tunnels
-            .into_iter()
-            .filter_map(|tunnel| validate_server_tunnel(tunnel, &mut messages))
-            .collect()
-    };
+    }
 
     if messages.is_empty() {
         Ok(ServerSettings {
@@ -222,15 +228,15 @@ fn validate_client_settings(
         messages.push("client.retry-interval must be at least 1".to_owned());
     }
 
-    let services = if raw.services.len() != 1 {
+    let service_count = raw.services.len();
+    let services = raw
+        .services
+        .into_iter()
+        .filter_map(|service| validate_client_service(service, &mut messages))
+        .collect();
+    if service_count != 1 {
         messages.push("phase-2 client mode requires exactly one Catch-all Service".to_owned());
-        Vec::new()
-    } else {
-        raw.services
-            .into_iter()
-            .filter_map(|service| validate_client_service(service, &mut messages))
-            .collect()
-    };
+    }
 
     if messages.is_empty() {
         Ok(ClientSettings {
@@ -286,22 +292,25 @@ fn validate_server_tunnel(
 ) -> Option<ServerTunnelSettings> {
     if raw.hostnames.is_some() {
         messages.push("phase-2 server mode only supports a Catch-all Tunnel".to_owned());
-        return None;
     }
 
-    let Some(client_identity) = raw.client_public_key_fingerprint else {
-        messages.push("server.tunnels[].client-public-key-fingerprint is required".to_owned());
-        return None;
-    };
-    match client_identity.parse::<ClientIdentity>() {
-        Ok(client_identity) => Some(ServerTunnelSettings { client_identity }),
-        Err(error) => {
-            messages.push(format!(
-                "server.tunnels[].client-public-key-fingerprint is invalid: {error}"
-            ));
+    let client_identity = match raw.client_public_key_fingerprint {
+        Some(client_identity) => match client_identity.parse::<ClientIdentity>() {
+            Ok(client_identity) => Some(client_identity),
+            Err(error) => {
+                messages.push(format!(
+                    "server.tunnels[].client-public-key-fingerprint is invalid: {error}"
+                ));
+                None
+            }
+        },
+        None => {
+            messages.push("server.tunnels[].client-public-key-fingerprint is required".to_owned());
             None
         }
-    }
+    };
+
+    client_identity.map(|client_identity| ServerTunnelSettings { client_identity })
 }
 
 fn validate_client_service(
@@ -310,21 +319,27 @@ fn validate_client_service(
 ) -> Option<ClientServiceSettings> {
     if raw.hostnames.is_some() {
         messages.push("phase-2 client mode only supports a Catch-all Service".to_owned());
-        return None;
     }
 
-    let Some(local_addr) = raw.local_addr else {
-        messages.push("client.services[].local-addr is required".to_owned());
-        return None;
+    let local_addr = match raw.local_addr {
+        Some(local_addr) => {
+            if !is_valid_local_addr(&local_addr) {
+                messages.push(
+                    "client.services[].local-addr must be a TCP address or host:port pair"
+                        .to_owned(),
+                );
+                None
+            } else {
+                Some(local_addr)
+            }
+        }
+        None => {
+            messages.push("client.services[].local-addr is required".to_owned());
+            None
+        }
     };
-    if !is_valid_local_addr(&local_addr) {
-        messages.push(
-            "client.services[].local-addr must be a TCP address or host:port pair".to_owned(),
-        );
-        return None;
-    }
 
-    Some(ClientServiceSettings { local_addr })
+    local_addr.map(|local_addr| ClientServiceSettings { local_addr })
 }
 
 fn is_valid_local_addr(local_addr: &str) -> bool {

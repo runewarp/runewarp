@@ -30,4 +30,8 @@ local-addr = "127.0.0.1:443"
     assert!(message.contains("client.key-file is required"));
     assert!(message.contains("client.retry-interval must be at least 1"));
     assert!(message.contains("phase-2 client mode requires exactly one Catch-all Service"));
+    assert!(message.contains("phase-2 client mode only supports a Catch-all Service"));
+    assert!(
+        message.contains("client.services[].local-addr must be a TCP address or host:port pair")
+    );
 }

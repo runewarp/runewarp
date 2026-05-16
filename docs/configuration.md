@@ -166,6 +166,7 @@ Runewarp should reject config that violates any of these rules:
 - all fingerprints must be lowercase hex without colons
 - `retry-interval` must be at least `1`
 - certificate, key, and CA files must exist and be readable
+- manual `server.cert-file` / `server.key-file` material must parse and form a usable TLS pair
 - `local-addr` must parse as a TCP address or host:port pair
 
 ### Intra-side hostname uniqueness

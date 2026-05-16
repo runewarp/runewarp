@@ -43,6 +43,7 @@ async fn forwards_tls_passthrough_end_to_end() {
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
             private_key_from_der(&tunnel_key),
@@ -100,6 +101,7 @@ async fn drops_public_tls_when_no_client_is_connected() {
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert],
             private_key_from_der(&tunnel_key),
@@ -137,6 +139,7 @@ async fn library_constructors_expose_addresses_before_running() {
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
             private_key_from_der(&tunnel_key),
@@ -192,6 +195,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
             private_key_from_der(&tunnel_key),
@@ -264,6 +268,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
             private_key_from_der(&tunnel_key),
@@ -314,6 +319,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
             private_key_from_der(&tunnel_key),

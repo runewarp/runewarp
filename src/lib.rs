@@ -7,6 +7,7 @@ mod quic;
 mod server;
 mod settings;
 mod startup;
+mod tls_material;
 
 pub use client::{Client, ClientConfig, ClientConnectError};
 pub use client_hello::{

@@ -29,7 +29,7 @@ fn keygen_writes_default_client_identity_artifacts() {
 fn keygen_writes_pem_artifacts_and_a_client_identity_fingerprint() {
     let tempdir = tempdir().unwrap();
 
-    Command::cargo_bin("runewarp")
+    let assert = Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
         .arg("keygen")
@@ -40,6 +40,7 @@ fn keygen_writes_pem_artifacts_and_a_client_identity_fingerprint() {
     let certificate = fs::read_to_string(tempdir.path().join("certs/client.crt")).unwrap();
     let fingerprint =
         fs::read_to_string(tempdir.path().join("certs/client-fingerprint.txt")).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
     assert!(private_key.starts_with("-----BEGIN PRIVATE KEY-----"));
     assert!(certificate.starts_with("-----BEGIN CERTIFICATE-----"));
@@ -50,6 +51,8 @@ fn keygen_writes_pem_artifacts_and_a_client_identity_fingerprint() {
             .chars()
             .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
     );
+    assert!(stdout.contains("90 days"));
+    assert!(stdout.contains("60 days"));
 }
 
 #[test]

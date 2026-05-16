@@ -10,12 +10,16 @@ use super::active_client::ActiveClientSlot;
 pub(crate) async fn handle_visitor_connection(
     mut visitor_stream: TcpStream,
     active_client_slot: ActiveClientSlot,
+    server_hostname: String,
 ) -> io::Result<()> {
     let parsed_client_hello = match read_client_hello(&mut visitor_stream).await {
         Ok(parsed_client_hello) => parsed_client_hello,
         Err(_) => return Ok(()),
     };
-    let (_public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
+    let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
+    if public_hostname == server_hostname {
+        return Ok(());
+    }
 
     let Some(active_connection) = active_client_slot.current_connection().await else {
         return Ok(());

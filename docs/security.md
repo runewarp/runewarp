@@ -121,7 +121,7 @@ Runewarp uses `instant-acme` in **TLS-ALPN-01 only** mode.
 - the runtime does not validate cross-side hostname coverage
 - there is no Local backend health check in the committed baseline
 - the simple manual/private-CA Server path may keep private CA material on the public Server
-- the current runtime still lacks Client auth, renewal, ACME, and the tightened exclusive-trust model
+- the current runtime still lacks Client auth, renewal, and ACME
 
 Those are known limitations, not hidden guarantees.
 

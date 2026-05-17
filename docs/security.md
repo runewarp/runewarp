@@ -1,10 +1,10 @@
 # Security
 
-Runewarp keeps customer TLS termination on the operator's own Local backend, not on the public edge. The Server still sees routing metadata, so the security model is private tunneling for TLS passthrough, not zero knowledge. The committed routing model also treats explicit Server-side `public-hostnames` as a security boundary: the Server should only route Public hostnames that an operator has authorized on a Tunnel.
+Runewarp keeps customer TLS termination on the operator's own Local backend, not on the public edge. The Server still sees routing metadata, so the security model is private tunneling for TLS passthrough, not zero knowledge. The committed phase-3 routing model also treats explicit Server-side `public-hostnames` as a security boundary once exact-match Server authorization lands.
 
 ## Current status
 
-The current repository still ships the earlier phase-2 surface (`runewarp keygen`, flat cert/key config, additive `server-ca-file`) on top of the phase-1 data path. It authenticates the Server side of the Tunnel connection but does **not** yet authenticate Clients. The agreed next operator surface replaces that with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, stricter trust semantics, and explicit Server-authorized hostname routing, but those changes are not implemented yet. Do not expose the current build to the public internet until Client authentication lands.
+The current repository now ships the corrected phase-2 surface (`runewarp server cert ...`, `runewarp client identity ...`, directory-based material, exclusive `server-ca-file`, Client authentication, ACME, and same-key Client certificate renewal before initial connect and reconnect attempts). It still retains the phase-2 Server Catch-all runtime; explicit Server-authorized exact-match public-hostnames remain phase-3 work.
 
 ## What the Server can and cannot see
 
@@ -57,7 +57,7 @@ The pinned value is the Client public key, not the certificate lifetime or seria
 
 One shared `client-identity` per Tunnel remains the default phase-2 trust model.
 
-Current code status: only steps 1 and 2 are implemented, and the current `server-ca-file` behavior still augments system trust instead of replacing it.
+Current code status: steps 1-4 are implemented, and `server-ca-file` is exclusive when configured.
 
 ## Client identity and certificate lifecycle
 
@@ -67,7 +67,7 @@ Recommended behavior:
 
 - certificates are valid for **90 days**
 - the Client renews them at **60 days**
-- renewal happens on startup and periodically while the Client is running
+- renewal happens before the initial connect and before reconnect attempts
 - renewal reuses the same key by default, so the Client identity does not change
 
 That means ordinary certificate renewal should not require a Server config change. Explicit key rotation is different: changing the key changes the Client identity.
@@ -85,7 +85,7 @@ The Server certificate protects the tunnel endpoint itself:
 
 - it covers `server.hostname`
 - it is used for QUIC on `443/udp`
-- it is also used for ACME TLS-ALPN-01 on `443/tcp`
+- ACME TLS-ALPN-01 on `443/tcp` is scoped to `server.hostname` and uses challenge certificates rather than customer Public hostname certificates
 
 Server certificate renewal does **not** cause an immediate hard cutover. Existing QUIC connections continue with the certificate from their original handshake until they reconnect.
 
@@ -109,11 +109,11 @@ When `client.server-ca-file` is omitted, the Client uses the system trust store 
 
 ## ACME scope
 
-Runewarp uses `instant-acme` in **TLS-ALPN-01 only** mode.
+Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode.
 
 - ACME is only for the Server hostname
 - ACME never provisions certificates for customer Public hostnames
-- ACME state data must be writable by the Server and protected like any other secret-bearing material
+- ACME state data in `server.acme.state-directory` must be writable by the Server, must exist before boot, and should be protected like any other secret-bearing material
 
 ## Operational risks
 
@@ -121,7 +121,7 @@ Runewarp uses `instant-acme` in **TLS-ALPN-01 only** mode.
 - the runtime does not validate cross-side hostname coverage
 - there is no Local backend health check in the committed baseline
 - the simple manual/private-CA Server path may keep private CA material on the public Server
-- the current runtime still lacks Client auth, renewal, and ACME
+- the current runtime still lacks phase-3 exact-match Server authorization and per-Tunnel connection isolation
 
 Those are known limitations, not hidden guarantees.
 

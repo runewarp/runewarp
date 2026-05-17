@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    PreparedClient, PreparedServer, generate_client_identity, load_client_settings,
-    load_server_settings,
+    PreparedClient, PreparedServer, generate_client_identity, initialize_manual_server_certificate,
+    load_client_settings, load_server_settings,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -23,16 +23,9 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 #[tokio::test]
 async fn prepared_server_binds_the_existing_runtime_from_validated_settings() {
     let tempdir = tempdir().unwrap();
-    let cert = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
-    fs::create_dir(tempdir.path().join("server-cert")).unwrap();
-    fs::write(
-        tempdir.path().join("server-cert/server.crt"),
-        cert.cert.pem(),
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("server-cert/server.key"),
-        cert.signing_key.serialize_pem(),
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
     )
     .unwrap();
     fs::write(
@@ -66,16 +59,9 @@ fn localhost(port: u16) -> SocketAddr {
 #[tokio::test]
 async fn prepared_server_drops_public_tls_addressed_to_the_server_hostname() {
     let tempdir = tempdir().unwrap();
-    let server_cert = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
-    fs::create_dir(tempdir.path().join("server-cert")).unwrap();
-    fs::write(
-        tempdir.path().join("server-cert/server.crt"),
-        server_cert.cert.pem(),
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("server-cert/server.key"),
-        server_cert.signing_key.serialize_pem(),
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
     )
     .unwrap();
 
@@ -123,13 +109,12 @@ client-identity = "{}"
     )
     .await;
 
-    fs::write(tempdir.path().join("server-ca.pem"), server_cert.cert.pem()).unwrap();
     fs::write(
         tempdir.path().join("client.toml"),
         r#"
 [client]
 server-hostname = "tunnel.example.test"
-server-ca-file = "server-ca.pem"
+server-ca-file = "server-cert/server-ca.crt"
 identity-directory = "."
 
 [[client.services]]
@@ -176,16 +161,9 @@ backend-address = "__BACKEND_ADDR__"
 #[tokio::test]
 async fn prepared_server_rejects_an_untrusted_client_identity_before_serving_public_tls() {
     let tempdir = tempdir().unwrap();
-    let server_cert = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
-    fs::create_dir(tempdir.path().join("server-cert")).unwrap();
-    fs::write(
-        tempdir.path().join("server-cert/server.crt"),
-        server_cert.cert.pem(),
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("server-cert/server.key"),
-        server_cert.signing_key.serialize_pem(),
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
     )
     .unwrap();
 
@@ -227,13 +205,12 @@ client-identity = "{}"
 
     let backend = spawn_tls_backend(vec!["app.example.test".to_owned()], *b"pong").await;
 
-    fs::write(tempdir.path().join("server-ca.pem"), server_cert.cert.pem()).unwrap();
     fs::write(
         tempdir.path().join("client.toml"),
         r#"
 [client]
 server-hostname = "tunnel.example.test"
-server-ca-file = "server-ca.pem"
+server-ca-file = "server-cert/server-ca.crt"
 identity-directory = "."
 
 [[client.services]]

@@ -32,25 +32,21 @@ fn server_cert_init_writes_the_manual_server_ca_layout() {
     assert_exists(
         tempdir
             .path()
-            .join("server-cert/state/manual/server-ca.key")
+            .join("server-cert/state/server-ca.key")
             .as_path(),
     );
     assert_exists(
         tempdir
             .path()
-            .join("server-cert/state/manual/server-hostname.txt")
+            .join("server-cert/state/server-hostname.txt")
             .as_path(),
     );
 
     let server_cert = fs::read_to_string(tempdir.path().join("server-cert/server.crt")).unwrap();
     let server_key = fs::read_to_string(tempdir.path().join("server-cert/server.key")).unwrap();
     let server_ca = fs::read_to_string(tempdir.path().join("server-cert/server-ca.crt")).unwrap();
-    let server_hostname = fs::read_to_string(
-        tempdir
-            .path()
-            .join("server-cert/state/manual/server-hostname.txt"),
-    )
-    .unwrap();
+    let server_hostname =
+        fs::read_to_string(tempdir.path().join("server-cert/state/server-hostname.txt")).unwrap();
 
     assert!(server_cert.starts_with("-----BEGIN CERTIFICATE-----"));
     assert!(server_key.starts_with("-----BEGIN PRIVATE KEY-----"));
@@ -118,14 +114,10 @@ fn server_cert_init_writes_private_keys_with_owner_only_permissions() {
         .permissions()
         .mode()
         & 0o777;
-    let ca_key_mode = fs::metadata(
-        tempdir
-            .path()
-            .join("server-cert/state/manual/server-ca.key"),
-    )
-    .unwrap()
-    .permissions()
-    .mode()
+    let ca_key_mode = fs::metadata(tempdir.path().join("server-cert/state/server-ca.key"))
+        .unwrap()
+        .permissions()
+        .mode()
         & 0o777;
 
     assert_eq!(server_key_mode, 0o600);
@@ -167,11 +159,10 @@ fn server_cert_renew_reissues_the_leaf_without_changing_the_server_ca() {
         fs::read(cert_directory.join("server.key")).expect("original server key");
     let original_server_ca =
         fs::read(cert_directory.join("server-ca.crt")).expect("original server CA certificate");
-    let original_server_ca_key = fs::read(cert_directory.join("state/manual/server-ca.key"))
-        .expect("original server CA key");
-    let original_hostname =
-        fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
-            .expect("original stored hostname");
+    let original_server_ca_key =
+        fs::read(cert_directory.join("state/server-ca.key")).expect("original server CA key");
+    let original_hostname = fs::read_to_string(cert_directory.join("state/server-hostname.txt"))
+        .expect("original stored hostname");
 
     assert_cmd::Command::cargo_bin("runewarp")
         .expect("binary path")
@@ -203,12 +194,12 @@ fn server_cert_renew_reissues_the_leaf_without_changing_the_server_ca() {
         "renew should preserve the existing server CA certificate",
     );
     assert_eq!(
-        fs::read(cert_directory.join("state/manual/server-ca.key")).expect("renewed server CA key"),
+        fs::read(cert_directory.join("state/server-ca.key")).expect("renewed server CA key"),
         original_server_ca_key,
         "renew should preserve the existing server CA private key",
     );
     assert_eq!(
-        fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
+        fs::read_to_string(cert_directory.join("state/server-hostname.txt"))
             .expect("renewed stored hostname"),
         original_hostname,
         "renew should preserve the stored normalized hostname",
@@ -242,11 +233,10 @@ fn server_cert_rotate_ca_replaces_the_ca_and_updates_the_stored_hostname() {
         fs::read(cert_directory.join("server.key")).expect("original server key");
     let original_server_ca =
         fs::read(cert_directory.join("server-ca.crt")).expect("original server CA certificate");
-    let original_server_ca_key = fs::read(cert_directory.join("state/manual/server-ca.key"))
-        .expect("original server CA key");
-    let original_hostname =
-        fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
-            .expect("original stored hostname");
+    let original_server_ca_key =
+        fs::read(cert_directory.join("state/server-ca.key")).expect("original server CA key");
+    let original_hostname = fs::read_to_string(cert_directory.join("state/server-hostname.txt"))
+        .expect("original stored hostname");
 
     assert_cmd::Command::cargo_bin("runewarp")
         .expect("binary path")
@@ -280,18 +270,18 @@ fn server_cert_rotate_ca_replaces_the_ca_and_updates_the_stored_hostname() {
         "rotate-ca should replace the server CA certificate",
     );
     assert_ne!(
-        fs::read(cert_directory.join("state/manual/server-ca.key")).expect("rotated server CA key"),
+        fs::read(cert_directory.join("state/server-ca.key")).expect("rotated server CA key"),
         original_server_ca_key,
         "rotate-ca should replace the server CA private key",
     );
     assert_ne!(
-        fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
+        fs::read_to_string(cert_directory.join("state/server-hostname.txt"))
             .expect("rotated stored hostname"),
         original_hostname,
         "rotate-ca should replace the stored hostname",
     );
     assert_eq!(
-        fs::read_to_string(cert_directory.join("state/manual/server-hostname.txt"))
+        fs::read_to_string(cert_directory.join("state/server-hostname.txt"))
             .expect("rotated stored hostname"),
         "rotated.example.test",
         "rotate-ca should normalize the stored hostname",

@@ -21,6 +21,7 @@ Today that means:
 - `runewarp client identity init --directory ...` currently generates a Client private key, an initial self-signed Client certificate, and `client-identity.txt`
 - `runewarp server` and `runewarp client` still load `./config.toml` by default and boot the Catch-all single-Tunnel design using the corrected runtime config names plus either `[server.cert].directory` or `[server.acme]`
 - ACME TLS-ALPN-01 now provisions and refreshes the Server hostname certificate from `server.acme.state-directory`
+- Client certificate freshness is checked before the initial Tunnel connection and before reconnect attempts, without background renewal polling
 - each Client instance connects to the Server over QUIC using one Tunnel connection
 - the current implementation only keeps one Client instance active at a time
 - exact-match routing and later multi-Tunnel operator work still land in later phases
@@ -40,7 +41,8 @@ cargo test
 ## Design boundaries
 
 - TLS passthrough is the product boundary; Runewarp does not terminate customer TLS on public hostnames
-- The Server is the routing authority for Public hostnames and should only route hostnames explicitly authorized on a Tunnel
+- The Server is the routing authority for Public hostnames
+- The current runtime still uses the phase-2 Catch-all single-Tunnel shape; phase-3 makes Server-side Public hostname authorization explicit with `server.tunnels[].public-hostnames`
 - Client-side routing can use Hostname mirroring or one Catch-all Service, depending on whether the Client also needs per-host local routing
 - Plain HTTP backends and edge TLS termination are out of scope
 

@@ -11,7 +11,7 @@ use crate::tls_material::{
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
-    hostname::normalize_public_hostname,
+    SERVER_CA_FILENAME, hostname::normalize_public_hostname,
 };
 
 pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
@@ -112,19 +112,29 @@ impl std::error::Error for SettingsError {
 }
 
 pub fn load_server_settings(path: &Path) -> Result<ServerSettings, SettingsError> {
-    let raw = load_selected_section::<RawServerConfig>(path, "server")?;
-    validate_server_settings(path, raw)
+    let section_value = load_selected_section_value(path, "server")?;
+    let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
+    validate_server_settings(
+        path,
+        raw,
+        collect_server_unknown_field_messages(&section_value),
+    )
 }
 
 pub fn load_client_settings(path: &Path) -> Result<ClientSettings, SettingsError> {
-    let raw = load_selected_section::<RawClientConfig>(path, "client")?;
-    validate_client_settings(path, raw)
+    let section_value = load_selected_section_value(path, "client")?;
+    let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
+    validate_client_settings(
+        path,
+        raw,
+        collect_client_unknown_field_messages(&section_value),
+    )
 }
 
-fn load_selected_section<T>(path: &Path, section: &'static str) -> Result<T, SettingsError>
-where
-    T: DeserializeOwned,
-{
+fn load_selected_section_value(
+    path: &Path,
+    section: &'static str,
+) -> Result<toml::Value, SettingsError> {
     let contents = fs::read_to_string(path).map_err(|source| SettingsError::Read {
         path: path.to_path_buf(),
         source,
@@ -142,7 +152,19 @@ where
             messages: vec![format!("missing [{section}] section")],
         });
     };
+    Ok(section_value)
+}
+
+fn deserialize_selected_section<T>(
+    path: &Path,
+    section: &'static str,
+    section_value: &toml::Value,
+) -> Result<T, SettingsError>
+where
+    T: DeserializeOwned,
+{
     section_value
+        .clone()
         .try_into::<T>()
         .map_err(|source| SettingsError::Parse {
             path: path.to_path_buf(),
@@ -154,8 +176,8 @@ where
 fn validate_server_settings(
     path: &Path,
     raw: RawServerConfig,
+    mut messages: Vec<String>,
 ) -> Result<ServerSettings, SettingsError> {
-    let mut messages = Vec::new();
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     let hostname = raw
@@ -172,9 +194,9 @@ fn validate_server_settings(
         messages
             .push("exactly one of [server.cert] or [server.acme] must be configured".to_owned());
     }
-    let manual = raw
-        .cert
-        .and_then(|cert| validate_server_manual_cert_settings(cert, config_dir, &mut messages));
+    let manual = raw.cert.and_then(|cert| {
+        validate_server_manual_cert_settings(cert, config_dir, hostname.as_str(), &mut messages)
+    });
     let acme = raw
         .acme
         .and_then(|acme| validate_server_acme_settings(acme, config_dir, &mut messages));
@@ -215,8 +237,8 @@ fn validate_server_settings(
 fn validate_client_settings(
     path: &Path,
     raw: RawClientConfig,
+    mut messages: Vec<String>,
 ) -> Result<ClientSettings, SettingsError> {
-    let mut messages = Vec::new();
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     let server_hostname = raw
@@ -352,6 +374,7 @@ fn validate_directory_file(
 fn validate_server_manual_cert_settings(
     raw: RawServerCertConfig,
     config_dir: &Path,
+    server_hostname: &str,
     messages: &mut Vec<String>,
 ) -> Option<PathBuf> {
     let directory =
@@ -368,8 +391,18 @@ fn validate_server_manual_cert_settings(
         SERVER_KEY_FILENAME,
         messages,
     );
-    if let (Some(cert_path), Some(key_path)) = (cert_path.as_deref(), key_path.as_deref())
-        && let Err(error) = validate_server_tls_material(cert_path, key_path)
+    let ca_path = validate_directory_file(
+        "server.cert.directory",
+        &directory,
+        SERVER_CA_FILENAME,
+        messages,
+    );
+    if let (Some(cert_path), Some(key_path), Some(ca_path)) = (
+        cert_path.as_deref(),
+        key_path.as_deref(),
+        ca_path.as_deref(),
+    ) && let Err(error) =
+        validate_server_tls_material(cert_path, key_path, ca_path, server_hostname)
     {
         messages.push(format!("server TLS material is invalid: {error}"));
         return None;
@@ -387,19 +420,18 @@ fn validate_server_acme_settings(
         messages.push("server.acme.email is required".to_owned());
         String::new()
     });
-    let state_directory = match raw.state_directory {
-        Some(state_directory) => resolve_path(config_dir, &state_directory),
-        None => {
-            messages.push("server.acme.state-directory is required".to_owned());
-            PathBuf::new()
-        }
-    };
+    let state_directory = validate_required_directory(
+        "server.acme.state-directory",
+        raw.state_directory,
+        config_dir,
+        messages,
+    );
 
-    if email.is_empty() || state_directory.as_os_str().is_empty() {
+    if email.is_empty() || state_directory.is_none() {
         return None;
     }
 
-    Some((email, state_directory))
+    Some((email, state_directory.expect("validated state directory")))
 }
 
 fn validate_server_tunnel(
@@ -473,8 +505,88 @@ fn resolve_path(config_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
+fn collect_server_unknown_field_messages(section_value: &toml::Value) -> Vec<String> {
+    let mut messages = Vec::new();
+    let Some(server) = section_value.as_table() else {
+        return messages;
+    };
+
+    push_unknown_table_fields(
+        server,
+        &["hostname", "cert", "acme", "tunnels"],
+        &mut messages,
+    );
+
+    if let Some(cert) = server.get("cert").and_then(toml::Value::as_table) {
+        push_unknown_table_fields(cert, &["directory"], &mut messages);
+    }
+
+    if let Some(acme) = server.get("acme").and_then(toml::Value::as_table) {
+        push_unknown_table_fields(acme, &["email", "state-directory"], &mut messages);
+    }
+
+    if let Some(tunnels) = server.get("tunnels").and_then(toml::Value::as_array) {
+        for tunnel in tunnels {
+            if let Some(tunnel) = tunnel.as_table() {
+                push_unknown_table_fields(
+                    tunnel,
+                    &["public-hostnames", "client-identity"],
+                    &mut messages,
+                );
+            }
+        }
+    }
+
+    messages
+}
+
+fn collect_client_unknown_field_messages(section_value: &toml::Value) -> Vec<String> {
+    let mut messages = Vec::new();
+    let Some(client) = section_value.as_table() else {
+        return messages;
+    };
+
+    push_unknown_table_fields(
+        client,
+        &[
+            "server-hostname",
+            "server-ca-file",
+            "identity-directory",
+            "reconnect-interval",
+            "services",
+        ],
+        &mut messages,
+    );
+
+    if let Some(services) = client.get("services").and_then(toml::Value::as_array) {
+        for service in services {
+            if let Some(service) = service.as_table() {
+                push_unknown_table_fields(
+                    service,
+                    &["public-hostnames", "backend-address"],
+                    &mut messages,
+                );
+            }
+        }
+    }
+
+    messages
+}
+
+fn push_unknown_table_fields(
+    table: &toml::Table,
+    known_fields: &[&str],
+    messages: &mut Vec<String>,
+) {
+    for field in table.keys() {
+        if !known_fields.contains(&field.as_str()) {
+            messages.push(format!("unknown field `{field}`"));
+        }
+    }
+}
+
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct RawServerConfig {
     hostname: Option<String>,
     cert: Option<RawServerCertConfig>,
@@ -484,27 +596,27 @@ struct RawServerConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct RawServerCertConfig {
     directory: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct RawServerAcmeConfig {
     email: Option<String>,
     state_directory: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct RawServerTunnelConfig {
     public_hostnames: Option<Vec<String>>,
     client_identity: Option<String>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct RawClientConfig {
     server_hostname: Option<String>,
     server_ca_file: Option<PathBuf>,
@@ -515,7 +627,7 @@ struct RawClientConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct RawClientServiceConfig {
     public_hostnames: Option<Vec<String>>,
     backend_address: Option<String>,

@@ -20,7 +20,6 @@ pub const SERVER_CA_LIFETIME_DAYS: u64 = 3650;
 pub const SERVER_CERT_LIFETIME_DAYS: u64 = 90;
 
 const SERVER_STATE_DIR: &str = "state";
-const SERVER_MANUAL_STATE_DIR: &str = "manual";
 const SERVER_CA_KEY_FILENAME: &str = "server-ca.key";
 const SERVER_HOSTNAME_FILENAME: &str = "server-hostname.txt";
 
@@ -257,9 +256,7 @@ fn server_leaf_params(
 }
 
 fn manual_state_directory(directory: &Path) -> PathBuf {
-    directory
-        .join(SERVER_STATE_DIR)
-        .join(SERVER_MANUAL_STATE_DIR)
+    directory.join(SERVER_STATE_DIR)
 }
 
 fn load_stored_hostname(directory: &Path) -> Result<String, ServerCertError> {

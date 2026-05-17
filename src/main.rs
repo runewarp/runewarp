@@ -78,16 +78,9 @@ async fn run_client_command(
         .await
         .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
 
-        tokio::select! {
-            run_result = client.run() => {
-                if let Err(error) = run_result {
-                    eprintln!("warning: tunnel connection lost: {error}; reconnecting");
-                    continue;
-                }
-            }
-            renewal_result = maintain_client_identity_certificate(settings.identity_directory.clone()) => {
-                renewal_result?;
-            }
+        if let Err(error) = client.run().await {
+            eprintln!("warning: tunnel connection lost: {error}; reconnecting");
+            continue;
         }
 
         return Ok(());
@@ -104,49 +97,6 @@ fn ensure_client_identity_fresh(
             runewarp::renew_client_identity_certificate(directory)?;
             Ok(())
         }
-    }
-}
-
-async fn maintain_client_identity_certificate(
-    directory: std::path::PathBuf,
-) -> Result<(), runewarp::ClientIdentityMaterialError> {
-    let mut retry_delay = Duration::from_secs(1);
-
-    loop {
-        match runewarp::inspect_client_certificate_renewal(&directory, OffsetDateTime::now_utc())? {
-            runewarp::ClientCertificateRenewalDecision::NotDue { renew_at, .. } => {
-                retry_delay = Duration::from_secs(1);
-                tokio::time::sleep(next_client_identity_check_delay(
-                    renew_at,
-                    OffsetDateTime::now_utc(),
-                ))
-                .await;
-            }
-            runewarp::ClientCertificateRenewalDecision::Due { .. } => {
-                if let Err(error) = runewarp::renew_client_identity_certificate(&directory) {
-                    eprintln!("warning: failed to renew client certificate: {error}; retrying");
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = retry_delay.saturating_mul(2).min(Duration::from_secs(60));
-                    continue;
-                }
-                retry_delay = Duration::from_secs(1);
-            }
-            runewarp::ClientCertificateRenewalDecision::Expired { .. } => {
-                runewarp::renew_client_identity_certificate(&directory)?;
-                retry_delay = Duration::from_secs(1);
-            }
-        }
-    }
-}
-
-fn next_client_identity_check_delay(renew_at: OffsetDateTime, now: OffsetDateTime) -> Duration {
-    const MAX_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
-
-    let until_renewal = renew_at - now;
-    if until_renewal.is_negative() {
-        Duration::from_secs(0)
-    } else {
-        until_renewal.try_into().unwrap_or(MAX_DELAY).min(MAX_DELAY)
     }
 }
 
@@ -408,10 +358,7 @@ mod tests {
         CLIENT_KEY_FILENAME, ClientIdentity,
     };
 
-    use super::{
-        ensure_client_identity_fresh, maintain_client_identity_certificate,
-        retry_with_immediate_retry,
-    };
+    use super::{ensure_client_identity_fresh, retry_with_immediate_retry};
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum TestError {
@@ -512,12 +459,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn maintain_client_identity_certificate_renews_due_certificates_while_running() {
+    #[test]
+    fn ensure_client_identity_fresh_leaves_not_yet_due_certificates_untouched() {
         let tempdir = tempdir().unwrap();
         write_client_identity_with_not_before(
             tempdir.path(),
-            OffsetDateTime::now_utc() - TimeDuration::days(60) + TimeDuration::seconds(1),
+            OffsetDateTime::now_utc() - TimeDuration::days(60) + TimeDuration::minutes(1),
         );
 
         let original_private_key = fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap();
@@ -525,16 +472,13 @@ mod tests {
         let original_identity =
             fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap();
 
-        let task = tokio::spawn(maintain_client_identity_certificate(
-            tempdir.path().to_path_buf(),
-        ));
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        ensure_client_identity_fresh(tempdir.path()).unwrap();
 
         assert_eq!(
             fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap(),
             original_private_key
         );
-        assert_ne!(
+        assert_eq!(
             fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap(),
             original_certificate
         );
@@ -542,10 +486,6 @@ mod tests {
             fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap(),
             original_identity
         );
-        assert!(!task.is_finished());
-
-        task.abort();
-        let _ = task.await;
     }
 
     fn write_client_identity_with_not_before(directory: &Path, not_before: OffsetDateTime) {

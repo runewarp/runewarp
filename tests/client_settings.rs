@@ -46,7 +46,6 @@ fn client_settings_reject_the_legacy_flat_client_surface() {
 server-hostname = "tunnel.example.test"
 cert-file = "client.crt"
 key-file = "client.key"
-retry-interval = 5
 
 [[client.services]]
 local-addr = "127.0.0.1:443"
@@ -57,6 +56,10 @@ local-addr = "127.0.0.1:443"
     let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
     let message = error.to_string();
 
-    assert!(message.contains("failed to parse [client]"));
+    assert!(!message.contains("failed to parse [client]"));
     assert!(message.contains("unknown field `cert-file`"));
+    assert!(message.contains("unknown field `key-file`"));
+    assert!(message.contains("unknown field `local-addr`"));
+    assert!(message.contains("client.identity-directory is required"));
+    assert!(message.contains("client.services[].backend-address is required"));
 }

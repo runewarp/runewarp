@@ -1,6 +1,6 @@
 # Configuration
 
-This document describes the agreed Runewarp configuration model. The current binary still ships the earlier phase-2 Catch-all surface (`runewarp keygen`, flat `cert-file` / `key-file`, additive `server-ca-file`, `local-addr`, and `retry-interval`). The changes below are the corrected operator surface to implement next, and they are intended as a clean break from that earlier shape. The committed phase-3 model also removes Server Catch-all: every Server Tunnel must list explicit `public-hostnames`, while the Client either lists explicit `public-hostnames` too or uses one Catch-all Service.
+This document describes the agreed Runewarp configuration model. The current binary now ships the corrected phase-2 operator surface (`runewarp server cert ...`, `runewarp client identity ...`, directory-based material, exclusive `server-ca-file`, Client authentication, ACME, and same-key Client certificate renewal before initial connect and reconnect attempts). The committed phase-3 model still removes Server Catch-all: every Server Tunnel must list explicit `public-hostnames`, while the Client either lists explicit `public-hostnames` too or uses one Catch-all Service.
 
 ## Principles
 
@@ -32,26 +32,25 @@ runewarp client identity rotate --directory ./client-identity
 
 Today the binary supports:
 
-- one legacy Catch-all Tunnel on the Server
+- one Catch-all Tunnel on the Server
 - one Catch-all Service on the Client
-- flat manual TLS keys: `cert-file` and `key-file`
-- additive `server-ca-file` behavior on the Client
-- generated Client key, certificate, and fingerprint material through `runewarp keygen`
+- `runewarp server cert init|renew|rotate-ca`
+- `runewarp client identity init|renew|rotate`
+- directory-based Server certificate and Client identity material
+- exclusive `client.server-ca-file` trust when configured
+- pinned `client-identity` enforcement on Tunnel connections
+- automatic same-key Client certificate renewal before initial connect and reconnect attempts
+- ACME TLS-ALPN-01 for `server.hostname`
+- one active Client instance at a time
+- one active Tunnel connection at a time
 
 The current binary still does **not** implement:
 
-- `runewarp server cert ...`
-- `runewarp client identity ...`
-- directory-based certificate or identity material
 - required explicit `server.tunnels[].public-hostnames`
 - multiple Server Tunnels and one active Tunnel connection per Tunnel
 - multiple Client instances, with one Client instance per Tunnel
 - multiple Client Services with exact-match selection
 - per-role `logs` booleans
-- exclusive Client trust when `server-ca-file` is configured
-- Client authentication enforcement
-- Client certificate renewal
-- ACME
 
 ## Server exact-match mode
 
@@ -170,7 +169,7 @@ The grouping of hostnames into Tunnels and Services may differ. One Tunnel can s
 | `server.logs` | no | Boolean controlling human-readable Server runtime logs. Defaults to `true` when omitted. |
 | `server.cert.directory` | with manual/private-CA Server certificates | Directory containing the deployed Server leaf material. In the simple manual path, this directory also contains `server-ca.crt` and an internal `state/` subdirectory for renewal state. |
 | `server.acme.email` | with ACME | ACME contact address. TLS-ALPN-01 only. |
-| `server.acme.state-directory` | with ACME | Writable path for durable ACME account and certificate state. |
+| `server.acme.state-directory` | with ACME | Writable path for durable ACME account and certificate state. The directory must already exist before boot. |
 | `server.tunnels[].public-hostnames` | yes | One or more exact Public hostnames routed through this Tunnel. This field is required on every Server Tunnel and must contain DNS hostnames only. |
 | `server.tunnels[].client-identity` | yes | Lowercase hex SHA-256 fingerprint of the Client public key's SubjectPublicKeyInfo. This names the trust concept rather than the old `client-public-key-fingerprint` encoding detail. |
 
@@ -292,7 +291,7 @@ A future lint or doctor workflow may help detect drift, but the runtime does not
 
 ## Automation and rotation
 
-- Client certificate renewal is automatic by default and should also happen on startup
+- Client certificate renewal is automatic by default before the initial connect and before reconnect attempts
 - manual `runewarp client identity renew` exists for repair and explicit operator action
 - manual/private-CA Server renewal stays explicit through `runewarp server cert renew`
 - ordinary Server leaf renewal keeps the same Server CA
@@ -311,7 +310,7 @@ The exact record type is up to the operator. The important part is that Public h
 
 ## Migration note
 
-The agreed operator surface is a clean break from the currently implemented flat-key and `keygen` design. Planned follow-on work should update the runtime to the names and structures in this document rather than adding compatibility aliases for the older keys.
+The corrected operator surface is now the shipped baseline. Follow-on work should extend the names and structures in this document rather than reintroducing flat-key or `keygen` compatibility aliases.
 
 ## Backend behavior
 

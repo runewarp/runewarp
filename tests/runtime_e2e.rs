@@ -5,9 +5,11 @@ use std::time::Duration;
 
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    Client, ClientConfig, PreparedClient, Server, ServerConfig, generate_client_identity,
-    load_client_settings, make_client_quic_config, make_server_quic_config,
-    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
+    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
+    PreparedClient, PreparedServer, Server, ServerConfig, generate_client_identity,
+    initialize_manual_server_certificate, load_client_settings, load_server_settings,
+    make_client_quic_config, make_server_quic_config, make_server_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth_resolver,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -97,6 +99,108 @@ async fn forwards_tls_passthrough_end_to_end() {
     backend_task.await.unwrap();
     server_task.abort();
     client_task.abort();
+    let _ = server_task.await;
+    let _ = client_task.await;
+}
+
+#[tokio::test]
+async fn forwards_tls_passthrough_end_to_end_with_manual_private_ca_material() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    let client_identity = generate_client_identity().unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
+        &client_identity.certificate_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
+        &client_identity.private_key_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_IDENTITY_FILENAME),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let backend = spawn_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"pong",
+    )
+    .await;
+
+    std::fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+client-identity = "{}"
+"#,
+            client_identity.client_identity
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-cert/server-ca.crt"
+identity-directory = "client-identity"
+
+[[client.services]]
+backend-address = "__BACKEND_ADDR__"
+"#
+        .replace("__BACKEND_ADDR__", &backend.0.to_string()),
+    )
+    .unwrap();
+
+    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    let response = wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(response, *b"pong");
+
+    backend.1.abort();
+    server_task.abort();
+    client_task.abort();
+    let _ = backend.1.await;
     let _ = server_task.await;
     let _ = client_task.await;
 }

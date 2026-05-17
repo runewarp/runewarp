@@ -194,6 +194,7 @@ pub enum ServerStartupError {
         path: std::path::PathBuf,
         source: io::Error,
     },
+    InvalidTlsMaterial(String),
     QuicConfig(QuicConfigError),
     Bind(io::Error),
 }
@@ -217,6 +218,7 @@ impl fmt::Display for ServerStartupError {
                     path.display()
                 )
             }
+            Self::InvalidTlsMaterial(message) => write!(formatter, "{message}"),
             Self::QuicConfig(source) => write!(formatter, "{source}"),
             Self::Bind(source) => write!(formatter, "failed to bind server listeners: {source}"),
         }
@@ -230,7 +232,9 @@ impl std::error::Error for ServerStartupError {
             Self::ParsePem { source, .. } => Some(source),
             Self::QuicConfig(source) => Some(source),
             Self::Bind(source) => Some(source),
-            Self::MissingCertificate { .. } | Self::MissingPrivateKey { .. } => None,
+            Self::MissingCertificate { .. }
+            | Self::MissingPrivateKey { .. }
+            | Self::InvalidTlsMaterial(_) => None,
         }
     }
 }
@@ -242,6 +246,14 @@ impl From<TlsMaterialError> for ServerStartupError {
             TlsMaterialError::MissingCertificate { path } => Self::MissingCertificate { path },
             TlsMaterialError::MissingPrivateKey { path } => Self::MissingPrivateKey { path },
             TlsMaterialError::ParsePem { path, source } => Self::ParsePem { path, source },
+            TlsMaterialError::ParseX509 { .. }
+            | TlsMaterialError::AddRootCertificate { .. }
+            | TlsMaterialError::BuildServerVerifier(_)
+            | TlsMaterialError::InvalidServerName { .. }
+            | TlsMaterialError::InvalidCertificateAuthority { .. }
+            | TlsMaterialError::InvalidServerCertificate { .. } => {
+                Self::InvalidTlsMaterial(error.to_string())
+            }
             TlsMaterialError::InvalidConfiguration(source) => Self::QuicConfig(source),
         }
     }

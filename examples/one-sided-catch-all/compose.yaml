@@ -1,0 +1,105 @@
+x-runewarp-service: &runewarp-service
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  image: runewarp-example:local
+  user: "${RUNEWARP_UID:-65532}:${RUNEWARP_GID:-65532}"
+  volumes:
+    - ./material:/example/material
+
+services:
+  server-cert-init:
+    <<: *runewarp-service
+    command:
+      - server
+      - cert
+      - init
+      - --directory
+      - /example/material/server-cert
+      - --hostname
+      - tunnel.preview.test
+
+  client-identity-init:
+    <<: *runewarp-service
+    command:
+      - client
+      - identity
+      - init
+      - --directory
+      - /example/material/client-identity
+
+  config-init:
+    image: busybox:1.36.1
+    user: "${RUNEWARP_UID:-65532}:${RUNEWARP_GID:-65532}"
+    depends_on:
+      server-cert-init:
+        condition: service_completed_successfully
+      client-identity-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./material:/example/material
+    command:
+      - sh
+      - -euc
+      - |
+        client_identity="$(tr -d '\r\n' < /example/material/client-identity/client-identity.txt)"
+        cat > /example/material/server.toml <<EOF
+        [server]
+        hostname = "tunnel.preview.test"
+
+        [server.cert]
+        directory = "server-cert"
+
+        [[server.tunnels]]
+        public-hostnames = ["hello.preview.test", "goodbye.preview.test"]
+        client-identity = "$${client_identity}"
+        EOF
+        cat > /example/material/client.toml <<'EOF'
+        [client]
+        server-hostname = "tunnel.preview.test"
+        server-ca-file = "server-cert/server-ca.crt"
+        identity-directory = "client-identity"
+
+        [[client.services]]
+        backend-address = "caddy:8443"
+        EOF
+
+  caddy:
+    image: caddy:2
+    user: "${RUNEWARP_UID:-65532}:${RUNEWARP_GID:-65532}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./material/caddy-data:/data
+      - ./material/caddy-config:/config
+
+  server:
+    <<: *runewarp-service
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+    command:
+      - server
+      - --config
+      - /example/material/server.toml
+    cap_add:
+      - NET_BIND_SERVICE
+    networks:
+      default:
+        aliases:
+          - tunnel.preview.test
+    ports:
+      - "${RUNEWARP_PUBLIC_PORT:-8443}:443/tcp"
+
+  client:
+    <<: *runewarp-service
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+      server:
+        condition: service_started
+      caddy:
+        condition: service_started
+    command:
+      - client
+      - --config
+      - /example/material/client.toml

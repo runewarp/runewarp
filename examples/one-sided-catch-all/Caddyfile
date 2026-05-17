@@ -1,0 +1,9 @@
+https://hello.preview.test:8443 {
+	tls internal
+	respond "hello from hello.preview.test"
+}
+
+https://goodbye.preview.test:8443 {
+	tls internal
+	respond "goodbye from goodbye.preview.test"
+}

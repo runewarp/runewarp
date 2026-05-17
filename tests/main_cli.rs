@@ -43,3 +43,31 @@ fn keygen_is_rejected_as_an_unrecognized_command() {
             .any(|line| line == "Available commands: server, client")
     );
 }
+
+#[test]
+fn server_help_prints_the_server_surface() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["server", "--help"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Available server commands"));
+    assert!(stdout.contains("cert"));
+    assert!(stdout.contains("--config"));
+}
+
+#[test]
+fn client_help_prints_the_client_surface() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["client", "--help"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Available client commands"));
+    assert!(stdout.contains("identity"));
+    assert!(stdout.contains("--config"));
+}

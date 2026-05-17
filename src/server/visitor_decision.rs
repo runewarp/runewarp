@@ -128,6 +128,7 @@ fn map_client_hello_error(error: ClientHelloError) -> VisitorRejection {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
 
@@ -139,15 +140,26 @@ mod tests {
     use tokio::io::{AsyncWriteExt, DuplexStream};
 
     use crate::acme::ACME_TLS_ALPN;
-    use crate::{make_client_quic_config, make_server_quic_config};
+    use crate::{
+        GeneratedClientIdentity, ServerTunnelSettings, generate_client_identity,
+        make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
+    };
 
     use super::super::tunnel_registry::TunnelRegistry;
     use super::{VisitorDecision, VisitorDecisionModule};
 
     #[tokio::test]
     async fn authorized_public_hostname_with_active_tunnel_connection_yields_forward_decision() {
-        let registry = TunnelRegistry::single(vec!["App.Example.Test.".to_owned()]).unwrap();
-        let fixture = TunnelConnectionFixture::connect().await;
+        let client_identity = generate_client_identity().unwrap();
+        let registry = TunnelRegistry::configured(
+            "Tunnel.Example.Test.",
+            &[ServerTunnelSettings {
+                public_hostnames: vec!["App.Example.Test.".to_owned()],
+                client_identity: client_identity.client_identity.clone(),
+            }],
+        )
+        .unwrap();
+        let fixture = TunnelConnectionFixture::connect(&client_identity).await;
         registry.register(fixture.server_connection.clone()).await;
 
         let module =
@@ -232,12 +244,13 @@ mod tests {
     }
 
     impl TunnelConnectionFixture {
-        async fn connect() -> Self {
+        async fn connect(client_identity: &GeneratedClientIdentity) -> Self {
             let (certificate, private_key) = make_self_signed_cert("tunnel.example.test");
             let server_endpoint = Endpoint::server(
-                make_server_quic_config(
+                make_server_quic_config_with_client_auth(
                     vec![certificate.clone()],
                     private_key_from_der(&private_key),
+                    std::slice::from_ref(&client_identity.client_identity),
                 )
                 .unwrap(),
                 localhost(0),
@@ -247,7 +260,12 @@ mod tests {
 
             let mut client_endpoint = Endpoint::client(localhost(0)).unwrap();
             client_endpoint.set_default_client_config(
-                make_client_quic_config(root_store_with(&certificate)).unwrap(),
+                make_client_quic_config_with_client_auth(
+                    root_store_with(&certificate),
+                    client_certificate_chain(client_identity),
+                    client_private_key(client_identity),
+                )
+                .unwrap(),
             );
 
             let accept_connection = async {
@@ -320,6 +338,20 @@ mod tests {
 
     fn private_key_from_der(der: &[u8]) -> PrivateKeyDer<'static> {
         PrivatePkcs8KeyDer::from(der.to_vec()).into()
+    }
+
+    fn client_certificate_chain(
+        client_identity: &GeneratedClientIdentity,
+    ) -> Vec<CertificateDer<'static>> {
+        rustls_pemfile::certs(&mut Cursor::new(client_identity.certificate_pem.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn client_private_key(client_identity: &GeneratedClientIdentity) -> PrivateKeyDer<'static> {
+        rustls_pemfile::private_key(&mut Cursor::new(client_identity.private_key_pem.as_bytes()))
+            .unwrap()
+            .unwrap()
     }
 
     fn root_store_with(certificate: &CertificateDer<'static>) -> RootCertStore {

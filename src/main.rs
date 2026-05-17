@@ -37,6 +37,10 @@ async fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
         print_available_commands(None);
         return Ok(());
     };
+    if is_help_flag(&command) {
+        print_available_commands(None);
+        return Ok(());
+    }
 
     match command.as_str() {
         "server" => run_server_command_from_args(args).await,
@@ -53,6 +57,16 @@ fn print_available_commands(unrecognized: Option<&str>) {
         println!("unrecognized command: {unrecognized}");
     }
     println!("Available commands: server, client");
+}
+
+fn print_server_commands() {
+    println!("Available server commands: cert");
+    println!("Options: --config <PATH>");
+}
+
+fn print_client_commands() {
+    println!("Available client commands: identity");
+    println!("Options: --config <PATH>");
 }
 
 async fn run_client_command(
@@ -124,6 +138,10 @@ async fn run_server_command_from_args(
             .await?;
         return Ok(());
     };
+    if is_help_flag(&argument) {
+        print_server_commands();
+        return Ok(());
+    }
 
     if argument == "cert" {
         return run_server_cert_command(args);
@@ -170,6 +188,10 @@ async fn run_client_command_from_args(
         let settings = load_client_settings(Path::new(DEFAULT_CONFIG_PATH))?;
         return run_client_command(&settings, wildcard(0)).await;
     };
+    if is_help_flag(&argument) {
+        print_client_commands();
+        return Ok(());
+    }
 
     if argument == "identity" {
         return run_client_identity_command(args);
@@ -328,6 +350,11 @@ fn parse_config_path(
 fn wildcard(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
 }
+
+fn is_help_flag(argument: &str) -> bool {
+    matches!(argument, "--help" | "-h")
+}
+
 fn write_client_identity_artifacts(directory: &Path) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(directory)?;
     let generated = generate_client_identity()?;

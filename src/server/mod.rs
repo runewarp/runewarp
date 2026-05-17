@@ -35,13 +35,13 @@ pub struct Server {
 
 impl Server {
     pub async fn bind(config: ServerConfig) -> io::Result<Self> {
-        let public_listener = TcpListener::bind(config.public_bind_addr).await?;
-        let tunnel_endpoint = Endpoint::server(config.quic_server_config, config.tunnel_bind_addr)?;
         let tunnel_registry = if config.configured_tunnels.is_empty() {
             TunnelRegistry::single(config.authorized_public_hostnames)
         } else {
-            TunnelRegistry::configured(&config.configured_tunnels)
+            TunnelRegistry::configured(&config.server_hostname, &config.configured_tunnels)?
         };
+        let public_listener = TcpListener::bind(config.public_bind_addr).await?;
+        let tunnel_endpoint = Endpoint::server(config.quic_server_config, config.tunnel_bind_addr)?;
 
         Ok(Self {
             public_listener,

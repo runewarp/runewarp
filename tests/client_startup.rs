@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    ClientSettings, PreparedClient, Server, ServerConfig, generate_client_identity,
-    load_client_settings, make_server_quic_config,
+    ClientServiceSettings, ClientSettings, PreparedClient, Server, ServerConfig,
+    generate_client_identity, load_client_settings, make_server_quic_config,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tempfile::tempdir;
@@ -160,4 +160,116 @@ async fn prepared_client_rejects_settings_without_services() {
 
     server_task.abort();
     let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn prepared_client_rejects_multi_service_catch_all_settings() {
+    let tempdir = tempdir().unwrap();
+    let certified_server =
+        generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+    fs::write(
+        tempdir.path().join("server-ca.pem"),
+        certified_server.cert.pem(),
+    )
+    .unwrap();
+    let client_identity = generate_client_identity().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let settings = ClientSettings {
+        server_hostname: "tunnel.example.test".to_owned(),
+        logs: true,
+        server_ca_file: Some(tempdir.path().join("server-ca.pem")),
+        identity_directory: tempdir.path().join("client-identity"),
+        reconnect_interval: Duration::from_secs(5),
+        services: vec![
+            ClientServiceSettings {
+                public_hostnames: None,
+                backend_address: "localhost:443".to_owned(),
+            },
+            ClientServiceSettings {
+                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                backend_address: "localhost:8443".to_owned(),
+            },
+        ],
+    };
+
+    let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
+        Ok(_) => panic!("expected client startup to reject a multi-service catch-all shape"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains(
+        "client.services[].public-hostnames may be omitted only when there is exactly one service"
+    ));
+}
+
+#[tokio::test]
+async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings() {
+    let tempdir = tempdir().unwrap();
+    let certified_server =
+        generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+    fs::write(
+        tempdir.path().join("server-ca.pem"),
+        certified_server.cert.pem(),
+    )
+    .unwrap();
+    let client_identity = generate_client_identity().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let settings = ClientSettings {
+        server_hostname: "tunnel.example.test".to_owned(),
+        logs: true,
+        server_ca_file: Some(tempdir.path().join("server-ca.pem")),
+        identity_directory: tempdir.path().join("client-identity"),
+        reconnect_interval: Duration::from_secs(5),
+        services: vec![
+            ClientServiceSettings {
+                public_hostnames: Some(vec!["App.Example.Test.".to_owned()]),
+                backend_address: "localhost:443".to_owned(),
+            },
+            ClientServiceSettings {
+                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                backend_address: "localhost:8443".to_owned(),
+            },
+        ],
+    };
+
+    let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
+        Ok(_) => panic!("expected client startup to reject duplicate service hostnames"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains(
+        "client.services[].public-hostnames must be unique after normalization: app.example.test"
+    ));
 }

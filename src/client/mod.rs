@@ -9,6 +9,8 @@ use quinn::{Connection, Endpoint};
 
 use crate::ClientServiceSettings;
 
+pub(crate) use service::validate_services;
+
 #[derive(Clone)]
 pub struct ClientConfig {
     pub local_bind_addr: SocketAddr,

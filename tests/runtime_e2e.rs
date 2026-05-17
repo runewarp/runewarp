@@ -6,10 +6,10 @@ use std::time::Duration;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
-    PreparedClient, PreparedServer, Server, ServerConfig, generate_client_identity,
-    initialize_manual_server_certificate, load_client_settings, load_server_settings,
-    make_client_quic_config, make_server_quic_config, make_server_quic_config_with_client_auth,
-    make_server_quic_config_with_client_auth_resolver,
+    PreparedClient, PreparedServer, Server, ServerConfig, ServerTunnelSettings,
+    generate_client_identity, initialize_manual_server_certificate, load_client_settings,
+    load_server_settings, make_client_quic_config, make_server_quic_config,
+    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -620,6 +620,87 @@ async fn library_constructors_expose_addresses_before_running() {
     client_task.abort();
     let _ = server_task.await;
     let _ = client_task.await;
+}
+
+#[tokio::test]
+async fn server_bind_rejects_duplicate_configured_tunnel_hostnames() {
+    let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let first_client = generate_client_identity().unwrap();
+    let second_client = generate_client_identity().unwrap();
+
+    let error = match Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: Vec::new(),
+        configured_tunnels: vec![
+            ServerTunnelSettings {
+                public_hostnames: vec!["App.Example.Test.".to_owned()],
+                client_identity: first_client.client_identity,
+            },
+            ServerTunnelSettings {
+                public_hostnames: vec!["app.example.test".to_owned()],
+                client_identity: second_client.client_identity,
+            },
+        ],
+        logs: true,
+        public_tls_config: None,
+        quic_server_config: make_server_quic_config(
+            vec![tunnel_cert.clone()],
+            private_key_from_der(&tunnel_key),
+        )
+        .unwrap(),
+    })
+    .await
+    {
+        Ok(_) => panic!("expected server bind to reject duplicate configured tunnel hostnames"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains(
+        "server.tunnels[].public-hostnames must be unique after normalization: app.example.test"
+    ));
+}
+
+#[tokio::test]
+async fn server_bind_rejects_duplicate_configured_tunnel_client_identities() {
+    let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let shared_client = generate_client_identity().unwrap();
+
+    let error = match Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: Vec::new(),
+        configured_tunnels: vec![
+            ServerTunnelSettings {
+                public_hostnames: vec!["app.example.test".to_owned()],
+                client_identity: shared_client.client_identity.clone(),
+            },
+            ServerTunnelSettings {
+                public_hostnames: vec!["api.example.test".to_owned()],
+                client_identity: shared_client.client_identity,
+            },
+        ],
+        logs: true,
+        public_tls_config: None,
+        quic_server_config: make_server_quic_config(
+            vec![tunnel_cert.clone()],
+            private_key_from_der(&tunnel_key),
+        )
+        .unwrap(),
+    })
+    .await
+    {
+        Ok(_) => panic!("expected server bind to reject duplicate configured tunnel identities"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("server.tunnels[].client-identity must be unique")
+    );
 }
 
 #[tokio::test]

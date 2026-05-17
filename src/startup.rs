@@ -14,7 +14,7 @@ use crate::tls_material::{
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConnectError, ClientIdentity,
     ClientSettings, QuicConfigError, Server, ServerCertificateSettings, ServerConfig,
-    ServerSettings, make_client_quic_config_with_client_auth,
+    ServerSettings, client::validate_services, make_client_quic_config_with_client_auth,
     make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
 };
 
@@ -145,9 +145,11 @@ impl PreparedClient {
     ) -> Result<Self, ClientStartupError> {
         if settings.services.is_empty() {
             return Err(ClientStartupError::InvalidSettings(
-                "client settings must include at least one Service",
+                "client settings must include at least one Service".to_owned(),
             ));
         }
+        let services = validate_services(&settings.services)
+            .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
         let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
         let cert_chain =
             load_certificate_chain(&settings.identity_directory.join(CLIENT_CERT_FILENAME))
@@ -161,7 +163,7 @@ impl PreparedClient {
             local_bind_addr,
             server_addr,
             server_name: settings.server_hostname.clone(),
-            services: settings.services.clone(),
+            services,
             logs: settings.logs,
             quic_client_config,
         })
@@ -271,7 +273,7 @@ impl From<TlsMaterialError> for ServerStartupError {
 #[derive(Debug)]
 pub enum ClientStartupError {
     TlsMaterial(ServerStartupError),
-    InvalidSettings(&'static str),
+    InvalidSettings(String),
     NativeRoots { errors: usize },
     AddRootCertificate(rustls::Error),
     QuicConfig(QuicConfigError),

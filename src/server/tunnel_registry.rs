@@ -20,18 +20,6 @@ pub(crate) struct TunnelRegistry {
 }
 
 impl TunnelRegistry {
-    pub(crate) fn single(public_hostnames: Vec<String>) -> Self {
-        let public_hostname_to_tunnel = public_hostnames
-            .into_iter()
-            .map(|hostname| (hostname, 0))
-            .collect();
-        Self {
-            client_identity_to_tunnel: Arc::new(HashMap::new()),
-            public_hostname_to_tunnel: Arc::new(public_hostname_to_tunnel),
-            tunnel_slots: Arc::new(vec![ActiveClientSlot::new()]),
-        }
-    }
-
     pub(crate) fn configured(
         server_hostname: &str,
         tunnels: &[ServerTunnelSettings],
@@ -122,9 +110,6 @@ impl TunnelRegistry {
     }
 
     fn tunnel_index_for_connection(&self, connection: &Connection) -> Option<usize> {
-        if self.client_identity_to_tunnel.is_empty() {
-            return Some(0);
-        }
         let identity = client_identity_from_connection(connection)?;
         self.client_identity_to_tunnel.get(&identity).copied()
     }

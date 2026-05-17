@@ -17,7 +17,6 @@ pub struct ServerConfig {
     pub public_bind_addr: SocketAddr,
     pub tunnel_bind_addr: SocketAddr,
     pub server_hostname: String,
-    pub authorized_public_hostnames: Vec<String>,
     pub configured_tunnels: Vec<ServerTunnelSettings>,
     pub logs: bool,
     pub public_tls_config: Option<Arc<rustls::ServerConfig>>,
@@ -35,11 +34,14 @@ pub struct Server {
 
 impl Server {
     pub async fn bind(config: ServerConfig) -> io::Result<Self> {
-        let tunnel_registry = if config.configured_tunnels.is_empty() {
-            TunnelRegistry::single(config.authorized_public_hostnames)
-        } else {
-            TunnelRegistry::configured(&config.server_hostname, &config.configured_tunnels)?
-        };
+        if config.configured_tunnels.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "server bind requires at least one configured Tunnel",
+            ));
+        }
+        let tunnel_registry =
+            TunnelRegistry::configured(&config.server_hostname, &config.configured_tunnels)?;
         let public_listener = TcpListener::bind(config.public_bind_addr).await?;
         let tunnel_endpoint = Endpoint::server(config.quic_server_config, config.tunnel_bind_addr)?;
 

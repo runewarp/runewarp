@@ -65,7 +65,6 @@ impl PreparedServer {
             public_bind_addr,
             tunnel_bind_addr,
             server_hostname: settings.hostname.clone(),
-            authorized_public_hostnames: Vec::new(),
             configured_tunnels: settings.tunnels.clone(),
             logs: settings.logs,
             public_tls_config: acme_state

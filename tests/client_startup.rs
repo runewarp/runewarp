@@ -5,7 +5,8 @@ use std::time::Duration;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     ClientServiceSettings, ClientSettings, PreparedClient, Server, ServerConfig,
-    generate_client_identity, load_client_settings, make_server_quic_config,
+    ServerTunnelSettings, generate_client_identity, load_client_settings,
+    make_server_quic_config_with_client_auth,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tempfile::tempdir;
@@ -18,17 +19,21 @@ async fn prepared_client_connects_from_validated_settings() {
     let server_cert_pem = certified_server.cert.pem();
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
+    let client_identity = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![ServerTunnelSettings {
+            public_hostnames: vec!["app.example.test".to_owned()],
+            client_identity: client_identity.client_identity.clone(),
+        }],
         logs: true,
         public_tls_config: None,
-        quic_server_config: make_server_quic_config(
-            vec![server_cert],
+        quic_server_config: make_server_quic_config_with_client_auth(
+            vec![server_cert.clone()],
             private_key_from_der(&server_key),
+            std::slice::from_ref(&client_identity.client_identity),
         )
         .unwrap(),
     })
@@ -37,7 +42,6 @@ async fn prepared_client_connects_from_validated_settings() {
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_identity = generate_client_identity().unwrap();
     fs::write(tempdir.path().join("server-ca.pem"), server_cert_pem).unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -96,17 +100,21 @@ async fn prepared_client_rejects_settings_without_services() {
     let server_cert_pem = certified_server.cert.pem();
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
+    let client_identity = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![ServerTunnelSettings {
+            public_hostnames: vec!["app.example.test".to_owned()],
+            client_identity: client_identity.client_identity.clone(),
+        }],
         logs: true,
         public_tls_config: None,
-        quic_server_config: make_server_quic_config(
-            vec![server_cert],
+        quic_server_config: make_server_quic_config_with_client_auth(
+            vec![server_cert.clone()],
             private_key_from_der(&server_key),
+            std::slice::from_ref(&client_identity.client_identity),
         )
         .unwrap(),
     })
@@ -115,7 +123,6 @@ async fn prepared_client_rejects_settings_without_services() {
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_identity = generate_client_identity().unwrap();
     fs::write(tempdir.path().join("server-ca.pem"), server_cert_pem).unwrap();
     fs::write(
         tempdir.path().join("client.crt"),

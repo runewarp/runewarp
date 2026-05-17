@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Cursor};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -6,9 +6,10 @@ use std::time::Duration;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
-    PreparedClient, PreparedServer, Server, ServerConfig, ServerTunnelSettings,
-    generate_client_identity, initialize_manual_server_certificate, load_client_settings,
-    load_server_settings, make_client_quic_config, make_server_quic_config,
+    GeneratedClientIdentity, PreparedClient, PreparedServer, Server, ServerConfig,
+    ServerTunnelSettings, generate_client_identity, initialize_manual_server_certificate,
+    load_client_settings, load_server_settings, make_client_quic_config,
+    make_client_quic_config_with_client_auth, make_server_quic_config,
     make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
 };
 use rustls::RootCertStore;
@@ -26,6 +27,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 async fn forwards_tls_passthrough_end_to_end() {
     let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let trusted_client = generate_client_identity().unwrap();
 
     let backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
     let backend_address = backend_listener.local_addr().unwrap();
@@ -52,15 +54,14 @@ async fn forwards_tls_passthrough_end_to_end() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
         public_tls_config: None,
-        quic_server_config: make_server_quic_config(
-            vec![tunnel_cert.clone()],
-            private_key_from_der(&tunnel_key),
-        )
-        .unwrap(),
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&trusted_client],
+        ),
     })
     .await
     .unwrap();
@@ -73,7 +74,7 @@ async fn forwards_tls_passthrough_end_to_end() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_address.to_string(),
-        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &trusted_client),
     })
     .await
     .unwrap();
@@ -213,18 +214,18 @@ backend-address = "__BACKEND_ADDRESS__"
 #[tokio::test]
 async fn drops_public_tls_when_no_client_is_connected() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let trusted_client = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
-        quic_server_config: make_server_quic_config(
-            vec![tunnel_cert],
-            private_key_from_der(&tunnel_key),
-        )
-        .unwrap(),
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&trusted_client],
+        ),
         public_tls_config: None,
     })
     .await
@@ -256,6 +257,7 @@ async fn drops_public_tls_when_no_client_is_connected() {
 async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let (challenge_cert, challenge_key) = make_self_signed_cert("tunnel.example.test");
+    let trusted_client = generate_client_identity().unwrap();
     let mut challenge_server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(
@@ -269,14 +271,13 @@ async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
-        quic_server_config: make_server_quic_config(
-            vec![tunnel_cert],
-            private_key_from_der(&tunnel_key),
-        )
-        .unwrap(),
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&trusted_client],
+        ),
         public_tls_config: Some(Arc::new(challenge_server_config)),
     })
     .await
@@ -307,6 +308,7 @@ async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
 async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
     let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let trusted_client = generate_client_identity().unwrap();
     let backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
     let backend_address = backend_listener.local_addr().unwrap();
     let backend_acceptor = TlsAcceptor::from(Arc::new(
@@ -339,14 +341,13 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
-        quic_server_config: make_server_quic_config(
-            vec![tunnel_cert.clone()],
-            private_key_from_der(&tunnel_key),
-        )
-        .unwrap(),
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&trusted_client],
+        ),
         public_tls_config: Some(Arc::new(challenge_server_config)),
     })
     .await
@@ -360,7 +361,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_address.to_string(),
-        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &trusted_client),
     })
     .await
     .unwrap();
@@ -434,8 +435,7 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth_resolver(
@@ -527,8 +527,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![tunnel_cert.clone()],
@@ -579,19 +578,19 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
 #[tokio::test]
 async fn library_constructors_expose_addresses_before_running() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let trusted_client = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
         public_tls_config: None,
-        quic_server_config: make_server_quic_config(
-            vec![tunnel_cert.clone()],
-            private_key_from_der(&tunnel_key),
-        )
-        .unwrap(),
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&trusted_client],
+        ),
     })
     .await
     .unwrap();
@@ -607,7 +606,7 @@ async fn library_constructors_expose_addresses_before_running() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: available_local_addr().await.to_string(),
-        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &trusted_client),
     })
     .await
     .unwrap();
@@ -632,16 +631,9 @@ async fn server_bind_rejects_duplicate_configured_tunnel_hostnames() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: Vec::new(),
         configured_tunnels: vec![
-            ServerTunnelSettings {
-                public_hostnames: vec!["App.Example.Test.".to_owned()],
-                client_identity: first_client.client_identity,
-            },
-            ServerTunnelSettings {
-                public_hostnames: vec!["app.example.test".to_owned()],
-                client_identity: second_client.client_identity,
-            },
+            configured_tunnel(&["App.Example.Test."], &first_client),
+            configured_tunnel(&["app.example.test"], &second_client),
         ],
         logs: true,
         public_tls_config: None,
@@ -671,16 +663,9 @@ async fn server_bind_rejects_duplicate_configured_tunnel_client_identities() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: Vec::new(),
         configured_tunnels: vec![
-            ServerTunnelSettings {
-                public_hostnames: vec!["app.example.test".to_owned()],
-                client_identity: shared_client.client_identity.clone(),
-            },
-            ServerTunnelSettings {
-                public_hostnames: vec!["api.example.test".to_owned()],
-                client_identity: shared_client.client_identity,
-            },
+            configured_tunnel(&["app.example.test"], &shared_client),
+            configured_tunnel(&["api.example.test"], &shared_client),
         ],
         logs: true,
         public_tls_config: None,
@@ -704,6 +689,36 @@ async fn server_bind_rejects_duplicate_configured_tunnel_client_identities() {
 }
 
 #[tokio::test]
+async fn server_bind_rejects_empty_configured_tunnels() {
+    let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+
+    let error = match Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        configured_tunnels: Vec::new(),
+        logs: true,
+        public_tls_config: None,
+        quic_server_config: make_server_quic_config(
+            vec![tunnel_cert],
+            private_key_from_der(&tunnel_key),
+        )
+        .unwrap(),
+    })
+    .await
+    {
+        Ok(_) => panic!("expected server bind to reject an empty configured tunnel set"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("server bind requires at least one configured Tunnel")
+    );
+}
+
+#[tokio::test]
 async fn latest_client_instance_serves_subsequent_visitor_connections() {
     let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
     let backend_one = spawn_tls_backend(
@@ -720,19 +735,19 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
     .await;
 
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let shared_client = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         logs: true,
         public_tls_config: None,
-        quic_server_config: make_server_quic_config(
-            vec![tunnel_cert.clone()],
-            private_key_from_der(&tunnel_key),
-        )
-        .unwrap(),
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&shared_client],
+        ),
     })
     .await
     .unwrap();
@@ -745,7 +760,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_one.0.to_string(),
-        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -763,7 +778,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_two.0.to_string(),
-        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -796,20 +811,20 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
     )
     .await;
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let shared_client = generate_client_identity().unwrap();
 
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         logs: true,
         public_tls_config: None,
-        quic_server_config: make_server_quic_config(
-            vec![tunnel_cert.clone()],
-            private_key_from_der(&tunnel_key),
-        )
-        .unwrap(),
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&shared_client],
+        ),
     })
     .await
     .unwrap();
@@ -822,7 +837,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend.0.to_string(),
-        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -851,20 +866,20 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
     let closed_backend_address = available_local_addr().await;
     let (backend_cert, _) = make_self_signed_cert("app.example.test");
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let shared_client = generate_client_identity().unwrap();
 
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         logs: true,
         public_tls_config: None,
-        quic_server_config: make_server_quic_config(
-            vec![tunnel_cert.clone()],
-            private_key_from_der(&tunnel_key),
-        )
-        .unwrap(),
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&shared_client],
+        ),
     })
     .await
     .unwrap();
@@ -877,7 +892,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: closed_backend_address.to_string(),
-        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -917,19 +932,19 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
     .await;
 
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let shared_client = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        authorized_public_hostnames: vec!["app.example.test".to_owned()],
-        configured_tunnels: Vec::new(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         logs: true,
         public_tls_config: None,
-        quic_server_config: make_server_quic_config(
-            vec![tunnel_cert.clone()],
-            private_key_from_der(&tunnel_key),
-        )
-        .unwrap(),
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&shared_client],
+        ),
     })
     .await
     .unwrap();
@@ -942,7 +957,7 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_one_addr.to_string(),
-        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -977,7 +992,7 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_two.0.to_string(),
-        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -1043,6 +1058,62 @@ fn make_self_signed_cert_with_pem(server_name: &str) -> (CertificateDer<'static>
 
 fn private_key_from_der(der: &[u8]) -> PrivateKeyDer<'static> {
     PrivatePkcs8KeyDer::from(der.to_vec()).into()
+}
+
+fn configured_tunnel(
+    public_hostnames: &[&str],
+    client_identity: &GeneratedClientIdentity,
+) -> ServerTunnelSettings {
+    ServerTunnelSettings {
+        public_hostnames: public_hostnames
+            .iter()
+            .map(|hostname| (*hostname).to_owned())
+            .collect(),
+        client_identity: client_identity.client_identity.clone(),
+    }
+}
+
+fn make_authenticated_server_quic_config(
+    certificate: &CertificateDer<'static>,
+    private_key: &[u8],
+    trusted_clients: &[&GeneratedClientIdentity],
+) -> quinn::ServerConfig {
+    let trusted_client_identities = trusted_clients
+        .iter()
+        .map(|client| client.client_identity.clone())
+        .collect::<Vec<_>>();
+    make_server_quic_config_with_client_auth(
+        vec![certificate.clone()],
+        private_key_from_der(private_key),
+        &trusted_client_identities,
+    )
+    .unwrap()
+}
+
+fn make_authenticated_client_quic_config(
+    server_certificate: &CertificateDer<'static>,
+    client_identity: &GeneratedClientIdentity,
+) -> quinn::ClientConfig {
+    make_client_quic_config_with_client_auth(
+        root_store_with(server_certificate),
+        client_certificate_chain(client_identity),
+        client_private_key(client_identity),
+    )
+    .unwrap()
+}
+
+fn client_certificate_chain(
+    client_identity: &GeneratedClientIdentity,
+) -> Vec<CertificateDer<'static>> {
+    rustls_pemfile::certs(&mut Cursor::new(client_identity.certificate_pem.as_bytes()))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn client_private_key(client_identity: &GeneratedClientIdentity) -> PrivateKeyDer<'static> {
+    rustls_pemfile::private_key(&mut Cursor::new(client_identity.private_key_pem.as_bytes()))
+        .unwrap()
+        .unwrap()
 }
 
 fn root_store_with(certificate: &CertificateDer<'static>) -> RootCertStore {

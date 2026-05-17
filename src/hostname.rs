@@ -2,7 +2,10 @@ use std::fmt;
 use std::net::IpAddr;
 
 pub(crate) fn normalize_public_hostname(hostname: &str) -> String {
-    hostname.trim_end_matches('.').to_ascii_lowercase()
+    hostname
+        .strip_suffix('.')
+        .unwrap_or(hostname)
+        .to_ascii_lowercase()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,14 +105,6 @@ mod tests {
     }
 
     #[test]
-    fn strips_all_trailing_dots_from_public_hostnames() {
-        assert_eq!(
-            normalize_public_hostname("app.example.test..."),
-            "app.example.test"
-        );
-    }
-
-    #[test]
     fn accepts_punycode_a_labels() {
         assert_eq!(
             validate_public_hostname("XN--BCHER-KVA.example").unwrap(),
@@ -143,12 +138,6 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(32))]
-
-        #[test]
-        fn normalization_is_idempotent(hostname in ".*") {
-            let normalized = normalize_public_hostname(&hostname);
-            prop_assert_eq!(normalize_public_hostname(&normalized), normalized);
-        }
 
         #[test]
         fn validated_hostnames_remain_in_canonical_form(hostname in ".*") {

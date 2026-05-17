@@ -150,7 +150,7 @@ mod tests {
 
     #[tokio::test]
     async fn authorized_public_hostname_with_active_tunnel_connection_yields_forward_decision() {
-        let client_identity = generate_client_identity().unwrap();
+        let client_identity = generate_client_identity().expect("generate test client identity");
         let registry = TunnelRegistry::configured(
             "Tunnel.Example.Test.",
             &[ServerTunnelSettings {

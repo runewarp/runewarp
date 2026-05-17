@@ -28,12 +28,13 @@ if [[ -z "$image_user" || "$image_user" == "0" || "$image_user" == "root" ]]; th
   exit 1
 fi
 
-docker run --rm "$image_tag" server --help >/dev/null
-docker run --rm "$image_tag" client --help >/dev/null
-cargo run --quiet --manifest-path "$repo_root/Cargo.toml" -- \
-  server cert init --directory "$work_dir/server-cert" --hostname tunnel.example.test >/dev/null
-cargo run --quiet --manifest-path "$repo_root/Cargo.toml" -- \
-  client identity init --directory "$work_dir/client-identity" >/dev/null
+docker run --rm -v "$work_dir:/work" -w /work "$image_tag" \
+  server cert init --directory server-cert --hostname tunnel.example.test >/dev/null
+docker run --rm -v "$work_dir:/work" -w /work "$image_tag" \
+  client identity init --directory client-identity >/dev/null
+
+test -f "$work_dir/server-cert/server-ca.crt"
+test -f "$work_dir/client-identity/client-identity.txt"
 
 client_identity="$(tr -d '\r\n' < "$work_dir/client-identity/client-identity.txt")"
 cat >"$work_dir/config.toml" <<EOF

@@ -250,13 +250,50 @@ client-identity = "111122223333444455556666777788889999aaaabbbbccccddddeeeeffff0
     let error = load_server_settings(&tempdir.path().join("config.toml")).unwrap_err();
     let message = error.to_string();
 
-    assert!(
-        message.contains(
-            "server.tunnels[].public-hostnames must be unique after normalization: app.example.test"
-        )
-    );
+    assert!(message.contains(
+        "server.tunnels[].public-hostnames must be unique after normalization: app.example.test"
+    ));
     assert!(message.contains(
         "server.tunnels[].public-hostnames must not include server.hostname `tunnel.example.test`"
+    ));
+}
+
+#[test]
+fn server_settings_report_duplicate_hostnames_even_when_another_hostname_is_invalid() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["App.Example.Test."]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test", "*.bad.example.test"]
+client-identity = "111122223333444455556666777788889999aaaabbbbccccddddeeeeffff0000"
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains(
+        "server.tunnels[].public-hostnames contains invalid hostname `*.bad.example.test`"
+    ));
+    assert!(message.contains(
+        "server.tunnels[].public-hostnames must be unique after normalization: app.example.test"
     ));
 }
 

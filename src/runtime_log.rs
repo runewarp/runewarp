@@ -28,9 +28,13 @@ mod tests {
     fn emit_suppresses_disabled_lines() {
         let mut lines = Vec::new();
 
-        emit(false, "server route app.example.test -> forwarded", |line| {
-            lines.push(line.to_owned());
-        });
+        emit(
+            false,
+            "server route app.example.test -> forwarded",
+            |line| {
+                lines.push(line.to_owned());
+            },
+        );
 
         assert!(lines.is_empty());
     }

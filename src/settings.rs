@@ -6,16 +6,20 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::tls_material::validate_server_tls_material;
-use crate::{ClientIdentity, hostname::normalize_public_hostname};
+use crate::tls_material::{
+    SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, validate_server_tls_material,
+};
+use crate::{
+    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
+    SERVER_CA_FILENAME, hostname::normalize_public_hostname,
+};
 
-pub const DEFAULT_CLIENT_RETRY_INTERVAL_SECS: u64 = 5;
+pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerSettings {
     pub hostname: String,
-    pub cert_file: PathBuf,
-    pub key_file: PathBuf,
+    pub certificate: ServerCertificateSettings,
     pub tunnels: Vec<ServerTunnelSettings>,
 }
 
@@ -25,18 +29,28 @@ pub struct ServerTunnelSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerCertificateSettings {
+    Manual {
+        directory: PathBuf,
+    },
+    Acme {
+        email: String,
+        state_directory: PathBuf,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientSettings {
     pub server_hostname: String,
     pub server_ca_file: Option<PathBuf>,
-    pub cert_file: PathBuf,
-    pub key_file: PathBuf,
-    pub retry_interval: Duration,
+    pub identity_directory: PathBuf,
+    pub reconnect_interval: Duration,
     pub services: Vec<ClientServiceSettings>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientServiceSettings {
-    pub local_addr: String,
+    pub backend_addr: String,
 }
 
 #[derive(Debug)]
@@ -98,19 +112,29 @@ impl std::error::Error for SettingsError {
 }
 
 pub fn load_server_settings(path: &Path) -> Result<ServerSettings, SettingsError> {
-    let raw = load_selected_section::<RawServerConfig>(path, "server")?;
-    validate_server_settings(path, raw)
+    let section_value = load_selected_section_value(path, "server")?;
+    let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
+    validate_server_settings(
+        path,
+        raw,
+        collect_server_unknown_field_messages(&section_value),
+    )
 }
 
 pub fn load_client_settings(path: &Path) -> Result<ClientSettings, SettingsError> {
-    let raw = load_selected_section::<RawClientConfig>(path, "client")?;
-    validate_client_settings(path, raw)
+    let section_value = load_selected_section_value(path, "client")?;
+    let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
+    validate_client_settings(
+        path,
+        raw,
+        collect_client_unknown_field_messages(&section_value),
+    )
 }
 
-fn load_selected_section<T>(path: &Path, section: &'static str) -> Result<T, SettingsError>
-where
-    T: DeserializeOwned,
-{
+fn load_selected_section_value(
+    path: &Path,
+    section: &'static str,
+) -> Result<toml::Value, SettingsError> {
     let contents = fs::read_to_string(path).map_err(|source| SettingsError::Read {
         path: path.to_path_buf(),
         source,
@@ -128,7 +152,19 @@ where
             messages: vec![format!("missing [{section}] section")],
         });
     };
+    Ok(section_value)
+}
+
+fn deserialize_selected_section<T>(
+    path: &Path,
+    section: &'static str,
+    section_value: &toml::Value,
+) -> Result<T, SettingsError>
+where
+    T: DeserializeOwned,
+{
     section_value
+        .clone()
         .try_into::<T>()
         .map_err(|source| SettingsError::Parse {
             path: path.to_path_buf(),
@@ -140,8 +176,8 @@ where
 fn validate_server_settings(
     path: &Path,
     raw: RawServerConfig,
+    mut messages: Vec<String>,
 ) -> Result<ServerSettings, SettingsError> {
-    let mut messages = Vec::new();
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     let hostname = raw
@@ -152,19 +188,26 @@ fn validate_server_settings(
             String::new()
         });
 
-    if raw.acme.is_some() {
-        messages.push("server.acme is not supported in Catch-all mode yet".to_owned());
+    let manual_present = raw.cert.is_some();
+    let acme_present = raw.acme.is_some();
+    if manual_present == acme_present {
+        messages
+            .push("exactly one of [server.cert] or [server.acme] must be configured".to_owned());
     }
-
-    let cert_file =
-        validate_required_path("server.cert-file", raw.cert_file, config_dir, &mut messages);
-    let key_file =
-        validate_required_path("server.key-file", raw.key_file, config_dir, &mut messages);
-    if let (Some(cert_file), Some(key_file)) = (cert_file.as_deref(), key_file.as_deref())
-        && let Err(error) = validate_server_tls_material(cert_file, key_file)
-    {
-        messages.push(format!("server TLS material is invalid: {error}"));
-    }
+    let manual = raw.cert.and_then(|cert| {
+        validate_server_manual_cert_settings(cert, config_dir, hostname.as_str(), &mut messages)
+    });
+    let acme = raw
+        .acme
+        .and_then(|acme| validate_server_acme_settings(acme, config_dir, &mut messages));
+    let certificate = match (manual_present, acme_present) {
+        (true, false) => manual.map(|directory| ServerCertificateSettings::Manual { directory }),
+        (false, true) => acme.map(|(email, state_directory)| ServerCertificateSettings::Acme {
+            email,
+            state_directory,
+        }),
+        _ => None,
+    };
 
     let tunnel_count = raw.tunnels.len();
     let tunnels = raw
@@ -179,8 +222,7 @@ fn validate_server_settings(
     if messages.is_empty() {
         Ok(ServerSettings {
             hostname,
-            cert_file: cert_file.expect("validated server.cert-file"),
-            key_file: key_file.expect("validated server.key-file"),
+            certificate: certificate.expect("validated server certificate settings"),
             tunnels,
         })
     } else {
@@ -195,8 +237,8 @@ fn validate_server_settings(
 fn validate_client_settings(
     path: &Path,
     raw: RawClientConfig,
+    mut messages: Vec<String>,
 ) -> Result<ClientSettings, SettingsError> {
-    let mut messages = Vec::new();
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     let server_hostname = raw
@@ -216,16 +258,38 @@ fn validate_client_settings(
         ),
         None => None,
     };
-    let cert_file =
-        validate_required_path("client.cert-file", raw.cert_file, config_dir, &mut messages);
-    let key_file =
-        validate_required_path("client.key-file", raw.key_file, config_dir, &mut messages);
+    let identity_directory = validate_required_directory(
+        "client.identity-directory",
+        raw.identity_directory,
+        config_dir,
+        &mut messages,
+    );
+    if let Some(identity_directory) = identity_directory.as_deref() {
+        let _ = validate_directory_file(
+            "client.identity-directory",
+            identity_directory,
+            CLIENT_CERT_FILENAME,
+            &mut messages,
+        );
+        let _ = validate_directory_file(
+            "client.identity-directory",
+            identity_directory,
+            CLIENT_KEY_FILENAME,
+            &mut messages,
+        );
+        let _ = validate_directory_file(
+            "client.identity-directory",
+            identity_directory,
+            CLIENT_IDENTITY_FILENAME,
+            &mut messages,
+        );
+    }
 
-    let retry_interval_secs = raw
-        .retry_interval
-        .unwrap_or(DEFAULT_CLIENT_RETRY_INTERVAL_SECS);
-    if retry_interval_secs < 1 {
-        messages.push("client.retry-interval must be at least 1".to_owned());
+    let reconnect_interval_secs = raw
+        .reconnect_interval
+        .unwrap_or(DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS);
+    if reconnect_interval_secs < 1 {
+        messages.push("client.reconnect-interval must be at least 1".to_owned());
     }
 
     let service_count = raw.services.len();
@@ -242,9 +306,8 @@ fn validate_client_settings(
         Ok(ClientSettings {
             server_hostname,
             server_ca_file,
-            cert_file: cert_file.expect("validated client.cert-file"),
-            key_file: key_file.expect("validated client.key-file"),
-            retry_interval: Duration::from_secs(retry_interval_secs),
+            identity_directory: identity_directory.expect("validated client.identity-directory"),
+            reconnect_interval: Duration::from_secs(reconnect_interval_secs),
             services,
         })
     } else {
@@ -254,19 +317,6 @@ fn validate_client_settings(
             messages,
         })
     }
-}
-
-fn validate_required_path(
-    field_name: &str,
-    raw_path: Option<PathBuf>,
-    config_dir: &Path,
-    messages: &mut Vec<String>,
-) -> Option<PathBuf> {
-    let Some(raw_path) = raw_path else {
-        messages.push(format!("{field_name} is required"));
-        return None;
-    };
-    validate_optional_path(field_name, raw_path, config_dir, messages)
 }
 
 fn validate_optional_path(
@@ -286,26 +336,124 @@ fn validate_optional_path(
     Some(resolved)
 }
 
+fn validate_required_directory(
+    field_name: &str,
+    raw_path: Option<PathBuf>,
+    config_dir: &Path,
+    messages: &mut Vec<String>,
+) -> Option<PathBuf> {
+    let Some(raw_path) = raw_path else {
+        messages.push(format!("{field_name} is required"));
+        return None;
+    };
+    let resolved = resolve_path(config_dir, &raw_path);
+    if !resolved.is_dir() {
+        messages.push(format!(
+            "{field_name} directory not found: {}",
+            resolved.display()
+        ));
+        return None;
+    }
+    Some(resolved)
+}
+
+fn validate_directory_file(
+    field_name: &str,
+    directory: &Path,
+    filename: &str,
+    messages: &mut Vec<String>,
+) -> Option<PathBuf> {
+    let path = directory.join(filename);
+    if !path.is_file() {
+        messages.push(format!("{field_name} file not found: {}", path.display()));
+        return None;
+    }
+    Some(path)
+}
+
+fn validate_server_manual_cert_settings(
+    raw: RawServerCertConfig,
+    config_dir: &Path,
+    server_hostname: &str,
+    messages: &mut Vec<String>,
+) -> Option<PathBuf> {
+    let directory =
+        validate_required_directory("server.cert.directory", raw.directory, config_dir, messages)?;
+    let cert_path = validate_directory_file(
+        "server.cert.directory",
+        &directory,
+        SERVER_CERT_FILENAME,
+        messages,
+    );
+    let key_path = validate_directory_file(
+        "server.cert.directory",
+        &directory,
+        SERVER_KEY_FILENAME,
+        messages,
+    );
+    let ca_path = validate_directory_file(
+        "server.cert.directory",
+        &directory,
+        SERVER_CA_FILENAME,
+        messages,
+    );
+    if let (Some(cert_path), Some(key_path), Some(ca_path)) = (
+        cert_path.as_deref(),
+        key_path.as_deref(),
+        ca_path.as_deref(),
+    ) && let Err(error) =
+        validate_server_tls_material(cert_path, key_path, ca_path, server_hostname)
+    {
+        messages.push(format!("server TLS material is invalid: {error}"));
+        return None;
+    }
+
+    Some(directory)
+}
+
+fn validate_server_acme_settings(
+    raw: RawServerAcmeConfig,
+    config_dir: &Path,
+    messages: &mut Vec<String>,
+) -> Option<(String, PathBuf)> {
+    let email = raw.email.unwrap_or_else(|| {
+        messages.push("server.acme.email is required".to_owned());
+        String::new()
+    });
+    let state_directory = validate_required_directory(
+        "server.acme.state-directory",
+        raw.state_directory,
+        config_dir,
+        messages,
+    );
+
+    if email.is_empty() || state_directory.is_none() {
+        return None;
+    }
+
+    Some((email, state_directory.expect("validated state directory")))
+}
+
 fn validate_server_tunnel(
     raw: RawServerTunnelConfig,
     messages: &mut Vec<String>,
 ) -> Option<ServerTunnelSettings> {
-    if raw.hostnames.is_some() {
+    if raw.public_hostnames.is_some() {
         messages.push("phase-2 server mode only supports a Catch-all Tunnel".to_owned());
     }
 
-    let client_identity = match raw.client_public_key_fingerprint {
+    let client_identity = match raw.client_identity {
         Some(client_identity) => match client_identity.parse::<ClientIdentity>() {
             Ok(client_identity) => Some(client_identity),
             Err(error) => {
                 messages.push(format!(
-                    "server.tunnels[].client-public-key-fingerprint is invalid: {error}"
+                    "server.tunnels[].client-identity is invalid: {error}"
                 ));
                 None
             }
         },
         None => {
-            messages.push("server.tunnels[].client-public-key-fingerprint is required".to_owned());
+            messages.push("server.tunnels[].client-identity is required".to_owned());
             None
         }
     };
@@ -317,34 +465,34 @@ fn validate_client_service(
     raw: RawClientServiceConfig,
     messages: &mut Vec<String>,
 ) -> Option<ClientServiceSettings> {
-    if raw.hostnames.is_some() {
+    if raw.public_hostnames.is_some() {
         messages.push("phase-2 client mode only supports a Catch-all Service".to_owned());
     }
 
-    let local_addr = match raw.local_addr {
-        Some(local_addr) => {
-            if !is_valid_local_addr(&local_addr) {
+    let backend_addr = match raw.backend_address {
+        Some(backend_addr) => {
+            if !is_valid_backend_addr(&backend_addr) {
                 messages.push(
-                    "client.services[].local-addr must be a TCP address or host:port pair"
+                    "client.services[].backend-address must be a TCP address or host:port pair"
                         .to_owned(),
                 );
                 None
             } else {
-                Some(local_addr)
+                Some(backend_addr)
             }
         }
         None => {
-            messages.push("client.services[].local-addr is required".to_owned());
+            messages.push("client.services[].backend-address is required".to_owned());
             None
         }
     };
 
-    local_addr.map(|local_addr| ClientServiceSettings { local_addr })
+    backend_addr.map(|backend_addr| ClientServiceSettings { backend_addr })
 }
 
-fn is_valid_local_addr(local_addr: &str) -> bool {
-    local_addr.parse::<std::net::SocketAddr>().is_ok()
-        || local_addr
+fn is_valid_backend_addr(backend_addr: &str) -> bool {
+    backend_addr.parse::<std::net::SocketAddr>().is_ok()
+        || backend_addr
             .rsplit_once(':')
             .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
 }
@@ -357,48 +505,139 @@ fn resolve_path(config_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
+fn collect_server_unknown_field_messages(section_value: &toml::Value) -> Vec<String> {
+    let mut messages = Vec::new();
+    let Some(server) = section_value.as_table() else {
+        return messages;
+    };
+
+    push_unknown_table_fields(
+        server,
+        &["hostname", "cert", "acme", "tunnels"],
+        &mut messages,
+    );
+
+    if let Some(cert) = server.get("cert").and_then(toml::Value::as_table) {
+        push_unknown_table_fields(cert, &["directory"], &mut messages);
+    }
+
+    if let Some(acme) = server.get("acme").and_then(toml::Value::as_table) {
+        push_unknown_table_fields(acme, &["email", "state-directory"], &mut messages);
+    }
+
+    if let Some(tunnels) = server.get("tunnels").and_then(toml::Value::as_array) {
+        for tunnel in tunnels {
+            if let Some(tunnel) = tunnel.as_table() {
+                push_unknown_table_fields(
+                    tunnel,
+                    &["public-hostnames", "client-identity"],
+                    &mut messages,
+                );
+            }
+        }
+    }
+
+    messages
+}
+
+fn collect_client_unknown_field_messages(section_value: &toml::Value) -> Vec<String> {
+    let mut messages = Vec::new();
+    let Some(client) = section_value.as_table() else {
+        return messages;
+    };
+
+    push_unknown_table_fields(
+        client,
+        &[
+            "server-hostname",
+            "server-ca-file",
+            "identity-directory",
+            "reconnect-interval",
+            "services",
+        ],
+        &mut messages,
+    );
+
+    if let Some(services) = client.get("services").and_then(toml::Value::as_array) {
+        for service in services {
+            if let Some(service) = service.as_table() {
+                push_unknown_table_fields(
+                    service,
+                    &["public-hostnames", "backend-address"],
+                    &mut messages,
+                );
+            }
+        }
+    }
+
+    messages
+}
+
+fn push_unknown_table_fields(
+    table: &toml::Table,
+    known_fields: &[&str],
+    messages: &mut Vec<String>,
+) {
+    for field in table.keys() {
+        if !known_fields.contains(&field.as_str()) {
+            messages.push(format!("unknown field `{field}`"));
+        }
+    }
+}
+
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct RawServerConfig {
     hostname: Option<String>,
-    cert_file: Option<PathBuf>,
-    key_file: Option<PathBuf>,
-    acme: Option<toml::Table>,
+    cert: Option<RawServerCertConfig>,
+    acme: Option<RawServerAcmeConfig>,
     #[serde(default)]
     tunnels: Vec<RawServerTunnelConfig>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-struct RawServerTunnelConfig {
-    hostnames: Option<Vec<String>>,
-    client_public_key_fingerprint: Option<String>,
+#[serde(rename_all = "kebab-case")]
+struct RawServerCertConfig {
+    directory: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
+struct RawServerAcmeConfig {
+    email: Option<String>,
+    state_directory: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawServerTunnelConfig {
+    public_hostnames: Option<Vec<String>>,
+    client_identity: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
 struct RawClientConfig {
     server_hostname: Option<String>,
     server_ca_file: Option<PathBuf>,
-    cert_file: Option<PathBuf>,
-    key_file: Option<PathBuf>,
-    retry_interval: Option<u64>,
+    identity_directory: Option<PathBuf>,
+    reconnect_interval: Option<u64>,
     #[serde(default)]
     services: Vec<RawClientServiceConfig>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 struct RawClientServiceConfig {
-    hostnames: Option<Vec<String>>,
-    local_addr: Option<String>,
+    public_hostnames: Option<Vec<String>>,
+    backend_address: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::{is_valid_local_addr, resolve_path};
+    use super::{is_valid_backend_addr, resolve_path};
 
     #[test]
     fn resolves_relative_paths_against_the_config_directory() {
@@ -413,8 +652,8 @@ mod tests {
 
     #[test]
     fn accepts_host_port_local_backend_pairs() {
-        assert!(is_valid_local_addr("caddy.local:443"));
-        assert!(is_valid_local_addr("127.0.0.1:443"));
-        assert!(!is_valid_local_addr("caddy.local"));
+        assert!(is_valid_backend_addr("caddy.local:443"));
+        assert!(is_valid_backend_addr("127.0.0.1:443"));
+        assert!(!is_valid_backend_addr("caddy.local"));
     }
 }

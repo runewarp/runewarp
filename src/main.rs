@@ -9,13 +9,14 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use runewarp::{
-    CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS, PreparedClient, PreparedServer,
-    generate_client_identity, load_client_settings, load_server_settings,
+    CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
+    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, PreparedClient, PreparedServer,
+    generate_client_identity, initialize_manual_server_certificate, load_client_settings,
+    load_server_settings, renew_client_identity_certificate, renew_manual_server_certificate,
+    rotate_client_identity, rotate_manual_server_certificate_authority,
 };
+use time::OffsetDateTime;
 
-const CLIENT_KEY_FILENAME: &str = "client.key";
-const CLIENT_CERT_FILENAME: &str = "client.crt";
-const CLIENT_FINGERPRINT_FILENAME: &str = "client-fingerprint.txt";
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 
 #[tokio::main]
@@ -37,24 +38,8 @@ async fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
     };
 
     match command.as_str() {
-        "keygen" => {
-            let out_dir = parse_keygen_out_dir(args)?;
-            write_keygen_artifacts(&out_dir)
-        }
-        "server" => {
-            let config_path = parse_config_path(args)?;
-            let settings = load_server_settings(&config_path)?;
-            PreparedServer::bind(&settings, wildcard(443), wildcard(443))
-                .await?
-                .run()
-                .await?;
-            Ok(())
-        }
-        "client" => {
-            let config_path = parse_config_path(args)?;
-            let settings = load_client_settings(&config_path)?;
-            run_client_command(&settings, wildcard(0)).await
-        }
+        "server" => run_server_command_from_args(args).await,
+        "client" => run_client_command_from_args(args).await,
         _ => {
             print_available_commands(Some(&command));
             Ok(())
@@ -66,7 +51,7 @@ fn print_available_commands(unrecognized: Option<&str>) {
     if let Some(unrecognized) = unrecognized {
         println!("unrecognized command: {unrecognized}");
     }
-    println!("Available commands: server, client, keygen");
+    println!("Available commands: server, client");
 }
 
 async fn run_client_command(
@@ -74,8 +59,9 @@ async fn run_client_command(
     local_bind_addr: SocketAddr,
 ) -> Result<(), Box<dyn Error>> {
     loop {
+        ensure_client_identity_fresh(&settings.identity_directory)?;
         let client = retry_with_immediate_retry(
-            settings.retry_interval,
+            settings.reconnect_interval,
             should_retry_client_connect_error,
             || async {
                 let client = PreparedClient::connect(settings, local_bind_addr).await?;
@@ -98,6 +84,118 @@ async fn run_client_command(
         }
 
         return Ok(());
+    }
+}
+
+fn ensure_client_identity_fresh(
+    directory: &Path,
+) -> Result<(), runewarp::ClientIdentityMaterialError> {
+    match runewarp::inspect_client_certificate_renewal(directory, OffsetDateTime::now_utc())? {
+        runewarp::ClientCertificateRenewalDecision::NotDue { .. } => Ok(()),
+        runewarp::ClientCertificateRenewalDecision::Due { .. }
+        | runewarp::ClientCertificateRenewalDecision::Expired { .. } => {
+            runewarp::renew_client_identity_certificate(directory)?;
+            Ok(())
+        }
+    }
+}
+
+async fn run_server_command_from_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let Some(argument) = args.next() else {
+        let settings = load_server_settings(Path::new(DEFAULT_CONFIG_PATH))?;
+        PreparedServer::bind(&settings, wildcard(443), wildcard(443))
+            .await?
+            .run()
+            .await?;
+        return Ok(());
+    };
+
+    if argument == "cert" {
+        return run_server_cert_command(args);
+    }
+
+    let config_path = parse_config_path(std::iter::once(argument).chain(args))?;
+    let settings = load_server_settings(&config_path)?;
+    PreparedServer::bind(&settings, wildcard(443), wildcard(443))
+        .await?
+        .run()
+        .await?;
+    Ok(())
+}
+
+fn run_server_cert_command(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    let Some(command) = args.next() else {
+        return Err("missing server cert command".into());
+    };
+
+    match command.as_str() {
+        "init" => {
+            let (directory, hostname) = parse_directory_and_hostname_args(args)?;
+            initialize_manual_server_certificate(&directory, &hostname)?;
+            Ok(())
+        }
+        "renew" => {
+            let directory = parse_directory_arg(args)?;
+            renew_manual_server_certificate(&directory)?;
+            Ok(())
+        }
+        "rotate-ca" => {
+            let (directory, hostname) = parse_directory_and_hostname_args(args)?;
+            rotate_manual_server_certificate_authority(&directory, &hostname)?;
+            Ok(())
+        }
+        _ => Err(format!("unrecognized server cert command: {command}").into()),
+    }
+}
+
+async fn run_client_command_from_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let Some(argument) = args.next() else {
+        let settings = load_client_settings(Path::new(DEFAULT_CONFIG_PATH))?;
+        return run_client_command(&settings, wildcard(0)).await;
+    };
+
+    if argument == "identity" {
+        return run_client_identity_command(args);
+    }
+
+    let config_path = parse_config_path(std::iter::once(argument).chain(args))?;
+    let settings = load_client_settings(&config_path)?;
+    run_client_command(&settings, wildcard(0)).await
+}
+
+fn run_client_identity_command(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn Error>> {
+    let Some(command) = args.next() else {
+        return Err("missing client identity command".into());
+    };
+
+    match command.as_str() {
+        "init" => {
+            let directory = parse_directory_arg(args)?;
+            write_client_identity_artifacts(&directory)
+        }
+        "renew" => {
+            let directory = parse_directory_arg(args)?;
+            let renewed = renew_client_identity_certificate(&directory)?;
+            println!("Client identity: {}", renewed.client_identity);
+            println!("Renewed certificate lifetime: {CLIENT_CERT_LIFETIME_DAYS} days");
+            println!("Renewal target: {CLIENT_CERT_RENEW_AFTER_DAYS} days");
+            Ok(())
+        }
+        "rotate" => {
+            let directory = parse_directory_arg(args)?;
+            let rotated = rotate_client_identity(&directory)?;
+            println!("Client identity: {}", rotated.client_identity);
+            println!("Rotated certificate lifetime: {CLIENT_CERT_LIFETIME_DAYS} days");
+            println!("Renewal target: {CLIENT_CERT_RENEW_AFTER_DAYS} days");
+            Ok(())
+        }
+        _ => Err(format!("unrecognized client identity command: {command}").into()),
     }
 }
 
@@ -138,25 +236,59 @@ where
     }
 }
 
-fn parse_keygen_out_dir(
+fn parse_directory_arg(
     mut args: impl Iterator<Item = String>,
 ) -> Result<std::path::PathBuf, Box<dyn Error>> {
-    let mut out_dir = std::path::PathBuf::from("certs");
+    let Some(argument) = args.next() else {
+        return Err("missing --directory".into());
+    };
+    if argument != "--directory" {
+        return Err(format!("unrecognized command argument: {argument}").into());
+    }
+
+    let Some(value) = args.next() else {
+        return Err("missing value for --directory".into());
+    };
+
+    if let Some(argument) = args.next() {
+        return Err(format!("unrecognized command argument: {argument}").into());
+    }
+
+    Ok(value.into())
+}
+
+fn parse_directory_and_hostname_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(std::path::PathBuf, String), Box<dyn Error>> {
+    let mut directory = None;
+    let mut hostname = None;
+
     while let Some(argument) = args.next() {
         match argument.as_str() {
-            "--out-dir" => {
+            "--directory" => {
                 let Some(value) = args.next() else {
-                    return Err("missing value for --out-dir".into());
+                    return Err("missing value for --directory".into());
                 };
-                out_dir = value.into();
+                directory = Some(value.into());
             }
-            _ => {
-                return Err(format!("unrecognized keygen argument: {argument}").into());
+            "--hostname" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value for --hostname".into());
+                };
+                hostname = Some(value);
             }
+            _ => return Err(format!("unrecognized command argument: {argument}").into()),
         }
     }
 
-    Ok(out_dir)
+    let Some(directory) = directory else {
+        return Err("missing --directory".into());
+    };
+    let Some(hostname) = hostname else {
+        return Err("missing --hostname".into());
+    };
+
+    Ok((directory, hostname))
 }
 
 fn parse_config_path(
@@ -183,23 +315,22 @@ fn parse_config_path(
 fn wildcard(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
 }
-
-fn write_keygen_artifacts(out_dir: &Path) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(out_dir)?;
+fn write_client_identity_artifacts(directory: &Path) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(directory)?;
     let generated = generate_client_identity()?;
     write_new_file(
-        &out_dir.join(CLIENT_KEY_FILENAME),
+        &directory.join(CLIENT_KEY_FILENAME),
         generated.private_key_pem.as_bytes(),
     )?;
     write_new_file(
-        &out_dir.join(CLIENT_CERT_FILENAME),
+        &directory.join(CLIENT_CERT_FILENAME),
         generated.certificate_pem.as_bytes(),
     )?;
     write_new_file(
-        &out_dir.join(CLIENT_FINGERPRINT_FILENAME),
+        &directory.join(CLIENT_IDENTITY_FILENAME),
         generated.client_identity.to_string().as_bytes(),
     )?;
-    println!("Client identity fingerprint: {}", generated.client_identity);
+    println!("Client identity: {}", generated.client_identity);
     println!("Initial certificate lifetime: {CLIENT_CERT_LIFETIME_DAYS} days");
     println!("Renewal target: {CLIENT_CERT_RENEW_AFTER_DAYS} days");
     Ok(())
@@ -213,10 +344,21 @@ fn write_new_file(path: &Path, contents: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use super::retry_with_immediate_retry;
+    use rcgen::{CertificateParams, KeyPair, PublicKeyData};
+    use tempfile::tempdir;
+    use time::{Duration as TimeDuration, OffsetDateTime};
+
+    use runewarp::{
+        CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_IDENTITY_FILENAME,
+        CLIENT_KEY_FILENAME, ClientIdentity,
+    };
+
+    use super::{ensure_client_identity_fresh, retry_with_immediate_retry};
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum TestError {
@@ -286,5 +428,87 @@ mod tests {
 
         assert_eq!(result, Err(TestError::Permanent));
         assert!(sleeps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ensure_client_identity_fresh_renews_due_certificates_before_connecting() {
+        let tempdir = tempdir().unwrap();
+        write_client_identity_with_not_before(
+            tempdir.path(),
+            OffsetDateTime::now_utc() - TimeDuration::days(61),
+        );
+
+        let original_private_key = fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap();
+        let original_certificate = fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap();
+        let original_identity =
+            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap();
+
+        ensure_client_identity_fresh(tempdir.path()).unwrap();
+
+        assert_eq!(
+            fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap(),
+            original_private_key
+        );
+        assert_ne!(
+            fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap(),
+            original_certificate
+        );
+        assert_eq!(
+            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap(),
+            original_identity
+        );
+    }
+
+    #[test]
+    fn ensure_client_identity_fresh_leaves_not_yet_due_certificates_untouched() {
+        let tempdir = tempdir().unwrap();
+        write_client_identity_with_not_before(
+            tempdir.path(),
+            OffsetDateTime::now_utc() - TimeDuration::days(60) + TimeDuration::minutes(1),
+        );
+
+        let original_private_key = fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap();
+        let original_certificate = fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap();
+        let original_identity =
+            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap();
+
+        ensure_client_identity_fresh(tempdir.path()).unwrap();
+
+        assert_eq!(
+            fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap(),
+            original_private_key
+        );
+        assert_eq!(
+            fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap(),
+            original_certificate
+        );
+        assert_eq!(
+            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap(),
+            original_identity
+        );
+    }
+
+    fn write_client_identity_with_not_before(directory: &Path, not_before: OffsetDateTime) {
+        let signing_key = KeyPair::generate().unwrap();
+        let mut certificate_params =
+            CertificateParams::new(vec!["runewarp-client".to_owned()]).unwrap();
+        certificate_params.not_before = not_before;
+        certificate_params.not_after =
+            not_before + TimeDuration::days(CLIENT_CERT_LIFETIME_DAYS as i64);
+        let certificate = certificate_params.self_signed(&signing_key).unwrap();
+        let client_identity =
+            ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
+
+        fs::write(
+            directory.join(CLIENT_KEY_FILENAME),
+            signing_key.serialize_pem(),
+        )
+        .unwrap();
+        fs::write(directory.join(CLIENT_CERT_FILENAME), certificate.pem()).unwrap();
+        fs::write(
+            directory.join(CLIENT_IDENTITY_FILENAME),
+            client_identity.to_string(),
+        )
+        .unwrap();
     }
 }

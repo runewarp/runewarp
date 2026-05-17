@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the committed Runewarp design. The current repository includes the phase-1 `Server` and `Client` data path plus an earlier phase-2 operator surface built around `runewarp server`, `runewarp client`, and `runewarp keygen` with flat cert/key config. The agreed next operator surface replaces that with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, and tighter trust semantics. The committed phase-3 model also removes Server Catch-all and adds exact-match Server routing with one active Tunnel connection per Tunnel. Exact-match routing, ACME, renewal, and Client authentication enforcement are still not implemented.
+This document describes the committed Runewarp design. The current repository now ships the corrected phase-2 operator/runtime/authentication surface around `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, exclusive manual-CA trust, Client authentication, same-key Client certificate renewal before the initial connect and reconnect attempts, and ACME for `server.hostname`. The committed phase-3 model still removes Server Catch-all and adds exact-match Server routing with one active Tunnel connection per Tunnel; those routing changes are not implemented yet.
 
 ## Roles
 
@@ -69,7 +69,7 @@ Runewarp adds no framing header to public traffic. The forwarded byte stream beg
 - intra-side hostname uniqueness is enforced at boot
 - cross-side hostname coverage is **not** validated at runtime; drift under Hostname mirroring is an operator responsibility
 
-The current code authenticates only the Server side of the Tunnel connection, still uses additive extra CA material on the Client, and still exposes the older flat-key operator surface. Client authentication, the tightened trust model, renewal, and ACME are part of the committed design but have not landed in the runtime yet.
+The current code authenticates both sides of the Tunnel connection, uses exclusive configured `server-ca-file` trust on the Client, exposes the corrected operator surface, and renews same-key Client certificates before the initial connect and reconnect attempts. Phase-3 exact-match Server authorization and per-Tunnel connection isolation have not landed yet.
 
 ## Product boundaries
 
@@ -80,7 +80,7 @@ The current code authenticates only the Server side of the Tunnel connection, st
 
 ## Current implementation note
 
-Each Client instance establishes one Tunnel connection. The committed phase-3 model keeps one active connection per Tunnel and one Client instance per Tunnel. The current code still keeps only one active Client instance at a time and still exposes a legacy Server Catch-all shape, so those phase-3 changes are intentionally documented ahead of implementation.
+Each Client instance establishes one Tunnel connection. The committed phase-3 model keeps one active connection per Tunnel and one Client instance per Tunnel. The current code still keeps only one active Client instance at a time and still uses the phase-2 Server Catch-all shape, so those phase-3 changes are intentionally documented ahead of implementation.
 
 ## Future work
 

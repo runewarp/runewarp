@@ -1,6 +1,6 @@
 # Protocol
 
-This document describes the committed Runewarp wire behavior. The current code implements only the phase-1 legacy Catch-all TCP-to-QUIC-to-TCP data path with one active Client instance and Server-authenticated Tunnel connections. The agreed next phase-2 operator surface renames `retry-interval` to `reconnect-interval` and tightens Client trust of manual Server CAs. The committed phase-3 model also removes Server Catch-all, routes by exact Server-authorized Public hostname, and keeps one active Tunnel connection per Tunnel, but those changes are not implemented yet.
+This document describes the committed Runewarp wire behavior. The current code now implements the corrected phase-2 TCP-to-QUIC-to-TCP data path with one active Client instance, corrected runtime startup (`reconnect-interval`, `[server.cert].directory`, `[server.acme].state-directory`, and exclusive configured `server-ca-file` trust), pinned Client authentication on Tunnel connections, same-key Client certificate renewal before the initial connect and reconnect attempts, and ACME TLS-ALPN-01 for the Server hostname. The committed phase-3 model still removes Server Catch-all, routes by exact Server-authorized Public hostname, and keeps one active Tunnel connection per Tunnel, but those routing changes are not implemented yet.
 
 ## Listener model
 
@@ -10,7 +10,7 @@ This document describes the committed Runewarp wire behavior. The current code i
 | `443/tcp` | ACME for the Server hostname | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
 | `443/udp` | Client Tunnel connections | QUIC/TLS with ALPN `runewarp/1` |
 
-Current code status: the Visitor TLS path and the Server-authenticated QUIC connection are implemented. ACME and Client authentication land in later phases.
+Current code status: the Visitor TLS path, ACME challenge handling for the Server hostname, and mutual Tunnel authentication are implemented. Exact-match Server routing still lands in phase 3.
 
 ## Public TCP routing
 
@@ -39,7 +39,7 @@ Each Client instance establishes one long-lived QUIC connection to `server-hostn
 4. Validate the Server certificate for the Server hostname, using either system trust or the exclusive configured Server CA file.
 5. In the committed baseline, present the Client certificate and authenticate the pinned `client-identity` from its public key. One shared `client-identity` per Tunnel remains the default phase-2 model.
 
-Current code status: step 5 is not implemented yet, and the current Client still loads `server-ca-file` alongside the system trust store instead of replacing it.
+Current code status: steps 1-5 are implemented for the current phase-2 Catch-all runtime. Client certificate freshness is checked before the initial connect and before reconnect attempts; the runtime does not poll while a Tunnel connection stays up.
 
 Rules:
 

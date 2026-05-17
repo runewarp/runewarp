@@ -5,9 +5,8 @@ Runewarp is being built as a self-hosted TLS passthrough tunnel. The core docs d
 ## Current state
 
 - the phase-1 data path is implemented as a library-first `Server` and `Client` runtime
-- the current phase-2 legacy Catch-all operator surface is implemented with `runewarp keygen`, flat cert/key config, and additive `server-ca-file`
-- the agreed next phase-2 surface replaces that with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, and tighter trust semantics
-- the current implementation still uses a legacy Server Catch-all Tunnel, a Client Catch-all Service, and one active Client instance with one Tunnel connection
+- the corrected phase-2 operator/runtime/authentication surface is implemented with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, exclusive `server-ca-file`, Client authentication, ACME, and same-key renewal before initial connect and reconnect attempts
+- the current implementation still uses the phase-2 Server Catch-all Tunnel, a Client Catch-all Service, and one active Client instance with one Tunnel connection
 - the committed phase-3 model removes Server Catch-all: every Server Tunnel must list explicit `public-hostnames`, while the Client either uses explicit `public-hostnames` too or one Catch-all Service
 
 ## Phase 1 - Library data path
@@ -29,7 +28,7 @@ Scope:
 
 Goal: make the single-Tunnel design usable by operators.
 
-Status: config loading, `runewarp server`, `runewarp client`, and the older `runewarp keygen` surface are implemented for the Catch-all manual-TLS path. The corrected phase-2 follow-up still needs the role-first `server cert` / `client identity` operator surface, directory-based material, tighter Client trust semantics, Client-identity enforcement, certificate renewal, and ACME.
+Status: implemented for the phase-2 single-Tunnel Catch-all runtime. Phase-3 exact-match routing, multiple Tunnels / Client instances, and per-role log controls remain later work.
 
 Scope:
 

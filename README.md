@@ -13,36 +13,36 @@ Runewarp is a self-hostable tunnel for TLS passthrough. A public Runewarp Server
 
 ## Current status
 
-The repository now ships the phase-1 data path plus the first phase-2 operator surface.
+The repository now ships the phase-1 data path plus the phase-2 Catch-all operator surface.
 
 Today that means:
 
 - public TCP passthrough works end to end
-- `runewarp keygen` currently generates a Client private key, an initial self-signed Client certificate, and the pinned Client-identity fingerprint
-- `runewarp server` and `runewarp client` load `./config.toml` by default and boot the Catch-all single-Tunnel design with the older flat cert/key config surface
-- the agreed next operator surface replaces `runewarp keygen` with `runewarp client identity ...`, adds `runewarp server cert ...`, moves certificate material to directory-based config, and tightens Client trust of manual Server CAs
+- `runewarp client identity init --directory ...` currently generates a Client private key, an initial self-signed Client certificate, and `client-identity.txt`
+- `runewarp server` and `runewarp client` still load `./config.toml` by default and boot the Catch-all single-Tunnel design using the corrected runtime config names plus either `[server.cert].directory` or `[server.acme]`
+- ACME TLS-ALPN-01 now provisions and refreshes the Server hostname certificate from `server.acme.state-directory`
+- Client certificate freshness is checked before the initial Tunnel connection and before reconnect attempts, without background renewal polling
 - each Client instance connects to the Server over QUIC using one Tunnel connection
 - the current implementation only keeps one Client instance active at a time
-- exact-match routing, ACME, Client certificate renewal, pinned Client-identity enforcement, and the corrected operator surface still land in later phase-2 work
-
-The current build is still not ready for public deployment without Client authentication hardening.
+- exact-match routing and later multi-Tunnel operator work still land in later phases
 
 ## Getting started
 
 ```bash
 cargo build --release
 cargo test
-./target/release/runewarp keygen
+./target/release/runewarp client identity init --directory ./client-identity
 ./target/release/runewarp server --config ./config.toml
 ./target/release/runewarp client --config ./config.toml
 ```
 
-`runewarp server` and `runewarp client` default to `./config.toml` when `--config` is omitted. The current binary still uses `runewarp keygen` with `--out-dir`, but the intended next operator surface replaces it with `runewarp client identity init --directory ...`.
+`runewarp server` and `runewarp client` default to `./config.toml` when `--config` is omitted. Client identity provisioning uses `runewarp client identity init --directory ...`, and Server operators can choose either `[server.cert]` manual certificates or `[server.acme]` for the Server hostname.
 
 ## Design boundaries
 
 - TLS passthrough is the product boundary; Runewarp does not terminate customer TLS on public hostnames
-- The Server is the routing authority for Public hostnames and should only route hostnames explicitly authorized on a Tunnel
+- The Server is the routing authority for Public hostnames
+- The current runtime still uses the phase-2 Catch-all single-Tunnel shape; phase-3 makes Server-side Public hostname authorization explicit with `server.tunnels[].public-hostnames`
 - Client-side routing can use Hostname mirroring or one Catch-all Service, depending on whether the Client also needs per-host local routing
 - Plain HTTP backends and edge TLS termination are out of scope
 

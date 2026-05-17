@@ -6,16 +6,22 @@ use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use tokio::net::lookup_host;
 
-use crate::tls_material::{TlsMaterialError, load_certificate_chain, load_private_key};
+use crate::acme::{ManagedAcmeState, build_acme_state, run_acme_state};
+use crate::tls_material::{
+    SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, TlsMaterialError, load_certificate_chain,
+    load_private_key,
+};
 use crate::{
-    Client, ClientConfig, ClientConnectError, ClientIdentity, ClientSettings, QuicConfigError,
-    Server, ServerConfig, ServerSettings, make_client_quic_config_with_client_auth,
-    make_server_quic_config,
+    CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig, ClientConnectError,
+    ClientIdentity, ClientSettings, QuicConfigError, Server, ServerCertificateSettings,
+    ServerConfig, ServerSettings, make_client_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
 };
 
 pub struct PreparedServer {
     server: Server,
     trusted_client_identities: Vec<ClientIdentity>,
+    acme_state: Option<ManagedAcmeState>,
 }
 
 impl PreparedServer {
@@ -24,14 +30,43 @@ impl PreparedServer {
         public_bind_addr: SocketAddr,
         tunnel_bind_addr: SocketAddr,
     ) -> Result<Self, ServerStartupError> {
-        let cert_chain = load_certificate_chain(&settings.cert_file)?;
-        let private_key = load_private_key(&settings.key_file)?;
-        let quic_server_config = make_server_quic_config(cert_chain, private_key)
-            .map_err(ServerStartupError::QuicConfig)?;
+        let trusted_client_identities = settings
+            .tunnels
+            .iter()
+            .map(|tunnel| tunnel.client_identity.clone())
+            .collect::<Vec<_>>();
+        let (quic_server_config, acme_state) = match &settings.certificate {
+            ServerCertificateSettings::Manual { directory } => {
+                let cert_chain = load_certificate_chain(&directory.join(SERVER_CERT_FILENAME))?;
+                let private_key = load_private_key(&directory.join(SERVER_KEY_FILENAME))?;
+                let quic_server_config = make_server_quic_config_with_client_auth(
+                    cert_chain,
+                    private_key,
+                    &trusted_client_identities,
+                )
+                .map_err(ServerStartupError::QuicConfig)?;
+                (quic_server_config, None)
+            }
+            ServerCertificateSettings::Acme {
+                email,
+                state_directory,
+            } => {
+                let acme_state = build_acme_state(&settings.hostname, email, state_directory);
+                let quic_server_config = make_server_quic_config_with_client_auth_resolver(
+                    acme_state.resolver(),
+                    &trusted_client_identities,
+                )
+                .map_err(ServerStartupError::QuicConfig)?;
+                (quic_server_config, Some(acme_state))
+            }
+        };
         let server = Server::bind(ServerConfig {
             public_bind_addr,
             tunnel_bind_addr,
             server_hostname: settings.hostname.clone(),
+            public_tls_config: acme_state
+                .as_ref()
+                .map(ManagedAcmeState::challenge_rustls_config),
             quic_server_config,
         })
         .await
@@ -39,11 +74,8 @@ impl PreparedServer {
 
         Ok(Self {
             server,
-            trusted_client_identities: settings
-                .tunnels
-                .iter()
-                .map(|tunnel| tunnel.client_identity.clone())
-                .collect(),
+            trusted_client_identities,
+            acme_state,
         })
     }
 
@@ -60,7 +92,20 @@ impl PreparedServer {
     }
 
     pub async fn run(self) -> io::Result<()> {
-        self.server.run().await
+        let Self {
+            server, acme_state, ..
+        } = self;
+        if let Some(acme_state) = acme_state {
+            tokio::select! {
+                server_result = server.run() => server_result,
+                acme_result = run_acme_state(acme_state) => match acme_result {
+                    Ok(never) => match never {},
+                    Err(error) => Err(error),
+                },
+            }
+        } else {
+            server.run().await
+        }
     }
 }
 
@@ -96,9 +141,10 @@ impl PreparedClient {
             ));
         };
         let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
-        let cert_chain = load_certificate_chain(&settings.cert_file)
-            .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
-        let private_key = load_private_key(&settings.key_file)
+        let cert_chain =
+            load_certificate_chain(&settings.identity_directory.join(CLIENT_CERT_FILENAME))
+                .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
+        let private_key = load_private_key(&settings.identity_directory.join(CLIENT_KEY_FILENAME))
             .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
         let quic_client_config =
             make_client_quic_config_with_client_auth(loaded_roots.roots, cert_chain, private_key)
@@ -107,7 +153,7 @@ impl PreparedClient {
             local_bind_addr,
             server_addr,
             server_name: settings.server_hostname.clone(),
-            backend_addr: service.local_addr.clone(),
+            backend_addr: service.backend_addr.clone(),
             quic_client_config,
         })
         .await
@@ -148,6 +194,7 @@ pub enum ServerStartupError {
         path: std::path::PathBuf,
         source: io::Error,
     },
+    InvalidTlsMaterial(String),
     QuicConfig(QuicConfigError),
     Bind(io::Error),
 }
@@ -171,6 +218,7 @@ impl fmt::Display for ServerStartupError {
                     path.display()
                 )
             }
+            Self::InvalidTlsMaterial(message) => write!(formatter, "{message}"),
             Self::QuicConfig(source) => write!(formatter, "{source}"),
             Self::Bind(source) => write!(formatter, "failed to bind server listeners: {source}"),
         }
@@ -184,7 +232,9 @@ impl std::error::Error for ServerStartupError {
             Self::ParsePem { source, .. } => Some(source),
             Self::QuicConfig(source) => Some(source),
             Self::Bind(source) => Some(source),
-            Self::MissingCertificate { .. } | Self::MissingPrivateKey { .. } => None,
+            Self::MissingCertificate { .. }
+            | Self::MissingPrivateKey { .. }
+            | Self::InvalidTlsMaterial(_) => None,
         }
     }
 }
@@ -196,6 +246,14 @@ impl From<TlsMaterialError> for ServerStartupError {
             TlsMaterialError::MissingCertificate { path } => Self::MissingCertificate { path },
             TlsMaterialError::MissingPrivateKey { path } => Self::MissingPrivateKey { path },
             TlsMaterialError::ParsePem { path, source } => Self::ParsePem { path, source },
+            TlsMaterialError::ParseX509 { .. }
+            | TlsMaterialError::AddRootCertificate { .. }
+            | TlsMaterialError::BuildServerVerifier(_)
+            | TlsMaterialError::InvalidServerName { .. }
+            | TlsMaterialError::InvalidCertificateAuthority { .. }
+            | TlsMaterialError::InvalidServerCertificate { .. } => {
+                Self::InvalidTlsMaterial(error.to_string())
+            }
             TlsMaterialError::InvalidConfiguration(source) => Self::QuicConfig(source),
         }
     }
@@ -289,14 +347,7 @@ fn build_root_store(
 ) -> Result<LoadedRootStore, ClientStartupError> {
     let mut roots = RootCertStore::empty();
     let mut loaded_root_count = 0;
-
-    for cert in native_roots.certs {
-        roots
-            .add(cert)
-            .map_err(ClientStartupError::AddRootCertificate)?;
-        loaded_root_count += 1;
-    }
-    if let Some(server_ca_file) = server_ca_file {
+    let native_root_error_count = if let Some(server_ca_file) = server_ca_file {
         for cert in load_certificate_chain(server_ca_file)
             .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?
         {
@@ -305,16 +356,25 @@ fn build_root_store(
                 .map_err(ClientStartupError::AddRootCertificate)?;
             loaded_root_count += 1;
         }
-    }
+        0
+    } else {
+        for cert in native_roots.certs {
+            roots
+                .add(cert)
+                .map_err(ClientStartupError::AddRootCertificate)?;
+            loaded_root_count += 1;
+        }
+        native_roots.error_count
+    };
     if loaded_root_count == 0 {
         return Err(ClientStartupError::NativeRoots {
-            errors: native_roots.error_count,
+            errors: native_root_error_count,
         });
     }
 
     Ok(LoadedRootStore {
         roots,
-        native_root_error_count: native_roots.error_count,
+        native_root_error_count,
         #[cfg(test)]
         loaded_root_count,
     })
@@ -325,11 +385,12 @@ mod tests {
     use std::fs;
 
     use rcgen::generate_simple_self_signed;
+    use rustls::pki_types::CertificateDer;
 
     use super::{ClientStartupError, NativeRootsLoad, build_root_store};
 
     #[test]
-    fn extra_ca_material_still_loads_when_native_trust_loading_is_partially_degraded() {
+    fn configured_server_ca_file_still_loads_without_native_roots() {
         let tempdir = tempfile::tempdir().unwrap();
         let extra_ca = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
         fs::write(tempdir.path().join("server-ca.pem"), extra_ca.cert.pem()).unwrap();
@@ -343,7 +404,28 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(loaded.native_root_error_count, 2);
+        assert_eq!(loaded.native_root_error_count, 0);
+        assert_eq!(loaded.loaded_root_count, 1);
+    }
+
+    #[test]
+    fn configured_server_ca_file_replaces_native_roots() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let native_ca =
+            generate_simple_self_signed(vec!["native.example.test".to_owned()]).unwrap();
+        let extra_ca = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+        fs::write(tempdir.path().join("server-ca.pem"), extra_ca.cert.pem()).unwrap();
+
+        let loaded = build_root_store(
+            NativeRootsLoad {
+                certs: vec![CertificateDer::from(native_ca.cert)],
+                error_count: 1,
+            },
+            Some(tempdir.path().join("server-ca.pem").as_path()),
+        )
+        .unwrap();
+
+        assert_eq!(loaded.native_root_error_count, 0);
         assert_eq!(loaded.loaded_root_count, 1);
     }
 

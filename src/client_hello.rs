@@ -12,6 +12,7 @@ pub const CLIENT_HELLO_BUFFER_LIMIT: usize = 16 * 1024;
 pub struct ParsedClientHello {
     buffered_bytes: Vec<u8>,
     server_name: String,
+    alpn_protocols: Vec<Vec<u8>>,
 }
 
 impl ParsedClientHello {
@@ -25,6 +26,12 @@ impl ParsedClientHello {
 
     pub fn server_name(&self) -> &str {
         &self.server_name
+    }
+
+    pub fn offers_alpn_protocol(&self, protocol: &[u8]) -> bool {
+        self.alpn_protocols
+            .iter()
+            .any(|offered| offered.as_slice() == protocol)
     }
 
     pub fn into_parts(self) -> (String, Vec<u8>) {
@@ -104,10 +111,18 @@ where
                     .server_name()
                     .ok_or(ClientHelloError::MissingSni)?
                     .to_owned();
+                let alpn_protocols = accepted
+                    .client_hello()
+                    .alpn()
+                    .into_iter()
+                    .flatten()
+                    .map(|protocol| protocol.to_vec())
+                    .collect();
 
                 return Ok(ParsedClientHello {
                     buffered_bytes,
                     server_name: normalize_public_hostname(&server_name),
+                    alpn_protocols,
                 });
             }
             Ok(None) => {}

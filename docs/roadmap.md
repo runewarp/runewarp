@@ -63,24 +63,43 @@ Scope:
 - fail-closed routing when no authorized or connected Tunnel or Service is available
 - per-role `logs` booleans controlling human-readable routing diagnostics
 
-## Phase 4 - Packaging and release engineering
+## Phase 4 - Preview packaging and automation
 
-Goal: make Runewarp easy to evaluate, ship, and run as an operator-focused technical preview.
+Goal: make Runewarp easy to evaluate and package as an operator-focused technical preview without publishing it yet.
+
+Scope:
+
+- one canonical runnable operator example under `examples/`, centered on One-sided Catch-all with Caddy
+- reserved `.test` hostnames in that example, with two explicit Public hostnames and distinct backend responses
+- local-first example execution, where `docker compose` builds the shared Runewarp image from the repo
+- explicit bootstrap via one-shot Compose init services that run `runewarp server cert init` and `runewarp client identity init`
+- example-local bind-mounted directories for generated Server and Client material
+- a manual/private-CA Server path for the runnable example and its CI coverage
+- a production-oriented shared Docker image for the single `runewarp` binary, usable for both `server` and `client`
+- minimal container images with non-root execution as a requirement and distroless as the preferred shape when practical
+- Linux-only always-on GitHub Actions CI for Clippy, fmt, docs, tests, and a real `x86_64` runnable-example smoke test
+- smoke-test coverage that exercises the shared container image path and trusts Caddy's internal local CA instead of using insecure TLS skips
+- manual release-build workflows that produce internal workflow artifacts only
+- `cargo publish --dry-run` or equivalent crate release-path validation in the manual release-build workflow
+- release binaries for GNU/glibc Linux `x86_64` and GNU/glibc Linux `aarch64`
+- per-target release archives plus checksums, with internal artifact names derived from the crate version and commit identity
+- publishable OCI image artifacts in the manual release-build workflow for Linux `x86_64` and `aarch64`
+- Docker image build automation for the later public release path
+
+## Phase 5 - Docs and preview release
+
+Goal: turn the preview packaging work into a documented public technical preview release.
 
 Scope:
 
 - customer/operator-facing documentation uplift
 - a rewritten README focused on operator outcomes and product boundaries instead of project status
 - `docs/usage.md`
-- common usage examples, including Docker Compose and Caddy
 - changelog
-- Clippy, fmt, docs, tests, and release-path checks in CI
 - crates.io release
-- release binaries
-- Docker Hub and GHCR images
-- minimal container images, ideally distroless and non-root where practical
+- Docker Hub and GHCR publication of the artifacts prepared in phase 4
 
-## Phase 5 - Multi-instance tunnels and availability
+## Phase 6 - Multi-instance tunnels and availability
 
 Goal: scale one routed hostname set across multiple Client instances of the same Tunnel.
 
@@ -93,7 +112,7 @@ Scope:
 - clearer handling for misconfigured replicas
 
 
-## Phase 6 - Protocol growth
+## Phase 7 - Protocol growth
 
 Goal: expand the data plane without changing the product boundary.
 
@@ -105,7 +124,7 @@ Scope:
 - structured JSON logging
 - IPv6 support
 
-## Phase 7 - Operations and safety
+## Phase 8 - Operations and safety
 
 Goal: support larger and more dynamic deployments.
 
@@ -118,7 +137,7 @@ Scope:
 - lint and doctor tooling for Hostname mirroring drift
 - eventual per-hostname public port support
 
-## Phase 8 - Advanced network features
+## Phase 9 - Advanced network features
 
 Goal: handle more demanding edge and privacy requirements.
 

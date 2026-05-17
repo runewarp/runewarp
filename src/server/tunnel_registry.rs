@@ -20,6 +20,35 @@ pub(crate) struct TunnelRegistry {
 }
 
 impl TunnelRegistry {
+    #[cfg(test)]
+    pub(crate) fn single(public_hostnames: Vec<String>) -> io::Result<Self> {
+        let mut public_hostname_to_tunnel = HashMap::new();
+        let mut seen_public_hostnames = HashSet::new();
+        for hostname in public_hostnames {
+            let normalized_hostname = validate_public_hostname(&hostname).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "authorized_public_hostnames contains invalid hostname `{hostname}`: {error}"
+                    ),
+                )
+            })?;
+            if !seen_public_hostnames.insert(normalized_hostname.clone()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "authorized_public_hostnames must be unique after normalization: {normalized_hostname}"
+                    ),
+                ));
+            }
+            public_hostname_to_tunnel.insert(normalized_hostname, 0);
+        }
+        Ok(Self {
+            client_identity_to_tunnel: Arc::new(HashMap::new()),
+            public_hostname_to_tunnel: Arc::new(public_hostname_to_tunnel),
+            tunnel_slots: Arc::new(vec![ActiveClientSlot::new()]),
+        })
+    }
     pub(crate) fn configured(
         server_hostname: &str,
         tunnels: &[ServerTunnelSettings],

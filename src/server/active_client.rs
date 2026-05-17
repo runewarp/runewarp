@@ -34,13 +34,25 @@ impl ActiveClientSlot {
 
     pub(crate) async fn register(&self, connection: Connection) {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        let previous = {
+        let (installed, previous) = {
             let mut active_client = self.active_client.write().await;
-            active_client.replace(ActiveClientInstance {
-                generation,
-                connection: connection.clone(),
-            })
+            let current_generation = active_client.as_ref().map(|active| active.generation);
+            if !incoming_generation_supersedes(current_generation, generation) {
+                (false, None)
+            } else {
+                (
+                    true,
+                    active_client.replace(ActiveClientInstance {
+                        generation,
+                        connection: connection.clone(),
+                    }),
+                )
+            }
         };
+        if !installed {
+            connection.close(0_u32.into(), b"replaced");
+            return;
+        }
 
         if let Some(previous) = previous {
             previous.connection.close(0_u32.into(), b"replaced");
@@ -57,5 +69,29 @@ impl ActiveClientSlot {
                 *active_client_guard = None;
             }
         });
+    }
+}
+
+fn incoming_generation_supersedes(
+    current_generation: Option<u64>,
+    incoming_generation: u64,
+) -> bool {
+    current_generation.is_none_or(|current_generation| incoming_generation > current_generation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::incoming_generation_supersedes;
+
+    #[test]
+    fn newer_generations_supersede_older_active_connections() {
+        assert!(incoming_generation_supersedes(None, 1));
+        assert!(incoming_generation_supersedes(Some(1), 2));
+    }
+
+    #[test]
+    fn stale_generations_do_not_replace_newer_active_connections() {
+        assert!(!incoming_generation_supersedes(Some(2), 1));
+        assert!(!incoming_generation_supersedes(Some(2), 2));
     }
 }

@@ -298,6 +298,39 @@ client-identity = "111122223333444455556666777788889999aaaabbbbccccddddeeeeffff0
 }
 
 #[test]
+fn server_settings_reject_empty_public_hostname_lists() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = []
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("server.tunnels[].public-hostnames must not be empty")
+    );
+}
+
+#[test]
 fn server_settings_reject_duplicate_client_identities() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(

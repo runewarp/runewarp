@@ -28,6 +28,7 @@ x509-parser = "0.18.1"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
+proptest = "1.6.0"
 tempfile = "3.27.0"
 
 [[bin]]

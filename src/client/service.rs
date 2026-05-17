@@ -28,12 +28,12 @@ mod tests {
     fn catch_all_service_matches_when_it_is_the_only_service() {
         let services = vec![ClientServiceSettings {
             public_hostnames: None,
-            backend_addr: "127.0.0.1:443".to_owned(),
+            backend_address: "127.0.0.1:443".to_owned(),
         }];
 
         let service = select_service(&services, "app.example.test").unwrap();
 
-        assert_eq!(service.backend_addr, "127.0.0.1:443");
+        assert_eq!(service.backend_address, "127.0.0.1:443");
     }
 
     #[test]
@@ -41,16 +41,16 @@ mod tests {
         let services = vec![
             ClientServiceSettings {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
-                backend_addr: "127.0.0.1:443".to_owned(),
+                backend_address: "127.0.0.1:443".to_owned(),
             },
             ClientServiceSettings {
                 public_hostnames: Some(vec!["api.example.test".to_owned()]),
-                backend_addr: "127.0.0.1:8443".to_owned(),
+                backend_address: "127.0.0.1:8443".to_owned(),
             },
         ];
 
         let service = select_service(&services, "api.example.test").unwrap();
 
-        assert_eq!(service.backend_addr, "127.0.0.1:8443");
+        assert_eq!(service.backend_address, "127.0.0.1:8443");
     }
 }

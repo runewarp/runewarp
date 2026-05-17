@@ -120,9 +120,9 @@ server-ca-file = "server-cert/server-ca.crt"
 identity-directory = "."
 
 [[client.services]]
-backend-address = "__BACKEND_ADDR__"
+backend-address = "__BACKEND_ADDRESS__"
 "#
-        .replace("__BACKEND_ADDR__", &backend.0.to_string()),
+        .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
     )
     .unwrap();
 
@@ -223,9 +223,9 @@ server-ca-file = "server-cert/server-ca.crt"
 identity-directory = "."
 
 [[client.services]]
-backend-address = "__BACKEND_ADDR__"
+backend-address = "__BACKEND_ADDRESS__"
 "#
-        .replace("__BACKEND_ADDR__", &backend.0.to_string()),
+        .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
     )
     .unwrap();
 
@@ -870,9 +870,9 @@ server-ca-file = "server-cert/server-ca.crt"
 identity-directory = "."
 
 [[client.services]]
-backend-address = "__BACKEND_ADDR__"
+backend-address = "__BACKEND_ADDRESS__"
 "#
-        .replace("__BACKEND_ADDR__", &backend.0.to_string()),
+        .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
     )
     .unwrap();
 

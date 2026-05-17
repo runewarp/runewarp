@@ -24,14 +24,20 @@ pub(crate) fn build_acme_state(
         .state()
 }
 
-pub(crate) async fn run_acme_state(mut state: ManagedAcmeState, logs: bool) -> io::Result<Infallible> {
+pub(crate) async fn run_acme_state(
+    mut state: ManagedAcmeState,
+    logs: bool,
+) -> io::Result<Infallible> {
     loop {
         match state.next().await {
             Some(Ok(_event)) => {}
             Some(Err(error)) => {
                 emit_stderr(
                     logs,
-                    &warning_line("server", &format!("ACME certificate management error: {error}")),
+                    &warning_line(
+                        "server",
+                        &format!("ACME certificate management error: {error}"),
+                    ),
                 );
             }
             None => {

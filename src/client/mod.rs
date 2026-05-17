@@ -113,8 +113,7 @@ impl Client {
         logs: bool,
         route_mode: ClientRouteMode,
     ) -> Result<Self, ClientConnectError> {
-        let mut endpoint =
-            Endpoint::client(local_bind_addr).map_err(ClientConnectError::Bind)?;
+        let mut endpoint = Endpoint::client(local_bind_addr).map_err(ClientConnectError::Bind)?;
         endpoint.set_default_client_config(quic_client_config);
 
         let connection = endpoint

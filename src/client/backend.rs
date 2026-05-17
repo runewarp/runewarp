@@ -16,21 +16,24 @@ pub(crate) async fn handle_tunnel_stream(
 ) -> io::Result<()> {
     let (backend_addr, public_hostname, buffered_bytes) =
         match resolve_backend(&services, &mut recv).await {
-        Ok(selection) => selection,
-        Err(BackendResolutionError::ReadClientHello(error)) => {
-            emit_stderr(logs, &warning_line("client", &format!("rejected stream: {error}")));
-            reject_stream(send, recv);
-            return Err(error);
-        }
-        Err(BackendResolutionError::NoMatchingService { public_hostname }) => {
-            emit_stderr(
-                logs,
-                &client_route_line(&public_hostname, "rejected (no matching service)"),
-            );
-            reject_stream(send, recv);
-            return Ok(());
-        }
-    };
+            Ok(selection) => selection,
+            Err(BackendResolutionError::ReadClientHello(error)) => {
+                emit_stderr(
+                    logs,
+                    &warning_line("client", &format!("rejected stream: {error}")),
+                );
+                reject_stream(send, recv);
+                return Err(error);
+            }
+            Err(BackendResolutionError::NoMatchingService { public_hostname }) => {
+                emit_stderr(
+                    logs,
+                    &client_route_line(&public_hostname, "rejected (no matching service)"),
+                );
+                reject_stream(send, recv);
+                return Ok(());
+            }
+        };
 
     let mut backend_stream = match TcpStream::connect(backend_addr.as_str()).await {
         Ok(stream) => stream,
@@ -83,7 +86,11 @@ async fn resolve_backend(
         return Err(BackendResolutionError::NoMatchingService { public_hostname });
     };
 
-    Ok((service.backend_addr.clone(), public_hostname, buffered_bytes))
+    Ok((
+        service.backend_addr.clone(),
+        public_hostname,
+        buffered_bytes,
+    ))
 }
 
 fn reject_stream(mut send: SendStream, mut recv: RecvStream) {

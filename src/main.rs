@@ -8,6 +8,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use runewarp::runtime_log::{emit_stderr, warning_line};
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, PreparedClient, PreparedServer,
@@ -15,7 +16,6 @@ use runewarp::{
     load_server_settings, renew_client_identity_certificate, renew_manual_server_certificate,
     rotate_client_identity, rotate_manual_server_certificate_authority,
 };
-use runewarp::runtime_log::{emit_stderr, warning_line};
 use time::OffsetDateTime;
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
@@ -88,7 +88,10 @@ async fn run_client_command(
         if let Err(error) = client.run().await {
             emit_stderr(
                 settings.logs,
-                &warning_line("client", &format!("tunnel connection lost: {error}; reconnecting")),
+                &warning_line(
+                    "client",
+                    &format!("tunnel connection lost: {error}; reconnecting"),
+                ),
             );
             continue;
         }

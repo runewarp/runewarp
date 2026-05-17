@@ -18,6 +18,7 @@ use rustls::sign::CertifiedKey;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Notify, oneshot};
 use tokio::time::{sleep, timeout};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
@@ -816,6 +817,122 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
     let _ = client_task.await;
 }
 
+#[tokio::test]
+async fn replacing_a_tunnel_connection_drops_existing_streams() {
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let (backend_one_addr, backend_one_started, backend_one_release, backend_one_task) =
+        spawn_staged_tls_backend(
+            private_key_from_der(&backend_key),
+            backend_cert.clone(),
+            *b"on",
+            *b"e!",
+        )
+        .await;
+    let backend_two = spawn_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"two!",
+    )
+    .await;
+
+    let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let server = Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
+        public_tls_config: None,
+        quic_server_config: make_server_quic_config(
+            vec![tunnel_cert.clone()],
+            private_key_from_der(&tunnel_key),
+        )
+        .unwrap(),
+    })
+    .await
+    .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_one = Client::connect(ClientConfig {
+        local_bind_addr: localhost(0),
+        server_addr: tunnel_addr,
+        server_name: "tunnel.example.test".to_owned(),
+        backend_addr: backend_one_addr.to_string(),
+        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+    })
+    .await
+    .unwrap();
+    let client_one_task = tokio::spawn(client_one.run());
+
+    let connector = TlsConnector::from(Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store_with(&backend_cert))
+            .with_no_client_auth(),
+    ));
+    let tcp_stream = TcpStream::connect(public_addr).await.unwrap();
+    let mut tls_stream = connector
+        .connect(
+            ServerName::try_from("app.example.test").unwrap(),
+            tcp_stream,
+        )
+        .await
+        .unwrap();
+    tls_stream.write_all(b"ping").await.unwrap();
+
+    timeout(Duration::from_secs(1), backend_one_started)
+        .await
+        .expect("timed out waiting for the first backend response chunk")
+        .expect("staged backend should signal once the first response chunk is sent");
+
+    let mut initial_bytes = [0_u8; 2];
+    tls_stream.read_exact(&mut initial_bytes).await.unwrap();
+    assert_eq!(&initial_bytes, b"on");
+
+    let client_two = Client::connect(ClientConfig {
+        local_bind_addr: localhost(0),
+        server_addr: tunnel_addr,
+        server_name: "tunnel.example.test".to_owned(),
+        backend_addr: backend_two.0.to_string(),
+        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+    })
+    .await
+    .unwrap();
+    let client_two_task = tokio::spawn(client_two.run());
+
+    let replacement_response =
+        wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
+            .await
+            .unwrap();
+    assert_eq!(replacement_response, *b"two!");
+
+    backend_one_release.notify_one();
+
+    let mut remaining_bytes = [0_u8; 2];
+    let read_result = timeout(
+        Duration::from_secs(1),
+        tls_stream.read_exact(&mut remaining_bytes),
+    )
+    .await
+    .expect("timed out waiting for the replaced stream to terminate");
+    assert!(
+        read_result.is_err(),
+        "replaced tunnel stream should not complete successfully"
+    );
+
+    backend_two.1.abort();
+    server_task.abort();
+    client_one_task.abort();
+    client_two_task.abort();
+    let _ = backend_one_task.await;
+    let _ = backend_two.1.await;
+    let _ = server_task.await;
+    let _ = client_one_task.await;
+    let _ = client_two_task.await;
+}
+
 fn localhost(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
@@ -916,6 +1033,46 @@ async fn spawn_tls_backend(
     });
 
     (addr, task)
+}
+
+async fn spawn_staged_tls_backend(
+    private_key: PrivateKeyDer<'static>,
+    certificate: CertificateDer<'static>,
+    first_chunk: [u8; 2],
+    second_chunk: [u8; 2],
+) -> (
+    SocketAddr,
+    oneshot::Receiver<()>,
+    Arc<Notify>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], private_key)
+            .unwrap(),
+    ));
+    let (started_tx, started_rx) = oneshot::channel();
+    let release = Arc::new(Notify::new());
+    let release_for_task = release.clone();
+
+    let task = tokio::spawn(async move {
+        let (tcp_stream, _) = listener.accept().await.unwrap();
+        let mut tls_stream = acceptor.accept(tcp_stream).await.unwrap();
+        let mut request = [0_u8; 4];
+        tls_stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"ping");
+        tls_stream.write_all(&first_chunk).await.unwrap();
+        tls_stream.flush().await.unwrap();
+        let _ = started_tx.send(());
+        release_for_task.notified().await;
+        let _ = tls_stream.write_all(&second_chunk).await;
+        let _ = tls_stream.shutdown().await;
+    });
+
+    (addr, started_rx, release, task)
 }
 
 async fn request_tls_response(

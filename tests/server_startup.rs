@@ -394,10 +394,7 @@ async fn prepared_client_rejects_streams_without_a_matching_service() {
     .unwrap();
 
     let backend = spawn_tls_backend(
-        vec![
-            "app.example.test".to_owned(),
-            "api.example.test".to_owned(),
-        ],
+        vec!["app.example.test".to_owned(), "api.example.test".to_owned()],
         *b"pong",
     )
     .await;
@@ -585,13 +582,15 @@ backend-address = "{}"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let app_client_settings = load_client_settings(&tempdir.path().join("client-app.toml")).unwrap();
+    let app_client_settings =
+        load_client_settings(&tempdir.path().join("client-app.toml")).unwrap();
     let app_client = PreparedClient::connect_to(&app_client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
     let app_client_task = tokio::spawn(app_client.run());
 
-    let api_client_settings = load_client_settings(&tempdir.path().join("client-api.toml")).unwrap();
+    let api_client_settings =
+        load_client_settings(&tempdir.path().join("client-api.toml")).unwrap();
     let api_client = PreparedClient::connect_to(&api_client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -756,15 +755,17 @@ backend-address = "{}"
             .unwrap();
     let app_client_one_task = tokio::spawn(app_client_one.run());
 
-    let api_client_settings = load_client_settings(&tempdir.path().join("client-api.toml")).unwrap();
+    let api_client_settings =
+        load_client_settings(&tempdir.path().join("client-api.toml")).unwrap();
     let api_client = PreparedClient::connect_to(&api_client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
     let api_client_task = tokio::spawn(api_client.run());
 
-    let first_app_response = request_tls_response(public_addr, &app_backend_one.1, "app.example.test")
-        .await
-        .unwrap();
+    let first_app_response =
+        request_tls_response(public_addr, &app_backend_one.1, "app.example.test")
+            .await
+            .unwrap();
     assert_eq!(first_app_response, *b"one!");
     let first_api_response = request_tls_response(public_addr, &api_backend.1, "api.example.test")
         .await

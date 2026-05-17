@@ -39,12 +39,18 @@ pub(crate) async fn handle_visitor_connection(
                 let _ = tls_stream.shutdown().await;
             }
         } else {
-            emit_stderr(logs, &server_route_line(&public_hostname, "dropped (server hostname)"));
+            emit_stderr(
+                logs,
+                &server_route_line(&public_hostname, "dropped (server hostname)"),
+            );
         }
         return Ok(());
     }
     if !tunnel_registry.contains_public_hostname(&public_hostname) {
-        emit_stderr(logs, &server_route_line(&public_hostname, "dropped (unauthorized)"));
+        emit_stderr(
+            logs,
+            &server_route_line(&public_hostname, "dropped (unauthorized)"),
+        );
         return Ok(());
     }
     let Some(active_connection) = tunnel_registry.current_connection(&public_hostname).await else {
@@ -54,12 +60,17 @@ pub(crate) async fn handle_visitor_connection(
         );
         return Ok(());
     };
-    emit_stderr(logs, &server_route_line(&public_hostname, "forwarded"));
-
     let (send, recv) = match active_connection.open_bi().await {
         Ok(stream) => stream,
-        Err(_) => return Ok(()),
+        Err(_) => {
+            emit_stderr(
+                logs,
+                &server_route_line(&public_hostname, "dropped (no active tunnel connection)"),
+            );
+            return Ok(());
+        }
     };
+    emit_stderr(logs, &server_route_line(&public_hostname, "forwarded"));
 
     proxy_tcp_over_quic(visitor_stream, buffered_bytes, send, recv).await
 }

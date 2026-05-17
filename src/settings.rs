@@ -58,6 +58,28 @@ pub struct ClientServiceSettings {
     pub backend_addr: String,
 }
 
+struct ValidatedRequiredPublicHostnames {
+    values: Vec<String>,
+    is_valid: bool,
+}
+
+struct ValidatedOptionalPublicHostnames {
+    values: Option<Vec<String>>,
+    valid_hostnames: Vec<String>,
+    is_valid: bool,
+}
+
+struct ValidatedServerTunnel {
+    settings: Option<ServerTunnelSettings>,
+    public_hostnames: Vec<String>,
+    client_identity: Option<ClientIdentity>,
+}
+
+struct ValidatedClientService {
+    settings: Option<ClientServiceSettings>,
+    public_hostnames: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum SettingsError {
     Read {
@@ -186,8 +208,9 @@ fn validate_server_settings(
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     let hostname = match raw.hostname {
-        Some(hostname) => validate_hostname_field("server.hostname", hostname, &mut messages)
-            .unwrap_or_default(),
+        Some(hostname) => {
+            validate_hostname_field("server.hostname", hostname, &mut messages).unwrap_or_default()
+        }
         None => {
             messages.push("server.hostname is required".to_owned());
             String::new()
@@ -219,13 +242,17 @@ fn validate_server_settings(
     if raw.tunnels.is_empty() {
         messages.push("at least one [[server.tunnels]] entry is required".to_owned());
     }
-    let tunnels = raw
+    let validated_tunnels = raw
         .tunnels
         .into_iter()
-        .filter_map(|tunnel| validate_server_tunnel(tunnel, &mut messages))
+        .map(|tunnel| validate_server_tunnel(tunnel, &mut messages))
         .collect::<Vec<_>>();
-    validate_unique_client_identities(&tunnels, &mut messages);
-    validate_unique_server_hostnames(&hostname, &tunnels, &mut messages);
+    validate_unique_client_identities(&validated_tunnels, &mut messages);
+    validate_unique_server_hostnames(&hostname, &validated_tunnels, &mut messages);
+    let tunnels = validated_tunnels
+        .into_iter()
+        .filter_map(|tunnel| tunnel.settings)
+        .collect::<Vec<_>>();
 
     if messages.is_empty() {
         Ok(ServerSettings {
@@ -314,13 +341,21 @@ fn validate_client_settings(
     if service_count == 0 {
         messages.push("at least one [[client.services]] entry is required".to_owned());
     }
-    let services = raw
+    let validated_services = raw
         .services
         .into_iter()
-        .filter_map(|service| validate_client_service(service, &mut messages))
+        .map(|service| validate_client_service(service, &mut messages))
         .collect::<Vec<_>>();
-    validate_client_service_shapes(service_count, omitted_service_public_hostnames, &mut messages);
-    validate_unique_client_service_hostnames(&services, &mut messages);
+    validate_client_service_shapes(
+        service_count,
+        omitted_service_public_hostnames,
+        &mut messages,
+    );
+    validate_unique_client_service_hostnames(&validated_services, &mut messages);
+    let services = validated_services
+        .into_iter()
+        .filter_map(|service| service.settings)
+        .collect::<Vec<_>>();
 
     if messages.is_empty() {
         Ok(ClientSettings {
@@ -458,7 +493,7 @@ fn validate_server_acme_settings(
 fn validate_server_tunnel(
     raw: RawServerTunnelConfig,
     messages: &mut Vec<String>,
-) -> Option<ServerTunnelSettings> {
+) -> ValidatedServerTunnel {
     let public_hostnames = validate_required_public_hostnames(
         "server.tunnels[].public-hostnames",
         raw.public_hostnames,
@@ -481,21 +516,33 @@ fn validate_server_tunnel(
         }
     };
 
-    match (public_hostnames, client_identity) {
-        (Some(public_hostnames), Some(client_identity)) => Some(ServerTunnelSettings {
-            public_hostnames,
-            client_identity,
-        }),
-        _ => None,
+    let settings = if public_hostnames.is_valid {
+        client_identity
+            .clone()
+            .map(|client_identity| ServerTunnelSettings {
+                public_hostnames: public_hostnames.values.clone(),
+                client_identity,
+            })
+    } else {
+        None
+    };
+
+    ValidatedServerTunnel {
+        settings,
+        public_hostnames: public_hostnames.values,
+        client_identity,
     }
 }
 
 fn validate_client_service(
     raw: RawClientServiceConfig,
     messages: &mut Vec<String>,
-) -> Option<ClientServiceSettings> {
-    let public_hostnames =
-        validate_optional_public_hostnames("client.services[].public-hostnames", raw.public_hostnames, messages);
+) -> ValidatedClientService {
+    let public_hostnames = validate_optional_public_hostnames(
+        "client.services[].public-hostnames",
+        raw.public_hostnames,
+        messages,
+    );
 
     let backend_addr = match raw.backend_address {
         Some(backend_addr) => {
@@ -515,10 +562,19 @@ fn validate_client_service(
         }
     };
 
-    backend_addr.map(|backend_addr| ClientServiceSettings {
-        public_hostnames,
-        backend_addr,
-    })
+    let settings = if public_hostnames.is_valid {
+        backend_addr.map(|backend_addr| ClientServiceSettings {
+            public_hostnames: public_hostnames.values.clone(),
+            backend_addr,
+        })
+    } else {
+        None
+    };
+
+    ValidatedClientService {
+        settings,
+        public_hostnames: public_hostnames.valid_hostnames,
+    }
 }
 
 fn validate_hostname_field(
@@ -539,12 +595,15 @@ fn validate_required_public_hostnames(
     field_name: &str,
     raw_hostnames: Option<Vec<String>>,
     messages: &mut Vec<String>,
-) -> Option<Vec<String>> {
+) -> ValidatedRequiredPublicHostnames {
     match raw_hostnames {
         Some(hostnames) => validate_public_hostnames(field_name, hostnames, messages),
         None => {
             messages.push(format!("{field_name} is required"));
-            None
+            ValidatedRequiredPublicHostnames {
+                values: Vec::new(),
+                is_valid: false,
+            }
         }
     }
 }
@@ -553,18 +612,35 @@ fn validate_optional_public_hostnames(
     field_name: &str,
     raw_hostnames: Option<Vec<String>>,
     messages: &mut Vec<String>,
-) -> Option<Vec<String>> {
-    raw_hostnames.and_then(|hostnames| validate_public_hostnames(field_name, hostnames, messages))
+) -> ValidatedOptionalPublicHostnames {
+    match raw_hostnames {
+        Some(hostnames) => {
+            let validated = validate_public_hostnames(field_name, hostnames, messages);
+            ValidatedOptionalPublicHostnames {
+                values: validated.is_valid.then(|| validated.values.clone()),
+                valid_hostnames: validated.values,
+                is_valid: validated.is_valid,
+            }
+        }
+        None => ValidatedOptionalPublicHostnames {
+            values: None,
+            valid_hostnames: Vec::new(),
+            is_valid: true,
+        },
+    }
 }
 
 fn validate_public_hostnames(
     field_name: &str,
     hostnames: Vec<String>,
     messages: &mut Vec<String>,
-) -> Option<Vec<String>> {
+) -> ValidatedRequiredPublicHostnames {
     if hostnames.is_empty() {
         messages.push(format!("{field_name} must not be empty"));
-        return None;
+        return ValidatedRequiredPublicHostnames {
+            values: Vec::new(),
+            is_valid: false,
+        };
     }
 
     let mut validated = Vec::with_capacity(hostnames.len());
@@ -578,31 +654,32 @@ fn validate_public_hostnames(
         }
     }
 
-    if validated.len() == hostnames_len {
-        Some(validated)
-    } else {
-        None
+    ValidatedRequiredPublicHostnames {
+        is_valid: validated.len() == hostnames_len,
+        values: validated,
     }
 }
 
 fn validate_unique_client_identities(
-    tunnels: &[ServerTunnelSettings],
+    tunnels: &[ValidatedServerTunnel],
     messages: &mut Vec<String>,
 ) {
     let mut seen = HashSet::new();
     for tunnel in tunnels {
-        let identity = tunnel.client_identity.to_string();
-        if !seen.insert(identity.clone()) {
-            messages.push(format!(
-                "server.tunnels[].client-identity must be unique: {identity}"
-            ));
+        if let Some(identity) = &tunnel.client_identity {
+            let identity = identity.to_string();
+            if !seen.insert(identity.clone()) {
+                messages.push(format!(
+                    "server.tunnels[].client-identity must be unique: {identity}"
+                ));
+            }
         }
     }
 }
 
 fn validate_unique_server_hostnames(
     server_hostname: &str,
-    tunnels: &[ServerTunnelSettings],
+    tunnels: &[ValidatedServerTunnel],
     messages: &mut Vec<String>,
 ) {
     let mut seen = HashSet::new();
@@ -636,18 +713,16 @@ fn validate_client_service_shapes(
 }
 
 fn validate_unique_client_service_hostnames(
-    services: &[ClientServiceSettings],
+    services: &[ValidatedClientService],
     messages: &mut Vec<String>,
 ) {
     let mut seen = HashSet::new();
     for service in services {
-        if let Some(public_hostnames) = &service.public_hostnames {
-            for hostname in public_hostnames {
-                if !seen.insert(hostname.clone()) {
-                    messages.push(format!(
-                        "client.services[].public-hostnames must be unique after normalization: {hostname}"
-                    ));
-                }
+        for hostname in &service.public_hostnames {
+            if !seen.insert(hostname.clone()) {
+                messages.push(format!(
+                    "client.services[].public-hostnames must be unique after normalization: {hostname}"
+                ));
             }
         }
     }

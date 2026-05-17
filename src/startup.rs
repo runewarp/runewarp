@@ -98,7 +98,10 @@ impl PreparedServer {
 
     pub async fn run(self) -> io::Result<()> {
         let Self {
-            server, logs, acme_state, ..
+            server,
+            logs,
+            acme_state,
+            ..
         } = self;
         if let Some(acme_state) = acme_state {
             tokio::select! {

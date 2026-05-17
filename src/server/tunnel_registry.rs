@@ -47,7 +47,10 @@ impl TunnelRegistry {
     }
 
     pub(crate) async fn current_connection(&self, public_hostname: &str) -> Option<Connection> {
-        let tunnel_index = self.public_hostname_to_tunnel.get(public_hostname).copied()?;
+        let tunnel_index = self
+            .public_hostname_to_tunnel
+            .get(public_hostname)
+            .copied()?;
         self.tunnel_slots[tunnel_index].current_connection().await
     }
 

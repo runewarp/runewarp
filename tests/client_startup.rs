@@ -22,6 +22,9 @@ async fn prepared_client_connects_from_validated_settings() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![server_cert],
@@ -86,7 +89,7 @@ fn private_key_from_der(der: &[u8]) -> PrivateKeyDer<'static> {
 }
 
 #[tokio::test]
-async fn prepared_client_rejects_settings_without_a_catch_all_service() {
+async fn prepared_client_rejects_settings_without_services() {
     let tempdir = tempdir().unwrap();
     let certified_server =
         generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
@@ -97,6 +100,9 @@ async fn prepared_client_rejects_settings_without_a_catch_all_service() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![server_cert],
@@ -129,6 +135,7 @@ async fn prepared_client_rejects_settings_without_a_catch_all_service() {
 
     let settings = ClientSettings {
         server_hostname: "tunnel.example.test".to_owned(),
+        logs: true,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().to_path_buf(),
         reconnect_interval: Duration::from_secs(5),
@@ -148,7 +155,7 @@ async fn prepared_client_rejects_settings_without_a_catch_all_service() {
     assert!(
         error
             .to_string()
-            .contains("client settings must include exactly one Catch-all Service")
+            .contains("client settings must include at least one Service")
     );
 
     server_task.abort();

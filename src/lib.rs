@@ -5,6 +5,7 @@ mod hostname;
 mod identity;
 mod proxy;
 mod quic;
+pub mod runtime_log;
 mod server;
 mod server_cert;
 mod settings;

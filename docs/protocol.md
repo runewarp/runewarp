@@ -1,6 +1,6 @@
 # Protocol
 
-This document describes the committed Runewarp wire behavior. The current code now implements the corrected phase-2 TCP-to-QUIC-to-TCP data path with one active Client instance, corrected runtime startup (`reconnect-interval`, `[server.cert].directory`, `[server.acme].state-directory`, and exclusive configured `server-ca-file` trust), pinned Client authentication on Tunnel connections, same-key Client certificate renewal before the initial connect and reconnect attempts, and ACME TLS-ALPN-01 for the Server hostname. The committed phase-3 model still removes Server Catch-all, routes by exact Server-authorized Public hostname, and keeps one active Tunnel connection per Tunnel, but those routing changes are not implemented yet.
+This document describes the committed Runewarp wire behavior. The current code now implements the corrected phase-2 operator/runtime surface together with the phase-3 data path: exact Server-authorized Public hostname routing, Client-side exact-match Service selection or One-sided Catch-all, one active Tunnel connection per Tunnel, per-Tunnel latest-wins replacement, and ACME TLS-ALPN-01 for the Server hostname.
 
 ## Listener model
 
@@ -10,7 +10,7 @@ This document describes the committed Runewarp wire behavior. The current code n
 | `443/tcp` | ACME for the Server hostname | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
 | `443/udp` | Client Tunnel connections | QUIC/TLS with ALPN `runewarp/1` |
 
-Current code status: the Visitor TLS path, ACME challenge handling for the Server hostname, and mutual Tunnel authentication are implemented. Exact-match Server routing still lands in phase 3.
+Current code status: the Visitor TLS path, ACME challenge handling for the Server hostname, mutual Tunnel authentication, and exact-match Server routing are implemented.
 
 ## Public TCP routing
 
@@ -39,7 +39,7 @@ Each Client instance establishes one long-lived QUIC connection to `server-hostn
 4. Validate the Server certificate for the Server hostname, using either system trust or the exclusive configured Server CA file.
 5. In the committed baseline, present the Client certificate and authenticate the pinned `client-identity` from its public key. One shared `client-identity` per Tunnel remains the default phase-2 model.
 
-Current code status: steps 1-5 are implemented for the current phase-2 Catch-all runtime. Client certificate freshness is checked before the initial connect and before reconnect attempts; the runtime does not poll while a Tunnel connection stays up.
+Current code status: steps 1-5 are implemented for the shipped phase-3 runtime. Client certificate freshness is checked before the initial connect and before reconnect attempts; the runtime does not poll while a Tunnel connection stays up.
 
 Rules:
 
@@ -52,13 +52,13 @@ Rules:
 
 When the Client receives a new QUIC stream:
 
-1. If it has exactly one configured Service and that Service omits `public-hostnames`, send the stream directly to that `backend-address`.
-2. Otherwise, buffer the forwarded ClientHello and parse it using the same **16 KB** cap.
-3. Extract and normalize the SNI hostname.
-4. Match the hostname to `client.services[*].public-hostnames`.
+1. Buffer the forwarded ClientHello and parse it using the same **16 KB** cap.
+2. Extract and normalize the SNI hostname.
+3. If there is exactly one configured Service and it omits `public-hostnames`, select that Catch-all Service.
+4. Otherwise, match the hostname to `client.services[*].public-hostnames`.
 5. If no Service matches, reject the stream immediately.
 6. Open a TCP connection to the selected `backend-address`.
-7. Forward bytes in both directions.
+7. Forward the buffered ClientHello bytes, then continue streaming in both directions.
 
 Hostname mirroring is why both sides may list the same Public hostname: the Server uses it to choose a Tunnel and the Client uses it to choose a Service. In One-sided Catch-all, only the Server lists explicit Public hostnames and the sole Client Service accepts every hostname that Server has already authorized for that Tunnel.
 
@@ -92,10 +92,10 @@ If a new authenticated connection replaces an older connection for the same Tunn
 ## Operational limits
 
 - each Client instance has exactly one Tunnel connection
-- the committed phase-3 model keeps one active Tunnel connection per Tunnel
+- the runtime keeps one active Tunnel connection per Tunnel
 - the runtime does not validate cross-side hostname coverage under Hostname mirroring
 - there is no pre-flight Local backend health check
-- the current implementation still keeps only one active Client instance at a time
+- multiple Client instances across different Tunnels are supported; same-Tunnel pools remain future work
 
 ## Future protocol work
 

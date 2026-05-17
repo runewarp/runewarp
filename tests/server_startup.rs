@@ -38,6 +38,7 @@ hostname = "tunnel.example.test"
 directory = "server-cert"
 
 [[server.tunnels]]
+public-hostnames = ["app.example.test"]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 "#,
     )
@@ -93,6 +94,7 @@ hostname = "tunnel.example.test"
 directory = "server-cert"
 
 [[server.tunnels]]
+public-hostnames = ["app.example.test"]
 client-identity = "{}"
 "#,
             client_identity.client_identity
@@ -159,6 +161,658 @@ backend-address = "__BACKEND_ADDR__"
 }
 
 #[tokio::test]
+async fn prepared_server_drops_public_tls_for_unconfigured_public_hostnames() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+
+    let client_identity = generate_client_identity().unwrap();
+    fs::write(
+        tempdir.path().join("client.crt"),
+        client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client.key"),
+        client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+"#,
+            client_identity.client_identity
+        ),
+    )
+    .unwrap();
+
+    let backend = spawn_tls_backend(
+        vec![
+            "app.example.test".to_owned(),
+            "other.example.test".to_owned(),
+        ],
+        *b"pong",
+    )
+    .await;
+
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-cert/server-ca.crt"
+identity-directory = "."
+
+[[client.services]]
+backend-address = "__BACKEND_ADDR__"
+"#
+        .replace("__BACKEND_ADDR__", &backend.0.to_string()),
+    )
+    .unwrap();
+
+    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    let app_response = request_tls_response(public_addr, &backend.1, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(app_response, *b"pong");
+
+    let unknown_hostname_result = timeout(
+        Duration::from_secs(1),
+        request_tls_response(public_addr, &backend.1, "other.example.test"),
+    )
+    .await;
+    assert!(matches!(unknown_hostname_result, Ok(Err(_))));
+
+    backend.2.abort();
+    server_task.abort();
+    client_task.abort();
+    let _ = backend.2.await;
+    let _ = server_task.await;
+    let _ = client_task.await;
+}
+
+#[tokio::test]
+async fn prepared_client_routes_mirrored_public_hostnames_to_matching_services() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+
+    let client_identity = generate_client_identity().unwrap();
+    fs::write(
+        tempdir.path().join("client.crt"),
+        client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client.key"),
+        client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let app_backend = spawn_tls_backend(vec!["app.example.test".to_owned()], *b"app!").await;
+    let api_backend = spawn_tls_backend(vec!["api.example.test".to_owned()], *b"api!").await;
+
+    fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test", "api.example.test"]
+client-identity = "{}"
+"#,
+            client_identity.client_identity
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        tempdir.path().join("client.toml"),
+        format!(
+            r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-cert/server-ca.crt"
+identity-directory = "."
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "{}"
+
+[[client.services]]
+public-hostnames = ["api.example.test"]
+backend-address = "{}"
+"#,
+            app_backend.0, api_backend.0
+        ),
+    )
+    .unwrap();
+
+    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    let app_response = request_tls_response(public_addr, &app_backend.1, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(app_response, *b"app!");
+
+    let api_response = request_tls_response(public_addr, &api_backend.1, "api.example.test")
+        .await
+        .unwrap();
+    assert_eq!(api_response, *b"api!");
+
+    app_backend.2.abort();
+    api_backend.2.abort();
+    server_task.abort();
+    client_task.abort();
+    let _ = app_backend.2.await;
+    let _ = api_backend.2.await;
+    let _ = server_task.await;
+    let _ = client_task.await;
+}
+
+#[tokio::test]
+async fn prepared_client_rejects_streams_without_a_matching_service() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+
+    let client_identity = generate_client_identity().unwrap();
+    fs::write(
+        tempdir.path().join("client.crt"),
+        client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client.key"),
+        client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let backend = spawn_tls_backend(
+        vec![
+            "app.example.test".to_owned(),
+            "api.example.test".to_owned(),
+        ],
+        *b"pong",
+    )
+    .await;
+
+    fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test", "api.example.test"]
+client-identity = "{}"
+"#,
+            client_identity.client_identity
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        tempdir.path().join("client.toml"),
+        format!(
+            r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-cert/server-ca.crt"
+identity-directory = "."
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "{}"
+"#,
+            backend.0
+        ),
+    )
+    .unwrap();
+
+    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    let app_response = request_tls_response(public_addr, &backend.1, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(app_response, *b"pong");
+
+    let api_result = timeout(
+        Duration::from_secs(1),
+        request_tls_response(public_addr, &backend.1, "api.example.test"),
+    )
+    .await;
+    assert!(matches!(api_result, Ok(Err(_))));
+
+    backend.2.abort();
+    server_task.abort();
+    client_task.abort();
+    let _ = backend.2.await;
+    let _ = server_task.await;
+    let _ = client_task.await;
+}
+
+#[tokio::test]
+async fn prepared_server_routes_different_public_hostnames_to_different_tunnels() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+
+    let app_client_identity = generate_client_identity().unwrap();
+    fs::create_dir(tempdir.path().join("client-app")).unwrap();
+    fs::write(
+        tempdir.path().join("client-app/client.crt"),
+        app_client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-app/client.key"),
+        app_client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-app/client-identity.txt"),
+        app_client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let api_client_identity = generate_client_identity().unwrap();
+    fs::create_dir(tempdir.path().join("client-api")).unwrap();
+    fs::write(
+        tempdir.path().join("client-api/client.crt"),
+        api_client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-api/client.key"),
+        api_client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-api/client-identity.txt"),
+        api_client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let app_backend = spawn_tls_backend(vec!["app.example.test".to_owned()], *b"app!").await;
+    let api_backend = spawn_tls_backend(vec!["api.example.test".to_owned()], *b"api!").await;
+
+    fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+
+[[server.tunnels]]
+public-hostnames = ["api.example.test"]
+client-identity = "{}"
+"#,
+            app_client_identity.client_identity, api_client_identity.client_identity
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        tempdir.path().join("client-app.toml"),
+        format!(
+            r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-cert/server-ca.crt"
+identity-directory = "client-app"
+
+[[client.services]]
+backend-address = "{}"
+"#,
+            app_backend.0
+        ),
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-api.toml"),
+        format!(
+            r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-cert/server-ca.crt"
+identity-directory = "client-api"
+
+[[client.services]]
+backend-address = "{}"
+"#,
+            api_backend.0
+        ),
+    )
+    .unwrap();
+
+    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let app_client_settings = load_client_settings(&tempdir.path().join("client-app.toml")).unwrap();
+    let app_client = PreparedClient::connect_to(&app_client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let app_client_task = tokio::spawn(app_client.run());
+
+    let api_client_settings = load_client_settings(&tempdir.path().join("client-api.toml")).unwrap();
+    let api_client = PreparedClient::connect_to(&api_client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let api_client_task = tokio::spawn(api_client.run());
+
+    let app_response = request_tls_response(public_addr, &app_backend.1, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(app_response, *b"app!");
+
+    let api_response = request_tls_response(public_addr, &api_backend.1, "api.example.test")
+        .await
+        .unwrap();
+    assert_eq!(api_response, *b"api!");
+
+    app_backend.2.abort();
+    api_backend.2.abort();
+    server_task.abort();
+    app_client_task.abort();
+    api_client_task.abort();
+    let _ = app_backend.2.await;
+    let _ = api_backend.2.await;
+    let _ = server_task.await;
+    let _ = app_client_task.await;
+    let _ = api_client_task.await;
+}
+
+#[tokio::test]
+async fn replacing_one_tunnel_connection_does_not_disrupt_other_tunnels() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+
+    let app_client_identity = generate_client_identity().unwrap();
+    fs::create_dir(tempdir.path().join("client-app")).unwrap();
+    fs::write(
+        tempdir.path().join("client-app/client.crt"),
+        app_client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-app/client.key"),
+        app_client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-app/client-identity.txt"),
+        app_client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let api_client_identity = generate_client_identity().unwrap();
+    fs::create_dir(tempdir.path().join("client-api")).unwrap();
+    fs::write(
+        tempdir.path().join("client-api/client.crt"),
+        api_client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-api/client.key"),
+        api_client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-api/client-identity.txt"),
+        api_client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let app_backend_one = spawn_tls_backend(vec!["app.example.test".to_owned()], *b"one!").await;
+    let app_backend_two = spawn_tls_backend(vec!["app.example.test".to_owned()], *b"two!").await;
+    let api_backend = spawn_tls_backend(vec!["api.example.test".to_owned()], *b"api!").await;
+
+    fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+
+[[server.tunnels]]
+public-hostnames = ["api.example.test"]
+client-identity = "{}"
+"#,
+            app_client_identity.client_identity, api_client_identity.client_identity
+        ),
+    )
+    .unwrap();
+
+    fs::write(
+        tempdir.path().join("client-app-one.toml"),
+        format!(
+            r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-cert/server-ca.crt"
+identity-directory = "client-app"
+
+[[client.services]]
+backend-address = "{}"
+"#,
+            app_backend_one.0
+        ),
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-app-two.toml"),
+        format!(
+            r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-cert/server-ca.crt"
+identity-directory = "client-app"
+
+[[client.services]]
+backend-address = "{}"
+"#,
+            app_backend_two.0
+        ),
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-api.toml"),
+        format!(
+            r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-cert/server-ca.crt"
+identity-directory = "client-api"
+
+[[client.services]]
+backend-address = "{}"
+"#,
+            api_backend.0
+        ),
+    )
+    .unwrap();
+
+    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let app_client_one_settings =
+        load_client_settings(&tempdir.path().join("client-app-one.toml")).unwrap();
+    let app_client_one =
+        PreparedClient::connect_to(&app_client_one_settings, localhost(0), tunnel_addr)
+            .await
+            .unwrap();
+    let app_client_one_task = tokio::spawn(app_client_one.run());
+
+    let api_client_settings = load_client_settings(&tempdir.path().join("client-api.toml")).unwrap();
+    let api_client = PreparedClient::connect_to(&api_client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let api_client_task = tokio::spawn(api_client.run());
+
+    let first_app_response = request_tls_response(public_addr, &app_backend_one.1, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(first_app_response, *b"one!");
+    let first_api_response = request_tls_response(public_addr, &api_backend.1, "api.example.test")
+        .await
+        .unwrap();
+    assert_eq!(first_api_response, *b"api!");
+
+    let app_client_two_settings =
+        load_client_settings(&tempdir.path().join("client-app-two.toml")).unwrap();
+    let app_client_two =
+        PreparedClient::connect_to(&app_client_two_settings, localhost(0), tunnel_addr)
+            .await
+            .unwrap();
+    let app_client_two_task = tokio::spawn(app_client_two.run());
+
+    let replaced_app_response = timeout(Duration::from_secs(1), async {
+        loop {
+            match request_tls_response(public_addr, &app_backend_two.1, "app.example.test").await {
+                Ok(response) => return response,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the replacement app tunnel connection");
+    assert_eq!(replaced_app_response, *b"two!");
+
+    let second_api_response = request_tls_response(public_addr, &api_backend.1, "api.example.test")
+        .await
+        .unwrap();
+    assert_eq!(second_api_response, *b"api!");
+
+    app_backend_one.2.abort();
+    app_backend_two.2.abort();
+    api_backend.2.abort();
+    server_task.abort();
+    app_client_one_task.abort();
+    app_client_two_task.abort();
+    api_client_task.abort();
+    let _ = app_backend_one.2.await;
+    let _ = app_backend_two.2.await;
+    let _ = api_backend.2.await;
+    let _ = server_task.await;
+    let _ = app_client_one_task.await;
+    let _ = app_client_two_task.await;
+    let _ = api_client_task.await;
+}
+
+#[tokio::test]
 async fn prepared_server_rejects_an_untrusted_client_identity_before_serving_public_tls() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
@@ -196,6 +850,7 @@ hostname = "tunnel.example.test"
 directory = "server-cert"
 
 [[server.tunnels]]
+public-hostnames = ["app.example.test"]
 client-identity = "{}"
 "#,
             trusted_client_identity.client_identity
@@ -267,6 +922,7 @@ email = "admin@example.test"
 state-directory = "acme-state"
 
 [[server.tunnels]]
+public-hostnames = ["app.example.test"]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 "#,
     )
@@ -334,6 +990,7 @@ email = "admin@example.test"
 state-directory = "acme-state"
 
 [[server.tunnels]]
+public-hostnames = ["app.example.test"]
 client-identity = "{}"
 "#,
             client_identity.client_identity

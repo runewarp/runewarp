@@ -51,6 +51,9 @@ async fn forwards_tls_passthrough_end_to_end() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
@@ -157,6 +160,7 @@ hostname = "tunnel.example.test"
 directory = "server-cert"
 
 [[server.tunnels]]
+public-hostnames = ["app.example.test"]
 client-identity = "{}"
 "#,
             client_identity.client_identity
@@ -212,6 +216,9 @@ async fn drops_public_tls_when_no_client_is_connected() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert],
             private_key_from_der(&tunnel_key),
@@ -261,6 +268,9 @@ async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert],
             private_key_from_der(&tunnel_key),
@@ -328,6 +338,9 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
             private_key_from_der(&tunnel_key),
@@ -420,6 +433,9 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth_resolver(
             resolver.clone(),
@@ -510,6 +526,9 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![tunnel_cert.clone()],
             private_key_from_der(&tunnel_key),
@@ -563,6 +582,9 @@ async fn library_constructors_expose_addresses_before_running() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
@@ -620,6 +642,9 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
@@ -694,6 +719,9 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
@@ -746,6 +774,9 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
         public_bind_addr: localhost(0),
         tunnel_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
+        authorized_public_hostnames: vec!["app.example.test".to_owned()],
+        configured_tunnels: Vec::new(),
+        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],

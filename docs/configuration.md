@@ -1,6 +1,6 @@
 # Configuration
 
-This document describes the agreed Runewarp configuration model. The current binary now ships the corrected phase-2 operator surface (`runewarp server cert ...`, `runewarp client identity ...`, directory-based material, exclusive `server-ca-file`, Client authentication, ACME, and same-key Client certificate renewal before initial connect and reconnect attempts). The committed phase-3 model still removes Server Catch-all: every Server Tunnel must list explicit `public-hostnames`, while the Client either lists explicit `public-hostnames` too or uses one Catch-all Service.
+This document describes the agreed Runewarp configuration model. The current binary now ships the corrected phase-2 operator surface together with the phase-3 exact-match routing model: every Server Tunnel lists explicit `public-hostnames`, while the Client either lists explicit `public-hostnames` too or uses one Catch-all Service.
 
 ## Principles
 
@@ -32,8 +32,12 @@ runewarp client identity rotate --directory ./client-identity
 
 Today the binary supports:
 
-- one Catch-all Tunnel on the Server
-- one Catch-all Service on the Client
+- required explicit `server.tunnels[].public-hostnames`
+- multiple Server Tunnels
+- one active Tunnel connection per Tunnel, with latest-wins replacement inside that Tunnel only
+- multiple Client instances across different Tunnels
+- multiple Client Services with exact-match selection
+- one Catch-all Service when the Client has exactly one Service
 - `runewarp server cert init|renew|rotate-ca`
 - `runewarp client identity init|renew|rotate`
 - directory-based Server certificate and Client identity material
@@ -41,16 +45,7 @@ Today the binary supports:
 - pinned `client-identity` enforcement on Tunnel connections
 - automatic same-key Client certificate renewal before initial connect and reconnect attempts
 - ACME TLS-ALPN-01 for `server.hostname`
-- one active Client instance at a time
-- one active Tunnel connection at a time
-
-The current binary still does **not** implement:
-
-- required explicit `server.tunnels[].public-hostnames`
-- multiple Server Tunnels and one active Tunnel connection per Tunnel
-- multiple Client instances, with one Client instance per Tunnel
-- multiple Client Services with exact-match selection
-- per-role `logs` booleans
+- per-role `logs` booleans, defaulting to `true`
 
 ## Server exact-match mode
 
@@ -296,7 +291,7 @@ A future lint or doctor workflow may help detect drift, but the runtime does not
 - manual/private-CA Server renewal stays explicit through `runewarp server cert renew`
 - ordinary Server leaf renewal keeps the same Server CA
 - Client identity rotation is an explicit coordinated cutover, not a multi-identity steady-state config
-- one shared `client-identity` per Tunnel remains the default model, even when multi-instance tunnels arrive later
+- one shared `client-identity` per Tunnel remains the default model, even though same-Tunnel multi-instance pools remain later work
 
 ## DNS example
 

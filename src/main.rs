@@ -15,6 +15,7 @@ use runewarp::{
     load_server_settings, renew_client_identity_certificate, renew_manual_server_certificate,
     rotate_client_identity, rotate_manual_server_certificate_authority,
 };
+use runewarp::runtime_log::{emit_stderr, warning_line};
 use time::OffsetDateTime;
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
@@ -66,9 +67,15 @@ async fn run_client_command(
             || async {
                 let client = PreparedClient::connect(settings, local_bind_addr).await?;
                 if client.native_root_error_count() > 0 {
-                    eprintln!(
-                        "warning: {} system trust-store certificate(s) could not be loaded; continuing with the successfully loaded trust anchors",
-                        client.native_root_error_count()
+                    emit_stderr(
+                        settings.logs,
+                        &warning_line(
+                            "client",
+                            &format!(
+                                "{} system trust-store certificate(s) could not be loaded; continuing with the successfully loaded trust anchors",
+                                client.native_root_error_count()
+                            ),
+                        ),
                     );
                 }
                 Ok(client)
@@ -79,7 +86,10 @@ async fn run_client_command(
         .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
 
         if let Err(error) = client.run().await {
-            eprintln!("warning: tunnel connection lost: {error}; reconnecting");
+            emit_stderr(
+                settings.logs,
+                &warning_line("client", &format!("tunnel connection lost: {error}; reconnecting")),
+            );
             continue;
         }
 

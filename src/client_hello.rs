@@ -4,7 +4,7 @@ use std::io::Cursor;
 use rustls::server::Acceptor;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::hostname::normalize_public_hostname;
+use crate::hostname::validate_public_hostname;
 
 pub const CLIENT_HELLO_BUFFER_LIMIT: usize = 16 * 1024;
 
@@ -43,6 +43,7 @@ impl ParsedClientHello {
 pub enum ClientHelloError {
     Io(std::io::Error),
     InvalidTls,
+    InvalidSni,
     MissingSni,
     TooLong { limit: usize },
     UnexpectedEof,
@@ -53,6 +54,7 @@ impl fmt::Display for ClientHelloError {
         match self {
             Self::Io(error) => write!(formatter, "client hello IO error: {error}"),
             Self::InvalidTls => formatter.write_str("invalid TLS client hello"),
+            Self::InvalidSni => formatter.write_str("invalid SNI in client hello"),
             Self::MissingSni => formatter.write_str("missing SNI in client hello"),
             Self::TooLong { limit } => {
                 write!(formatter, "client hello exceeded the {limit}-byte limit")
@@ -68,9 +70,11 @@ impl std::error::Error for ClientHelloError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::InvalidTls | Self::MissingSni | Self::TooLong { .. } | Self::UnexpectedEof => {
-                None
-            }
+            Self::InvalidTls
+            | Self::InvalidSni
+            | Self::MissingSni
+            | Self::TooLong { .. }
+            | Self::UnexpectedEof => None,
         }
     }
 }
@@ -111,6 +115,8 @@ where
                     .server_name()
                     .ok_or(ClientHelloError::MissingSni)?
                     .to_owned();
+                let server_name = validate_public_hostname(&server_name)
+                    .map_err(|_| ClientHelloError::InvalidSni)?;
                 let alpn_protocols = accepted
                     .client_hello()
                     .alpn()
@@ -121,7 +127,7 @@ where
 
                 return Ok(ParsedClientHello {
                     buffered_bytes,
-                    server_name: normalize_public_hostname(&server_name),
+                    server_name,
                     alpn_protocols,
                 });
             }
@@ -140,11 +146,15 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll};
 
+    use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
     use rcgen::generate_simple_self_signed;
     use rustls::ClientConnection;
     use rustls::RootCertStore;
     use rustls::pki_types::{CertificateDer, ServerName};
     use tokio::io::{AsyncRead, ReadBuf};
+
+    use crate::hostname::validate_public_hostname;
 
     use super::{
         CLIENT_HELLO_BUFFER_LIMIT, ClientHelloError, ParsedClientHello, read_client_hello,
@@ -228,6 +238,16 @@ mod tests {
         read_client_hello(&mut reader).await
     }
 
+    fn parse_from_chunks_blocking(
+        chunks: Vec<Vec<u8>>,
+    ) -> Result<ParsedClientHello, ClientHelloError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("property tests should be able to build a runtime")
+            .block_on(parse_from_chunks(chunks))
+    }
+
     fn build_client_hello(server_name: ServerName<'static>) -> Vec<u8> {
         let trusted_cert = generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
         let cert_der = CertificateDer::from(trusted_cert.cert);
@@ -274,6 +294,23 @@ mod tests {
         fragmented
     }
 
+    fn chunk_bytes(bytes: Vec<u8>, chunk_sizes: Vec<usize>) -> Vec<Vec<u8>> {
+        let mut chunks = Vec::new();
+        let mut offset = 0;
+        for chunk_size in chunk_sizes {
+            if offset >= bytes.len() {
+                break;
+            }
+            let end = (offset + chunk_size).min(bytes.len());
+            chunks.push(bytes[offset..end].to_vec());
+            offset = end;
+        }
+        if offset < bytes.len() || chunks.is_empty() {
+            chunks.push(bytes[offset..].to_vec());
+        }
+        chunks
+    }
+
     struct ChunkedReader {
         chunks: VecDeque<Vec<u8>>,
     }
@@ -306,6 +343,38 @@ mod tests {
             }
 
             Poll::Ready(Ok(()))
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn preserves_valid_client_hellos_across_chunk_boundaries(
+            chunk_sizes in prop_vec(1usize..32, 0..32),
+            trailing_bytes in prop_vec(any::<u8>(), 0..32),
+        ) {
+            let client_hello = build_client_hello(ServerName::try_from("App.Example.Test").unwrap());
+            let mut buffered = client_hello.clone();
+            buffered.extend_from_slice(&trailing_bytes);
+
+            let parsed = parse_from_chunks_blocking(chunk_bytes(buffered.clone(), chunk_sizes)).unwrap();
+
+            prop_assert_eq!(parsed.server_name(), "app.example.test");
+            prop_assert!(buffered.starts_with(parsed.buffered_bytes()));
+            prop_assert!(parsed.buffered_bytes().len() >= client_hello.len());
+        }
+
+        #[test]
+        fn arbitrary_client_hello_bytes_only_succeed_with_validated_server_names(
+            bytes in prop_vec(any::<u8>(), 0..(CLIENT_HELLO_BUFFER_LIMIT + 8)),
+        ) {
+            let result = parse_from_chunks_blocking(vec![bytes.clone()]);
+
+            if let Ok(parsed) = result {
+                prop_assert!(validate_public_hostname(parsed.server_name()).is_ok());
+                prop_assert_eq!(parsed.buffered_bytes(), bytes.as_slice());
+            }
         }
     }
 }

@@ -28,7 +28,7 @@ async fn forwards_tls_passthrough_end_to_end() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
 
     let backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
-    let backend_addr = backend_listener.local_addr().unwrap();
+    let backend_address = backend_listener.local_addr().unwrap();
     let backend_acceptor = TlsAcceptor::from(Arc::new(
         rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -72,7 +72,7 @@ async fn forwards_tls_passthrough_end_to_end() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend_addr.to_string(),
+        backend_address: backend_address.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -177,9 +177,9 @@ server-ca-file = "server-cert/server-ca.crt"
 identity-directory = "client-identity"
 
 [[client.services]]
-backend-address = "__BACKEND_ADDR__"
+backend-address = "__BACKEND_ADDRESS__"
 "#
-        .replace("__BACKEND_ADDR__", &backend.0.to_string()),
+        .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
     )
     .unwrap();
 
@@ -308,7 +308,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
     let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
-    let backend_addr = backend_listener.local_addr().unwrap();
+    let backend_address = backend_listener.local_addr().unwrap();
     let backend_acceptor = TlsAcceptor::from(Arc::new(
         rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -359,7 +359,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend_addr.to_string(),
+        backend_address: backend_address.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -460,9 +460,9 @@ server-ca-file = "server-a.pem"
 identity-directory = "."
 
 [[client.services]]
-backend-address = "__BACKEND_ADDR__"
+backend-address = "__BACKEND_ADDRESS__"
 "#
-        .replace("__BACKEND_ADDR__", &backend.0.to_string()),
+        .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
     )
     .unwrap();
     let client_a_settings = load_client_settings(&tempdir.path().join("client-a.toml")).unwrap();
@@ -494,9 +494,9 @@ server-ca-file = "server-b.pem"
 identity-directory = "."
 
 [[client.services]]
-backend-address = "__BACKEND_ADDR__"
+backend-address = "__BACKEND_ADDRESS__"
 "#
-        .replace("__BACKEND_ADDR__", &backend.0.to_string()),
+        .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
     )
     .unwrap();
     let client_b_settings = load_client_settings(&tempdir.path().join("client-b.toml")).unwrap();
@@ -548,7 +548,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend.0.to_string(),
+        backend_address: backend.0.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await;
@@ -606,7 +606,7 @@ async fn library_constructors_expose_addresses_before_running() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: available_local_addr().await.to_string(),
+        backend_address: available_local_addr().await.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -663,7 +663,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend_one.0.to_string(),
+        backend_address: backend_one.0.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -681,7 +681,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend_two.0.to_string(),
+        backend_address: backend_two.0.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -740,7 +740,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend.0.to_string(),
+        backend_address: backend.0.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -767,7 +767,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
 
 #[tokio::test]
 async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
-    let closed_backend_addr = available_local_addr().await;
+    let closed_backend_address = available_local_addr().await;
     let (backend_cert, _) = make_self_signed_cert("app.example.test");
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
 
@@ -795,7 +795,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: closed_backend_addr.to_string(),
+        backend_address: closed_backend_address.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -860,7 +860,7 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend_one_addr.to_string(),
+        backend_address: backend_one_addr.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await
@@ -895,7 +895,7 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
-        backend_addr: backend_two.0.to_string(),
+        backend_address: backend_two.0.to_string(),
         quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
     })
     .await

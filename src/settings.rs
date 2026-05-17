@@ -55,7 +55,7 @@ pub struct ClientSettings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientServiceSettings {
     pub public_hostnames: Option<Vec<String>>,
-    pub backend_addr: String,
+    pub backend_address: String,
 }
 
 struct ValidatedRequiredPublicHostnames {
@@ -544,16 +544,16 @@ fn validate_client_service(
         messages,
     );
 
-    let backend_addr = match raw.backend_address {
-        Some(backend_addr) => {
-            if !is_valid_backend_addr(&backend_addr) {
+    let backend_address = match raw.backend_address {
+        Some(backend_address) => {
+            if !is_valid_backend_address(&backend_address) {
                 messages.push(
                     "client.services[].backend-address must be a TCP address or host:port pair"
                         .to_owned(),
                 );
                 None
             } else {
-                Some(backend_addr)
+                Some(backend_address)
             }
         }
         None => {
@@ -563,9 +563,9 @@ fn validate_client_service(
     };
 
     let settings = if public_hostnames.is_valid {
-        backend_addr.map(|backend_addr| ClientServiceSettings {
+        backend_address.map(|backend_address| ClientServiceSettings {
             public_hostnames: public_hostnames.values.clone(),
-            backend_addr,
+            backend_address,
         })
     } else {
         None
@@ -728,9 +728,9 @@ fn validate_unique_client_service_hostnames(
     }
 }
 
-fn is_valid_backend_addr(backend_addr: &str) -> bool {
-    backend_addr.parse::<std::net::SocketAddr>().is_ok()
-        || backend_addr
+fn is_valid_backend_address(backend_address: &str) -> bool {
+    backend_address.parse::<std::net::SocketAddr>().is_ok()
+        || backend_address
             .rsplit_once(':')
             .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
 }
@@ -878,7 +878,7 @@ struct RawClientServiceConfig {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{is_valid_backend_addr, resolve_path};
+    use super::{is_valid_backend_address, resolve_path};
 
     #[test]
     fn resolves_relative_paths_against_the_config_directory() {
@@ -893,8 +893,8 @@ mod tests {
 
     #[test]
     fn accepts_host_port_local_backend_pairs() {
-        assert!(is_valid_backend_addr("caddy.local:443"));
-        assert!(is_valid_backend_addr("127.0.0.1:443"));
-        assert!(!is_valid_backend_addr("caddy.local"));
+        assert!(is_valid_backend_address("caddy.local:443"));
+        assert!(is_valid_backend_address("127.0.0.1:443"));
+        assert!(!is_valid_backend_address("caddy.local"));
     }
 }

@@ -84,6 +84,8 @@ pub(crate) fn validate_public_hostname(hostname: &str) -> Result<String, PublicH
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::{PublicHostnameError, normalize_public_hostname, validate_public_hostname};
 
     #[test]
@@ -132,5 +134,23 @@ mod tests {
             validate_public_hostname("127.0.0.1").unwrap_err(),
             PublicHostnameError::IpLiteral
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn normalization_is_idempotent(hostname in ".*") {
+            let normalized = normalize_public_hostname(&hostname);
+            prop_assert_eq!(normalize_public_hostname(&normalized), normalized);
+        }
+
+        #[test]
+        fn validated_hostnames_remain_in_canonical_form(hostname in ".*") {
+            if let Ok(validated) = validate_public_hostname(&hostname) {
+                prop_assert_eq!(normalize_public_hostname(&validated), validated.clone());
+                prop_assert_eq!(validate_public_hostname(&validated), Ok(validated.clone()));
+            }
+        }
     }
 }

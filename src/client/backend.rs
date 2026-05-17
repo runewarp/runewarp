@@ -14,7 +14,7 @@ pub(crate) async fn handle_tunnel_stream(
     services: Vec<ClientServiceSettings>,
     logs: bool,
 ) -> io::Result<()> {
-    let (backend_addr, public_hostname, buffered_bytes) =
+    let (backend_address, public_hostname, buffered_bytes) =
         match resolve_backend(&services, &mut recv).await {
             Ok(selection) => selection,
             Err(BackendResolutionError::ReadClientHello(error)) => {
@@ -35,14 +35,14 @@ pub(crate) async fn handle_tunnel_stream(
             }
         };
 
-    let mut backend_stream = match TcpStream::connect(backend_addr.as_str()).await {
+    let mut backend_stream = match TcpStream::connect(backend_address.as_str()).await {
         Ok(stream) => stream,
         Err(error) => {
             emit_stderr(
                 logs,
                 &client_route_line(
                     &public_hostname,
-                    &format!("backend connect failed ({backend_addr})"),
+                    &format!("backend connect failed ({backend_address})"),
                 ),
             );
             reject_stream(send, recv);
@@ -54,7 +54,7 @@ pub(crate) async fn handle_tunnel_stream(
             logs,
             &client_route_line(
                 &public_hostname,
-                &format!("backend write failed ({backend_addr})"),
+                &format!("backend write failed ({backend_address})"),
             ),
         );
         reject_stream(send, recv);
@@ -62,7 +62,7 @@ pub(crate) async fn handle_tunnel_stream(
     }
     emit_stderr(
         logs,
-        &client_route_line(&public_hostname, &format!("backend {backend_addr}")),
+        &client_route_line(&public_hostname, &format!("backend {backend_address}")),
     );
 
     proxy_tcp_over_quic(backend_stream, Vec::new(), send, recv).await
@@ -87,7 +87,7 @@ async fn resolve_backend(
     };
 
     Ok((
-        service.backend_addr.clone(),
+        service.backend_address.clone(),
         public_hostname,
         buffered_bytes,
     ))

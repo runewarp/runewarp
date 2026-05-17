@@ -471,6 +471,7 @@ pub fn decide_client_certificate_renewal(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use time::{Duration, OffsetDateTime};
 
     use super::{
@@ -561,5 +562,23 @@ mod tests {
                 expired_at: expires_at
             }
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn client_identities_round_trip_through_lowercase_hex(
+            bytes in proptest::array::uniform32(any::<u8>()),
+        ) {
+            let encoded = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+
+            let parsed = encoded.parse::<ClientIdentity>().unwrap();
+
+            prop_assert_eq!(parsed.to_string(), encoded);
+        }
     }
 }

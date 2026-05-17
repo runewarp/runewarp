@@ -14,7 +14,7 @@ pub struct ClientConfig {
     pub local_bind_addr: SocketAddr,
     pub server_addr: SocketAddr,
     pub server_name: String,
-    pub backend_addr: String,
+    pub backend_address: String,
     pub quic_client_config: quinn::ClientConfig,
 }
 
@@ -31,7 +31,7 @@ pub(crate) struct RoutedClientConfig {
 #[derive(Clone)]
 enum ClientRouteMode {
     CatchAll {
-        backend_addr: String,
+        backend_address: String,
     },
     Routed {
         services: Vec<ClientServiceSettings>,
@@ -83,7 +83,7 @@ impl Client {
             config.quic_client_config,
             true,
             ClientRouteMode::CatchAll {
-                backend_addr: config.backend_addr,
+                backend_address: config.backend_address,
             },
         )
         .await
@@ -153,9 +153,9 @@ impl Client {
 
     fn services_for_stream(&self) -> Vec<ClientServiceSettings> {
         match &self.route_mode {
-            ClientRouteMode::CatchAll { backend_addr } => vec![ClientServiceSettings {
+            ClientRouteMode::CatchAll { backend_address } => vec![ClientServiceSettings {
                 public_hostnames: None,
-                backend_addr: backend_addr.clone(),
+                backend_address: backend_address.clone(),
             }],
             ClientRouteMode::Routed { services } => services.clone(),
         }

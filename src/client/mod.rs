@@ -1,10 +1,13 @@
 mod backend;
+mod service;
 
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 
 use quinn::{Connection, Endpoint};
+
+use crate::ClientServiceSettings;
 
 #[derive(Clone)]
 pub struct ClientConfig {
@@ -15,8 +18,29 @@ pub struct ClientConfig {
     pub quic_client_config: quinn::ClientConfig,
 }
 
+#[derive(Clone)]
+pub(crate) struct RoutedClientConfig {
+    pub(crate) local_bind_addr: SocketAddr,
+    pub(crate) server_addr: SocketAddr,
+    pub(crate) server_name: String,
+    pub(crate) services: Vec<ClientServiceSettings>,
+    pub(crate) logs: bool,
+    pub(crate) quic_client_config: quinn::ClientConfig,
+}
+
+#[derive(Clone)]
+enum ClientRouteMode {
+    CatchAll {
+        backend_addr: String,
+    },
+    Routed {
+        services: Vec<ClientServiceSettings>,
+    },
+}
+
 pub struct Client {
-    backend_addr: String,
+    logs: bool,
+    route_mode: ClientRouteMode,
     endpoint: Endpoint,
     connection: Connection,
 }
@@ -52,18 +76,56 @@ impl std::error::Error for ClientConnectError {
 
 impl Client {
     pub async fn connect(config: ClientConfig) -> Result<Self, ClientConnectError> {
+        Self::connect_internal(
+            config.local_bind_addr,
+            config.server_addr,
+            config.server_name,
+            config.quic_client_config,
+            true,
+            ClientRouteMode::CatchAll {
+                backend_addr: config.backend_addr,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_with_services(
+        config: RoutedClientConfig,
+    ) -> Result<Self, ClientConnectError> {
+        Self::connect_internal(
+            config.local_bind_addr,
+            config.server_addr,
+            config.server_name,
+            config.quic_client_config,
+            config.logs,
+            ClientRouteMode::Routed {
+                services: config.services,
+            },
+        )
+        .await
+    }
+
+    async fn connect_internal(
+        local_bind_addr: SocketAddr,
+        server_addr: SocketAddr,
+        server_name: String,
+        quic_client_config: quinn::ClientConfig,
+        logs: bool,
+        route_mode: ClientRouteMode,
+    ) -> Result<Self, ClientConnectError> {
         let mut endpoint =
-            Endpoint::client(config.local_bind_addr).map_err(ClientConnectError::Bind)?;
-        endpoint.set_default_client_config(config.quic_client_config);
+            Endpoint::client(local_bind_addr).map_err(ClientConnectError::Bind)?;
+        endpoint.set_default_client_config(quic_client_config);
 
         let connection = endpoint
-            .connect(config.server_addr, &config.server_name)
+            .connect(server_addr, &server_name)
             .map_err(ClientConnectError::Connect)?
             .await
             .map_err(ClientConnectError::Handshake)?;
 
         Ok(Self {
-            backend_addr: config.backend_addr,
+            logs,
+            route_mode,
             endpoint,
             connection,
         })
@@ -77,15 +139,26 @@ impl Client {
         loop {
             match self.connection.accept_bi().await {
                 Ok((send, recv)) => {
-                    let backend_addr = self.backend_addr.clone();
+                    let services = self.services_for_stream();
+                    let logs = self.logs;
                     tokio::spawn(async move {
-                        let _ = backend::handle_tunnel_stream(send, recv, backend_addr).await;
+                        let _ = backend::handle_tunnel_stream(send, recv, services, logs).await;
                     });
                 }
                 Err(quinn::ConnectionError::ApplicationClosed { .. })
                 | Err(quinn::ConnectionError::LocallyClosed) => return Ok(()),
                 Err(error) => return Err(error),
             }
+        }
+    }
+
+    fn services_for_stream(&self) -> Vec<ClientServiceSettings> {
+        match &self.route_mode {
+            ClientRouteMode::CatchAll { backend_addr } => vec![ClientServiceSettings {
+                public_hostnames: None,
+                backend_addr: backend_addr.clone(),
+            }],
+            ClientRouteMode::Routed { services } => services.clone(),
         }
     }
 }

@@ -12,14 +12,15 @@ use crate::tls_material::{
     load_private_key,
 };
 use crate::{
-    CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig, ClientConnectError,
-    ClientIdentity, ClientSettings, QuicConfigError, Server, ServerCertificateSettings,
-    ServerConfig, ServerSettings, make_client_quic_config_with_client_auth,
+    CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConnectError, ClientIdentity,
+    ClientSettings, QuicConfigError, Server, ServerCertificateSettings, ServerConfig,
+    ServerSettings, make_client_quic_config_with_client_auth,
     make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
 };
 
 pub struct PreparedServer {
     server: Server,
+    logs: bool,
     trusted_client_identities: Vec<ClientIdentity>,
     acme_state: Option<ManagedAcmeState>,
 }
@@ -64,6 +65,9 @@ impl PreparedServer {
             public_bind_addr,
             tunnel_bind_addr,
             server_hostname: settings.hostname.clone(),
+            authorized_public_hostnames: Vec::new(),
+            configured_tunnels: settings.tunnels.clone(),
+            logs: settings.logs,
             public_tls_config: acme_state
                 .as_ref()
                 .map(ManagedAcmeState::challenge_rustls_config),
@@ -74,6 +78,7 @@ impl PreparedServer {
 
         Ok(Self {
             server,
+            logs: settings.logs,
             trusted_client_identities,
             acme_state,
         })
@@ -93,12 +98,12 @@ impl PreparedServer {
 
     pub async fn run(self) -> io::Result<()> {
         let Self {
-            server, acme_state, ..
+            server, logs, acme_state, ..
         } = self;
         if let Some(acme_state) = acme_state {
             tokio::select! {
                 server_result = server.run() => server_result,
-                acme_result = run_acme_state(acme_state) => match acme_result {
+                acme_result = run_acme_state(acme_state, logs) => match acme_result {
                     Ok(never) => match never {},
                     Err(error) => Err(error),
                 },
@@ -135,11 +140,11 @@ impl PreparedClient {
         local_bind_addr: SocketAddr,
         server_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
-        let [service] = settings.services.as_slice() else {
+        if settings.services.is_empty() {
             return Err(ClientStartupError::InvalidSettings(
-                "client settings must include exactly one Catch-all Service",
+                "client settings must include at least one Service",
             ));
-        };
+        }
         let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
         let cert_chain =
             load_certificate_chain(&settings.identity_directory.join(CLIENT_CERT_FILENAME))
@@ -149,11 +154,12 @@ impl PreparedClient {
         let quic_client_config =
             make_client_quic_config_with_client_auth(loaded_roots.roots, cert_chain, private_key)
                 .map_err(ClientStartupError::QuicConfig)?;
-        let client = Client::connect(ClientConfig {
+        let client = Client::connect_with_services(crate::client::RoutedClientConfig {
             local_bind_addr,
             server_addr,
             server_name: settings.server_hostname.clone(),
-            backend_addr: service.backend_addr.clone(),
+            services: settings.services.clone(),
+            logs: settings.logs,
             quic_client_config,
         })
         .await

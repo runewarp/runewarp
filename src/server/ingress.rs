@@ -11,13 +11,15 @@ use tokio_rustls::TlsAcceptor;
 use crate::acme::ACME_TLS_ALPN;
 use crate::client_hello::read_client_hello;
 use crate::proxy::proxy_tcp_over_quic;
+use crate::runtime_log::{emit_stderr, server_route_line};
 
-use super::active_client::ActiveClientSlot;
+use super::tunnel_registry::TunnelRegistry;
 
 pub(crate) async fn handle_visitor_connection(
     mut visitor_stream: TcpStream,
-    active_client_slot: ActiveClientSlot,
+    tunnel_registry: TunnelRegistry,
     server_hostname: String,
+    logs: bool,
     public_tls_config: Option<Arc<rustls::ServerConfig>>,
 ) -> io::Result<()> {
     let parsed_client_hello = match read_client_hello(&mut visitor_stream).await {
@@ -28,6 +30,7 @@ pub(crate) async fn handle_visitor_connection(
     let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
     if public_hostname == server_hostname {
         if is_acme_tls_alpn_challenge && let Some(public_tls_config) = public_tls_config {
+            emit_stderr(logs, &server_route_line(&public_hostname, "acme challenge"));
             let acceptor = TlsAcceptor::from(public_tls_config);
             if let Ok(mut tls_stream) = acceptor
                 .accept(PrefixedStream::new(buffered_bytes, visitor_stream))
@@ -35,13 +38,23 @@ pub(crate) async fn handle_visitor_connection(
             {
                 let _ = tls_stream.shutdown().await;
             }
+        } else {
+            emit_stderr(logs, &server_route_line(&public_hostname, "dropped (server hostname)"));
         }
         return Ok(());
     }
-
-    let Some(active_connection) = active_client_slot.current_connection().await else {
+    if !tunnel_registry.contains_public_hostname(&public_hostname) {
+        emit_stderr(logs, &server_route_line(&public_hostname, "dropped (unauthorized)"));
+        return Ok(());
+    }
+    let Some(active_connection) = tunnel_registry.current_connection(&public_hostname).await else {
+        emit_stderr(
+            logs,
+            &server_route_line(&public_hostname, "dropped (no active tunnel connection)"),
+        );
         return Ok(());
     };
+    emit_stderr(logs, &server_route_line(&public_hostname, "forwarded"));
 
     let (send, recv) = match active_connection.open_bi().await {
         Ok(stream) => stream,

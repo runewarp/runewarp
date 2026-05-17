@@ -5,6 +5,40 @@ use runewarp::{initialize_manual_server_certificate, load_server_settings};
 use tempfile::tempdir;
 
 #[test]
+fn server_settings_accept_exact_match_tunnels_and_default_logs_to_true() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "Tunnel.Example.Test."
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["App.Example.Test.", "api.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(settings.hostname, "tunnel.example.test");
+    assert!(settings.logs);
+    assert_eq!(
+        settings.tunnels[0].public_hostnames,
+        vec!["app.example.test", "api.example.test"]
+    );
+}
+
+#[test]
 fn server_settings_report_all_selected_mode_errors_together() {
     let tempdir = tempdir().unwrap();
     fs::write(
@@ -27,9 +61,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
     assert!(message.contains("server.hostname is required"));
     assert!(message.contains("exactly one of [server.cert] or [server.acme] must be configured"));
-    assert!(message.contains("phase-2 server mode requires exactly one Catch-all Tunnel"));
-    assert!(message.contains("phase-2 server mode only supports a Catch-all Tunnel"));
     assert!(message.contains("server.tunnels[].client-identity is invalid"));
+    assert!(message.contains("server.tunnels[].public-hostnames is required"));
 }
 
 #[test]
@@ -183,5 +216,83 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         error
             .to_string()
             .contains("server.acme.state-directory directory not found")
+    );
+}
+
+#[test]
+fn server_settings_reject_duplicate_public_hostnames_and_server_hostname_reuse() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["App.Example.Test."]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test", "tunnel.example.test"]
+client-identity = "111122223333444455556666777788889999aaaabbbbccccddddeeeeffff0000"
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let message = error.to_string();
+
+    assert!(
+        message.contains(
+            "server.tunnels[].public-hostnames must be unique after normalization: app.example.test"
+        )
+    );
+    assert!(message.contains(
+        "server.tunnels[].public-hostnames must not include server.hostname `tunnel.example.test`"
+    ));
+}
+
+#[test]
+fn server_settings_reject_duplicate_client_identities() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+
+[[server.tunnels]]
+public-hostnames = ["api.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("server.tunnels[].client-identity must be unique")
     );
 }

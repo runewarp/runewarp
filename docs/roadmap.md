@@ -6,8 +6,7 @@ Runewarp is being built as a self-hosted TLS passthrough tunnel. The core docs d
 
 - the phase-1 data path is implemented as a library-first `Server` and `Client` runtime
 - the corrected phase-2 operator/runtime/authentication surface is implemented with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, exclusive `server-ca-file`, Client authentication, ACME, and same-key renewal before initial connect and reconnect attempts
-- the current implementation still uses the phase-2 Server Catch-all Tunnel, a Client Catch-all Service, and one active Client instance with one Tunnel connection
-- the committed phase-3 model removes Server Catch-all: every Server Tunnel must list explicit `public-hostnames`, while the Client either uses explicit `public-hostnames` too or one Catch-all Service
+- the current implementation ships phase-3 exact-match routing with explicit `server.tunnels[].public-hostnames`, multiple Server Tunnels, multiple Client instances across those Tunnels, multiple Client Services, one active Tunnel connection per Tunnel, and per-role `logs` toggles
 
 ## Phase 1 - Library data path
 
@@ -28,7 +27,7 @@ Scope:
 
 Goal: make the single-Tunnel design usable by operators.
 
-Status: implemented for the phase-2 single-Tunnel Catch-all runtime. Phase-3 exact-match routing, multiple Tunnels / Client instances, and per-role log controls remain later work.
+Status: implemented for the corrected operator/runtime surface, certificate lifecycle, ACME, and exclusive configured Server trust.
 
 Scope:
 
@@ -46,6 +45,8 @@ Scope:
 ## Phase 3 - Exact-match hostname routing
 
 Goal: make Server-side Public hostname authorization explicit while adding Client-side routing flexibility without changing the transparent data path.
+
+Status: implemented.
 
 Scope:
 

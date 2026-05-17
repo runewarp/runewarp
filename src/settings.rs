@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ use crate::tls_material::{
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
-    SERVER_CA_FILENAME, hostname::normalize_public_hostname,
+    SERVER_CA_FILENAME, hostname::validate_public_hostname,
 };
 
 pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
@@ -19,12 +20,14 @@ pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerSettings {
     pub hostname: String,
+    pub logs: bool,
     pub certificate: ServerCertificateSettings,
     pub tunnels: Vec<ServerTunnelSettings>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerTunnelSettings {
+    pub public_hostnames: Vec<String>,
     pub client_identity: ClientIdentity,
 }
 
@@ -42,6 +45,7 @@ pub enum ServerCertificateSettings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientSettings {
     pub server_hostname: String,
+    pub logs: bool,
     pub server_ca_file: Option<PathBuf>,
     pub identity_directory: PathBuf,
     pub reconnect_interval: Duration,
@@ -50,6 +54,7 @@ pub struct ClientSettings {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientServiceSettings {
+    pub public_hostnames: Option<Vec<String>>,
     pub backend_addr: String,
 }
 
@@ -180,13 +185,14 @@ fn validate_server_settings(
 ) -> Result<ServerSettings, SettingsError> {
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
-    let hostname = raw
-        .hostname
-        .map(|hostname| normalize_public_hostname(&hostname))
-        .unwrap_or_else(|| {
+    let hostname = match raw.hostname {
+        Some(hostname) => validate_hostname_field("server.hostname", hostname, &mut messages)
+            .unwrap_or_default(),
+        None => {
             messages.push("server.hostname is required".to_owned());
             String::new()
-        });
+        }
+    };
 
     let manual_present = raw.cert.is_some();
     let acme_present = raw.acme.is_some();
@@ -209,19 +215,22 @@ fn validate_server_settings(
         _ => None,
     };
 
-    let tunnel_count = raw.tunnels.len();
+    let logs = raw.logs.unwrap_or(true);
+    if raw.tunnels.is_empty() {
+        messages.push("at least one [[server.tunnels]] entry is required".to_owned());
+    }
     let tunnels = raw
         .tunnels
         .into_iter()
         .filter_map(|tunnel| validate_server_tunnel(tunnel, &mut messages))
-        .collect();
-    if tunnel_count != 1 {
-        messages.push("phase-2 server mode requires exactly one Catch-all Tunnel".to_owned());
-    }
+        .collect::<Vec<_>>();
+    validate_unique_client_identities(&tunnels, &mut messages);
+    validate_unique_server_hostnames(&hostname, &tunnels, &mut messages);
 
     if messages.is_empty() {
         Ok(ServerSettings {
             hostname,
+            logs,
             certificate: certificate.expect("validated server certificate settings"),
             tunnels,
         })
@@ -241,13 +250,16 @@ fn validate_client_settings(
 ) -> Result<ClientSettings, SettingsError> {
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
-    let server_hostname = raw
-        .server_hostname
-        .map(|hostname| normalize_public_hostname(&hostname))
-        .unwrap_or_else(|| {
+    let server_hostname = match raw.server_hostname {
+        Some(hostname) => {
+            validate_hostname_field("client.server-hostname", hostname, &mut messages)
+                .unwrap_or_default()
+        }
+        None => {
             messages.push("client.server-hostname is required".to_owned());
             String::new()
-        });
+        }
+    };
 
     let server_ca_file = match raw.server_ca_file {
         Some(server_ca_file) => validate_optional_path(
@@ -292,19 +304,28 @@ fn validate_client_settings(
         messages.push("client.reconnect-interval must be at least 1".to_owned());
     }
 
+    let logs = raw.logs.unwrap_or(true);
     let service_count = raw.services.len();
+    let omitted_service_public_hostnames = raw
+        .services
+        .iter()
+        .filter(|service| service.public_hostnames.is_none())
+        .count();
+    if service_count == 0 {
+        messages.push("at least one [[client.services]] entry is required".to_owned());
+    }
     let services = raw
         .services
         .into_iter()
         .filter_map(|service| validate_client_service(service, &mut messages))
-        .collect();
-    if service_count != 1 {
-        messages.push("phase-2 client mode requires exactly one Catch-all Service".to_owned());
-    }
+        .collect::<Vec<_>>();
+    validate_client_service_shapes(service_count, omitted_service_public_hostnames, &mut messages);
+    validate_unique_client_service_hostnames(&services, &mut messages);
 
     if messages.is_empty() {
         Ok(ClientSettings {
             server_hostname,
+            logs,
             server_ca_file,
             identity_directory: identity_directory.expect("validated client.identity-directory"),
             reconnect_interval: Duration::from_secs(reconnect_interval_secs),
@@ -438,9 +459,11 @@ fn validate_server_tunnel(
     raw: RawServerTunnelConfig,
     messages: &mut Vec<String>,
 ) -> Option<ServerTunnelSettings> {
-    if raw.public_hostnames.is_some() {
-        messages.push("phase-2 server mode only supports a Catch-all Tunnel".to_owned());
-    }
+    let public_hostnames = validate_required_public_hostnames(
+        "server.tunnels[].public-hostnames",
+        raw.public_hostnames,
+        messages,
+    );
 
     let client_identity = match raw.client_identity {
         Some(client_identity) => match client_identity.parse::<ClientIdentity>() {
@@ -458,16 +481,21 @@ fn validate_server_tunnel(
         }
     };
 
-    client_identity.map(|client_identity| ServerTunnelSettings { client_identity })
+    match (public_hostnames, client_identity) {
+        (Some(public_hostnames), Some(client_identity)) => Some(ServerTunnelSettings {
+            public_hostnames,
+            client_identity,
+        }),
+        _ => None,
+    }
 }
 
 fn validate_client_service(
     raw: RawClientServiceConfig,
     messages: &mut Vec<String>,
 ) -> Option<ClientServiceSettings> {
-    if raw.public_hostnames.is_some() {
-        messages.push("phase-2 client mode only supports a Catch-all Service".to_owned());
-    }
+    let public_hostnames =
+        validate_optional_public_hostnames("client.services[].public-hostnames", raw.public_hostnames, messages);
 
     let backend_addr = match raw.backend_address {
         Some(backend_addr) => {
@@ -487,7 +515,142 @@ fn validate_client_service(
         }
     };
 
-    backend_addr.map(|backend_addr| ClientServiceSettings { backend_addr })
+    backend_addr.map(|backend_addr| ClientServiceSettings {
+        public_hostnames,
+        backend_addr,
+    })
+}
+
+fn validate_hostname_field(
+    field_name: &str,
+    hostname: String,
+    messages: &mut Vec<String>,
+) -> Option<String> {
+    match validate_public_hostname(&hostname) {
+        Ok(hostname) => Some(hostname),
+        Err(error) => {
+            messages.push(format!("{field_name} is invalid: {error}"));
+            None
+        }
+    }
+}
+
+fn validate_required_public_hostnames(
+    field_name: &str,
+    raw_hostnames: Option<Vec<String>>,
+    messages: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    match raw_hostnames {
+        Some(hostnames) => validate_public_hostnames(field_name, hostnames, messages),
+        None => {
+            messages.push(format!("{field_name} is required"));
+            None
+        }
+    }
+}
+
+fn validate_optional_public_hostnames(
+    field_name: &str,
+    raw_hostnames: Option<Vec<String>>,
+    messages: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    raw_hostnames.and_then(|hostnames| validate_public_hostnames(field_name, hostnames, messages))
+}
+
+fn validate_public_hostnames(
+    field_name: &str,
+    hostnames: Vec<String>,
+    messages: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    if hostnames.is_empty() {
+        messages.push(format!("{field_name} must not be empty"));
+        return None;
+    }
+
+    let mut validated = Vec::with_capacity(hostnames.len());
+    let hostnames_len = hostnames.len();
+    for hostname in hostnames {
+        match validate_public_hostname(&hostname) {
+            Ok(hostname) => validated.push(hostname),
+            Err(error) => messages.push(format!(
+                "{field_name} contains invalid hostname `{hostname}`: {error}"
+            )),
+        }
+    }
+
+    if validated.len() == hostnames_len {
+        Some(validated)
+    } else {
+        None
+    }
+}
+
+fn validate_unique_client_identities(
+    tunnels: &[ServerTunnelSettings],
+    messages: &mut Vec<String>,
+) {
+    let mut seen = HashSet::new();
+    for tunnel in tunnels {
+        let identity = tunnel.client_identity.to_string();
+        if !seen.insert(identity.clone()) {
+            messages.push(format!(
+                "server.tunnels[].client-identity must be unique: {identity}"
+            ));
+        }
+    }
+}
+
+fn validate_unique_server_hostnames(
+    server_hostname: &str,
+    tunnels: &[ServerTunnelSettings],
+    messages: &mut Vec<String>,
+) {
+    let mut seen = HashSet::new();
+    for tunnel in tunnels {
+        for hostname in &tunnel.public_hostnames {
+            if !server_hostname.is_empty() && hostname == server_hostname {
+                messages.push(format!(
+                    "server.tunnels[].public-hostnames must not include server.hostname `{server_hostname}`"
+                ));
+            }
+            if !seen.insert(hostname.clone()) {
+                messages.push(format!(
+                    "server.tunnels[].public-hostnames must be unique after normalization: {hostname}"
+                ));
+            }
+        }
+    }
+}
+
+fn validate_client_service_shapes(
+    service_count: usize,
+    omitted_service_public_hostnames: usize,
+    messages: &mut Vec<String>,
+) {
+    if service_count > 1 && omitted_service_public_hostnames > 0 {
+        messages.push(
+            "client.services[].public-hostnames may be omitted only when there is exactly one service"
+                .to_owned(),
+        );
+    }
+}
+
+fn validate_unique_client_service_hostnames(
+    services: &[ClientServiceSettings],
+    messages: &mut Vec<String>,
+) {
+    let mut seen = HashSet::new();
+    for service in services {
+        if let Some(public_hostnames) = &service.public_hostnames {
+            for hostname in public_hostnames {
+                if !seen.insert(hostname.clone()) {
+                    messages.push(format!(
+                        "client.services[].public-hostnames must be unique after normalization: {hostname}"
+                    ));
+                }
+            }
+        }
+    }
 }
 
 fn is_valid_backend_addr(backend_addr: &str) -> bool {
@@ -513,7 +676,7 @@ fn collect_server_unknown_field_messages(section_value: &toml::Value) -> Vec<Str
 
     push_unknown_table_fields(
         server,
-        &["hostname", "cert", "acme", "tunnels"],
+        &["hostname", "logs", "cert", "acme", "tunnels"],
         &mut messages,
     );
 
@@ -550,6 +713,7 @@ fn collect_client_unknown_field_messages(section_value: &toml::Value) -> Vec<Str
         client,
         &[
             "server-hostname",
+            "logs",
             "server-ca-file",
             "identity-directory",
             "reconnect-interval",
@@ -589,6 +753,7 @@ fn push_unknown_table_fields(
 #[serde(rename_all = "kebab-case")]
 struct RawServerConfig {
     hostname: Option<String>,
+    logs: Option<bool>,
     cert: Option<RawServerCertConfig>,
     acme: Option<RawServerAcmeConfig>,
     #[serde(default)]
@@ -619,6 +784,7 @@ struct RawServerTunnelConfig {
 #[serde(rename_all = "kebab-case")]
 struct RawClientConfig {
     server_hostname: Option<String>,
+    logs: Option<bool>,
     server_ca_file: Option<PathBuf>,
     identity_directory: Option<PathBuf>,
     reconnect_interval: Option<u64>,

@@ -1,10 +1,10 @@
 # Security
 
-Runewarp keeps customer TLS termination on the operator's own Local backend, not on the public edge. The Server still sees routing metadata, so the security model is private tunneling for TLS passthrough, not zero knowledge. The committed phase-3 routing model also treats explicit Server-side `public-hostnames` as a security boundary once exact-match Server authorization lands.
+Runewarp keeps customer TLS termination on the operator's own Local backend, not on the public edge. The Server still sees routing metadata, so the security model is private tunneling for TLS passthrough, not zero knowledge. The shipped phase-3 routing model treats explicit Server-side `public-hostnames` as a security boundary.
 
 ## Current status
 
-The current repository now ships the corrected phase-2 surface (`runewarp server cert ...`, `runewarp client identity ...`, directory-based material, exclusive `server-ca-file`, Client authentication, ACME, and same-key Client certificate renewal before initial connect and reconnect attempts). It still retains the phase-2 Server Catch-all runtime; explicit Server-authorized exact-match public-hostnames remain phase-3 work.
+The current repository now ships the corrected phase-2 surface (`runewarp server cert ...`, `runewarp client identity ...`, directory-based material, exclusive `server-ca-file`, Client authentication, ACME, and same-key Client certificate renewal before initial connect and reconnect attempts) together with explicit Server-authorized exact-match public-hostname routing and per-Tunnel connection isolation.
 
 ## What the Server can and cannot see
 
@@ -121,7 +121,7 @@ Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode.
 - the runtime does not validate cross-side hostname coverage
 - there is no Local backend health check in the committed baseline
 - the simple manual/private-CA Server path may keep private CA material on the public Server
-- the current runtime still lacks phase-3 exact-match Server authorization and per-Tunnel connection isolation
+- same-Tunnel load-balanced pools and zero-downtime replacement remain future work
 
 Those are known limitations, not hidden guarantees.
 

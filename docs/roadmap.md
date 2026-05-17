@@ -111,8 +111,19 @@ Scope:
 - one shared `client-identity` per Tunnel by default, with separate identities as a later advanced case
 - clearer handling for misconfigured replicas
 
+## Phase 7 - Optional remote configuration
 
-## Phase 7 - Protocol growth
+Goal: add an optional control-plane integration path without replacing the self-hosted file-based baseline.
+
+Scope:
+
+- outbound WebSocket control connection from a Runewarp instance to a control plane
+- optional remote configuration alongside local static config
+- authenticated enrollment for remotely managed instances
+- remote delivery of routing and runtime configuration without custody of operator private keys
+- explicit support for hosted control planes such as Runewarp Cloud without making them mandatory
+
+## Phase 8 - Protocol growth
 
 Goal: expand the data plane without changing the product boundary.
 
@@ -120,11 +131,10 @@ Scope:
 
 - public QUIC and HTTP/3 on `443/udp`
 - wildcard Public hostnames
-- HTTP/3-based remote configuration instead of a custom control protocol
 - structured JSON logging
 - IPv6 support
 
-## Phase 8 - Operations and safety
+## Phase 9 - Operations and safety
 
 Goal: support larger and more dynamic deployments.
 
@@ -137,7 +147,7 @@ Scope:
 - lint and doctor tooling for Hostname mirroring drift
 - eventual per-hostname public port support
 
-## Phase 9 - Advanced network features
+## Phase 10 - Advanced network features
 
 Goal: handle more demanding edge and privacy requirements.
 

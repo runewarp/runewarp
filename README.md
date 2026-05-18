@@ -26,7 +26,7 @@ Today that means:
 - the runtime keeps one active Tunnel connection per Tunnel, and a newer authenticated connection replaces the older connection only for that same Tunnel
 - Client-side routing supports either Hostname mirroring with exact-match Services or one Catch-all Service behind an explicit Server-authorized Tunnel
 - human-readable Server and Client routing diagnostics are enabled by default and can be disabled with `server.logs` and `client.logs`
-- the repository now ships a shared non-root Docker image together with always-on `CI` and a manual `Preview Docker images` workflow for internal OCI preview artifacts
+- the repository now ships a shared non-root Docker image together with always-on `CI` and a manual `Docker images` workflow for internal OCI preview artifacts
 
 ## Getting started
 

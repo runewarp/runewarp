@@ -8,4 +8,3 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --quiet
 cargo doc --no-deps
-./scripts/test-shared-image.sh

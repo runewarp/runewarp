@@ -28,10 +28,10 @@ jobs:
           echo "RUNEWARP_ARTIFACT_PREFIX=runewarp-v${version}-${commit}" >> "$GITHUB_ENV"
 
       - name: Export linux/amd64 OCI image
-        run: ./scripts/export-oci-image.sh linux/amd64 "$OUTPUT_DIR"
+        run: ./scripts/docker-image.sh linux/amd64 "$OUTPUT_DIR"
 
       - name: Export linux/arm64 OCI image
-        run: ./scripts/export-oci-image.sh linux/arm64 "$OUTPUT_DIR"
+        run: ./scripts/docker-image.sh linux/arm64 "$OUTPUT_DIR"
 
       - name: Upload OCI image artifacts
         uses: actions/upload-artifact@v7

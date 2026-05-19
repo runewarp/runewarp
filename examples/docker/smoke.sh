@@ -4,7 +4,8 @@ set -euo pipefail
 example_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 generated_dir="$example_dir/generated"
 compose_file="$example_dir/docker-compose.yml"
-caddy_root_ca="$generated_dir/caddy/data/caddy/pki/authorities/local/root.crt"
+caddy_root_ca="$generated_dir/caddy/root.crt"
+caddy_container_root_ca="/data/caddy/pki/authorities/local/root.crt"
 
 fail() {
   echo "$1" >&2
@@ -19,18 +20,19 @@ cleanup() {
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
 }
 
-wait_for_file() {
-  local path="$1"
-  local attempts="$2"
-  local delay_seconds="$3"
+wait_for_caddy_root_ca() {
+  local attempts="$1"
+  local delay_seconds="$2"
   local attempt
   for (( attempt = 0; attempt < attempts; attempt += 1 )); do
-    if [[ -f "$path" ]]; then
+    if compose exec -T caddy sh -c "test -f '$caddy_container_root_ca'" >/dev/null 2>&1; then
+      compose exec -T caddy sh -c "cat '$caddy_container_root_ca'" > "$caddy_root_ca"
       return 0
     fi
     sleep "$delay_seconds"
   done
-  fail "timed out waiting for $path"
+  compose logs --no-color caddy >&2 || true
+  fail "timed out waiting for $caddy_container_root_ca in the caddy container"
 }
 
 assert_hostname_response() {
@@ -64,6 +66,6 @@ trap cleanup EXIT
 cleanup
 "$example_dir/prepare.sh" --reset
 compose up -d
-wait_for_file "$caddy_root_ca" 30 2
+wait_for_caddy_root_ca 30 2
 assert_hostname_response "app.example.test" "app.example.test via runewarp"
 assert_hostname_response "api.example.test" "api.example.test via runewarp"

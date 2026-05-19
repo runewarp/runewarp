@@ -42,15 +42,15 @@ cargo test
 
 ## Docker example
 
-The repository now includes one canonical `docker/` example for the phase-4 preview:
+The repository now includes one canonical `examples/docker/` example for the phase-4 preview:
 
 ```bash
-cd docker
+cd examples/docker
 ./prepare.sh
 docker compose up
 ```
 
-It uses the committed One-sided Catch-all topology with `tunnel.example.test` as the Server hostname and `app.example.test` plus `api.example.test` as the routed Public hostnames. `./smoke.sh` resets the example, starts the stack, and verifies both hostnames over TLS against Caddy's local CA.
+It uses the committed One-sided Catch-all topology with `tunnel.example.test` as the Server hostname and `app.example.test` plus `api.example.test` as the routed Public hostnames. `./prepare.sh` renders service-shaped state under `generated/server`, `generated/client`, and `generated/caddy` so it is easy to see what each container mounts. `./smoke.sh` resets the example, starts the stack, and verifies both hostnames over TLS against Caddy's local CA.
 
 ## Design boundaries
 

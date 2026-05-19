@@ -2,17 +2,21 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 generated_dir="$script_dir/generated"
-server_dir="$generated_dir/server-cert"
+server_service_dir="$generated_dir/server"
+server_dir="$server_service_dir/cert"
 server_state_dir="$server_dir/state"
-client_dir="$generated_dir/client-identity"
-config_dir="$generated_dir/config"
-client_trust_dir="$generated_dir/server-ca"
-caddy_data_dir="$generated_dir/caddy/data"
-caddy_config_dir="$generated_dir/caddy/config"
-server_template="$script_dir/server-config.toml.template"
-client_template="$script_dir/client-config.toml.template"
+server_config_path="$server_service_dir/config.toml"
+client_service_dir="$generated_dir/client"
+client_dir="$client_service_dir/identity"
+client_trust_dir="$client_service_dir/trust"
+client_config_path="$client_service_dir/config.toml"
+caddy_service_dir="$generated_dir/caddy"
+caddy_data_dir="$caddy_service_dir/data"
+caddy_config_dir="$caddy_service_dir/config"
+server_template="$script_dir/server/config.toml.template"
+client_template="$script_dir/client/config.toml.template"
 image_tag="runewarp-example:local"
 
 usage() {
@@ -89,20 +93,13 @@ assert_complete_or_empty() {
 
 prepare_directories() {
   mkdir -p \
+    "$server_service_dir" \
     "$server_state_dir" \
+    "$client_service_dir" \
     "$client_dir" \
-    "$config_dir" \
     "$client_trust_dir" \
     "$caddy_data_dir" \
     "$caddy_config_dir"
-}
-
-allow_container_writes() {
-  chmod 0777 "$server_dir" "$server_state_dir" "$client_dir"
-}
-
-lock_directories() {
-  chmod 0755 "$server_dir" "$server_state_dir" "$client_dir"
 }
 
 build_image() {
@@ -111,6 +108,7 @@ build_image() {
 
 run_runewarp() {
   docker run --rm \
+    --user "$(id -u):$(id -g)" \
     --volume "$script_dir:/workspace" \
     "$image_tag" \
     "$@"
@@ -120,11 +118,11 @@ render_server_config() {
   local client_identity
   client_identity="$(tr -d '[:space:]' < "$client_dir/client-identity.txt")"
   sed "s/__CLIENT_IDENTITY__/$client_identity/g" \
-    "$server_template" > "$config_dir/server.toml"
+    "$server_template" > "$server_config_path"
 }
 
 render_client_config() {
-  cp "$client_template" "$config_dir/client.toml"
+  cp "$client_template" "$client_config_path"
 }
 
 render_client_trust_bundle() {
@@ -140,20 +138,18 @@ assert_complete_or_empty "server certificate material" "$server_dir" "${server_f
 assert_complete_or_empty "client identity material" "$client_dir" "${client_files[@]}"
 
 build_image
-allow_container_writes
-trap lock_directories EXIT
 
 if ! all_files_exist "$server_dir" "${server_files[@]}"; then
   run_runewarp \
     server cert init \
-    --directory /workspace/generated/server-cert \
+    --directory /workspace/generated/server/cert \
     --hostname tunnel.example.test
 fi
 
 if ! all_files_exist "$client_dir" "${client_files[@]}"; then
   run_runewarp \
     client identity init \
-    --directory /workspace/generated/client-identity
+    --directory /workspace/generated/client/identity
 fi
 
 render_client_trust_bundle

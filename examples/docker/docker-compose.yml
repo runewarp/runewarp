@@ -21,7 +21,7 @@ services:
       - ./generated/client:/runewarp:ro
 
   caddy:
-    image: caddy:2.10
+    image: caddy:2
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./generated/caddy/data:/data

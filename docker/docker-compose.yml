@@ -21,7 +21,7 @@ services:
     volumes:
       - ./generated/config/client.toml:/runewarp/config/client.toml:ro
       - ./generated/client-identity:/runewarp/client-identity:ro
-      - ./generated/server-cert:/runewarp/server-cert:ro
+      - ./generated/server-ca:/runewarp/server-ca:ro
 
   caddy:
     image: caddy:2.10

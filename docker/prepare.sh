@@ -8,6 +8,7 @@ server_dir="$generated_dir/server-cert"
 server_state_dir="$server_dir/state"
 client_dir="$generated_dir/client-identity"
 config_dir="$generated_dir/config"
+client_trust_dir="$generated_dir/server-ca"
 caddy_data_dir="$generated_dir/caddy/data"
 caddy_config_dir="$generated_dir/caddy/config"
 server_template="$script_dir/server-config.toml.template"
@@ -91,6 +92,7 @@ prepare_directories() {
     "$server_state_dir" \
     "$client_dir" \
     "$config_dir" \
+    "$client_trust_dir" \
     "$caddy_data_dir" \
     "$caddy_config_dir"
 }
@@ -125,6 +127,10 @@ render_client_config() {
   cp "$client_template" "$config_dir/client.toml"
 }
 
+render_client_trust_bundle() {
+  cp "$server_dir/server-ca.crt" "$client_trust_dir/server-ca.crt"
+}
+
 if $reset_requested; then
   rm -rf "$generated_dir"
 fi
@@ -150,5 +156,6 @@ if ! all_files_exist "$client_dir" "${client_files[@]}"; then
     --directory /workspace/generated/client-identity
 fi
 
+render_client_trust_bundle
 render_server_config
 render_client_config

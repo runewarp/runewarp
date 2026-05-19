@@ -1,6 +1,6 @@
 services:
   server:
-    image: runewarp-example:local
+    image: runewarp/runewarp:local
     command: ["server", "--config", "/runewarp/config.toml"]
     ports:
       - "8443:443/tcp"
@@ -12,7 +12,7 @@ services:
           - tunnel.example.test
 
   client:
-    image: runewarp-example:local
+    image: runewarp/runewarp:local
     command: ["client", "--config", "/runewarp/config.toml"]
     depends_on:
       - server

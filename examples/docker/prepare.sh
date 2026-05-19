@@ -17,7 +17,7 @@ caddy_data_dir="$caddy_service_dir/data"
 caddy_config_dir="$caddy_service_dir/config"
 server_template="$script_dir/server/config.toml.template"
 client_template="$script_dir/client/config.toml.template"
-image_tag="runewarp-example:local"
+image_tag="runewarp/runewarp:local"
 
 usage() {
   echo "usage: $0 [--reset]" >&2

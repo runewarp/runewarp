@@ -1,13 +1,9 @@
-{
-  admin off
-}
-
-https://app.example.test {
+app.example.test {
   tls internal
   respond "app.example.test via runewarp" 200
 }
 
-https://api.example.test {
+api.example.test {
   tls internal
   respond "api.example.test via runewarp" 200
 }

@@ -85,8 +85,8 @@ Every Server Tunnel must list explicit `public-hostnames`. Server Catch-all is n
 ```toml
 [client]
 server-hostname = "tunnel.example.com"
-identity-directory = "/etc/runewarp/client"
 server-ca-file = "/etc/runewarp/server-ca.crt"
+identity-directory = "/etc/runewarp/client"
 reconnect-interval = 5
 
 [[client.services]]
@@ -105,8 +105,8 @@ Client exact-match mode is used when the Client also needs per-host local routin
 ```toml
 [client]
 server-hostname = "tunnel.example.com"
-identity-directory = "/etc/runewarp/client"
 server-ca-file = "/etc/runewarp/server-ca.crt"
+identity-directory = "/etc/runewarp/client"
 reconnect-interval = 5
 
 [[client.services]]
@@ -141,8 +141,8 @@ Each `client-identity` names exactly one Tunnel. If an operator needs different 
 ```toml
 [client]
 server-hostname = "tunnel.example.com"
-identity-directory = "/etc/runewarp/client"
 server-ca-file = "/etc/runewarp/server-ca.crt"
+identity-directory = "/etc/runewarp/client"
 reconnect-interval = 5
 
 [[client.services]]
@@ -173,9 +173,9 @@ The grouping of hostnames into Tunnels and Services may differ. One Tunnel can s
 | Key | Required | Notes |
 | --- | --- | --- |
 | `client.server-hostname` | yes | Server hostname the Client dials on UDP port `443`. Re-resolved on every reconnect attempt. |
-| `client.logs` | no | Boolean controlling human-readable Client runtime logs. Defaults to `true` when omitted. |
-| `client.identity-directory` | yes | Directory containing the Client keypair, certificate, and `client-identity.txt`. |
 | `client.server-ca-file` | no | Exclusive trust bundle for the Server hostname. When present, trust only the PEM certificates in this file; do not also use system roots. This file may contain more than one CA certificate during a planned CA rotation. |
+| `client.identity-directory` | yes | Directory containing the Client keypair, certificate, and `client-identity.txt`. |
+| `client.logs` | no | Boolean controlling human-readable Client runtime logs. Defaults to `true` when omitted. |
 | `client.reconnect-interval` | no | Fixed reconnect delay after the first immediate retry. Minimum `1` second. |
 | `client.services[].public-hostnames` | when exact-match local routing is desired | Exact Public hostnames this Service accepts locally. Omit only on the sole Catch-all Service. |
 | `client.services[].backend-address` | yes | TCP endpoint for the forwarded traffic. This backend must terminate TLS. Hostnames are allowed; the value is an address because it includes a port. |

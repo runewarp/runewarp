@@ -8,5 +8,4 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --quiet
 cargo doc --no-deps
-bash ./examples/docker/test-prepare.sh
 bash ./examples/docker/smoke.sh

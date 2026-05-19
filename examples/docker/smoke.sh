@@ -66,6 +66,6 @@ trap cleanup EXIT
 cleanup
 "$example_dir/prepare.sh" --reset
 compose up -d
-wait_for_caddy_root_ca 30 2
+wait_for_caddy_root_ca 30 1
 assert_hostname_response "app.example.test" "app.example.test via runewarp"
 assert_hostname_response "api.example.test" "api.example.test via runewarp"

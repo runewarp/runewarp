@@ -1,0 +1,9 @@
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+directory = "/runewarp/server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test", "api.example.test"]
+client-identity = "__CLIENT_IDENTITY__"

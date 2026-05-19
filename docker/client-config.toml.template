@@ -1,0 +1,8 @@
+[client]
+server-hostname = "tunnel.example.test"
+identity-directory = "/runewarp/client-identity"
+server-ca-file = "/runewarp/server-cert/server-ca.crt"
+reconnect-interval = 5
+
+[[client.services]]
+backend-address = "caddy:443"

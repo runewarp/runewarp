@@ -1,0 +1,28 @@
+services:
+  server:
+    image: runewarp-example:local
+    command: ["server", "--config", "/runewarp/config.toml"]
+    ports:
+      - "8443:443/tcp"
+    volumes:
+      - ./generated/server:/runewarp:ro
+    networks:
+      default:
+        aliases:
+          - tunnel.example.test
+
+  client:
+    image: runewarp-example:local
+    command: ["client", "--config", "/runewarp/config.toml"]
+    depends_on:
+      - server
+      - caddy
+    volumes:
+      - ./generated/client:/runewarp:ro
+
+  caddy:
+    image: caddy:2.10
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./generated/caddy/data:/data
+      - ./generated/caddy/config:/config

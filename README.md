@@ -40,6 +40,18 @@ cargo test
 
 `runewarp server` and `runewarp client` default to `./config.toml` when `--config` is omitted. Client identity provisioning uses `runewarp client identity init --directory ...`, and Server operators can choose either `[server.cert]` manual certificates or `[server.acme]` for the Server hostname.
 
+## Docker example
+
+The repository now includes one canonical `docker/` example for the phase-4 preview:
+
+```bash
+cd docker
+./prepare.sh
+docker compose up
+```
+
+It uses the committed One-sided Catch-all topology with `tunnel.example.test` as the Server hostname and `app.example.test` plus `api.example.test` as the routed Public hostnames. `./smoke.sh` resets the example, starts the stack, and verifies both hostnames over TLS against Caddy's local CA.
+
 ## Design boundaries
 
 - TLS passthrough is the product boundary; Runewarp does not terminate customer TLS on public hostnames

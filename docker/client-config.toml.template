@@ -1,7 +1,7 @@
 [client]
 server-hostname = "tunnel.example.test"
 identity-directory = "/runewarp/client-identity"
-server-ca-file = "/runewarp/server-cert/server-ca.crt"
+server-ca-file = "/runewarp/server-ca/server-ca.crt"
 reconnect-interval = 5
 
 [[client.services]]

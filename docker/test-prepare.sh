@@ -30,6 +30,7 @@ assert_exists "$generated_dir/server-cert/state/server-hostname.txt"
 assert_exists "$generated_dir/client-identity/client.crt"
 assert_exists "$generated_dir/client-identity/client.key"
 assert_exists "$generated_dir/client-identity/client-identity.txt"
+assert_exists "$generated_dir/server-ca/server-ca.crt"
 assert_exists "$generated_dir/config/server.toml"
 assert_exists "$generated_dir/config/client.toml"
 
@@ -38,6 +39,7 @@ assert_contains "$generated_dir/config/server.toml" 'hostname = "tunnel.example.
 assert_contains "$generated_dir/config/server.toml" 'public-hostnames = ["app.example.test", "api.example.test"]'
 assert_contains "$generated_dir/config/server.toml" "client-identity = \"$client_identity\""
 assert_contains "$generated_dir/config/client.toml" 'server-hostname = "tunnel.example.test"'
+assert_contains "$generated_dir/config/client.toml" 'server-ca-file = "/runewarp/server-ca/server-ca.crt"'
 assert_contains "$generated_dir/config/client.toml" 'backend-address = "caddy:443"'
 
 if grep -Fq "public-hostnames" "$generated_dir/config/client.toml"; then

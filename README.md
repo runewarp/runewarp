@@ -50,7 +50,7 @@ cd examples/docker
 docker compose up
 ```
 
-It uses the committed One-sided Catch-all topology with `tunnel.example.test` as the Server hostname and `app.example.test` plus `api.example.test` as the routed Public hostnames. `./prepare.sh` renders service-shaped state under `generated/server`, `generated/client`, and `generated/caddy` so it is easy to see what each container mounts. `./smoke.sh` resets the example, starts the stack, and verifies both hostnames over TLS against Caddy's local CA.
+It uses the committed One-sided Catch-all topology with `tunnel.example.test` as the Server hostname and `app.example.test` plus `api.example.test` as the routed Public hostnames. `./prepare.sh` builds the local image, keeps authoritative source material under `generated/server/cert-source` and `generated/client/identity-source`, and renders container-readable runtime state under `generated/server`, `generated/client`, and `generated/caddy`. `./smoke.sh` resets the example, starts the stack, verifies both hostnames over TLS against Caddy's local CA, and then cleans the stack back down with sectioned progress output.
 
 ## Design boundaries
 

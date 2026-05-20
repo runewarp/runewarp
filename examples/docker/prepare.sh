@@ -3,13 +3,18 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
+
+. "$repo_root/scripts/lib.sh"
+
 generated_dir="$script_dir/generated"
 server_service_dir="$generated_dir/server"
-server_dir="$server_service_dir/cert"
-server_state_dir="$server_dir/state"
+server_source_dir="$server_service_dir/cert-source"
+server_state_dir="$server_source_dir/state"
+server_runtime_dir="$server_service_dir/cert"
 server_config_path="$server_service_dir/config.toml"
 client_service_dir="$generated_dir/client"
-client_dir="$client_service_dir/identity"
+client_source_dir="$client_service_dir/identity-source"
+client_runtime_dir="$client_service_dir/identity"
 client_trust_dir="$client_service_dir/trust"
 client_config_path="$client_service_dir/config.toml"
 caddy_service_dir="$generated_dir/caddy"
@@ -18,50 +23,49 @@ caddy_config_dir="$caddy_service_dir/config"
 server_template="$script_dir/server/config.toml.template"
 client_template="$script_dir/client/config.toml.template"
 image_tag="runewarp/runewarp:local"
-
-usage() {
-  echo "usage: $0 [--reset]" >&2
-  exit 1
-}
-
-fail() {
-  echo "$1" >&2
-  exit 1
-}
-
-if [[ $# -gt 1 ]]; then
-  usage
-fi
-
-reset_requested=false
-if [[ $# -eq 1 ]]; then
-  case "$1" in
-    --reset)
-      reset_requested=true
-      ;;
-    *)
-      usage
-      ;;
-  esac
-fi
-
-server_files=(
+server_source_files=(
   "server.crt"
   "server.key"
   "server-ca.crt"
   "state/server-ca.key"
   "state/server-hostname.txt"
 )
-client_files=(
+client_source_files=(
   "client.crt"
   "client.key"
   "client-identity.txt"
 )
 
+usage() {
+  usage_error "$(basename "$0") [--reset]"
+}
+
+parse_args() {
+  case $# in
+    0)
+      reset_requested=false
+      ;;
+    1)
+      case "$1" in
+        --reset)
+          reset_requested=true
+          ;;
+        *)
+          usage
+          ;;
+      esac
+      ;;
+    *)
+      usage
+      ;;
+  esac
+}
+
 all_files_exist() {
   local base_dir="$1"
-  shift
   local relative_path
+
+  shift
   for relative_path in "$@"; do
     [[ -f "$base_dir/$relative_path" ]] || return 1
   done
@@ -69,8 +73,9 @@ all_files_exist() {
 
 any_file_exists() {
   local base_dir="$1"
-  shift
   local relative_path
+
+  shift
   for relative_path in "$@"; do
     if [[ -e "$base_dir/$relative_path" ]]; then
       return 0
@@ -82,28 +87,47 @@ any_file_exists() {
 assert_complete_or_empty() {
   local label="$1"
   local base_dir="$2"
+
   shift 2
+
   if all_files_exist "$base_dir" "$@"; then
     return 0
   fi
+
   if any_file_exists "$base_dir" "$@"; then
-    fail "found incomplete $label in $base_dir; rerun $0 --reset to rebuild it cleanly"
+    die "found incomplete $label in $base_dir; rerun $(basename "$0") --reset to rebuild it cleanly"
   fi
 }
 
 prepare_directories() {
   mkdir -p \
     "$server_service_dir" \
+    "$server_source_dir" \
     "$server_state_dir" \
+    "$server_runtime_dir" \
     "$client_service_dir" \
-    "$client_dir" \
+    "$client_source_dir" \
+    "$client_runtime_dir" \
     "$client_trust_dir" \
     "$caddy_data_dir" \
     "$caddy_config_dir"
 }
 
 build_image() {
-  docker build --tag "$image_tag" "$repo_root"
+  require_command docker
+
+  if ! docker buildx version >/dev/null 2>&1; then
+    die "docker buildx is required to build the local example image"
+  fi
+
+  section "Building local Runewarp image"
+  note "Loading $image_tag into the local Docker image store"
+
+  docker buildx build \
+    --file "$repo_root/Dockerfile" \
+    --load \
+    --tag "$image_tag" \
+    "$repo_root"
 }
 
 run_runewarp() {
@@ -116,7 +140,8 @@ run_runewarp() {
 
 render_server_config() {
   local client_identity
-  client_identity="$(tr -d '[:space:]' < "$client_dir/client-identity.txt")"
+
+  client_identity="$(tr -d '[:space:]' < "$client_source_dir/client-identity.txt")"
   sed "s/__CLIENT_IDENTITY__/$client_identity/g" \
     "$server_template" > "$server_config_path"
 }
@@ -125,33 +150,98 @@ render_client_config() {
   cp "$client_template" "$client_config_path"
 }
 
-render_client_trust_bundle() {
-  cp "$server_dir/server-ca.crt" "$client_trust_dir/server-ca.crt"
+install_readonly_copy() {
+  local source_path="$1"
+  local destination_path="$2"
+
+  install -m 0444 "$source_path" "$destination_path"
 }
 
-if $reset_requested; then
+render_server_runtime_material() {
+  install_readonly_copy "$server_source_dir/server.crt" "$server_runtime_dir/server.crt"
+  install_readonly_copy "$server_source_dir/server.key" "$server_runtime_dir/server.key"
+  install_readonly_copy "$server_source_dir/server-ca.crt" "$server_runtime_dir/server-ca.crt"
+}
+
+render_client_runtime_material() {
+  install_readonly_copy "$client_source_dir/client.crt" "$client_runtime_dir/client.crt"
+  install_readonly_copy "$client_source_dir/client.key" "$client_runtime_dir/client.key"
+  install_readonly_copy "$client_source_dir/client-identity.txt" "$client_runtime_dir/client-identity.txt"
+}
+
+render_client_trust_bundle() {
+  install_readonly_copy "$server_source_dir/server-ca.crt" "$client_trust_dir/server-ca.crt"
+}
+
+reset_generated_state() {
+  section "Resetting generated Docker example state"
+  note "Removing $generated_dir and any legacy .env"
   rm -rf "$generated_dir"
-fi
+  rm -f "$script_dir/.env"
+}
 
-prepare_directories
-assert_complete_or_empty "server certificate material" "$server_dir" "${server_files[@]}"
-assert_complete_or_empty "client identity material" "$client_dir" "${client_files[@]}"
+prepare_server_certificate_material() {
+  section "Preparing server certificate material"
 
-build_image
+  if ! all_files_exist "$server_source_dir" "${server_source_files[@]}"; then
+    note "Generating certificate material for tunnel.example.test"
+    run_runewarp \
+      server cert init \
+      --directory /workspace/generated/server/cert-source \
+      --hostname tunnel.example.test
+    return
+  fi
 
-if ! all_files_exist "$server_dir" "${server_files[@]}"; then
-  run_runewarp \
-    server cert init \
-    --directory /workspace/generated/server/cert \
-    --hostname tunnel.example.test
-fi
+  note "Reusing existing server certificate material"
+}
 
-if ! all_files_exist "$client_dir" "${client_files[@]}"; then
-  run_runewarp \
-    client identity init \
-    --directory /workspace/generated/client/identity
-fi
+prepare_client_identity_material() {
+  section "Preparing client identity material"
 
-render_client_trust_bundle
-render_server_config
-render_client_config
+  if ! all_files_exist "$client_source_dir" "${client_source_files[@]}"; then
+    note "Generating client identity material"
+    run_runewarp \
+      client identity init \
+      --directory /workspace/generated/client/identity-source
+    return
+  fi
+
+  note "Reusing existing client identity material"
+}
+
+render_runtime_configuration() {
+  section "Rendering Docker example configuration"
+  note "Writing container-readable runtime material"
+
+  render_server_runtime_material
+  render_client_runtime_material
+  render_client_trust_bundle
+  render_server_config
+  render_client_config
+}
+
+main() {
+  parse_args "$@"
+
+  if [[ "$reset_requested" == true ]]; then
+    reset_generated_state
+  fi
+
+  section "Preparing Docker example state"
+  note "Ensuring generated directories exist"
+  prepare_directories
+
+  assert_complete_or_empty "server certificate material" "$server_source_dir" "${server_source_files[@]}"
+  assert_complete_or_empty "client identity material" "$client_source_dir" "${client_source_files[@]}"
+
+  build_image
+  prepare_server_certificate_material
+  prepare_client_identity_material
+  render_runtime_configuration
+
+  success "Docker example is ready"
+  note "Generated state is under $generated_dir"
+  note "Authoritative source material stays in generated/server/cert-source and generated/client/identity-source"
+}
+
+main "$@"

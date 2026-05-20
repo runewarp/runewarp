@@ -35,3 +35,24 @@ usage_error() {
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required"
 }
+
+runewarp_version() {
+  local repo_root="$1"
+  local version
+
+  version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo_root/Cargo.toml" | head -n1)"
+  [[ -n "$version" ]] || return 1
+  printf '%s\n' "$version"
+}
+
+runewarp_git_commit() {
+  local repo_root="$1"
+  local commit="${RUNEWARP_GIT_COMMIT:-}"
+
+  if [[ -z "$commit" ]]; then
+    commit="$(git -C "$repo_root" rev-parse --short=12 HEAD)"
+  fi
+
+  [[ -n "$commit" ]] || return 1
+  printf '%s\n' "$commit"
+}

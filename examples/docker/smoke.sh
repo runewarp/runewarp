@@ -16,14 +16,21 @@ compose() {
   docker compose -f "$compose_file" "$@"
 }
 
+stop_stack() {
+  compose down --volumes --remove-orphans --timeout 1 >/dev/null 2>&1 || true
+}
+
+require_compose() {
+  docker compose version >/dev/null 2>&1 || die "docker compose is required"
+}
+
 cleanup() {
   if [[ "$stack_started" != true ]]; then
     return
   fi
 
   section "Stopping Docker example stack"
-  note "Removing containers, networks, and volumes"
-  compose down --volumes --remove-orphans --timeout 1 >/dev/null 2>&1 || true
+  stop_stack
   stack_started=false
   note "Docker example stack is down"
 }
@@ -34,17 +41,18 @@ wait_for_caddy_root_ca() {
   local attempt
 
   section "Waiting for Caddy root CA"
-  note "Container path: $caddy_container_root_ca"
 
   for (( attempt = 1; attempt <= attempts; attempt += 1 )); do
-    note "Attempt $attempt/$attempts"
     if compose exec -T caddy sh -c "test -f '$caddy_container_root_ca'" >/dev/null 2>&1; then
-      note "Copying the local CA certificate to $caddy_root_ca"
       compose exec -T caddy sh -c "cat '$caddy_container_root_ca'" > "$caddy_root_ca"
+      note "Copied root CA to $caddy_root_ca"
       return 0
     fi
 
-    sleep "$delay_seconds"
+    if (( attempt < attempts )); then
+      note "Root CA not ready yet; retrying ($attempt/$attempts)"
+      sleep "$delay_seconds"
+    fi
   done
 
   warn "Timed out waiting for the Caddy root CA; dumping caddy logs"
@@ -58,11 +66,9 @@ assert_hostname_response() {
   local response=""
   local attempt
 
-  section "Verifying ${hostname}"
-  note "Expecting response body: ${expected_body}"
+  section "Verifying $hostname"
 
   for (( attempt = 1; attempt <= 30; attempt += 1 )); do
-    note "Attempt $attempt/30"
     if response="$(
       curl \
         --silent \
@@ -80,8 +86,10 @@ assert_hostname_response() {
       die "expected ${hostname} to return '${expected_body}', got '${response}'"
     fi
 
-    note "curl failed: ${response}"
-    sleep 2
+    if (( attempt < 30 )); then
+      note "Request failed; retrying ($attempt/30): ${response}"
+      sleep 2
+    fi
   done
 
   warn "Timed out waiting for ${hostname}; dumping docker compose logs"
@@ -91,18 +99,19 @@ assert_hostname_response() {
 
 reset_stack() {
   section "Resetting Docker example stack"
-  note "Removing any previous containers and volumes"
-  compose down --volumes --remove-orphans --timeout 1 >/dev/null 2>&1 || true
+  stop_stack
 }
 
 main() {
   trap cleanup EXIT
+  require_command docker
+  require_compose
+  require_command curl
 
   reset_stack
   "$example_dir/prepare.sh" --reset
 
   section "Starting Docker example stack"
-  note "Launching the server, client, and Caddy services"
   compose up -d >/dev/null
   stack_started=true
 

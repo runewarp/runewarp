@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/../.." && pwd)"
+example_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$example_dir/../.." && pwd)"
 
 . "$repo_root/scripts/lib.sh"
 
-generated_dir="$script_dir/generated"
+generated_dir="$example_dir/generated"
 server_service_dir="$generated_dir/server"
 server_source_dir="$server_service_dir/cert-source"
 server_state_dir="$server_source_dir/state"
@@ -20,9 +20,10 @@ client_config_path="$client_service_dir/config.toml"
 caddy_service_dir="$generated_dir/caddy"
 caddy_data_dir="$caddy_service_dir/data"
 caddy_config_dir="$caddy_service_dir/config"
-server_template="$script_dir/server/config.toml.template"
-client_template="$script_dir/client/config.toml.template"
+server_template="$example_dir/server/config.toml.template"
+client_template="$example_dir/client/config.toml.template"
 image_tag="runewarp/runewarp:local"
+reset_requested=false
 server_source_files=(
   "server.crt"
   "server.key"
@@ -41,19 +42,15 @@ usage() {
 }
 
 parse_args() {
-  case $# in
-    0)
-      reset_requested=false
+  if (( $# > 1 )); then
+    usage
+  fi
+
+  case "${1-}" in
+    "")
       ;;
-    1)
-      case "$1" in
-        --reset)
-          reset_requested=true
-          ;;
-        *)
-          usage
-          ;;
-      esac
+    --reset)
+      reset_requested=true
       ;;
     *)
       usage
@@ -114,18 +111,10 @@ prepare_directories() {
 }
 
 build_image() {
-  require_command docker
-
-  if ! docker buildx version >/dev/null 2>&1; then
-    die "docker buildx is required to build the local example image"
-  fi
-
   section "Building local Runewarp image"
-  note "Loading $image_tag into the local Docker image store"
 
-  docker buildx build \
+  docker build \
     --file "$repo_root/Dockerfile" \
-    --load \
     --tag "$image_tag" \
     "$repo_root"
 }
@@ -133,7 +122,7 @@ build_image() {
 run_runewarp() {
   docker run --rm \
     --user "$(id -u):$(id -g)" \
-    --volume "$script_dir:/workspace" \
+    --volume "$example_dir:/workspace" \
     "$image_tag" \
     "$@"
 }
@@ -175,9 +164,9 @@ render_client_trust_bundle() {
 
 reset_generated_state() {
   section "Resetting generated Docker example state"
-  note "Removing $generated_dir and any legacy .env"
+  note "Removing generated state"
   rm -rf "$generated_dir"
-  rm -f "$script_dir/.env"
+  rm -f "$example_dir/.env"
 }
 
 prepare_server_certificate_material() {
@@ -211,8 +200,6 @@ prepare_client_identity_material() {
 
 render_runtime_configuration() {
   section "Rendering Docker example configuration"
-  note "Writing container-readable runtime material"
-
   render_server_runtime_material
   render_client_runtime_material
   render_client_trust_bundle
@@ -222,13 +209,13 @@ render_runtime_configuration() {
 
 main() {
   parse_args "$@"
+  require_command docker
 
   if [[ "$reset_requested" == true ]]; then
     reset_generated_state
   fi
 
   section "Preparing Docker example state"
-  note "Ensuring generated directories exist"
   prepare_directories
 
   assert_complete_or_empty "server certificate material" "$server_source_dir" "${server_source_files[@]}"
@@ -240,8 +227,8 @@ main() {
   render_runtime_configuration
 
   success "Docker example is ready"
-  note "Generated state is under $generated_dir"
-  note "Authoritative source material stays in generated/server/cert-source and generated/client/identity-source"
+  note "Generated state: $generated_dir"
+  note "Source material: generated/server/cert-source and generated/client/identity-source"
 }
 
 main "$@"

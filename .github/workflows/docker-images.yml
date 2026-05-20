@@ -22,10 +22,11 @@ jobs:
 
       - name: Compute artifact identity
         run: |
-          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          commit="$(git rev-parse --short=12 HEAD)"
-          echo "RUNEWARP_GIT_COMMIT=$commit" >> "$GITHUB_ENV"
-          echo "RUNEWARP_ARTIFACT_PREFIX=runewarp-v${version}-${commit}" >> "$GITHUB_ENV"
+          . ./scripts/lib.sh
+          version="$(runewarp_version "$PWD")"
+          commit="$(runewarp_git_commit "$PWD")"
+          printf 'RUNEWARP_GIT_COMMIT=%s\n' "$commit" >> "$GITHUB_ENV"
+          printf 'RUNEWARP_ARTIFACT_PREFIX=runewarp-v%s-%s\n' "$version" "$commit" >> "$GITHUB_ENV"
 
       - name: Export linux/amd64 OCI image
         run: ./scripts/docker-image.sh linux/amd64 "$OUTPUT_DIR"

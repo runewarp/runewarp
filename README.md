@@ -8,16 +8,16 @@ Runewarp is a self-hostable ingress tunneling tool to privately forward TLS traf
 
 ## Goals
 
-- Enable TLS passthrough ingress tunneling — the Server routes traffic by SNI without terminating or inspecting TLS
-- Traverse NAT and firewalls on the Client side — Clients initiate outbound QUIC connections, so no inbound ports or port forwarding needed
-- Stay self-hostable and operator-controlled — single Rust binary, Apache 2.0
-- Keep the Server privacy-respecting by design — sees SNI, IPs, and byte counts, but never HTTP headers, bodies, or application plaintext
-- Remain operationally simple — TOML config, a handful of CLI subcommands, no external dependencies at runtime
+- **TLS passthrough ingress tunneling** — Server routes traffic by SNI without terminating or inspecting TLS
+- **Privacy-respecting by design** — sees SNI, IPs, but never HTTP headers or application plaintext
+- **Traverse NAT and firewalls** — Clients initiate outbound QUIC connections, so no port forwarding needed
+- **Self-hostable and operator-controlled** — single Rust binary, Apache 2.0
+- **Remain operationally simple** — TOML config, a handful of CLI subcommands, no runtime dependencies
 
 ## Non-goals
 
-- Server TLS termination — Server never decrypts or re-encrypts Visitor traffic
-- HTTP-layer routing — no path-based routing, header inspection, or Layer 7 awareness of any kind
+- **Server TLS termination** — Server never decrypts or re-encrypts Visitor traffic
+- **HTTP-layer routing** — no path-based routing, header inspection, or Layer 7 awareness of any kind
 
 ## Install
 

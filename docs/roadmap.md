@@ -1,161 +1,258 @@
 # Roadmap
 
-Runewarp is being built as a self-hosted TLS passthrough tunnel. The core docs describe the committed baseline; this document owns sequencing and longer-range expansion.
+The reference docs describe the committed Runewarp design. This document owns forward-looking sequencing and the mini-projects that may expand the product over time.
 
-## Current state
+## Shipped baseline
 
-- the phase-1 data path is implemented as a library-first `Server` and `Client` runtime
-- the corrected phase-2 operator/runtime/authentication surface is implemented with `runewarp server cert ...`, `runewarp client identity ...`, directory-based material, exclusive `server-ca-file`, Client authentication, ACME, and same-key renewal before initial connect and reconnect attempts
-- the current implementation ships phase-3 exact-match routing with explicit `server.tunnels[].public-hostnames`, multiple Server Tunnels, multiple Client instances across those Tunnels, multiple Client Services, one active Tunnel connection per Tunnel, and per-role `logs` toggles
+Runewarp already ships the following baseline:
 
-## Phase 1 - Library data path
+| Area | Shipped baseline |
+| --- | --- |
+| Core data path | Public TLS passthrough from the **Server** to a **Client**-side **Local backend** |
+| Operator surface and trust | `runewarp server`, `runewarp client`, `runewarp server cert ...`, `runewarp client identity ...`, ACME, manual/private-CA Server certificates, and pinned Client authentication |
+| Explicit routing | Required Server `public-hostnames`, multiple Server **Tunnels**, multiple Client **Services**, **Hostname mirroring**, and **One-sided Catch-all** |
+| Preview packaging | Shared Docker image, non-root container execution, CI automation, and preview image export workflows |
 
-Goal: prove the tunnel works end to end.
+## Public release
 
-Status: implemented as the core library runtime and end-to-end test path.
+This track turns the shipped baseline into a clean first public release.
 
-Scope:
+### Release-ready docs surface
 
-- one public Server
-- one Client instance
-- one Server Tunnel
-- one Client Service
-- public TLS passthrough on `443/tcp`
-- Client QUIC tunnel on `443/udp`
+**Outcome**
 
-## Phase 2 - Operator runtime and Client authentication
+- operators can understand what Runewarp is, what it is not, and how to evaluate or run it without reading internal project history
 
-Goal: make the single-Tunnel design usable by operators.
+**Planned work**
 
-Status: implemented for the corrected operator/runtime surface, certificate lifecycle, ACME, and exclusive configured Server trust.
+- keep the top-level README concise and product-focused
+- keep core reference docs evergreen, with roadmap material moved out of them
+- provide one task-oriented operator guide in `docs/usage.md`
+- document the shipped Docker example as an evaluation path
+- keep the canonical product language and boundaries consistent across the public docs set
 
-Scope:
+### Release notes and changelog discipline
 
-- TOML config loading
-- boot-time config validation
-- `runewarp server`, `runewarp client`, `runewarp server cert ...`, and `runewarp client identity ...`
-- directory-based Server cert and Client identity material
-- one shared `client-identity` per Tunnel
-- exclusive Client trust of a configured manual Server CA file
-- Client certificate auto-renewal with stable keys and explicit identity rotation
-- manual/private-CA Server certs with explicit `renew` and `rotate-ca`
-- ACME TLS-ALPN-01 for the Server hostname
-- human-readable logs
+**Outcome**
 
-## Phase 3 - Exact-match hostname routing
+- the first public release has a supportable release story rather than ad hoc notes
 
-Goal: make Server-side Public hostname authorization explicit while adding Client-side routing flexibility without changing the transparent data path.
+**Planned work**
 
-Status: implemented.
+- introduce a root changelog
+- define the release-note voice for operator-facing changes, boundaries, and limitations
+- call out changes that affect configuration, trust material, or rollout expectations
 
-Scope:
+### Public distribution channels
 
-- required `server.tunnels[].public-hostnames`; Server Catch-all is removed from the intended model
-- multiple Server Tunnels
-- multiple Client instances, with one Client instance per Tunnel
-- one active Tunnel connection per Tunnel, with per-Tunnel isolation and latest-wins replacement
-- multiple Client Services
-- exact-match Public hostname routing on the Server
-- explicit Client exact-match Services and Client Catch-all as the two valid client-side routing shapes
-- `Hostname mirroring` for both-sides explicit configs and `One-sided Catch-all` for Server exact-match plus Client Catch-all
-- no runtime cross-side hostname validation; mirrored coverage remains an operator responsibility
-- stronger hostname validation and normalization, including duplicate rejection, wildcard rejection, required server hostnames, and explicit single-entry exact-match
-- fail-closed routing when no authorized or connected Tunnel or Service is available
-- per-role `logs` booleans controlling human-readable routing diagnostics
+**Outcome**
 
-## Phase 4 - Preview packaging and automation
+- operators can install Runewarp through the release channels described by the public docs
 
-Goal: make Runewarp easy to evaluate and package as an operator-focused technical preview without publishing it yet.
+**Planned work**
 
-Scope:
+- publish the crate to crates.io
+- publish the shared container image to Docker Hub
+- publish the same container image to GHCR
+- keep binary versioning, image naming, and release tags aligned
 
-- a production-oriented shared Docker image for the single `runewarp` binary, usable for both `server` and `client`
-- minimal container images with non-root execution as a requirement and distroless as the preferred shape when practical
-- Linux-only always-on GitHub Actions `CI` for Clippy, fmt, docs, tests, and shared-image contract validation
-- shared-image validation that proves non-root execution, `runewarp server cert init`, `runewarp client identity init`, and low-port `server` startup with `CAP_NET_BIND_SERVICE`
-- a manual `Preview Docker images` workflow that exports internal OCI image artifacts for Linux `x86_64` and `aarch64`
-- internal image artifacts only; public publication remains a later phase
-- Docker image build automation for the later public release path
+### Install and packaging validation
 
-## Phase 5 - Docs and preview release
+**Outcome**
 
-Goal: turn the preview packaging work into a documented public technical preview release.
+- the documented install paths are tested as release surfaces rather than assumed
 
-Scope:
+**Planned work**
 
-- customer/operator-facing documentation uplift
-- a rewritten README focused on operator outcomes and product boundaries instead of project status
-- `docs/usage.md`
-- changelog
-- crates.io release
-- Docker Hub and GHCR publication of the artifacts prepared in phase 4
+- validate `cargo install runewarp`
+- validate public container pulls and basic startup
+- make sure the docs and release artifacts describe the same operator surface
 
-## Phase 6 - Multi-instance tunnels and availability
+## Availability
 
-Goal: scale one routed hostname set across multiple Client instances of the same Tunnel.
+This track scales one routed hostname set across more than one **Client instance** of the same **Tunnel**.
 
-Scope:
+### Same-Tunnel Client pools
 
-- multiple Client instances per single Tunnel
-- Tunnel pools with least-active balancing
-- round-robin tie-breaking
-- one shared `client-identity` per Tunnel by default, with separate identities as a later advanced case
-- clearer handling for misconfigured replicas
+**Outcome**
 
+- one **Tunnel** can be served by multiple concurrent Client instances instead of only one active connection
 
-## Phase 7 - Protocol growth
+**Planned work**
 
-Goal: expand the data plane without changing the product boundary.
+- replace the single-active-connection rule with a **Tunnel pool**
+- keep pool membership scoped per Tunnel so unrelated hostname sets stay isolated
+- define how incoming streams pick a serving Client instance without changing the public TLS passthrough boundary
 
-Scope:
+### Pool selection policy
 
-- public QUIC and HTTP/3 on `443/udp`
-- wildcard Public hostnames
-- HTTP/3-based remote configuration instead of a custom control protocol
-- structured JSON logging
-- IPv6 support
+**Outcome**
 
-## Phase 8 - Operations and safety
+- stream placement is predictable under load and understandable during incidents
 
-Goal: support larger and more dynamic deployments.
+**Planned work**
 
-Scope:
+- least-active balancing across the live connections in one Tunnel pool
+- round-robin tie-breaking when load is equal
+- explicit behavior when pool members disappear while traffic is in flight
 
-- live config reload without dropping active connections
-- backend health-aware routing
-- metrics for Prometheus and StatsD
+### Replica identity model
+
+**Outcome**
+
+- multi-instance deployments have a clear trust and misconfiguration story
+
+**Planned work**
+
+- keep one shared `client-identity` per Tunnel as the default pool model
+- define what happens when a replica presents the wrong identity or mismatched config
+- make replica failure modes easier for operators to diagnose
+
+## Protocol expansion
+
+This track grows the data plane without changing the product boundary.
+
+### Public QUIC and HTTP/3 passthrough
+
+**Outcome**
+
+- Runewarp can route QUIC-based application traffic on the public edge as well as TLS over TCP
+
+**Planned work**
+
+- decide how public QUIC passthrough coexists with Client Tunnel connections on `443/udp`
+- preserve explicit Server-side authorization for the routed hostname set
+- keep customer traffic opaque to the public edge
+
+### Wildcard Public hostnames
+
+**Outcome**
+
+- one Tunnel or Service can intentionally own a bounded wildcard hostname set
+
+**Planned work**
+
+- define the wildcard syntax accepted in config
+- decide how wildcard precedence interacts with exact-match hostnames
+- preserve clear operator reasoning about authorization and overlap
+
+### Remote configuration channel
+
+**Outcome**
+
+- operators can manage distributed runtime state without inventing a second control-plane product by accident
+
+**Planned work**
+
+- evaluate HTTP/3-based remote configuration over the existing QUIC transport
+- keep routing authority on the Server rather than moving to Client-side hostname registration
+- decide how remote configuration and static config coexist during rollout and recovery
+
+## Operations
+
+This track improves day-2 operation, observability, and safer runtime change management.
+
+### Live config reload
+
+**Outcome**
+
+- operators can apply approved config changes without restarting the whole runtime
+
+**Planned work**
+
+- reload Server and Client config without widening routing authority
+- decide how in-flight connections behave when routing entries change
+- keep validation fail-closed when new config is invalid
+
+### Health-aware routing
+
+**Outcome**
+
+- routing decisions can account for backend or Client health instead of only connection presence
+
+**Planned work**
+
+- introduce health signals for **Local backends** and later for pooled Client instances
+- decide whether health is passive, active, or both
+- preserve the current fail-closed stance when no healthy target exists
+
+### Metrics and logging
+
+**Outcome**
+
+- larger deployments can observe routing behavior without scraping human-readable logs alone
+
+**Planned work**
+
+- Prometheus and StatsD metrics
+- structured JSON logging alongside the current human-readable mode
+- clearer counters for routed hostnames, rejected streams, reconnects, and pool health
+
+### Routing lint and doctor tooling
+
+**Outcome**
+
+- operators can detect configuration drift before it becomes a production incident
+
+**Planned work**
+
+- lint and doctor tooling for **Hostname mirroring** drift
+- pre-flight checks for common trust-material mistakes
+- clearer diagnostics for overlap, missing coverage, and unsupported shapes
+
+### Port flexibility and deployment ergonomics
+
+**Outcome**
+
+- operators can fit Runewarp into a wider range of network and platform constraints
+
+**Planned work**
+
 - configurable public and tunnel ports
-- lint and doctor tooling for Hostname mirroring drift
-- eventual per-hostname public port support
+- later per-hostname public port support
+- IPv6 support where it changes deployment assumptions or listener behavior
 
-## Phase 9 - Advanced network features
+## Advanced networking
 
-Goal: handle more demanding edge and privacy requirements.
+This track handles harder privacy and multi-node deployment problems.
 
-Scope:
+### Encrypted ClientHello
 
-- ECH for public and Client connections
-- clustered multi-node mode
-- zero-downtime identity and CA rotation workflows
-- deeper HTTP/3 and QUIC passthrough work
+**Outcome**
+
+- public and tunnel traffic can hide more routing metadata where the surrounding ecosystem supports it
+
+**Planned work**
+
+- evaluate ECH for public traffic
+- evaluate ECH for Client tunnel connections
+- decide how ECH interacts with the product's SNI-based routing model
+
+### Clustered multi-node mode
+
+**Outcome**
+
+- more than one public node can participate in the same logical Runewarp deployment
+
+**Planned work**
+
+- define how clustered nodes route traffic to the correct **Tunnel** without centralizing the data path
+- decide how configuration and connection state are shared or replicated
+- preserve the current routing authority model while adding distribution
+
+### Zero-downtime trust rotation
+
+**Outcome**
+
+- operators can rotate trust anchors and identities without coordinated outages
+
+**Planned work**
+
+- zero-downtime `client-identity` rotation
+- zero-downtime **Server CA** rotation
+- safer overlap and cutover mechanics than the current reconnect-based model
 
 ## Deliberate non-goals
 
 - edge TLS termination for customer traffic
 - plain HTTP backend support
-
-## Testing priorities
-
-- unit tests for ClientHello parsing, config validation, hostname normalization, auth, and stream accounting
-- integration tests for exact-match routing, per-Tunnel isolation, reconnects, and later multi-instance Tunnel pools
-- end-to-end tests with a local TLS terminator behind the Client
-- benchmarks for parsing, forwarding, and allocation-sensitive paths
-- stronger property testing and fuzzing for security-critical code
-
-## Open questions worth tracking
-
-- how public QUIC passthrough should coexist with Client tunnels on `443/udp`
-- how clustered mode should route requests to the correct Tunnel without centralizing the data path
-- whether the Server should keep one coordinating accept loop or move to a clearer supervision model as the runtime grows
-- whether Server-side Tunnel selection and Client-side Service selection should eventually share a routing abstraction once exact-match routing is real on both sides
-- whether downstream connection reuse materially improves performance without hurting correctness

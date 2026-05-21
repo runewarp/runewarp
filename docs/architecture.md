@@ -1,91 +1,93 @@
 # Architecture
 
-This document describes the committed Runewarp design. The current repository now ships the corrected phase-2 operator/runtime/authentication surface together with the phase-3 routing model: explicit Server-authorized Public hostnames, exact-match Server routing, Hostname mirroring or One-sided Catch-all on the Client, one active Tunnel connection per Tunnel, and per-role human-readable routing diagnostics.
+This document describes the committed Runewarp design: TLS passthrough on the public edge, Server-authoritative hostname routing, mutually authenticated tunnel connections, and Client-side forwarding to operator-run TLS backends.
+
+## At a glance
+
+| Concern | Runewarp design |
+| --- | --- |
+| Public traffic | TLS passthrough; the public edge does not terminate customer TLS |
+| Routing authority | The **Server** selects the **Tunnel** from explicit Server-configured **Public hostnames** |
+| Client behavior | The **Client** selects a **Service** locally and forwards traffic to a TLS-terminating **Local backend** |
+| Tunnel transport | One long-lived QUIC/TLS **Tunnel connection** per **Client instance** |
+| Trust model | Server certificate validation plus pinned **Client identity** authentication |
 
 ## Roles
 
 | Component | Responsibility |
 | --- | --- |
-| Visitor | Connect to a Public hostname over TLS |
-| Server | Accept Visitor traffic, select a Tunnel, and forward the original encrypted stream |
-| Client instance | Maintain one Tunnel connection, choose a Service locally, and forward traffic to a Local backend |
-| Local backend | Terminate TLS and serve the application |
+| **Visitor** | Connects to a **Public hostname** over TLS |
+| **Server** | Accepts Visitor traffic, extracts SNI, selects a **Tunnel**, and forwards the original encrypted stream |
+| **Client instance** | Maintains one **Tunnel connection**, selects a **Service**, and forwards traffic to a **Local backend** |
+| **Local backend** | Terminates TLS and serves the operator application |
 
-## Core routing model
+## End-to-end flow
 
-Runewarp keeps routing authority on the Server:
+```mermaid
+flowchart LR
+    V[Visitor] -->|"TLS for a Public hostname"| S[Server]
+    S -->|"Select Tunnel by Public hostname"| T["Tunnel connection<br/>QUIC/TLS"]
+    T --> C[Client instance]
+    C -->|"Select Service and proxy bytes"| B[Local backend]
+```
 
-- the Server decides which Public hostnames belong to which Tunnel
-- the Server only routes Public hostnames explicitly authorized on a Tunnel
+Runewarp adds no routing header to public traffic. The forwarded byte stream begins with the Visitor's original ClientHello and stays encrypted until the Local backend terminates TLS.
+
+## Routing authority
+
+Runewarp keeps ingress authority on the **Server**:
+
+- every Server `[[tunnels]]` entry lists explicit **Public hostnames**
+- the Server routes only those hostnames into a **Tunnel**
 - the Client does not register hostnames with the Server
-- Public hostnames are the routing identity; there is no separate Tunnel or Service name field
-- exact hostname overlap is rejected within Server Tunnels and within Client Services
+- hostname overlap is rejected within Server **Tunnels** and within Client **Services**
 
-Runewarp deliberately supports **Hostname mirroring**:
+This keeps public hostname ownership explicit even when the Client chooses a different local routing shape.
 
-- operators repeat Public hostnames on both sides
-- the Server uses them to select a Tunnel
-- the Client uses the forwarded ClientHello to select a Service
-- the grouping into Tunnels and Services may differ
-- the public data path stays transparent because no extra routing header is added
+## Routing topologies
 
-Runewarp also supports **One-sided Catch-all**:
+| Topology | Server side | Client side | Use when |
+| --- | --- | --- | --- |
+| **Hostname mirroring** | Explicit **Public hostnames** on each **Tunnel** | Explicit **Public hostnames** on each **Service** | The Client needs per-host local routing decisions |
+| **One-sided Catch-all** | Explicit **Public hostnames** on each **Tunnel** | One sole **Service** with no `public-hostnames` | One backend should receive every hostname the Server already authorized for that Tunnel |
 
-- the Server still uses explicit Public hostnames on every Tunnel
-- the Client may omit `public-hostnames` only on its sole Service
-- one Local backend can then handle every hostname the Server has already authorized for that Tunnel
-
-## Client routing shape
-
-Server Tunnels always declare explicit Public hostnames.
-
-Client Services can be configured in two ways:
-
-- exact-match Services, where the Client also lists explicit Public hostnames
-- one Catch-all Service, used when one Local backend should receive every proxied hostname for that Tunnel
+In both shapes, the Server remains the routing authority for public ingress.
 
 ## Data path
 
-1. A Visitor connects to `443/tcp` on the Server.
+1. A **Visitor** connects to `443/tcp` on the **Server**.
 2. The Server buffers enough of the ClientHello to extract SNI.
-3. The Server rejects non-TLS traffic, missing-SNI traffic, and application traffic addressed to the Server hostname.
-4. The Server selects a Tunnel by exact Public hostname.
-5. If that Tunnel has no active connection, the Server drops the connection.
-6. Otherwise, the Server forwards the original encrypted bytes over that Tunnel connection.
-7. The receiving Client instance re-reads the forwarded ClientHello, selects a Service, and connects to the Local backend.
+3. The Server rejects non-TLS traffic, missing-SNI traffic, and non-ACME application traffic addressed to the **Server hostname**.
+4. The Server selects a **Tunnel** by exact **Public hostname**.
+5. If that Tunnel has no active **Tunnel connection**, the Server drops the connection.
+6. Otherwise, the Server forwards the original encrypted bytes over the selected Tunnel connection.
+7. The receiving **Client instance** re-reads the forwarded ClientHello, selects a **Service**, and connects to the **Local backend**.
 8. If no Client Service matches, the Client rejects the stream.
 9. The Local backend terminates TLS and serves the application.
 
-Runewarp adds no framing header to public traffic. The forwarded byte stream begins with the Visitor's original ClientHello.
+## Trust model
 
-## Trust and validation
+| Trust boundary | Design |
+| --- | --- |
+| **Server hostname** | Identifies the public Runewarp edge, not the operator application |
+| **Server certificate** | Protects the tunnel endpoint and is validated by the Client |
+| **Server CA** | Optional private trust anchor for the manual Server-certificate path |
+| **Client identity** | Pinned public-key identity used to authenticate the Client to the Server |
+| **Public hostname authorization** | Owned by Server config through explicit `server.tunnels[].public-hostnames` |
 
-- the Server hostname identifies the public edge itself
-- each Tunnel trusts one shared Client identity in the base design
-- a Client identity is the pinned public key, not a certificate serial or lifetime
-- manual Server certificates use a private Server CA that issues the Server leaf for `server.hostname`
-- when the Client is configured with a Server CA file, that file replaces system trust for the Tunnel connection and may contain a CA bundle during `rotate-ca` transitions
-- each Server Tunnel owns one explicit set of Public hostnames, and each `client-identity` names exactly one Tunnel
-- intra-side hostname uniqueness is enforced at boot
-- cross-side hostname coverage is **not** validated at runtime; drift under Hostname mirroring is an operator responsibility
+The Client validates the Server certificate either through system trust or through the exclusive configured `server-ca-file`. The Server authenticates the pinned `client-identity` from the Client public key rather than from a certificate lifetime.
 
-The current code authenticates both sides of the Tunnel connection, uses exclusive configured `server-ca-file` trust on the Client, exposes the corrected operator surface, renews same-key Client certificates before the initial connect and reconnect attempts, and enforces phase-3 exact-match Server authorization with per-Tunnel connection isolation.
+## Runtime shape
+
+- each **Client instance** establishes exactly one **Tunnel connection**
+- the runtime keeps one active connection per **Tunnel**
+- a newer authenticated connection replaces the older one only inside that same **Tunnel**
+- multiple Client instances across different Tunnels are supported
+- same-Tunnel load-balanced pools are not part of the current runtime shape
 
 ## Product boundaries
 
 - TLS passthrough is the product boundary
-- customer TLS is terminated only on the Local backend
+- customer TLS is terminated only on the **Local backend**
 - plain HTTP backends are out of scope
 - edge TLS termination for customer traffic is out of scope
-
-## Current implementation note
-
-Each Client instance establishes one Tunnel connection. The runtime keeps one active connection per Tunnel and uses latest-wins replacement only inside that Tunnel. Multiple Client instances across different Tunnels are supported now; load-balanced pools for the same Tunnel remain future work.
-
-## Future work
-
-- load-balanced Tunnel pools across multiple Client instances of the same Tunnel
-- wildcard Public hostnames
-- public QUIC and HTTP/3 passthrough
-- ECH
-- clustered routing and live config distribution

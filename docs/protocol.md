@@ -1,18 +1,16 @@
 # Protocol
 
-This document describes the committed Runewarp wire behavior. The current code now implements the corrected phase-2 operator/runtime surface together with the phase-3 data path: exact Server-authorized Public hostname routing, Client-side exact-match Service selection or One-sided Catch-all, one active Tunnel connection per Tunnel, per-Tunnel latest-wins replacement, and ACME TLS-ALPN-01 for the Server hostname.
+This document describes the committed Runewarp wire behavior and runtime invariants.
 
 ## Listener model
 
-| Listener | Traffic | Baseline handling |
+| Listener | Traffic | Behavior |
 | --- | --- | --- |
-| `443/tcp` | Visitor TLS | Read ClientHello, extract SNI, route raw bytes without terminating customer TLS |
-| `443/tcp` | ACME for the Server hostname | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
-| `443/udp` | Client Tunnel connections | QUIC/TLS with ALPN `runewarp/1` |
+| `443/tcp` | Visitor TLS | Read ClientHello, extract SNI, and route raw bytes without terminating customer TLS |
+| `443/tcp` | ACME for the **Server hostname** | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
+| `443/udp` | Client **Tunnel connections** | QUIC/TLS with ALPN `runewarp/1` |
 
-Current code status: the Visitor TLS path, ACME challenge handling for the Server hostname, mutual Tunnel authentication, and exact-match Server routing are implemented.
-
-## Public TCP routing
+## Public TLS routing
 
 For each inbound TCP connection on port `443`:
 
@@ -22,24 +20,33 @@ For each inbound TCP connection on port `443`:
 4. If TLS is valid but SNI is missing, drop the connection.
 5. If SNI equals `server.hostname` and ALPN is `acme-tls/1`, handle the ACME challenge.
 6. If SNI equals `server.hostname` and ALPN is anything else, drop the connection.
-7. Otherwise, select a Tunnel by exact normalized Public hostname from the configured `server.tunnels[].public-hostnames`.
+7. Otherwise, select a **Tunnel** by exact normalized **Public hostname** from `server.tunnels[].public-hostnames`.
 8. If no Tunnel owns that hostname, drop the connection.
-9. If the selected Tunnel has no active connection, drop the connection.
+9. If the selected Tunnel has no active **Tunnel connection**, drop the connection.
 10. Open a bidirectional stream on the selected Tunnel connection, forward the buffered ClientHello bytes, then continue streaming in both directions.
 
-The buffered ClientHello must never be logged or echoed back in diagnostics. When logs are enabled, diagnostics may log the normalized Public hostname and the routing outcome only.
+The buffered ClientHello must never be logged or echoed back in diagnostics. When logs are enabled, diagnostics may log the normalized **Public hostname** and the routing outcome only.
+
+## Drop conditions
+
+| Condition | Result |
+| --- | --- |
+| Non-TLS traffic on `443/tcp` | Drop immediately |
+| TLS without SNI | Drop immediately |
+| Application traffic addressed to the **Server hostname** | Drop unless it is ACME TLS-ALPN-01 |
+| Unauthorized **Public hostname** | Drop immediately |
+| No active **Tunnel connection** for the selected **Tunnel** | Drop immediately |
+| No matching Client **Service** | Reject the stream on the Client |
 
 ## Tunnel connection handshake
 
-Each Client instance establishes one long-lived QUIC connection to `server-hostname:443` over UDP:
+Each **Client instance** establishes one long-lived QUIC connection to `server-hostname:443` over UDP:
 
 1. Resolve `client.server-hostname`.
 2. Dial UDP port `443`.
 3. Negotiate QUIC with ALPN `runewarp/1`.
-4. Validate the Server certificate for the Server hostname, using either system trust or the exclusive configured Server CA file.
-5. In the committed baseline, present the Client certificate and authenticate the pinned `client-identity` from its public key. One shared `client-identity` per Tunnel remains the default phase-2 model.
-
-Current code status: steps 1-5 are implemented for the shipped phase-3 runtime. Client certificate freshness is checked before the initial connect and before reconnect attempts; the runtime does not poll while a Tunnel connection stays up.
+4. Validate the Server certificate for the **Server hostname**, using either system trust or the exclusive configured `server-ca-file`.
+5. Present the Client certificate and authenticate the pinned `client-identity` from its public key.
 
 Rules:
 
@@ -54,13 +61,11 @@ When the Client receives a new QUIC stream:
 
 1. Buffer the forwarded ClientHello and parse it using the same **16 KB** cap.
 2. Extract and normalize the SNI hostname.
-3. If there is exactly one configured Service and it omits `public-hostnames`, select that Catch-all Service.
+3. If there is exactly one configured **Service** and it omits `public-hostnames`, select that **Catch-all Service**.
 4. Otherwise, match the hostname to `client.services[*].public-hostnames`.
 5. If no Service matches, reject the stream immediately.
 6. Open a TCP connection to the selected `backend-address`.
 7. Forward the buffered ClientHello bytes, then continue streaming in both directions.
-
-Hostname mirroring is why both sides may list the same Public hostname: the Server uses it to choose a Tunnel and the Client uses it to choose a Service. In One-sided Catch-all, only the Server lists explicit Public hostnames and the sole Client Service accepts every hostname that Server has already authorized for that Tunnel.
 
 Notes:
 
@@ -68,13 +73,15 @@ Notes:
 - the parser must accumulate bytes until the TLS record is complete before attempting to extract SNI
 - `backend-address` must point at a TLS-terminating backend
 
-## Closure semantics
+## Stream lifecycle
 
 Runewarp uses symmetric close behavior:
 
 - a TCP FIN maps to QUIC `STREAM_FIN` in the same direction
 - a QUIC `STREAM_FIN` maps to TCP half-close in the same direction
 - resets or connection loss terminate the stream immediately
+
+When a QUIC connection drops, all streams on that connection are lost. They are not migrated elsewhere.
 
 ## Retry behavior
 
@@ -86,21 +93,12 @@ Client reconnect behavior is:
 
 `reconnect-interval` must be at least **1 second**.
 
-When a QUIC connection drops, all streams on that connection are lost. They are not migrated elsewhere.
-If a new authenticated connection replaces an older connection for the same Tunnel, the older connection closes and any streams on it are lost.
+If a new authenticated connection replaces an older connection for the same **Tunnel**, the older connection closes and any streams on it are lost.
 
-## Operational limits
+## Runtime invariants
 
-- each Client instance has exactly one Tunnel connection
-- the runtime keeps one active Tunnel connection per Tunnel
-- the runtime does not validate cross-side hostname coverage under Hostname mirroring
-- there is no pre-flight Local backend health check
-- multiple Client instances across different Tunnels are supported; same-Tunnel pools remain future work
-
-## Future protocol work
-
-- load-balanced Tunnel pools across multiple Client instances
-- public QUIC and HTTP/3 passthrough on `443/udp`
-- wildcard hostname routing
-- ECH for public and Client connections
-- HTTP/3-based remote configuration on the existing QUIC connection instead of a custom control protocol
+- each **Client instance** has exactly one **Tunnel connection**
+- the runtime keeps one active connection per **Tunnel**
+- the runtime does not validate cross-side hostname coverage under **Hostname mirroring**
+- there is no pre-flight **Local backend** health check
+- multiple Client instances across different Tunnels are supported

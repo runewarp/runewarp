@@ -27,7 +27,7 @@ fn client_settings_accept_exact_match_services_and_default_logs_to_true() {
         r#"
 [client]
 server-hostname = "Tunnel.Example.Test."
-identity-directory = "client-identity"
+identity-material-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test.", "api.example.test"]
@@ -72,7 +72,7 @@ backend-address = "127.0.0.1:443"
     let message = error.to_string();
 
     assert!(message.contains("client.server-hostname is required"));
-    assert!(message.contains("client.identity-directory is required"));
+    assert!(message.contains("client.identity-material-dir directory not found"));
     assert!(message.contains("client.reconnect-interval must be at least 1"));
     assert!(message.contains(
         "client.services[].public-hostnames may be omitted only when there is exactly one service"
@@ -107,8 +107,94 @@ local-addr = "127.0.0.1:443"
     assert!(message.contains("unknown field `cert-file`"));
     assert!(message.contains("unknown field `key-file`"));
     assert!(message.contains("unknown field `local-addr`"));
-    assert!(message.contains("client.identity-directory is required"));
+    assert!(message.contains("client.identity-material-dir directory not found"));
     assert!(message.contains("client.services[].backend-address is required"));
+}
+
+#[test]
+fn client_settings_reject_server_ca_file_without_ca_file_trust_mode() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(tempdir.path().join("server-ca.pem"), "placeholder").unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-ca-file = "server-ca.pem"
+identity-material-dir = "client-identity"
+
+[[client.services]]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error.to_string().contains(
+            "client.server-ca-file may be set only when client.server-trust = \"ca-file\""
+        )
+    );
+}
+
+#[test]
+fn client_settings_accept_ca_file_trust_with_an_explicit_server_ca_file() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(tempdir.path().join("server-ca.pem"), "placeholder").unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
+server-ca-file = "server-ca.pem"
+identity-material-dir = "client-identity"
+
+[[client.services]]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(
+        settings.server_ca_file,
+        Some(tempdir.path().join("server-ca.pem"))
+    );
 }
 
 #[test]
@@ -135,7 +221,7 @@ fn client_settings_reject_duplicate_public_hostnames_after_normalization() {
         r#"
 [client]
 server-hostname = "tunnel.example.test"
-identity-directory = "client-identity"
+identity-material-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test."]
@@ -179,7 +265,7 @@ fn client_settings_reject_empty_public_hostname_lists() {
         r#"
 [client]
 server-hostname = "tunnel.example.test"
-identity-directory = "client-identity"
+identity-material-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = []
@@ -221,7 +307,7 @@ fn client_settings_report_duplicate_hostnames_even_when_another_hostname_is_inva
         r#"
 [client]
 server-hostname = "tunnel.example.test"
-identity-directory = "client-identity"
+identity-material-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test."]

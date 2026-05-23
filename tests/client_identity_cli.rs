@@ -14,13 +14,7 @@ fn client_identity_init_writes_identity_artifacts_to_the_requested_directory() {
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
-        .args([
-            "client",
-            "identity",
-            "init",
-            "--directory",
-            "client-identity",
-        ])
+        .args(["client", "identity", "init", "--dir", "client-identity"])
         .assert()
         .success();
 
@@ -35,19 +29,69 @@ fn client_identity_init_writes_identity_artifacts_to_the_requested_directory() {
 }
 
 #[test]
+fn client_identity_init_uses_the_xdg_default_directory_when_dir_is_omitted() {
+    let tempdir = tempdir().unwrap();
+    let xdg_data_home = tempdir.path().join("xdg-data");
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("XDG_DATA_HOME", &xdg_data_home)
+        .args(["client", "identity", "init"])
+        .assert()
+        .success();
+
+    assert_exists(
+        xdg_data_home
+            .join("runewarp/client/identity/client.key")
+            .as_path(),
+    );
+    assert_exists(
+        xdg_data_home
+            .join("runewarp/client/identity/client.crt")
+            .as_path(),
+    );
+    assert_exists(
+        xdg_data_home
+            .join("runewarp/client/identity/client-identity.txt")
+            .as_path(),
+    );
+}
+
+#[test]
+fn client_identity_init_uses_the_configured_material_dir_when_config_is_provided() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/client-identity");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+identity-material-dir = "configured/client-identity"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--config", "client.toml"])
+        .assert()
+        .success();
+
+    assert_exists(configured_dir.join("client.key").as_path());
+    assert_exists(configured_dir.join("client.crt").as_path());
+    assert_exists(configured_dir.join("client-identity.txt").as_path());
+}
+
+#[test]
 fn client_identity_init_writes_pem_artifacts_and_a_client_identity() {
     let tempdir = tempdir().unwrap();
 
     let assert = Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
-        .args([
-            "client",
-            "identity",
-            "init",
-            "--directory",
-            "client-identity",
-        ])
+        .args(["client", "identity", "init", "--dir", "client-identity"])
         .assert()
         .success();
 
@@ -79,26 +123,14 @@ fn client_identity_init_refuses_to_overwrite_existing_identity_artifacts() {
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
-        .args([
-            "client",
-            "identity",
-            "init",
-            "--directory",
-            "client-identity",
-        ])
+        .args(["client", "identity", "init", "--dir", "client-identity"])
         .assert()
         .success();
 
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
-        .args([
-            "client",
-            "identity",
-            "init",
-            "--directory",
-            "client-identity",
-        ])
+        .args(["client", "identity", "init", "--dir", "client-identity"])
         .assert()
         .failure();
 }
@@ -110,13 +142,7 @@ fn client_identity_init_matches_the_generated_certificate_subject_public_key_inf
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
-        .args([
-            "client",
-            "identity",
-            "init",
-            "--directory",
-            "client-identity",
-        ])
+        .args(["client", "identity", "init", "--dir", "client-identity"])
         .assert()
         .success();
 
@@ -141,13 +167,7 @@ fn client_identity_renew_reuses_the_existing_key_and_identity() {
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
-        .args([
-            "client",
-            "identity",
-            "init",
-            "--directory",
-            "client-identity",
-        ])
+        .args(["client", "identity", "init", "--dir", "client-identity"])
         .assert()
         .success();
 
@@ -159,13 +179,7 @@ fn client_identity_renew_reuses_the_existing_key_and_identity() {
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
-        .args([
-            "client",
-            "identity",
-            "renew",
-            "--directory",
-            "client-identity",
-        ])
+        .args(["client", "identity", "renew", "--dir", "client-identity"])
         .assert()
         .success();
 
@@ -196,13 +210,7 @@ fn client_identity_rotate_replaces_the_key_and_client_identity() {
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
-        .args([
-            "client",
-            "identity",
-            "init",
-            "--directory",
-            "client-identity",
-        ])
+        .args(["client", "identity", "init", "--dir", "client-identity"])
         .assert()
         .success();
 
@@ -214,13 +222,7 @@ fn client_identity_rotate_replaces_the_key_and_client_identity() {
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
-        .args([
-            "client",
-            "identity",
-            "rotate",
-            "--directory",
-            "client-identity",
-        ])
+        .args(["client", "identity", "rotate", "--dir", "client-identity"])
         .assert()
         .success();
 
@@ -250,4 +252,43 @@ fn assert_exists(path: &Path) {
         "expected {} to exist after `runewarp client identity init`",
         path.display()
     );
+}
+
+#[test]
+fn client_identity_init_help_shows_the_new_dir_flag() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["client", "identity", "init", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Usage:"));
+    assert!(stdout.contains("runewarp client identity init"));
+    assert!(stdout.contains("--dir"));
+    assert!(!stdout.contains("--directory"));
+}
+
+#[test]
+fn client_identity_init_rejects_the_removed_directory_flag() {
+    let tempdir = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "identity",
+            "init",
+            "--directory",
+            "client-identity",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("unexpected argument '--directory'"));
+    assert!(stderr.contains("--dir"));
 }

@@ -1,7 +1,8 @@
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "/runewarp/trust/server-ca.crt"
-identity-directory = "/runewarp/identity"
+identity-material-dir = "/runewarp/identity"
 
 [[client.services]]
 backend-address = "caddy:443"

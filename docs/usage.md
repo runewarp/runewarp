@@ -62,14 +62,14 @@ Choose one of the two supported Server-certificate paths:
 
 | Path | When to use it | What to do |
 | --- | --- | --- |
-| ACME | Publicly routable Server hostname and standard public trust | Create a writable ACME state directory and configure `[server.acme]` |
+| ACME | Publicly routable Server hostname and standard public trust | Configure `[server.acme]`; omit `state-dir` to use the default XDG state location |
 | Manual/private-CA | Private deployments or operator-managed trust | Create the material with `runewarp server cert init` and distribute `server-ca.crt` to Clients |
 
 Manual/private-CA initialization:
 
 ```bash
 runewarp server cert init \
-  --directory /etc/runewarp/server \
+  --dir /etc/runewarp/server \
   --hostname tunnel.example.com
 ```
 
@@ -78,10 +78,15 @@ runewarp server cert init \
 Create the Client keypair, certificate, and durable `client-identity`:
 
 ```bash
-runewarp client identity init --directory /etc/runewarp/client
+runewarp client identity init --dir /etc/runewarp/client
 ```
 
 Read the generated `/etc/runewarp/client/client-identity.txt` value and place it into the matching Server `[[server.tunnels]]` entry as `client-identity`.
+
+If you omit `--dir`, Runewarp uses the default XDG data locations:
+
+- Client identity material: `$XDG_DATA_HOME/runewarp/client/identity/` or `~/.local/share/runewarp/client/identity/`
+- Manual/private-CA Server material: `$XDG_DATA_HOME/runewarp/server/cert/` or `~/.local/share/runewarp/server/cert/`
 
 ### 4. Write config
 
@@ -94,7 +99,6 @@ hostname = "tunnel.example.com"
 
 [server.acme]
 email = "admin@example.com"
-state-directory = "/var/lib/runewarp/acme"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.com", "api.example.com"]
@@ -105,7 +109,6 @@ client-identity = "4f7b6f7a9b0f0d2b..."
 # /etc/runewarp/client.toml
 [client]
 server-hostname = "tunnel.example.com"
-identity-directory = "/etc/runewarp/client"
 reconnect-interval = 5
 
 [[client.services]]
@@ -117,7 +120,9 @@ That Client has a **Catch-all Service**: the Server stays explicit about the aut
 If you are using the manual/private-CA Server path, add:
 
 ```toml
-server-ca-file = "/etc/runewarp/server-ca.crt"
+server-trust = "ca-file"
+# optionally override the default CA bundle path:
+# server-ca-file = "/etc/runewarp/server-ca.crt"
 ```
 
 See [`docs/configuration.md`](configuration.md) for exact-match Client routing, multi-Tunnel Server configs, multi-Service Client configs, and the complete key reference.
@@ -129,7 +134,7 @@ runewarp server --config /etc/runewarp/server.toml
 runewarp client --config /etc/runewarp/client.toml
 ```
 
-Runewarp defaults to `./config.toml` when `--config` is omitted, but explicit paths are easier to operate and review.
+Runewarp loads `--config` from `$XDG_CONFIG_HOME/runewarp/config.toml` when omitted, falling back to `~/.config/runewarp/config.toml` when `XDG_CONFIG_HOME` is unset. Explicit paths are still easier to operate and review.
 
 ### 6. Verify traffic
 
@@ -148,7 +153,7 @@ When logs are enabled, the Server and Client emit human-readable routing diagnos
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
 | No traffic reaches the backend | No active **Tunnel connection** | Confirm the Client is running and can reach the Server on `443/udp` |
-| Client cannot connect to the Server | Wrong Server trust path | Check `client.server-ca-file` for the manual/private-CA path, or confirm the ACME/public-CA chain is trusted |
+| Client cannot connect to the Server | Wrong Server trust path | Check `client.server-trust = "ca-file"` and the selected `client.server-ca-file` path for the manual/private-CA path, or confirm the ACME/public-CA chain is trusted |
 | Server drops a Public hostname | Hostname is not authorized on any Server `[[tunnels]]` entry | Check `server.tunnels[].public-hostnames` |
 | Client rejects the stream | No matching **Service** on the Client | Check Client `public-hostnames`, or confirm the sole Service is intentionally Catch-all |
 | Backend handshake fails | Backend is not terminating TLS | Confirm `backend-address` points at a TLS-speaking endpoint |

@@ -19,7 +19,7 @@ fn server_settings_accept_exact_match_tunnels_and_default_logs_to_true() {
 hostname = "Tunnel.Example.Test."
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["App.Example.Test.", "api.example.test"]
@@ -87,7 +87,7 @@ fn server_settings_reject_invalid_manual_tls_material_during_validation() {
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -122,7 +122,7 @@ fn server_settings_require_the_manual_server_ca_certificate() {
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -150,7 +150,7 @@ fn server_settings_reject_manual_tls_material_for_the_wrong_server_hostname() {
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -202,7 +202,7 @@ hostname = "tunnel.example.test"
 
 [server.acme]
 email = "admin@example.test"
-state-directory = "missing-acme-state"
+state-dir = "missing-acme-state"
 
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -215,7 +215,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert!(
         error
             .to_string()
-            .contains("server.acme.state-directory directory not found")
+            .contains("server.acme.state-dir directory not found")
     );
 }
 
@@ -234,7 +234,7 @@ fn server_settings_reject_duplicate_public_hostnames_and_server_hostname_reuse()
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["App.Example.Test."]
@@ -273,7 +273,7 @@ fn server_settings_report_duplicate_hostnames_even_when_another_hostname_is_inva
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["App.Example.Test."]
@@ -312,7 +312,7 @@ fn server_settings_reject_empty_public_hostname_lists() {
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = []
@@ -345,7 +345,7 @@ fn server_settings_reject_duplicate_client_identities() {
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]

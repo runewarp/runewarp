@@ -176,7 +176,7 @@ prepare_server_certificate_material() {
     note "Generating certificate material for tunnel.example.test"
     run_runewarp \
       server cert init \
-      --directory /workspace/generated/server/cert-source \
+      --dir /workspace/generated/server/cert-source \
       --hostname tunnel.example.test
     return
   fi
@@ -191,7 +191,7 @@ prepare_client_identity_material() {
     note "Generating client identity material"
     run_runewarp \
       client identity init \
-      --directory /workspace/generated/client/identity-source
+      --dir /workspace/generated/client/identity-source
     return
   fi
 

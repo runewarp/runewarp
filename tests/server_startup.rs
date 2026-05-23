@@ -35,7 +35,7 @@ async fn prepared_server_binds_the_existing_runtime_from_validated_settings() {
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -91,7 +91,7 @@ async fn prepared_server_drops_public_tls_addressed_to_the_server_hostname() {
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -116,8 +116,9 @@ client-identity = "{}"
         r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-directory = "."
+identity-material-dir = "."
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -194,7 +195,7 @@ async fn prepared_server_drops_public_tls_for_unconfigured_public_hostnames() {
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -219,8 +220,9 @@ client-identity = "{}"
         r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-directory = "."
+identity-material-dir = "."
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -300,7 +302,7 @@ async fn prepared_client_routes_mirrored_public_hostnames_to_matching_services()
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test", "api.example.test"]
@@ -317,8 +319,9 @@ client-identity = "{}"
             r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-directory = "."
+identity-material-dir = "."
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -407,7 +410,7 @@ async fn prepared_client_rejects_streams_without_a_matching_service() {
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test", "api.example.test"]
@@ -424,8 +427,9 @@ client-identity = "{}"
             r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-directory = "."
+identity-material-dir = "."
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -526,7 +530,7 @@ async fn prepared_server_routes_different_public_hostnames_to_different_tunnels(
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -547,8 +551,9 @@ client-identity = "{}"
             r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-directory = "client-app"
+identity-material-dir = "client-app"
 
 [[client.services]]
 backend-address = "{}"
@@ -563,8 +568,9 @@ backend-address = "{}"
             r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-directory = "client-api"
+identity-material-dir = "client-api"
 
 [[client.services]]
 backend-address = "{}"
@@ -675,7 +681,7 @@ async fn replacing_one_tunnel_connection_does_not_disrupt_other_tunnels() {
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -696,8 +702,9 @@ client-identity = "{}"
             r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-directory = "client-app"
+identity-material-dir = "client-app"
 
 [[client.services]]
 backend-address = "{}"
@@ -712,8 +719,9 @@ backend-address = "{}"
             r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-directory = "client-app"
+identity-material-dir = "client-app"
 
 [[client.services]]
 backend-address = "{}"
@@ -728,8 +736,9 @@ backend-address = "{}"
             r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-directory = "client-api"
+identity-material-dir = "client-api"
 
 [[client.services]]
 backend-address = "{}"
@@ -848,7 +857,7 @@ async fn prepared_server_rejects_an_untrusted_client_identity_before_serving_pub
 hostname = "tunnel.example.test"
 
 [server.cert]
-directory = "server-cert"
+material-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -866,8 +875,9 @@ client-identity = "{}"
         r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-directory = "."
+identity-material-dir = "."
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -920,7 +930,7 @@ hostname = "tunnel.example.test"
 
 [server.acme]
 email = "admin@example.test"
-state-directory = "acme-state"
+state-dir = "acme-state"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -988,7 +998,7 @@ hostname = "tunnel.example.test"
 
 [server.acme]
 email = "admin@example.test"
-state-directory = "acme-state"
+state-dir = "acme-state"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -1003,8 +1013,9 @@ client-identity = "{}"
         r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-ca.pem"
-identity-directory = "."
+identity-material-dir = "."
 
 [[client.services]]
 backend-address = "127.0.0.1:1"

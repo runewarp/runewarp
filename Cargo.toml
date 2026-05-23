@@ -11,6 +11,7 @@ keywords = ["tunnel", "port-forwarding", "remote-access", "tls-passthrough", "na
 categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
 futures-util = "0.3.32"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 rustls-acme = { version = "0.15.2", default-features = false, features = ["ring", "tokio", "tls12", "webpki-roots"] }

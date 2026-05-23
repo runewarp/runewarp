@@ -75,7 +75,7 @@ In both shapes, the Server remains the routing authority for public ingress.
 | **Client identity** | Pinned public-key identity used to authenticate the Client to the Server |
 | **Public hostname authorization** | Owned by Server config through explicit `server.tunnels[].public-hostnames` |
 
-The Client validates the Server certificate either through system trust or through the exclusive configured `server-ca-file`. The Server authenticates the pinned `client-identity` from the Client public key rather than from a certificate lifetime.
+The Client validates the Server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The Server authenticates the pinned `client-identity` from the Client public key rather than from a certificate lifetime.
 
 ## Runtime shape
 

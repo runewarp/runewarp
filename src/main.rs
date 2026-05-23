@@ -8,51 +8,62 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use clap::{CommandFactory, Parser};
 use runewarp::runtime_log::{emit_stderr, warning_line};
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
-    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, PreparedClient, PreparedServer,
-    generate_client_identity, initialize_manual_server_certificate, load_client_settings,
-    load_server_settings, renew_client_identity_certificate, renew_manual_server_certificate,
+    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, PreparedClient, PreparedServer, SettingsError,
+    XdgPathError, default_client_identity_material_dir, default_config_path,
+    default_server_cert_material_dir, generate_client_identity,
+    initialize_manual_server_certificate, load_client_settings, load_server_settings,
+    renew_client_identity_certificate, renew_manual_server_certificate,
+    resolve_client_identity_material_dir_from_config, resolve_server_cert_material_dir_from_config,
     rotate_client_identity, rotate_manual_server_certificate_authority,
 };
 use time::OffsetDateTime;
 
-const DEFAULT_CONFIG_PATH: &str = "config.toml";
+mod cli;
+
+enum RunError {
+    Cli(clap::Error),
+    Other(Box<dyn Error>),
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
     match run(env::args().skip(1)).await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
+        Err(RunError::Cli(error)) => error.exit(),
+        Err(RunError::Other(error)) => {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
     }
 }
 
-async fn run(args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
-    let mut args = args.into_iter();
-    let Some(command) = args.next() else {
-        print_available_commands(None);
+async fn run(args: impl Iterator<Item = String>) -> Result<(), RunError> {
+    let argv = std::iter::once(env!("CARGO_PKG_NAME").to_owned())
+        .chain(args)
+        .collect::<Vec<_>>();
+    if argv.len() == 1 {
+        let mut command = cli::Cli::command();
+        command
+            .print_help()
+            .map_err(|error| RunError::Other(Box::new(error)))?;
+        println!();
         return Ok(());
-    };
+    }
 
-    match command.as_str() {
-        "server" => run_server_command_from_args(args).await,
-        "client" => run_client_command_from_args(args).await,
-        _ => {
-            print_available_commands(Some(&command));
-            Ok(())
+    let cli = cli::Cli::try_parse_from(argv).map_err(RunError::Cli)?;
+    match cli.command {
+        Some(cli::TopLevelCommand::Server(command)) => {
+            run_server_command(command).await.map_err(RunError::Other)
         }
+        Some(cli::TopLevelCommand::Client(command)) => run_client_command_from_cli(command)
+            .await
+            .map_err(RunError::Other),
+        None => Ok(()),
     }
-}
-
-fn print_available_commands(unrecognized: Option<&str>) {
-    if let Some(unrecognized) = unrecognized {
-        println!("unrecognized command: {unrecognized}");
-    }
-    println!("Available commands: server, client");
 }
 
 async fn run_client_command(
@@ -113,23 +124,12 @@ fn ensure_client_identity_fresh(
     }
 }
 
-async fn run_server_command_from_args(
-    mut args: impl Iterator<Item = String>,
-) -> Result<(), Box<dyn Error>> {
-    let Some(argument) = args.next() else {
-        let settings = load_server_settings(Path::new(DEFAULT_CONFIG_PATH))?;
-        PreparedServer::bind(&settings, wildcard(443), wildcard(443))
-            .await?
-            .run()
-            .await?;
-        return Ok(());
-    };
-
-    if argument == "cert" {
-        return run_server_cert_command(args);
+async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Error>> {
+    if let Some(cli::ServerSubcommand::Cert(command)) = command.command {
+        return run_server_cert_command(command);
     }
 
-    let config_path = parse_config_path(std::iter::once(argument).chain(args))?;
+    let config_path = config_path_or_default(command.config)?;
     let settings = load_server_settings(&config_path)?;
     PreparedServer::bind(&settings, wildcard(443), wildcard(443))
         .await?
@@ -138,77 +138,58 @@ async fn run_server_command_from_args(
     Ok(())
 }
 
-fn run_server_cert_command(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
-    let Some(command) = args.next() else {
-        return Err("missing server cert command".into());
-    };
-
-    match command.as_str() {
-        "init" => {
-            let (directory, hostname) = parse_directory_and_hostname_args(args)?;
-            initialize_manual_server_certificate(&directory, &hostname)?;
+fn run_server_cert_command(command: cli::ServerCertArgs) -> Result<(), Box<dyn Error>> {
+    match command.command {
+        cli::ServerCertSubcommand::Init(args) => {
+            let directory = resolve_server_cert_dir(args.config, args.dir)?;
+            initialize_manual_server_certificate(&directory, &args.hostname)?;
             Ok(())
         }
-        "renew" => {
-            let directory = parse_directory_arg(args)?;
+        cli::ServerCertSubcommand::Renew(args) => {
+            let directory = resolve_server_cert_dir(args.config, args.dir)?;
             renew_manual_server_certificate(&directory)?;
             Ok(())
         }
-        "rotate-ca" => {
-            let (directory, hostname) = parse_directory_and_hostname_args(args)?;
-            rotate_manual_server_certificate_authority(&directory, &hostname)?;
+        cli::ServerCertSubcommand::RotateCa(args) => {
+            let directory = resolve_server_cert_dir(args.config, args.dir)?;
+            rotate_manual_server_certificate_authority(&directory, &args.hostname)?;
             Ok(())
         }
-        _ => Err(format!("unrecognized server cert command: {command}").into()),
     }
 }
 
-async fn run_client_command_from_args(
-    mut args: impl Iterator<Item = String>,
-) -> Result<(), Box<dyn Error>> {
-    let Some(argument) = args.next() else {
-        let settings = load_client_settings(Path::new(DEFAULT_CONFIG_PATH))?;
-        return run_client_command(&settings, wildcard(0)).await;
-    };
-
-    if argument == "identity" {
-        return run_client_identity_command(args);
+async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box<dyn Error>> {
+    if let Some(cli::ClientSubcommand::Identity(command)) = command.command {
+        return run_client_identity_command(command);
     }
 
-    let config_path = parse_config_path(std::iter::once(argument).chain(args))?;
+    let config_path = config_path_or_default(command.config)?;
     let settings = load_client_settings(&config_path)?;
     run_client_command(&settings, wildcard(0)).await
 }
 
-fn run_client_identity_command(
-    mut args: impl Iterator<Item = String>,
-) -> Result<(), Box<dyn Error>> {
-    let Some(command) = args.next() else {
-        return Err("missing client identity command".into());
-    };
-
-    match command.as_str() {
-        "init" => {
-            let directory = parse_directory_arg(args)?;
+fn run_client_identity_command(command: cli::ClientIdentityArgs) -> Result<(), Box<dyn Error>> {
+    match command.command {
+        cli::ClientIdentitySubcommand::Init(args) => {
+            let directory = resolve_client_identity_dir(args.config, args.dir)?;
             write_client_identity_artifacts(&directory)
         }
-        "renew" => {
-            let directory = parse_directory_arg(args)?;
+        cli::ClientIdentitySubcommand::Renew(args) => {
+            let directory = resolve_client_identity_dir(args.config, args.dir)?;
             let renewed = renew_client_identity_certificate(&directory)?;
             println!("Client identity: {}", renewed.client_identity);
             println!("Renewed certificate lifetime: {CLIENT_CERT_LIFETIME_DAYS} days");
             println!("Renewal target: {CLIENT_CERT_RENEW_AFTER_DAYS} days");
             Ok(())
         }
-        "rotate" => {
-            let directory = parse_directory_arg(args)?;
+        cli::ClientIdentitySubcommand::Rotate(args) => {
+            let directory = resolve_client_identity_dir(args.config, args.dir)?;
             let rotated = rotate_client_identity(&directory)?;
             println!("Client identity: {}", rotated.client_identity);
             println!("Rotated certificate lifetime: {CLIENT_CERT_LIFETIME_DAYS} days");
             println!("Renewal target: {CLIENT_CERT_RENEW_AFTER_DAYS} days");
             Ok(())
         }
-        _ => Err(format!("unrecognized client identity command: {command}").into()),
     }
 }
 
@@ -249,80 +230,66 @@ where
     }
 }
 
-fn parse_directory_arg(
-    mut args: impl Iterator<Item = String>,
+fn config_path_or_default(
+    config: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, Box<dyn Error>> {
-    let Some(argument) = args.next() else {
-        return Err("missing --directory".into());
-    };
-    if argument != "--directory" {
-        return Err(format!("unrecognized command argument: {argument}").into());
+    match config {
+        Some(config) => Ok(config),
+        None => default_config_path().map_err(|error| -> Box<dyn Error> { Box::new(error) }),
     }
-
-    let Some(value) = args.next() else {
-        return Err("missing value for --directory".into());
-    };
-
-    if let Some(argument) = args.next() {
-        return Err(format!("unrecognized command argument: {argument}").into());
-    }
-
-    Ok(value.into())
 }
 
-fn parse_directory_and_hostname_args(
-    mut args: impl Iterator<Item = String>,
-) -> Result<(std::path::PathBuf, String), Box<dyn Error>> {
-    let mut directory = None;
-    let mut hostname = None;
-
-    while let Some(argument) = args.next() {
-        match argument.as_str() {
-            "--directory" => {
-                let Some(value) = args.next() else {
-                    return Err("missing value for --directory".into());
-                };
-                directory = Some(value.into());
-            }
-            "--hostname" => {
-                let Some(value) = args.next() else {
-                    return Err("missing value for --hostname".into());
-                };
-                hostname = Some(value);
-            }
-            _ => return Err(format!("unrecognized command argument: {argument}").into()),
-        }
-    }
-
-    let Some(directory) = directory else {
-        return Err("missing --directory".into());
-    };
-    let Some(hostname) = hostname else {
-        return Err("missing --hostname".into());
-    };
-
-    Ok((directory, hostname))
+fn resolve_server_cert_dir(
+    config: Option<std::path::PathBuf>,
+    directory: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, Box<dyn Error>> {
+    resolve_material_dir(
+        config,
+        directory,
+        resolve_server_cert_material_dir_from_config,
+        default_server_cert_material_dir,
+    )
 }
 
-fn parse_config_path(
-    mut args: impl Iterator<Item = String>,
+fn resolve_client_identity_dir(
+    config: Option<std::path::PathBuf>,
+    directory: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, Box<dyn Error>> {
-    let mut config_path = std::path::PathBuf::from(DEFAULT_CONFIG_PATH);
-    while let Some(argument) = args.next() {
-        match argument.as_str() {
-            "--config" => {
-                let Some(value) = args.next() else {
-                    return Err("missing value for --config".into());
-                };
-                config_path = value.into();
-            }
-            _ => {
-                return Err(format!("unrecognized command argument: {argument}").into());
-            }
-        }
+    resolve_material_dir(
+        config,
+        directory,
+        resolve_client_identity_material_dir_from_config,
+        default_client_identity_material_dir,
+    )
+}
+
+fn resolve_material_dir(
+    config: Option<std::path::PathBuf>,
+    directory: Option<std::path::PathBuf>,
+    configured_dir: impl Fn(&Path) -> Result<Option<std::path::PathBuf>, SettingsError>,
+    default_dir: impl Fn() -> Result<std::path::PathBuf, XdgPathError>,
+) -> Result<std::path::PathBuf, Box<dyn Error>> {
+    if let Some(directory) = directory {
+        return Ok(directory);
     }
 
-    Ok(config_path)
+    if let Some(config_path) = candidate_config_path(config)
+        && let Some(configured_dir) =
+            configured_dir(&config_path).map_err(|error| -> Box<dyn Error> { Box::new(error) })?
+    {
+        return Ok(configured_dir);
+    }
+
+    default_dir().map_err(|error| -> Box<dyn Error> { Box::new(error) })
+}
+
+fn candidate_config_path(config: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    match config {
+        Some(config) => Some(config),
+        None => default_config_path()
+            .ok()
+            .filter(|default_config_path| default_config_path.is_file()),
+    }
 }
 
 fn wildcard(port: u16) -> SocketAddr {

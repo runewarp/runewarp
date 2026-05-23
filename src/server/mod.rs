@@ -1,6 +1,6 @@
 mod active_client;
 mod tunnel_registry;
-mod visitor_router;
+mod visitor_stream;
 
 use std::io;
 use std::net::SocketAddr;
@@ -12,7 +12,7 @@ use tokio::net::TcpListener;
 use crate::ServerTunnelSettings;
 
 use self::tunnel_registry::TunnelRegistry;
-use self::visitor_router::VisitorRouter;
+use self::visitor_stream::VisitorStreamHandler;
 
 pub struct ServerConfig {
     pub public_bind_addr: SocketAddr,
@@ -28,7 +28,7 @@ pub struct Server {
     public_listener: TcpListener,
     tunnel_endpoint: Endpoint,
     tunnel_registry: TunnelRegistry,
-    visitor_router: VisitorRouter,
+    visitor_stream_handler: VisitorStreamHandler,
 }
 
 impl Server {
@@ -41,7 +41,7 @@ impl Server {
         }
         let tunnel_registry =
             TunnelRegistry::configured(&config.server_hostname, &config.configured_tunnels)?;
-        let visitor_router = VisitorRouter::new(
+        let visitor_stream_handler = VisitorStreamHandler::new(
             config.server_hostname.clone(),
             tunnel_registry.clone(),
             config.logs,
@@ -54,7 +54,7 @@ impl Server {
             public_listener,
             tunnel_endpoint,
             tunnel_registry,
-            visitor_router,
+            visitor_stream_handler,
         })
     }
 
@@ -71,9 +71,9 @@ impl Server {
             tokio::select! {
                 accept_result = self.public_listener.accept() => {
                     let (visitor_stream, _) = accept_result?;
-                    let visitor_router = self.visitor_router.clone();
+                    let visitor_stream_handler = self.visitor_stream_handler.clone();
                     tokio::spawn(async move {
-                        let _ = visitor_router.handle(visitor_stream).await;
+                        let _ = visitor_stream_handler.handle(visitor_stream).await;
                     });
                 }
                 incoming = self.tunnel_endpoint.accept() => {

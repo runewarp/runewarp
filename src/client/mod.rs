@@ -1,5 +1,5 @@
-mod backend;
 mod service;
+mod tunnel_stream;
 
 use std::fmt;
 use std::io;
@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 
 use quinn::{Connection, Endpoint};
 
+use self::tunnel_stream::TunnelConnectionStreamHandler;
 use crate::ClientServiceSettings;
 
 pub(crate) use service::validate_services;
@@ -30,7 +31,6 @@ pub(crate) struct RoutedClientConfig {
     pub(crate) quic_client_config: quinn::ClientConfig,
 }
 
-#[derive(Clone)]
 enum ClientRouteMode {
     CatchAll {
         backend_address: String,
@@ -41,10 +41,9 @@ enum ClientRouteMode {
 }
 
 pub struct Client {
-    logs: bool,
-    route_mode: ClientRouteMode,
     endpoint: Endpoint,
     connection: Connection,
+    tunnel_stream_handler: TunnelConnectionStreamHandler,
 }
 
 #[derive(Debug)]
@@ -124,11 +123,13 @@ impl Client {
             .await
             .map_err(ClientConnectError::Handshake)?;
 
+        let tunnel_stream_handler =
+            TunnelConnectionStreamHandler::new(services_for_route_mode(route_mode), logs);
+
         Ok(Self {
-            logs,
-            route_mode,
             endpoint,
             connection,
+            tunnel_stream_handler,
         })
     }
 
@@ -140,10 +141,9 @@ impl Client {
         loop {
             match self.connection.accept_bi().await {
                 Ok((send, recv)) => {
-                    let services = self.services_for_stream();
-                    let logs = self.logs;
+                    let tunnel_stream_handler = self.tunnel_stream_handler.clone();
                     tokio::spawn(async move {
-                        let _ = backend::handle_tunnel_stream(send, recv, services, logs).await;
+                        let _ = tunnel_stream_handler.handle(send, recv).await;
                     });
                 }
                 Err(quinn::ConnectionError::ApplicationClosed { .. })
@@ -152,14 +152,14 @@ impl Client {
             }
         }
     }
+}
 
-    fn services_for_stream(&self) -> Vec<ClientServiceSettings> {
-        match &self.route_mode {
-            ClientRouteMode::CatchAll { backend_address } => vec![ClientServiceSettings {
-                public_hostnames: None,
-                backend_address: backend_address.clone(),
-            }],
-            ClientRouteMode::Routed { services } => services.clone(),
-        }
+fn services_for_route_mode(route_mode: ClientRouteMode) -> Vec<ClientServiceSettings> {
+    match route_mode {
+        ClientRouteMode::CatchAll { backend_address } => vec![ClientServiceSettings {
+            public_hostnames: None,
+            backend_address,
+        }],
+        ClientRouteMode::Routed { services } => services,
     }
 }

@@ -11,47 +11,20 @@ use tokio_rustls::TlsAcceptor;
 
 use super::tunnel_registry::TunnelRegistry;
 use crate::acme::ACME_TLS_ALPN;
-use crate::client_hello::{ClientHelloError, read_client_hello};
+use crate::client_hello::read_client_hello;
 use crate::hostname::validate_public_hostname;
 use crate::proxy::proxy_tcp_over_quic;
 use crate::runtime_log::{emit_stderr, server_route_line};
 
 #[derive(Clone)]
-pub(crate) struct VisitorRouter {
+pub(crate) struct VisitorStreamHandler {
     server_hostname: String,
     tunnel_registry: TunnelRegistry,
     logs: bool,
     public_tls_config: Option<Arc<rustls::ServerConfig>>,
 }
 
-#[derive(Debug)]
-enum VisitorRouting {
-    Reject(VisitorRejection),
-    ServeAcmeTlsAlpn01 {
-        server_hostname: String,
-        buffered_bytes: Vec<u8>,
-    },
-    Forward {
-        public_hostname: String,
-        buffered_bytes: Vec<u8>,
-        tunnel_connection: Connection,
-    },
-}
-
-#[derive(Debug)]
-enum VisitorRejection {
-    InvalidTls,
-    MissingSni,
-    InvalidSni,
-    ClientHelloTooLong { limit: usize },
-    IncompleteClientHello,
-    ReadFailure { kind: io::ErrorKind },
-    ServerHostname { server_hostname: String },
-    UnauthorizedPublicHostname { public_hostname: String },
-    NoActiveTunnelConnection { public_hostname: String },
-}
-
-impl VisitorRouter {
+impl VisitorStreamHandler {
     pub(crate) fn new(
         server_hostname: String,
         tunnel_registry: TunnelRegistry,
@@ -72,55 +45,23 @@ impl VisitorRouter {
     }
 
     pub(crate) async fn handle(&self, mut visitor_stream: TcpStream) -> io::Result<()> {
-        match self.route(&mut visitor_stream).await {
-            VisitorRouting::Reject(rejection) => {
-                self.log_rejection(&rejection);
-                Ok(())
-            }
-            VisitorRouting::ServeAcmeTlsAlpn01 {
-                server_hostname,
-                buffered_bytes,
-            } => {
-                self.serve_acme_tls_alpn_01(visitor_stream, server_hostname, buffered_bytes)
-                    .await
-            }
-            VisitorRouting::Forward {
-                public_hostname,
-                buffered_bytes,
-                tunnel_connection,
-            } => {
-                self.forward_to_tunnel(
-                    visitor_stream,
-                    public_hostname,
-                    buffered_bytes,
-                    tunnel_connection,
-                )
-                .await
-            }
-        }
-    }
-
-    async fn route<R>(&self, visitor: &mut R) -> VisitorRouting
-    where
-        R: AsyncRead + Unpin,
-    {
-        let parsed_client_hello = match read_client_hello(visitor).await {
+        let parsed_client_hello = match read_client_hello(&mut visitor_stream).await {
             Ok(parsed_client_hello) => parsed_client_hello,
-            Err(error) => return VisitorRouting::Reject(map_client_hello_error(error)),
+            Err(_) => return Ok(()),
         };
         let serves_acme_tls_alpn_01 = parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN);
         let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
 
         if public_hostname == self.server_hostname {
             return if serves_acme_tls_alpn_01 {
-                VisitorRouting::ServeAcmeTlsAlpn01 {
-                    server_hostname: public_hostname,
-                    buffered_bytes,
-                }
+                self.serve_acme_tls_alpn_01(visitor_stream, public_hostname, buffered_bytes)
+                    .await
             } else {
-                VisitorRouting::Reject(VisitorRejection::ServerHostname {
-                    server_hostname: public_hostname,
-                })
+                emit_stderr(
+                    self.logs,
+                    &server_route_line(&public_hostname, "dropped (server hostname)"),
+                );
+                Ok(())
             };
         }
 
@@ -128,9 +69,11 @@ impl VisitorRouter {
             .tunnel_registry
             .contains_public_hostname(&public_hostname)
         {
-            return VisitorRouting::Reject(VisitorRejection::UnauthorizedPublicHostname {
-                public_hostname,
-            });
+            emit_stderr(
+                self.logs,
+                &server_route_line(&public_hostname, "dropped (unauthorized)"),
+            );
+            return Ok(());
         }
 
         let Some(tunnel_connection) = self
@@ -138,16 +81,20 @@ impl VisitorRouter {
             .current_connection(&public_hostname)
             .await
         else {
-            return VisitorRouting::Reject(VisitorRejection::NoActiveTunnelConnection {
-                public_hostname,
-            });
+            emit_stderr(
+                self.logs,
+                &server_route_line(&public_hostname, "dropped (no active tunnel connection)"),
+            );
+            return Ok(());
         };
 
-        VisitorRouting::Forward {
+        self.forward_to_tunnel(
+            visitor_stream,
             public_hostname,
             buffered_bytes,
             tunnel_connection,
-        }
+        )
+        .await
     }
 
     async fn serve_acme_tls_alpn_01(
@@ -197,50 +144,6 @@ impl VisitorRouter {
         emit_stderr(self.logs, &server_route_line(&public_hostname, "forwarded"));
 
         proxy_tcp_over_quic(visitor_stream, buffered_bytes, send, recv).await
-    }
-
-    fn log_rejection(&self, rejection: &VisitorRejection) {
-        match rejection {
-            VisitorRejection::InvalidTls
-            | VisitorRejection::MissingSni
-            | VisitorRejection::InvalidSni
-            | VisitorRejection::IncompleteClientHello => {}
-            VisitorRejection::ClientHelloTooLong { limit } => {
-                let _ = limit;
-            }
-            VisitorRejection::ReadFailure { kind } => {
-                let _ = kind;
-            }
-            VisitorRejection::ServerHostname { server_hostname } => {
-                emit_stderr(
-                    self.logs,
-                    &server_route_line(server_hostname, "dropped (server hostname)"),
-                );
-            }
-            VisitorRejection::UnauthorizedPublicHostname { public_hostname } => {
-                emit_stderr(
-                    self.logs,
-                    &server_route_line(public_hostname, "dropped (unauthorized)"),
-                );
-            }
-            VisitorRejection::NoActiveTunnelConnection { public_hostname } => {
-                emit_stderr(
-                    self.logs,
-                    &server_route_line(public_hostname, "dropped (no active tunnel connection)"),
-                );
-            }
-        }
-    }
-}
-
-fn map_client_hello_error(error: ClientHelloError) -> VisitorRejection {
-    match error {
-        ClientHelloError::Io(error) => VisitorRejection::ReadFailure { kind: error.kind() },
-        ClientHelloError::InvalidTls => VisitorRejection::InvalidTls,
-        ClientHelloError::InvalidSni => VisitorRejection::InvalidSni,
-        ClientHelloError::MissingSni => VisitorRejection::MissingSni,
-        ClientHelloError::TooLong { limit } => VisitorRejection::ClientHelloTooLong { limit },
-        ClientHelloError::UnexpectedEof => VisitorRejection::IncompleteClientHello,
     }
 }
 
@@ -325,8 +228,9 @@ mod tests {
 
     use crate::acme::ACME_TLS_ALPN;
     use crate::{
-        GeneratedClientIdentity, ServerTunnelSettings, generate_client_identity,
-        make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
+        CLIENT_HELLO_BUFFER_LIMIT, GeneratedClientIdentity, ServerTunnelSettings,
+        generate_client_identity, make_client_quic_config_with_client_auth,
+        make_server_quic_config_with_client_auth,
     };
 
     #[tokio::test]
@@ -343,7 +247,8 @@ mod tests {
         let fixture = TunnelConnectionFixture::connect(&client_identity).await;
         registry.register(fixture.server_connection.clone()).await;
         let router =
-            VisitorRouter::new("Tunnel.Example.Test.".to_owned(), registry, false, None).unwrap();
+            VisitorStreamHandler::new("Tunnel.Example.Test.".to_owned(), registry, false, None)
+                .unwrap();
 
         let listener = TcpListener::bind(localhost(0)).await.unwrap();
         let visitor_addr = listener.local_addr().unwrap();
@@ -379,7 +284,7 @@ mod tests {
     async fn serves_acme_tls_for_the_server_hostname() {
         let registry = TunnelRegistry::single(vec!["app.example.test".to_owned()]).unwrap();
         let (certificate, public_tls_config) = make_public_tls_config("tunnel.example.test");
-        let router = VisitorRouter::new(
+        let router = VisitorStreamHandler::new(
             "Tunnel.Example.Test.".to_owned(),
             registry,
             false,
@@ -412,6 +317,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drops_application_traffic_for_the_server_hostname_without_opening_a_tunnel_stream() {
+        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await;
+
+        assert_drop_without_opening_a_tunnel_stream(
+            router,
+            build_client_hello("tunnel.example.test"),
+            Some(tunnel_connection),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drops_invalid_tls_without_opening_a_tunnel_stream() {
+        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await;
+
+        assert_drop_without_opening_a_tunnel_stream(
+            router,
+            b"not tls".to_vec(),
+            Some(tunnel_connection),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drops_client_hello_without_sni_without_opening_a_tunnel_stream() {
+        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await;
+
+        assert_drop_without_opening_a_tunnel_stream(
+            router,
+            build_client_hello_for_server_name(ServerName::IpAddress(Ipv4Addr::LOCALHOST.into())),
+            Some(tunnel_connection),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drops_incomplete_client_hello_without_opening_a_tunnel_stream() {
+        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await;
+        let mut client_hello = build_client_hello("app.example.test");
+        client_hello.truncate(10);
+
+        assert_drop_without_opening_a_tunnel_stream(router, client_hello, Some(tunnel_connection))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn drops_oversized_client_hello_without_opening_a_tunnel_stream() {
+        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await;
+
+        assert_drop_without_opening_a_tunnel_stream(
+            router,
+            oversized_client_hello(),
+            Some(tunnel_connection),
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn drops_unauthorized_public_hostname_without_opening_a_tunnel_stream() {
         let client_identity = generate_client_identity().expect("generate test client identity");
         let registry = TunnelRegistry::configured(
@@ -425,7 +388,8 @@ mod tests {
         let fixture = TunnelConnectionFixture::connect(&client_identity).await;
         registry.register(fixture.server_connection.clone()).await;
         let router =
-            VisitorRouter::new("Tunnel.Example.Test.".to_owned(), registry, false, None).unwrap();
+            VisitorStreamHandler::new("Tunnel.Example.Test.".to_owned(), registry, false, None)
+                .unwrap();
 
         let listener = TcpListener::bind(localhost(0)).await.unwrap();
         let visitor_addr = listener.local_addr().unwrap();
@@ -463,7 +427,8 @@ mod tests {
     async fn drops_public_hostname_when_the_tunnel_has_no_active_connection() {
         let registry = TunnelRegistry::single(vec!["app.example.test".to_owned()]).unwrap();
         let router =
-            VisitorRouter::new("tunnel.example.test".to_owned(), registry, false, None).unwrap();
+            VisitorStreamHandler::new("tunnel.example.test".to_owned(), registry, false, None)
+                .unwrap();
 
         let listener = TcpListener::bind(localhost(0)).await.unwrap();
         let visitor_addr = listener.local_addr().unwrap();
@@ -504,7 +469,8 @@ mod tests {
             .server_connection
             .close(0_u32.into(), b"closed before visitor handling");
         let router =
-            VisitorRouter::new("Tunnel.Example.Test.".to_owned(), registry, false, None).unwrap();
+            VisitorStreamHandler::new("Tunnel.Example.Test.".to_owned(), registry, false, None)
+                .unwrap();
 
         let listener = TcpListener::bind(localhost(0)).await.unwrap();
         let visitor_addr = listener.local_addr().unwrap();
@@ -517,6 +483,61 @@ mod tests {
         let client_hello = build_client_hello("app.example.test");
         visitor.write_all(&client_hello).await.unwrap();
         visitor.shutdown().await.unwrap();
+
+        let mut read_buffer = [0_u8; 1];
+        let read = timeout(Duration::from_secs(1), visitor.read(&mut read_buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read, 0);
+
+        router_task.await.unwrap();
+    }
+
+    async fn configured_router_with_active_tunnel_connection() -> (VisitorStreamHandler, Connection)
+    {
+        let client_identity = generate_client_identity().expect("generate test client identity");
+        let registry = TunnelRegistry::configured(
+            "Tunnel.Example.Test.",
+            &[ServerTunnelSettings {
+                public_hostnames: vec!["App.Example.Test.".to_owned()],
+                client_identity: client_identity.client_identity.clone(),
+            }],
+        )
+        .unwrap();
+        let fixture = TunnelConnectionFixture::connect(&client_identity).await;
+        registry.register(fixture.server_connection.clone()).await;
+        let router =
+            VisitorStreamHandler::new("Tunnel.Example.Test.".to_owned(), registry, false, None)
+                .unwrap();
+
+        (router, fixture.client_connection)
+    }
+
+    async fn assert_drop_without_opening_a_tunnel_stream(
+        router: VisitorStreamHandler,
+        visitor_bytes: Vec<u8>,
+        tunnel_connection: Option<Connection>,
+    ) {
+        let listener = TcpListener::bind(localhost(0)).await.unwrap();
+        let visitor_addr = listener.local_addr().unwrap();
+        let router_task = tokio::spawn(async move {
+            let (visitor_stream, _) = listener.accept().await.unwrap();
+            router.handle(visitor_stream).await.unwrap();
+        });
+
+        let mut visitor = TcpStream::connect(visitor_addr).await.unwrap();
+        visitor.write_all(&visitor_bytes).await.unwrap();
+        visitor.shutdown().await.unwrap();
+
+        if let Some(tunnel_connection) = tunnel_connection {
+            let open_stream =
+                timeout(Duration::from_millis(200), tunnel_connection.accept_bi()).await;
+            assert!(
+                open_stream.is_err(),
+                "router unexpectedly opened a tunnel stream"
+            );
+        }
 
         let mut read_buffer = [0_u8; 1];
         let read = timeout(Duration::from_secs(1), visitor.read(&mut read_buffer))
@@ -584,6 +605,10 @@ mod tests {
     }
 
     fn build_client_hello(server_name: &str) -> Vec<u8> {
+        build_client_hello_for_server_name(ServerName::try_from(server_name.to_owned()).unwrap())
+    }
+
+    fn build_client_hello_for_server_name(server_name: ServerName<'static>) -> Vec<u8> {
         let trusted_cert = generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
         let cert_der = CertificateDer::from(trusted_cert.cert);
         let mut roots = RootCertStore::empty();
@@ -592,14 +617,16 @@ mod tests {
         let config = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
-        let mut connection = ClientConnection::new(
-            Arc::new(config),
-            ServerName::try_from(server_name.to_owned()).unwrap(),
-        )
-        .unwrap();
+        let mut connection = ClientConnection::new(Arc::new(config), server_name).unwrap();
         let mut bytes = Vec::new();
         connection.write_tls(&mut bytes).unwrap();
         bytes
+    }
+
+    fn oversized_client_hello() -> Vec<u8> {
+        let mut oversized = vec![0x16, 0x03, 0x03, 0x40, 0x01];
+        oversized.extend(std::iter::repeat_n(0_u8, CLIENT_HELLO_BUFFER_LIMIT));
+        oversized
     }
 
     fn localhost(port: u16) -> SocketAddr {

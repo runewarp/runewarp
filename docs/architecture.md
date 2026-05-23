@@ -65,6 +65,14 @@ In both shapes, the Server remains the routing authority for public ingress.
 8. If no Client Service matches, the Client rejects the stream.
 9. The Local backend terminates TLS and serves the application.
 
+## Stream lifecycle seams
+
+Runewarp keeps the per-stream choreography concentrated behind two concrete modules:
+
+- the **Server** hands each accepted **Visitor** TCP stream to one handler that owns ClientHello parsing, **Server hostname** ACME handling, **Public hostname** authorization, **Tunnel** lookup, drop logging, and forwarding
+- the **Client** hands each inbound **Tunnel connection** stream to one handler that owns forwarded ClientHello parsing, **Service** selection, rejection, **Local backend** dialing, and forwarding
+- the outer runtimes stay thin callers; intermediate routing or backend-resolution result types do not cross those seams
+
 ## Trust model
 
 | Trust boundary | Design |

@@ -10,9 +10,12 @@ use serde::de::DeserializeOwned;
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, validate_server_tls_material,
 };
+use crate::trust::{ClientServerTrust, resolve_client_server_trust};
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
-    SERVER_CA_FILENAME, hostname::validate_public_hostname,
+    SERVER_CA_FILENAME, XdgPathError, default_client_identity_material_dir,
+    default_server_acme_state_dir, default_server_cert_material_dir,
+    hostname::validate_public_hostname,
 };
 
 pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
@@ -162,6 +165,47 @@ fn load_selected_section_value(
     path: &Path,
     section: &'static str,
 ) -> Result<toml::Value, SettingsError> {
+    let Some(section_value) = load_optional_selected_section_value(path, section)? else {
+        return Err(SettingsError::Validation {
+            path: path.to_path_buf(),
+            section,
+            messages: vec![format!("missing [{section}] section")],
+        });
+    };
+    Ok(section_value)
+}
+
+pub fn resolve_server_cert_material_dir_from_config(
+    path: &Path,
+) -> Result<Option<PathBuf>, SettingsError> {
+    let base_dir = config_dir(path);
+    let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
+        return Ok(None);
+    };
+    let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
+    let Some(cert) = raw.cert else {
+        return Ok(None);
+    };
+    Ok(cert.material_dir.map(|path| resolve_path(base_dir, &path)))
+}
+
+pub fn resolve_client_identity_material_dir_from_config(
+    path: &Path,
+) -> Result<Option<PathBuf>, SettingsError> {
+    let base_dir = config_dir(path);
+    let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
+        return Ok(None);
+    };
+    let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
+    Ok(raw
+        .identity_material_dir
+        .map(|path| resolve_path(base_dir, &path)))
+}
+
+fn load_optional_selected_section_value(
+    path: &Path,
+    section: &'static str,
+) -> Result<Option<toml::Value>, SettingsError> {
     let contents = fs::read_to_string(path).map_err(|source| SettingsError::Read {
         path: path.to_path_buf(),
         source,
@@ -172,14 +216,11 @@ fn load_selected_section_value(
             section,
             source: Box::new(source),
         })?;
-    let Some(section_value) = document.get(section).cloned() else {
-        return Err(SettingsError::Validation {
-            path: path.to_path_buf(),
-            section,
-            messages: vec![format!("missing [{section}] section")],
-        });
-    };
-    Ok(section_value)
+    Ok(document.get(section).cloned())
+}
+
+fn config_dir(path: &Path) -> &Path {
+    path.parent().unwrap_or_else(|| Path::new("."))
 }
 
 fn deserialize_selected_section<T>(
@@ -288,36 +329,42 @@ fn validate_client_settings(
         }
     };
 
-    let server_ca_file = match raw.server_ca_file {
-        Some(server_ca_file) => validate_optional_path(
-            "client.server-ca-file",
-            server_ca_file,
-            config_dir,
-            &mut messages,
-        ),
-        None => None,
-    };
-    let identity_directory = validate_required_directory(
-        "client.identity-directory",
-        raw.identity_directory,
+    let server_ca_file = match resolve_client_server_trust(
+        raw.server_trust.as_deref(),
+        raw.server_ca_file,
         config_dir,
+    ) {
+        Ok(ClientServerTrust::System) => None,
+        Ok(ClientServerTrust::CaFile(server_ca_file)) => {
+            validate_existing_file("client.server-ca-file", server_ca_file, &mut messages)
+        }
+        Err(error) => {
+            messages.push(error.to_string());
+            None
+        }
+    };
+    let identity_directory = validate_directory_with_default(
+        "client.identity-material-dir",
+        raw.identity_material_dir,
+        config_dir,
+        default_client_identity_material_dir,
         &mut messages,
     );
     if let Some(identity_directory) = identity_directory.as_deref() {
         let _ = validate_directory_file(
-            "client.identity-directory",
+            "client.identity-material-dir",
             identity_directory,
             CLIENT_CERT_FILENAME,
             &mut messages,
         );
         let _ = validate_directory_file(
-            "client.identity-directory",
+            "client.identity-material-dir",
             identity_directory,
             CLIENT_KEY_FILENAME,
             &mut messages,
         );
         let _ = validate_directory_file(
-            "client.identity-directory",
+            "client.identity-material-dir",
             identity_directory,
             CLIENT_IDENTITY_FILENAME,
             &mut messages,
@@ -362,7 +409,7 @@ fn validate_client_settings(
             server_hostname,
             logs,
             server_ca_file,
-            identity_directory: identity_directory.expect("validated client.identity-directory"),
+            identity_directory: identity_directory.expect("validated client.identity-material-dir"),
             reconnect_interval: Duration::from_secs(reconnect_interval_secs),
             services,
         })
@@ -375,21 +422,16 @@ fn validate_client_settings(
     }
 }
 
-fn validate_optional_path(
+fn validate_existing_file(
     field_name: &str,
-    raw_path: PathBuf,
-    config_dir: &Path,
+    path: PathBuf,
     messages: &mut Vec<String>,
 ) -> Option<PathBuf> {
-    let resolved = resolve_path(config_dir, &raw_path);
-    if !resolved.is_file() {
-        messages.push(format!(
-            "{field_name} file not found: {}",
-            resolved.display()
-        ));
+    if !path.is_file() {
+        messages.push(format!("{field_name} file not found: {}", path.display()));
         return None;
     }
-    Some(resolved)
+    Some(path)
 }
 
 fn validate_required_directory(
@@ -403,6 +445,33 @@ fn validate_required_directory(
         return None;
     };
     let resolved = resolve_path(config_dir, &raw_path);
+    if !resolved.is_dir() {
+        messages.push(format!(
+            "{field_name} directory not found: {}",
+            resolved.display()
+        ));
+        return None;
+    }
+    Some(resolved)
+}
+
+fn validate_directory_with_default(
+    field_name: &str,
+    raw_path: Option<PathBuf>,
+    config_dir: &Path,
+    default_path: impl Fn() -> Result<PathBuf, XdgPathError>,
+    messages: &mut Vec<String>,
+) -> Option<PathBuf> {
+    let resolved = match raw_path {
+        Some(raw_path) => resolve_path(config_dir, &raw_path),
+        None => match default_path() {
+            Ok(path) => path,
+            Err(error) => {
+                messages.push(error.to_string());
+                return None;
+            }
+        },
+    };
     if !resolved.is_dir() {
         messages.push(format!(
             "{field_name} directory not found: {}",
@@ -433,22 +502,27 @@ fn validate_server_manual_cert_settings(
     server_hostname: &str,
     messages: &mut Vec<String>,
 ) -> Option<PathBuf> {
-    let directory =
-        validate_required_directory("server.cert.directory", raw.directory, config_dir, messages)?;
+    let directory = validate_directory_with_default(
+        "server.cert.material-dir",
+        raw.material_dir,
+        config_dir,
+        default_server_cert_material_dir,
+        messages,
+    )?;
     let cert_path = validate_directory_file(
-        "server.cert.directory",
+        "server.cert.material-dir",
         &directory,
         SERVER_CERT_FILENAME,
         messages,
     );
     let key_path = validate_directory_file(
-        "server.cert.directory",
+        "server.cert.material-dir",
         &directory,
         SERVER_KEY_FILENAME,
         messages,
     );
     let ca_path = validate_directory_file(
-        "server.cert.directory",
+        "server.cert.material-dir",
         &directory,
         SERVER_CA_FILENAME,
         messages,
@@ -476,18 +550,41 @@ fn validate_server_acme_settings(
         messages.push("server.acme.email is required".to_owned());
         String::new()
     });
-    let state_directory = validate_required_directory(
-        "server.acme.state-directory",
-        raw.state_directory,
-        config_dir,
-        messages,
-    );
+    let state_directory = match raw.state_dir {
+        Some(state_dir) => validate_required_directory(
+            "server.acme.state-dir",
+            Some(state_dir),
+            config_dir,
+            messages,
+        ),
+        None => validate_default_acme_state_directory(messages),
+    };
 
     if email.is_empty() || state_directory.is_none() {
         return None;
     }
 
     Some((email, state_directory.expect("validated state directory")))
+}
+
+fn validate_default_acme_state_directory(messages: &mut Vec<String>) -> Option<PathBuf> {
+    let state_directory = match default_server_acme_state_dir() {
+        Ok(state_directory) => state_directory,
+        Err(error) => {
+            messages.push(error.to_string());
+            return None;
+        }
+    };
+
+    if let Err(source) = fs::create_dir_all(&state_directory) {
+        messages.push(format!(
+            "failed to create server.acme.state-dir directory {}: {source}",
+            state_directory.display()
+        ));
+        return None;
+    }
+
+    Some(state_directory)
 }
 
 fn validate_server_tunnel(
@@ -756,11 +853,11 @@ fn collect_server_unknown_field_messages(section_value: &toml::Value) -> Vec<Str
     );
 
     if let Some(cert) = server.get("cert").and_then(toml::Value::as_table) {
-        push_unknown_table_fields(cert, &["directory"], &mut messages);
+        push_unknown_table_fields(cert, &["material-dir"], &mut messages);
     }
 
     if let Some(acme) = server.get("acme").and_then(toml::Value::as_table) {
-        push_unknown_table_fields(acme, &["email", "state-directory"], &mut messages);
+        push_unknown_table_fields(acme, &["email", "state-dir"], &mut messages);
     }
 
     if let Some(tunnels) = server.get("tunnels").and_then(toml::Value::as_array) {
@@ -789,8 +886,9 @@ fn collect_client_unknown_field_messages(section_value: &toml::Value) -> Vec<Str
         &[
             "server-hostname",
             "logs",
+            "server-trust",
             "server-ca-file",
-            "identity-directory",
+            "identity-material-dir",
             "reconnect-interval",
             "services",
         ],
@@ -838,14 +936,14 @@ struct RawServerConfig {
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct RawServerCertConfig {
-    directory: Option<PathBuf>,
+    material_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct RawServerAcmeConfig {
     email: Option<String>,
-    state_directory: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -860,8 +958,9 @@ struct RawServerTunnelConfig {
 struct RawClientConfig {
     server_hostname: Option<String>,
     logs: Option<bool>,
+    server_trust: Option<String>,
     server_ca_file: Option<PathBuf>,
-    identity_directory: Option<PathBuf>,
+    identity_material_dir: Option<PathBuf>,
     reconnect_interval: Option<u64>,
     #[serde(default)]
     services: Vec<RawClientServiceConfig>,

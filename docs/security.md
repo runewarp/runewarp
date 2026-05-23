@@ -17,7 +17,7 @@ Runewarp is a private tunneling system for TLS passthrough, not an edge TLS term
 | --- | --- |
 | Server-side **Public hostname** authorization | Prevents random public traffic from entering a Tunnel just because some Client is connected |
 | Server certificate validation | Confirms the Client is connected to the intended **Server hostname** |
-| Exclusive `server-ca-file` trust | Limits trust for the Tunnel connection to the configured CA bundle |
+| Exclusive `ca-file` trust | Limits trust for the Tunnel connection to the configured CA bundle |
 | Pinned **Client identity** | Confirms the Client public key authorized for the selected Tunnel |
 | Backend TLS termination | Keeps customer TLS termination off the public edge |
 
@@ -35,7 +35,7 @@ Runewarp is a private tunneling system for TLS passthrough, not an edge TLS term
 The tunnel-connection trust model is:
 
 1. the Server presents a certificate for `server.hostname`
-2. the Client validates that certificate through system trust or through the exclusive configured `server-ca-file`
+2. the Client validates that certificate through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle
 3. the Client presents its own certificate
 4. the Server verifies the pinned `client-identity` from the Client public key
 
@@ -77,7 +77,8 @@ Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode.
 
 - ACME is only for the **Server hostname**
 - ACME never provisions certificates for customer **Public hostnames**
-- `server.acme.state-directory` must exist before boot and should be protected like secret-bearing material
+- when omitted, `server.acme.state-dir` defaults to the XDG state path and is created at startup
+- any explicit `server.acme.state-dir` should be protected like secret-bearing material
 
 ## Operational limits and trade-offs
 

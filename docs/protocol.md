@@ -45,7 +45,7 @@ Each **Client instance** establishes one long-lived QUIC connection to `server-h
 1. Resolve `client.server-hostname`.
 2. Dial UDP port `443`.
 3. Negotiate QUIC with ALPN `runewarp/1`.
-4. Validate the Server certificate for the **Server hostname**, using either system trust or the exclusive configured `server-ca-file`.
+4. Validate the Server certificate for the **Server hostname**, using either system trust or `client.server-trust = "ca-file"` with an exclusive CA bundle.
 5. Present the Client certificate and authenticate the pinned `client-identity` from its public key.
 
 Rules:

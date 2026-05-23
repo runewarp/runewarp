@@ -18,7 +18,7 @@ fn server_cert_init_writes_the_manual_server_ca_layout() {
             "server",
             "cert",
             "init",
-            "--directory",
+            "--dir",
             "server-cert",
             "--hostname",
             "Tunnel.Example.Test.",
@@ -55,6 +55,78 @@ fn server_cert_init_writes_the_manual_server_ca_layout() {
 }
 
 #[test]
+fn server_cert_init_uses_the_xdg_default_directory_when_dir_is_omitted() {
+    let tempdir = tempdir().unwrap();
+    let xdg_data_home = tempdir.path().join("xdg-data");
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("XDG_DATA_HOME", &xdg_data_home)
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    assert_exists(
+        xdg_data_home
+            .join("runewarp/server/cert/server.crt")
+            .as_path(),
+    );
+    assert_exists(
+        xdg_data_home
+            .join("runewarp/server/cert/server.key")
+            .as_path(),
+    );
+    assert_exists(
+        xdg_data_home
+            .join("runewarp/server/cert/server-ca.crt")
+            .as_path(),
+    );
+}
+
+#[test]
+fn server_cert_init_uses_the_configured_material_dir_when_config_is_provided() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/server-cert");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[server]
+
+[server.cert]
+material-dir = "configured/server-cert"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--config",
+            "server.toml",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    assert_exists(configured_dir.join("server.crt").as_path());
+    assert_exists(configured_dir.join("server.key").as_path());
+    assert_exists(configured_dir.join("server-ca.crt").as_path());
+}
+
+#[test]
 fn server_cert_init_refuses_to_overwrite_existing_material() {
     let tempdir = tempdir().unwrap();
 
@@ -65,7 +137,7 @@ fn server_cert_init_refuses_to_overwrite_existing_material() {
             "server",
             "cert",
             "init",
-            "--directory",
+            "--dir",
             "server-cert",
             "--hostname",
             "tunnel.example.test",
@@ -80,7 +152,7 @@ fn server_cert_init_refuses_to_overwrite_existing_material() {
             "server",
             "cert",
             "init",
-            "--directory",
+            "--dir",
             "server-cert",
             "--hostname",
             "tunnel.example.test",
@@ -101,7 +173,7 @@ fn server_cert_init_writes_private_keys_with_owner_only_permissions() {
             "server",
             "cert",
             "init",
-            "--directory",
+            "--dir",
             "server-cert",
             "--hostname",
             "tunnel.example.test",
@@ -143,7 +215,7 @@ fn server_cert_renew_reissues_the_leaf_without_changing_the_server_ca() {
             "server",
             "cert",
             "init",
-            "--directory",
+            "--dir",
             cert_directory
                 .to_str()
                 .expect("utf-8 certificate directory"),
@@ -170,7 +242,7 @@ fn server_cert_renew_reissues_the_leaf_without_changing_the_server_ca() {
             "server",
             "cert",
             "renew",
-            "--directory",
+            "--dir",
             cert_directory
                 .to_str()
                 .expect("utf-8 certificate directory"),
@@ -217,7 +289,7 @@ fn server_cert_rotate_ca_replaces_the_ca_and_updates_the_stored_hostname() {
             "server",
             "cert",
             "init",
-            "--directory",
+            "--dir",
             cert_directory
                 .to_str()
                 .expect("utf-8 certificate directory"),
@@ -244,7 +316,7 @@ fn server_cert_rotate_ca_replaces_the_ca_and_updates_the_stored_hostname() {
             "server",
             "cert",
             "rotate-ca",
-            "--directory",
+            "--dir",
             cert_directory
                 .to_str()
                 .expect("utf-8 certificate directory"),
@@ -286,4 +358,45 @@ fn server_cert_rotate_ca_replaces_the_ca_and_updates_the_stored_hostname() {
         "rotated.example.test",
         "rotate-ca should normalize the stored hostname",
     );
+}
+
+#[test]
+fn server_cert_init_help_shows_the_new_dir_flag() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["server", "cert", "init", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Usage:"));
+    assert!(stdout.contains("runewarp server cert init"));
+    assert!(stdout.contains("--dir"));
+    assert!(!stdout.contains("--directory"));
+}
+
+#[test]
+fn server_cert_init_rejects_the_removed_directory_flag() {
+    let tempdir = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--directory",
+            "server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("unexpected argument '--directory'"));
+    assert!(stderr.contains("--dir"));
 }

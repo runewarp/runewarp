@@ -3,6 +3,7 @@ mod client;
 mod client_hello;
 mod hostname;
 mod identity;
+mod paths;
 mod proxy;
 mod quic;
 pub mod runtime_log;
@@ -11,6 +12,7 @@ mod server_cert;
 mod settings;
 mod startup;
 mod tls_material;
+mod trust;
 
 pub use client::{Client, ClientConfig, ClientConnectError};
 pub use client_hello::{
@@ -24,6 +26,10 @@ pub use identity::{
     client_identity_from_certificate_der, decide_client_certificate_renewal,
     generate_client_identity, inspect_client_certificate_renewal,
     renew_client_identity_certificate, rotate_client_identity,
+};
+pub use paths::{
+    XdgPathError, default_client_identity_material_dir, default_client_server_ca_path,
+    default_config_path, default_server_acme_state_dir, default_server_cert_material_dir,
 };
 pub use quic::{
     IDLE_TIMEOUT, KEEPALIVE_INTERVAL, MAX_SERVER_OPENED_BIDI_STREAMS, QuicConfigError,
@@ -39,6 +45,7 @@ pub use server_cert::{
 pub use settings::{
     ClientServiceSettings, ClientSettings, DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS,
     ServerCertificateSettings, ServerSettings, ServerTunnelSettings, SettingsError,
-    load_client_settings, load_server_settings,
+    load_client_settings, load_server_settings, resolve_client_identity_material_dir_from_config,
+    resolve_server_cert_material_dir_from_config,
 };
 pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};

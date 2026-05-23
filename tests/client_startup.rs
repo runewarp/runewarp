@@ -64,8 +64,9 @@ async fn prepared_client_connects_from_validated_settings() {
         r#"
 [client]
 server-hostname = "tunnel.example.test"
+server-trust = "ca-file"
 server-ca-file = "server-ca.pem"
-identity-directory = "client-identity"
+identity-material-dir = "client-identity"
 
 [[client.services]]
 backend-address = "localhost:443"

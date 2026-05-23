@@ -68,9 +68,7 @@ Choose one of the two supported Server-certificate paths:
 Manual/private-CA initialization:
 
 ```bash
-runewarp server cert init \
-  --dir /etc/runewarp/server \
-  --hostname tunnel.example.com
+runewarp server cert init --hostname tunnel.example.com
 ```
 
 ### 3. Prepare the Client identity
@@ -78,15 +76,19 @@ runewarp server cert init \
 Create the Client keypair, certificate, and durable `client-identity`:
 
 ```bash
-runewarp client identity init --dir /etc/runewarp/client
+runewarp client identity init
 ```
 
-Read the generated `/etc/runewarp/client/client-identity.txt` value and place it into the matching Server `[[server.tunnels]]` entry as `client-identity`.
+Read the generated `client-identity.txt` value from the default Client identity directory and place it into the matching Server `[[server.tunnels]]` entry as `client-identity`.
 
 If you omit `--dir`, Runewarp uses the default XDG data locations:
 
 - Client identity material: `$XDG_DATA_HOME/runewarp/client/identity/` or `~/.local/share/runewarp/client/identity/`
 - Manual/private-CA Server material: `$XDG_DATA_HOME/runewarp/server/cert/` or `~/.local/share/runewarp/server/cert/`
+
+If you prefer custom directories, pass `--dir` during setup and point the matching config keys at those paths: `server.cert.material-dir`, `client.identity-material-dir`, and, when needed, `client.server-ca-file`.
+
+For the manual/private-CA path, either copy the generated `server-ca.crt` to `$XDG_DATA_HOME/runewarp/client/server-ca.crt` (or `~/.local/share/runewarp/client/server-ca.crt`) on each Client or set `client.server-ca-file` to the deployed CA bundle path.
 
 ### 4. Write config
 

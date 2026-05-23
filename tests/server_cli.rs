@@ -184,3 +184,57 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert!(!stderr.contains("server.acme.state-dir"));
     assert!(default_state_dir.is_dir());
 }
+
+#[test]
+fn server_does_not_create_the_default_acme_state_dir_for_invalid_dual_mode_config() {
+    let tempdir = tempdir().unwrap();
+    let xdg_state_home = tempdir.path().join("xdg-state");
+    let default_state_dir = xdg_state_home.join("runewarp/server/acme");
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+
+[server.cert]
+material-dir = "server-cert"
+
+[server.acme]
+email = "admin@example.test"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .args(["server", "--config", "server.toml"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("exactly one of [server.cert] or [server.acme] must be configured"));
+    assert!(!default_state_dir.exists());
+}

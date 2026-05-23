@@ -42,9 +42,9 @@ cd examples/docker
 `./prepare.sh`:
 
 - builds the local `runewarp/runewarp:local` image
-- generates manual/private-CA Server material under `generated/server/cert-source`
-- generates Client identity material under `generated/client/identity-source`
-- renders container-readable runtime material and config under `generated/server`, `generated/client`, and `generated/caddy`, including the new `material-dir`, `identity-material-dir`, and `server-trust` keys
+- generates manual/private-CA Server material under `generated/server/source-data/runewarp/server/cert`
+- generates Client identity material under `generated/client/source-data/runewarp/client/identity`
+- renders XDG-style runtime config and data trees under `generated/server`, `generated/client`, and `generated/caddy`, so the containers use default config discovery plus default material and trust paths inside the example
 
 Use `./prepare.sh --reset` when you want to discard generated state and rebuild it cleanly.
 

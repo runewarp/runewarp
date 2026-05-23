@@ -125,11 +125,12 @@ fn ensure_client_identity_fresh(
 }
 
 async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Error>> {
+    let config = command.config;
     if let Some(cli::ServerSubcommand::Cert(command)) = command.command {
-        return run_server_cert_command(command);
+        return run_server_cert_command(config, command);
     }
 
-    let config_path = config_path_or_default(command.config)?;
+    let config_path = config_path_or_default(config)?;
     let settings = load_server_settings(&config_path)?;
     PreparedServer::bind(&settings, wildcard(443), wildcard(443))
         .await?
@@ -138,20 +139,23 @@ async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-fn run_server_cert_command(command: cli::ServerCertArgs) -> Result<(), Box<dyn Error>> {
+fn run_server_cert_command(
+    config: Option<std::path::PathBuf>,
+    command: cli::ServerCertArgs,
+) -> Result<(), Box<dyn Error>> {
     match command.command {
         cli::ServerCertSubcommand::Init(args) => {
-            let directory = resolve_server_cert_dir(args.config, args.dir)?;
+            let directory = resolve_server_cert_dir(config, args.dir)?;
             initialize_manual_server_certificate(&directory, &args.hostname)?;
             Ok(())
         }
         cli::ServerCertSubcommand::Renew(args) => {
-            let directory = resolve_server_cert_dir(args.config, args.dir)?;
+            let directory = resolve_server_cert_dir(config, args.dir)?;
             renew_manual_server_certificate(&directory)?;
             Ok(())
         }
         cli::ServerCertSubcommand::RotateCa(args) => {
-            let directory = resolve_server_cert_dir(args.config, args.dir)?;
+            let directory = resolve_server_cert_dir(config, args.dir)?;
             rotate_manual_server_certificate_authority(&directory, &args.hostname)?;
             Ok(())
         }
@@ -159,23 +163,27 @@ fn run_server_cert_command(command: cli::ServerCertArgs) -> Result<(), Box<dyn E
 }
 
 async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box<dyn Error>> {
+    let config = command.config;
     if let Some(cli::ClientSubcommand::Identity(command)) = command.command {
-        return run_client_identity_command(command);
+        return run_client_identity_command(config, command);
     }
 
-    let config_path = config_path_or_default(command.config)?;
+    let config_path = config_path_or_default(config)?;
     let settings = load_client_settings(&config_path)?;
     run_client_command(&settings, wildcard(0)).await
 }
 
-fn run_client_identity_command(command: cli::ClientIdentityArgs) -> Result<(), Box<dyn Error>> {
+fn run_client_identity_command(
+    config: Option<std::path::PathBuf>,
+    command: cli::ClientIdentityArgs,
+) -> Result<(), Box<dyn Error>> {
     match command.command {
         cli::ClientIdentitySubcommand::Init(args) => {
-            let directory = resolve_client_identity_dir(args.config, args.dir)?;
+            let directory = resolve_client_identity_dir(config, args.dir)?;
             write_client_identity_artifacts(&directory)
         }
         cli::ClientIdentitySubcommand::Renew(args) => {
-            let directory = resolve_client_identity_dir(args.config, args.dir)?;
+            let directory = resolve_client_identity_dir(config, args.dir)?;
             let renewed = renew_client_identity_certificate(&directory)?;
             println!("Client identity: {}", renewed.client_identity);
             println!("Renewed certificate lifetime: {CLIENT_CERT_LIFETIME_DAYS} days");
@@ -183,7 +191,7 @@ fn run_client_identity_command(command: cli::ClientIdentityArgs) -> Result<(), B
             Ok(())
         }
         cli::ClientIdentitySubcommand::Rotate(args) => {
-            let directory = resolve_client_identity_dir(args.config, args.dir)?;
+            let directory = resolve_client_identity_dir(config, args.dir)?;
             let rotated = rotate_client_identity(&directory)?;
             println!("Client identity: {}", rotated.client_identity);
             println!("Rotated certificate lifetime: {CLIENT_CERT_LIFETIME_DAYS} days");

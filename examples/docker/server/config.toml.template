@@ -2,7 +2,6 @@
 hostname = "tunnel.example.test"
 
 [server.cert]
-material-dir = "/runewarp/cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test", "api.example.test"]

@@ -22,7 +22,7 @@ pub enum TopLevelCommand {
 
 #[derive(Debug, Args)]
 pub struct ServerArgs {
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Option<ServerSubcommand>,
@@ -49,8 +49,6 @@ pub enum ServerCertSubcommand {
 
 #[derive(Debug, Args)]
 pub struct ServerCertInitArgs {
-    #[arg(long, value_name = "PATH")]
-    pub config: Option<PathBuf>,
     #[arg(long = "dir", value_name = "DIR")]
     pub dir: Option<PathBuf>,
     #[arg(long, value_name = "HOSTNAME")]
@@ -59,15 +57,13 @@ pub struct ServerCertInitArgs {
 
 #[derive(Debug, Args)]
 pub struct ServerCertDirArgs {
-    #[arg(long, value_name = "PATH")]
-    pub config: Option<PathBuf>,
     #[arg(long = "dir", value_name = "DIR")]
     pub dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
 pub struct ClientArgs {
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Option<ClientSubcommand>,
@@ -94,8 +90,6 @@ pub enum ClientIdentitySubcommand {
 
 #[derive(Debug, Args)]
 pub struct ClientIdentityDirArgs {
-    #[arg(long, value_name = "PATH")]
-    pub config: Option<PathBuf>,
     #[arg(long = "dir", value_name = "DIR")]
     pub dir: Option<PathBuf>,
 }

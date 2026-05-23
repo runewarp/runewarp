@@ -1,7 +1,11 @@
 services:
   server:
     image: runewarp/runewarp:local
-    command: ["server", "--config", "/runewarp/config.toml"]
+    command: ["server"]
+    environment:
+      XDG_CONFIG_HOME: /runewarp/config
+      XDG_DATA_HOME: /runewarp/data
+      XDG_STATE_HOME: /runewarp/state
     ports:
       - "8443:443/tcp"
     volumes:
@@ -13,7 +17,11 @@ services:
 
   client:
     image: runewarp/runewarp:local
-    command: ["client", "--config", "/runewarp/config.toml"]
+    command: ["client"]
+    environment:
+      XDG_CONFIG_HOME: /runewarp/config
+      XDG_DATA_HOME: /runewarp/data
+      XDG_STATE_HOME: /runewarp/state
     depends_on:
       - server
       - caddy

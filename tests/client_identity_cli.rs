@@ -85,6 +85,63 @@ identity-material-dir = "configured/client-identity"
 }
 
 #[test]
+fn client_identity_init_accepts_config_before_the_leaf_subcommand() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/client-identity");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+identity-material-dir = "configured/client-identity"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "--config", "client.toml", "init"])
+        .assert()
+        .success();
+
+    assert_exists(configured_dir.join("client.key").as_path());
+    assert_exists(configured_dir.join("client.crt").as_path());
+    assert_exists(configured_dir.join("client-identity.txt").as_path());
+}
+
+#[test]
+fn client_identity_init_rejects_the_legacy_identity_directory_key_in_config() {
+    let tempdir = tempdir().unwrap();
+    let xdg_data_home = tempdir.path().join("xdg-data");
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+identity-directory = "legacy/client-identity"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("XDG_DATA_HOME", &xdg_data_home)
+        .args(["client", "identity", "init", "--config", "client.toml"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("unknown field `identity-directory`"));
+    assert!(
+        !xdg_data_home
+            .join("runewarp/client/identity/client.key")
+            .exists()
+    );
+}
+
+#[test]
 fn client_identity_init_writes_pem_artifacts_and_a_client_identity() {
     let tempdir = tempdir().unwrap();
 
@@ -268,6 +325,21 @@ fn client_identity_init_help_shows_the_new_dir_flag() {
     assert!(stdout.contains("runewarp client identity init"));
     assert!(stdout.contains("--dir"));
     assert!(!stdout.contains("--directory"));
+}
+
+#[test]
+fn client_identity_help_shows_the_config_flag() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["client", "identity", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Usage:"));
+    assert!(stdout.contains("runewarp client identity"));
+    assert!(stdout.contains("--config"));
 }
 
 #[test]

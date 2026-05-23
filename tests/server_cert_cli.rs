@@ -55,6 +55,21 @@ fn server_cert_init_writes_the_manual_server_ca_layout() {
 }
 
 #[test]
+fn server_cert_help_shows_the_config_flag() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["server", "cert", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Usage:"));
+    assert!(stdout.contains("runewarp server cert"));
+    assert!(stdout.contains("--config"));
+}
+
+#[test]
 fn server_cert_init_uses_the_xdg_default_directory_when_dir_is_omitted() {
     let tempdir = tempdir().unwrap();
     let xdg_data_home = tempdir.path().join("xdg-data");
@@ -124,6 +139,95 @@ material-dir = "configured/server-cert"
     assert_exists(configured_dir.join("server.crt").as_path());
     assert_exists(configured_dir.join("server.key").as_path());
     assert_exists(configured_dir.join("server-ca.crt").as_path());
+}
+
+#[test]
+fn server_cert_renew_accepts_config_before_the_leaf_subcommand() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/server-cert");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[server]
+
+[server.cert]
+material-dir = "configured/server-cert"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--config",
+            "server.toml",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    let original_server_certificate =
+        fs::read(configured_dir.join("server.crt")).expect("original server certificate");
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["server", "cert", "--config", "server.toml", "renew"])
+        .assert()
+        .success();
+
+    assert_ne!(
+        fs::read(configured_dir.join("server.crt")).expect("renewed server certificate"),
+        original_server_certificate,
+        "renew should use the configured material directory",
+    );
+}
+
+#[test]
+fn server_cert_init_rejects_the_legacy_directory_key_in_config() {
+    let tempdir = tempdir().unwrap();
+    let xdg_data_home = tempdir.path().join("xdg-data");
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[server]
+
+[server.cert]
+directory = "legacy/server-cert"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("XDG_DATA_HOME", &xdg_data_home)
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--config",
+            "server.toml",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("unknown field `directory`"));
+    assert!(
+        !xdg_data_home
+            .join("runewarp/server/cert/server.crt")
+            .exists()
+    );
 }
 
 #[test]

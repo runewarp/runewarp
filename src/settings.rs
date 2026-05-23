@@ -182,6 +182,14 @@ pub fn resolve_server_cert_material_dir_from_config(
     let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
         return Ok(None);
     };
+    let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
+    if !unknown_field_messages.is_empty() {
+        return Err(SettingsError::Validation {
+            path: path.to_path_buf(),
+            section: "server",
+            messages: unknown_field_messages,
+        });
+    }
     let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
     let Some(cert) = raw.cert else {
         return Ok(None);
@@ -196,6 +204,14 @@ pub fn resolve_client_identity_material_dir_from_config(
     let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
         return Ok(None);
     };
+    let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
+    if !unknown_field_messages.is_empty() {
+        return Err(SettingsError::Validation {
+            path: path.to_path_buf(),
+            section: "client",
+            messages: unknown_field_messages,
+        });
+    }
     let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
     Ok(raw
         .identity_material_dir
@@ -264,12 +280,19 @@ fn validate_server_settings(
         messages
             .push("exactly one of [server.cert] or [server.acme] must be configured".to_owned());
     }
-    let manual = raw.cert.and_then(|cert| {
-        validate_server_manual_cert_settings(cert, config_dir, hostname.as_str(), &mut messages)
-    });
-    let acme = raw
-        .acme
-        .and_then(|acme| validate_server_acme_settings(acme, config_dir, &mut messages));
+    let manual = if manual_present && !acme_present {
+        raw.cert.and_then(|cert| {
+            validate_server_manual_cert_settings(cert, config_dir, hostname.as_str(), &mut messages)
+        })
+    } else {
+        None
+    };
+    let acme = if acme_present && !manual_present {
+        raw.acme
+            .and_then(|acme| validate_server_acme_settings(acme, config_dir, &mut messages))
+    } else {
+        None
+    };
     let certificate = match (manual_present, acme_present) {
         (true, false) => manual.map(|directory| ServerCertificateSettings::Manual { directory }),
         (false, true) => acme.map(|(email, state_directory)| ServerCertificateSettings::Acme {

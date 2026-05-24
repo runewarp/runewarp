@@ -30,7 +30,11 @@ _Avoid_: Client, user agent
 
 **Server hostname**:
 The hostname that identifies the Runewarp public edge itself.
-_Avoid_: Public hostname, app hostname
+_Avoid_: Public hostname, app hostname, server address
+
+**Server address**:
+The client-configured network endpoint that a **Client instance** dials for its **Tunnel connection**, written as a hostname with an optional port. Its host part is also the TLS identity for the tunnel connection.
+_Avoid_: Server hostname, bind address
 
 **Server certificate**:
 The certificate the **Server** presents for the **Server hostname** on the tunnel endpoint.
@@ -80,8 +84,11 @@ _Avoid_: Mixed mode, asymmetric routing
 - Each **Tunnel connection** belongs to exactly one **Tunnel**
 - Each **Tunnel connection** belongs to exactly one **Client instance**
 - A **Client instance** establishes exactly one **Tunnel connection**
+- A **Client instance** dials exactly one **Server address** for its **Tunnel connection**
 - A **Visitor** reaches a **Local backend** only through a **Tunnel**
+- A **Server address** points at exactly one **Server**
 - A **Server hostname** identifies the public edge, not an operator application
+- The host part of a **Server address** is the **Server hostname**
 - A **Server certificate** belongs to exactly one **Server hostname**
 - A **Server CA** can issue one or more **Server certificates**
 - A **Public hostname** is routed through exactly one **Tunnel** at a time
@@ -105,6 +112,9 @@ _Avoid_: Mixed mode, asymmetric routing
 >
 > **Dev:** "Can `tunnel.example.com` also be a **Public hostname** for an app?"
 > **Domain expert:** "No. That is the **Server hostname**. Application traffic uses separate **Public hostnames**."
+>
+> **Dev:** "Is `tunnel.example.com:443` the **Server hostname**?"
+> **Domain expert:** "No. That is the **Server address**. `tunnel.example.com` is the **Server hostname** inside it."
 >
 > **Dev:** "Is the `caddy.local:443` target the **Service**?"
 > **Domain expert:** "No. The **Service** is the routing rule in client config. `caddy.local:443` is the **Local backend** it selects."
@@ -139,6 +149,7 @@ _Avoid_: Mixed mode, asymmetric routing
 - "client" was used to mean both the operator-run component and the outside network peer — resolved: **Client** is the operator-run component; **Visitor** is the outside public caller.
 - "client" was also used to blur the component and one running process — resolved: **Client** is the component; **Client instance** is one running copy.
 - "server hostname" and routed application hostnames were easy to blur — resolved: **Server hostname** names the Runewarp edge; **Public hostname** names operator application traffic.
+- "server address" and "server hostname" were easy to blur — resolved: **Server address** is the client-configured endpoint; **Server hostname** is the hostname form of that endpoint when a hostname is used.
 - "service" and "backend" were used interchangeably — resolved: **Service** is the client-side config unit; **Local backend** is the actual TLS endpoint the **Client** dials.
 - "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key, while certificates can rotate without changing that identity.
 - "server certificate" and the trust anchor behind it were easy to conflate — resolved: **Server certificate** is the presented leaf; **Server CA** is the private issuer in the manual Server path.

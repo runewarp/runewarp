@@ -100,6 +100,42 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 }
 
 #[test]
+fn server_reports_missing_material_files_with_a_recovery_hint() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("server-cert")).unwrap();
+    fs::write(
+        tempdir.path().join("server-cert/server.crt"),
+        "placeholder certificate",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("custom.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["server", "--config", "custom.toml"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("server-cert/server.key"));
+    assert!(stderr.contains("server-cert/server-ca.crt"));
+    assert!(stderr.contains("runewarp server cert init --config custom.toml"));
+}
+
+#[test]
 fn server_uses_the_default_material_dir_when_config_omits_it() {
     let tempdir = tempdir().unwrap();
     let xdg_data_home = tempdir.path().join("xdg-data");

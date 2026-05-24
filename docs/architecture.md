@@ -55,7 +55,7 @@ In both shapes, the Server remains the routing authority for public ingress.
 
 ## Data path
 
-1. A **Visitor** connects to `443/tcp` on the **Server**.
+1. A **Visitor** connects to the **Server** on its configured public TCP listener, `server.public-bind-address`, which defaults to `0.0.0.0:443`.
 2. The Server buffers enough of the ClientHello to extract SNI.
 3. The Server rejects non-TLS traffic, missing-SNI traffic, and non-ACME application traffic addressed to the **Server hostname**.
 4. The Server selects a **Tunnel** by exact **Public hostname**.

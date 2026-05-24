@@ -80,7 +80,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let server = PreparedServer::bind(
         &settings,
         settings.public_bind_address,
-        settings.tunnel_bind_address,
+        settings.tunnel_connection_bind_address,
     )
     .await
     .unwrap();

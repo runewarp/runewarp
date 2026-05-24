@@ -75,6 +75,7 @@ Existing QUIC connections continue with the certificate from their original hand
 
 Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode.
 
+- the current ACME config surface is fixed to Let's Encrypt
 - ACME is only for the **Server hostname**
 - ACME never provisions certificates for customer **Public hostnames**
 - when omitted, `server.acme.state-dir` defaults to the XDG state path and is created at startup

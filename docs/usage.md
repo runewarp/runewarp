@@ -13,7 +13,7 @@ This guide is the operator-facing path for installing Runewarp, preparing trust 
 
 Runewarp assumes:
 
-- a public **Server** reachable on `443/tcp` for **Visitor** TLS traffic and `443/udp` for **Client** tunnel connections
+- a public **Server** reachable on its configured `server.public-bind-address` for **Visitor** TLS traffic and `server.tunnel-bind-address` for **Client** **Tunnel connections**; both default to `0.0.0.0:443`
 - one or more operator-owned **Public hostnames** that resolve to the Server
 - a TLS-terminating **Local backend** behind the Client
 - a decision about the Server certificate path: ACME for the **Server hostname** or the manual/private-CA path
@@ -62,7 +62,7 @@ Choose one of the two supported Server-certificate paths:
 
 | Path | When to use it | What to do |
 | --- | --- | --- |
-| ACME | Publicly routable Server hostname and standard public trust | Configure `[server.acme]`; omit `state-dir` to use the default XDG state location |
+| ACME (Let's Encrypt) | Publicly routable Server hostname and standard public trust | Configure `[server.acme]`; Runewarp keeps the ACME provider fixed to Let's Encrypt here, and omitting `state-dir` uses the default XDG state location |
 | Manual/private-CA | Private deployments or operator-managed trust | Create the material with `runewarp server cert init` and distribute `server-ca.crt` to Clients |
 
 Manual/private-CA initialization:
@@ -71,7 +71,7 @@ Manual/private-CA initialization:
 runewarp server cert init --hostname tunnel.example.com
 ```
 
-When `server.hostname` is already set in config, `runewarp server cert init --config /path/to/server.toml` and `runewarp server cert rotate-ca --config /path/to/server.toml` can omit `--hostname`.
+When `server.hostname` is already set in config, `runewarp server cert init` and `runewarp server cert rotate-ca` can omit `--hostname`.
 
 ### 3. Prepare the Client identity
 
@@ -122,6 +122,8 @@ That Client has a **Catch-all Service**: the Server stays explicit about the aut
 
 If the Client must dial a non-default tunnel port, append it to `server-address` as `hostname:port`.
 
+If the Server must listen on non-default sockets, set `server.public-bind-address` for **Visitor** TLS traffic and `server.tunnel-bind-address` for **Client** **Tunnel connections**.
+
 If you are using the manual/private-CA Server path, add:
 
 ```toml
@@ -157,7 +159,7 @@ When logs are enabled, the Server and Client emit human-readable routing diagnos
 
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
-| No traffic reaches the backend | No active **Tunnel connection** | Confirm the Client is running and can reach the Server on `443/udp` |
+| No traffic reaches the backend | No active **Tunnel connection** | Confirm the Client is running and can reach the Server on the configured `server.tunnel-bind-address` |
 | Client cannot connect to the Server | Wrong Server trust path | Check `client.server-trust = "ca-file"` and the selected `client.server-ca-file` path for the manual/private-CA path, or confirm the ACME/public-CA chain is trusted |
 | Server drops a Public hostname | Hostname is not authorized on any Server `[[tunnels]]` entry | Check `server.tunnels[].public-hostnames` |
 | Client rejects the stream | No matching **Service** on the Client | Check Client `public-hostnames`, or confirm the sole Service is intentionally Catch-all |

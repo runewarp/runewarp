@@ -29,7 +29,7 @@ impl PreparedServer {
     pub async fn bind(
         settings: &ServerSettings,
         public_bind_addr: SocketAddr,
-        tunnel_bind_addr: SocketAddr,
+        tunnel_connection_bind_addr: SocketAddr,
     ) -> Result<Self, ServerStartupError> {
         let trusted_client_identities = settings
             .tunnels
@@ -63,7 +63,7 @@ impl PreparedServer {
         };
         let server = Server::bind(ServerConfig {
             public_bind_addr,
-            tunnel_bind_addr,
+            tunnel_connection_bind_addr,
             server_hostname: settings.hostname.clone(),
             configured_tunnels: settings.tunnels.clone(),
             logs: settings.logs,

@@ -102,6 +102,44 @@ backend-address = "caddy.local:443"
 }
 
 #[test]
+fn client_settings_accept_server_address_with_an_explicit_port() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "Tunnel.Example.Test.:9443"
+identity-dir = "client-identity"
+
+[[client.services]]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(settings.server_hostname, "tunnel.example.test");
+    assert_eq!(settings.server_port, 9443);
+}
+
+#[test]
 fn client_settings_reject_ip_literals_in_server_address() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
@@ -139,6 +177,47 @@ backend-address = "caddy.local:443"
         error
             .to_string()
             .contains("client.server-address is invalid: IP literals are not supported")
+    );
+}
+
+#[test]
+fn client_settings_reject_invalid_ports_in_server_address() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test:65536"
+identity-dir = "client-identity"
+
+[[client.services]]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("client.server-address is invalid: port must be a valid u16")
     );
 }
 

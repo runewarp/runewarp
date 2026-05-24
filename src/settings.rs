@@ -333,19 +333,15 @@ fn validate_server_settings(
 
     let logs = raw.logs.unwrap_or(true);
     let public_bind_address = match raw.public_bind_address {
-        Some(bind_address) => validate_socket_address_field(
-            "server.public-bind-address",
-            bind_address,
-            &mut messages,
-        ),
+        Some(bind_address) => {
+            validate_socket_address_field("server.public-bind-address", bind_address, &mut messages)
+        }
         None => Some(SocketAddr::from(([0, 0, 0, 0], 443))),
     };
     let tunnel_connection_bind_address = match raw.tunnel_bind_address {
-        Some(bind_address) => validate_socket_address_field(
-            "server.tunnel-bind-address",
-            bind_address,
-            &mut messages,
-        ),
+        Some(bind_address) => {
+            validate_socket_address_field("server.tunnel-bind-address", bind_address, &mut messages)
+        }
         None => Some(SocketAddr::from(([0, 0, 0, 0], 443))),
     };
     if raw.tunnels.is_empty() {
@@ -368,8 +364,7 @@ fn validate_server_settings(
             hostname,
             logs,
             certificate: certificate.expect("validated server certificate settings"),
-            public_bind_address: public_bind_address
-                .expect("validated server.public-bind-address"),
+            public_bind_address: public_bind_address.expect("validated server.public-bind-address"),
             tunnel_connection_bind_address: tunnel_connection_bind_address
                 .expect("validated server.tunnel-bind-address"),
             tunnels,

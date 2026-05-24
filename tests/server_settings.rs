@@ -1,7 +1,9 @@
 use std::fs;
 
 use rcgen::generate_simple_self_signed;
-use runewarp::{initialize_manual_server_certificate, load_server_settings};
+use runewarp::{
+    ServerCertificateSettings, initialize_manual_server_certificate, load_server_settings,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -17,9 +19,7 @@ fn server_settings_accept_exact_match_tunnels_and_default_logs_to_true() {
         r#"
 [server]
 hostname = "Tunnel.Example.Test."
-
-[server.cert]
-material-dir = "server-cert"
+cert-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["App.Example.Test.", "api.example.test"]
@@ -35,6 +35,82 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert_eq!(
         settings.tunnels[0].public_hostnames,
         vec!["app.example.test", "api.example.test"]
+    );
+}
+
+#[test]
+fn server_settings_accept_flat_cert_dir_and_default_to_manual_mode() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "Tunnel.Example.Test."
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["App.Example.Test.", "api.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(settings.hostname, "tunnel.example.test");
+    assert!(settings.logs);
+    assert_eq!(
+        settings.certificate,
+        ServerCertificateSettings::Manual {
+            directory: tempdir.path().join("server-cert"),
+        }
+    );
+    assert_eq!(settings.public_bind_address, "0.0.0.0:443".parse().unwrap());
+    assert_eq!(settings.tunnel_bind_address, "0.0.0.0:443".parse().unwrap());
+    assert_eq!(
+        settings.tunnels[0].public_hostnames,
+        vec!["app.example.test", "api.example.test"]
+    );
+}
+
+#[test]
+fn server_settings_accept_explicit_listener_bind_addresses() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+public-bind-address = "127.0.0.1:8443"
+tunnel-bind-address = "127.0.0.1:9443"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(
+        settings.public_bind_address,
+        "127.0.0.1:8443".parse().unwrap()
+    );
+    assert_eq!(
+        settings.tunnel_bind_address,
+        "127.0.0.1:9443".parse().unwrap()
     );
 }
 
@@ -60,9 +136,45 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let message = error.to_string();
 
     assert!(message.contains("server.hostname is required"));
-    assert!(message.contains("exactly one of [server.cert] or [server.acme] must be configured"));
+    assert!(message.contains("server.cert-dir directory not found"));
     assert!(message.contains("server.tunnels[].client-identity is invalid"));
     assert!(message.contains("server.tunnels[].public-hostnames is required"));
+}
+
+#[test]
+fn server_settings_reject_acme_and_cert_dir_together() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::create_dir(tempdir.path().join("acme-state")).unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[server.acme]
+email = "admin@example.test"
+state-dir = "acme-state"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("[server.acme] and server.cert-dir are mutually exclusive")
+    );
 }
 
 #[test]
@@ -85,9 +197,7 @@ fn server_settings_reject_invalid_manual_tls_material_during_validation() {
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "server-cert"
+cert-dir = "server-cert"
 
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -120,9 +230,7 @@ fn server_settings_require_the_manual_server_ca_certificate() {
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "server-cert"
+cert-dir = "server-cert"
 
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -148,9 +256,7 @@ fn server_settings_reject_manual_tls_material_for_the_wrong_server_hostname() {
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "server-cert"
+cert-dir = "server-cert"
 
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -187,7 +293,7 @@ client-public-key-fingerprint = "00112233445566778899aabbccddeeff001122334455667
     assert!(message.contains("unknown field `cert-file`"));
     assert!(message.contains("unknown field `key-file`"));
     assert!(message.contains("unknown field `client-public-key-fingerprint`"));
-    assert!(message.contains("exactly one of [server.cert] or [server.acme] must be configured"));
+    assert!(message.contains("server.cert-dir directory not found"));
     assert!(message.contains("server.tunnels[].client-identity is required"));
 }
 
@@ -232,9 +338,7 @@ fn server_settings_reject_duplicate_public_hostnames_and_server_hostname_reuse()
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "server-cert"
+cert-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["App.Example.Test."]
@@ -271,9 +375,7 @@ fn server_settings_report_duplicate_hostnames_even_when_another_hostname_is_inva
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "server-cert"
+cert-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["App.Example.Test."]
@@ -310,9 +412,7 @@ fn server_settings_reject_empty_public_hostname_lists() {
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "server-cert"
+cert-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = []
@@ -343,9 +443,7 @@ fn server_settings_reject_duplicate_client_identities() {
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "server-cert"
+cert-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]

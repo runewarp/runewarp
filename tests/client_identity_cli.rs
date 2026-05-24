@@ -67,7 +67,7 @@ fn client_identity_init_uses_the_configured_material_dir_when_config_is_provided
         tempdir.path().join("client.toml"),
         r#"
 [client]
-identity-material-dir = "configured/client-identity"
+identity-dir = "configured/client-identity"
 "#,
     )
     .unwrap();
@@ -93,7 +93,7 @@ fn client_identity_init_accepts_config_before_the_leaf_subcommand() {
         tempdir.path().join("client.toml"),
         r#"
 [client]
-identity-material-dir = "configured/client-identity"
+identity-dir = "configured/client-identity"
 "#,
     )
     .unwrap();

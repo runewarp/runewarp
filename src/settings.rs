@@ -1,12 +1,14 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use crate::server_address::ServerAddress;
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, validate_server_tls_material,
 };
@@ -25,6 +27,8 @@ pub struct ServerSettings {
     pub hostname: String,
     pub logs: bool,
     pub certificate: ServerCertificateSettings,
+    pub public_bind_address: SocketAddr,
+    pub tunnel_bind_address: SocketAddr,
     pub tunnels: Vec<ServerTunnelSettings>,
 }
 
@@ -48,6 +52,7 @@ pub enum ServerCertificateSettings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientSettings {
     pub server_hostname: String,
+    pub server_port: u16,
     pub logs: bool,
     pub server_ca_file: Option<PathBuf>,
     pub identity_directory: PathBuf,
@@ -191,10 +196,35 @@ pub fn resolve_server_cert_material_dir_from_config(
         });
     }
     let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
-    let Some(cert) = raw.cert else {
+    Ok(raw.cert_dir.map(|path| resolve_path(base_dir, &path)))
+}
+
+pub fn resolve_server_hostname_from_config(path: &Path) -> Result<Option<String>, SettingsError> {
+    let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
         return Ok(None);
     };
-    Ok(cert.material_dir.map(|path| resolve_path(base_dir, &path)))
+    let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
+    if !unknown_field_messages.is_empty() {
+        return Err(SettingsError::Validation {
+            path: path.to_path_buf(),
+            section: "server",
+            messages: unknown_field_messages,
+        });
+    }
+    let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
+    let mut messages = Vec::new();
+    let hostname = raw
+        .hostname
+        .and_then(|hostname| validate_hostname_field("server.hostname", hostname, &mut messages));
+    if messages.is_empty() {
+        Ok(hostname)
+    } else {
+        Err(SettingsError::Validation {
+            path: path.to_path_buf(),
+            section: "server",
+            messages,
+        })
+    }
 }
 
 pub fn resolve_client_identity_material_dir_from_config(
@@ -213,9 +243,7 @@ pub fn resolve_client_identity_material_dir_from_config(
         });
     }
     let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
-    Ok(raw
-        .identity_material_dir
-        .map(|path| resolve_path(base_dir, &path)))
+    Ok(raw.identity_dir.map(|path| resolve_path(base_dir, &path)))
 }
 
 fn load_optional_selected_section_value(
@@ -274,16 +302,18 @@ fn validate_server_settings(
         }
     };
 
-    let manual_present = raw.cert.is_some();
+    let manual_present = raw.cert_dir.is_some();
     let acme_present = raw.acme.is_some();
-    if manual_present == acme_present {
-        messages
-            .push("exactly one of [server.cert] or [server.acme] must be configured".to_owned());
+    if manual_present && acme_present {
+        messages.push("[server.acme] and server.cert-dir are mutually exclusive".to_owned());
     }
-    let manual = if manual_present && !acme_present {
-        raw.cert.and_then(|cert| {
-            validate_server_manual_cert_settings(cert, config_dir, hostname.as_str(), &mut messages)
-        })
+    let manual = if !acme_present {
+        validate_server_manual_cert_settings(
+            raw.cert_dir,
+            config_dir,
+            hostname.as_str(),
+            &mut messages,
+        )
     } else {
         None
     };
@@ -293,16 +323,21 @@ fn validate_server_settings(
     } else {
         None
     };
-    let certificate = match (manual_present, acme_present) {
-        (true, false) => manual.map(|directory| ServerCertificateSettings::Manual { directory }),
-        (false, true) => acme.map(|(email, state_directory)| ServerCertificateSettings::Acme {
+    let certificate = match acme_present {
+        false => manual.map(|directory| ServerCertificateSettings::Manual { directory }),
+        true => acme.map(|(email, state_directory)| ServerCertificateSettings::Acme {
             email,
             state_directory,
         }),
-        _ => None,
     };
 
     let logs = raw.logs.unwrap_or(true);
+    let public_bind_address = raw
+        .public_bind_address
+        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 443)));
+    let tunnel_bind_address = raw
+        .tunnel_bind_address
+        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 443)));
     if raw.tunnels.is_empty() {
         messages.push("at least one [[server.tunnels]] entry is required".to_owned());
     }
@@ -323,6 +358,8 @@ fn validate_server_settings(
             hostname,
             logs,
             certificate: certificate.expect("validated server certificate settings"),
+            public_bind_address,
+            tunnel_bind_address,
             tunnels,
         })
     } else {
@@ -341,14 +378,13 @@ fn validate_client_settings(
 ) -> Result<ClientSettings, SettingsError> {
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
-    let server_hostname = match raw.server_hostname {
-        Some(hostname) => {
-            validate_hostname_field("client.server-hostname", hostname, &mut messages)
-                .unwrap_or_default()
+    let server_address = match raw.server_address {
+        Some(server_address) => {
+            validate_server_address_field("client.server-address", server_address, &mut messages)
         }
         None => {
-            messages.push("client.server-hostname is required".to_owned());
-            String::new()
+            messages.push("client.server-address is required".to_owned());
+            None
         }
     };
 
@@ -367,38 +403,31 @@ fn validate_client_settings(
         }
     };
     let identity_directory = validate_directory_with_default(
-        "client.identity-material-dir",
-        raw.identity_material_dir,
+        "client.identity-dir",
+        raw.identity_dir,
         config_dir,
         default_client_identity_material_dir,
         &mut messages,
     );
     if let Some(identity_directory) = identity_directory.as_deref() {
         let _ = validate_directory_file(
-            "client.identity-material-dir",
+            "client.identity-dir",
             identity_directory,
             CLIENT_CERT_FILENAME,
             &mut messages,
         );
         let _ = validate_directory_file(
-            "client.identity-material-dir",
+            "client.identity-dir",
             identity_directory,
             CLIENT_KEY_FILENAME,
             &mut messages,
         );
         let _ = validate_directory_file(
-            "client.identity-material-dir",
+            "client.identity-dir",
             identity_directory,
             CLIENT_IDENTITY_FILENAME,
             &mut messages,
         );
-    }
-
-    let reconnect_interval_secs = raw
-        .reconnect_interval
-        .unwrap_or(DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS);
-    if reconnect_interval_secs < 1 {
-        messages.push("client.reconnect-interval must be at least 1".to_owned());
     }
 
     let logs = raw.logs.unwrap_or(true);
@@ -429,11 +458,19 @@ fn validate_client_settings(
 
     if messages.is_empty() {
         Ok(ClientSettings {
-            server_hostname,
+            server_hostname: server_address
+                .as_ref()
+                .expect("validated client.server-address")
+                .hostname()
+                .to_owned(),
+            server_port: server_address
+                .as_ref()
+                .expect("validated client.server-address")
+                .port(),
             logs,
             server_ca_file,
-            identity_directory: identity_directory.expect("validated client.identity-material-dir"),
-            reconnect_interval: Duration::from_secs(reconnect_interval_secs),
+            identity_directory: identity_directory.expect("validated client.identity-dir"),
+            reconnect_interval: Duration::from_secs(DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS),
             services,
         })
     } else {
@@ -520,36 +557,28 @@ fn validate_directory_file(
 }
 
 fn validate_server_manual_cert_settings(
-    raw: RawServerCertConfig,
+    raw_directory: Option<PathBuf>,
     config_dir: &Path,
     server_hostname: &str,
     messages: &mut Vec<String>,
 ) -> Option<PathBuf> {
     let directory = validate_directory_with_default(
-        "server.cert.material-dir",
-        raw.material_dir,
+        "server.cert-dir",
+        raw_directory,
         config_dir,
         default_server_cert_material_dir,
         messages,
     )?;
     let cert_path = validate_directory_file(
-        "server.cert.material-dir",
+        "server.cert-dir",
         &directory,
         SERVER_CERT_FILENAME,
         messages,
     );
-    let key_path = validate_directory_file(
-        "server.cert.material-dir",
-        &directory,
-        SERVER_KEY_FILENAME,
-        messages,
-    );
-    let ca_path = validate_directory_file(
-        "server.cert.material-dir",
-        &directory,
-        SERVER_CA_FILENAME,
-        messages,
-    );
+    let key_path =
+        validate_directory_file("server.cert-dir", &directory, SERVER_KEY_FILENAME, messages);
+    let ca_path =
+        validate_directory_file("server.cert-dir", &directory, SERVER_CA_FILENAME, messages);
     if let (Some(cert_path), Some(key_path), Some(ca_path)) = (
         cert_path.as_deref(),
         key_path.as_deref(),
@@ -704,6 +733,20 @@ fn validate_hostname_field(
 ) -> Option<String> {
     match validate_public_hostname(&hostname) {
         Ok(hostname) => Some(hostname),
+        Err(error) => {
+            messages.push(format!("{field_name} is invalid: {error}"));
+            None
+        }
+    }
+}
+
+fn validate_server_address_field(
+    field_name: &str,
+    server_address: String,
+    messages: &mut Vec<String>,
+) -> Option<ServerAddress> {
+    match ServerAddress::parse(&server_address) {
+        Ok(server_address) => Some(server_address),
         Err(error) => {
             messages.push(format!("{field_name} is invalid: {error}"));
             None
@@ -871,13 +914,17 @@ fn collect_server_unknown_field_messages(section_value: &toml::Value) -> Vec<Str
 
     push_unknown_table_fields(
         server,
-        &["hostname", "logs", "cert", "acme", "tunnels"],
+        &[
+            "hostname",
+            "logs",
+            "cert-dir",
+            "acme",
+            "public-bind-address",
+            "tunnel-bind-address",
+            "tunnels",
+        ],
         &mut messages,
     );
-
-    if let Some(cert) = server.get("cert").and_then(toml::Value::as_table) {
-        push_unknown_table_fields(cert, &["material-dir"], &mut messages);
-    }
 
     if let Some(acme) = server.get("acme").and_then(toml::Value::as_table) {
         push_unknown_table_fields(acme, &["email", "state-dir"], &mut messages);
@@ -907,12 +954,11 @@ fn collect_client_unknown_field_messages(section_value: &toml::Value) -> Vec<Str
     push_unknown_table_fields(
         client,
         &[
-            "server-hostname",
+            "server-address",
             "logs",
             "server-trust",
             "server-ca-file",
-            "identity-material-dir",
-            "reconnect-interval",
+            "identity-dir",
             "services",
         ],
         &mut messages,
@@ -950,16 +996,12 @@ fn push_unknown_table_fields(
 struct RawServerConfig {
     hostname: Option<String>,
     logs: Option<bool>,
-    cert: Option<RawServerCertConfig>,
+    cert_dir: Option<PathBuf>,
     acme: Option<RawServerAcmeConfig>,
+    public_bind_address: Option<SocketAddr>,
+    tunnel_bind_address: Option<SocketAddr>,
     #[serde(default)]
     tunnels: Vec<RawServerTunnelConfig>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
-struct RawServerCertConfig {
-    material_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -979,12 +1021,11 @@ struct RawServerTunnelConfig {
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct RawClientConfig {
-    server_hostname: Option<String>,
+    server_address: Option<String>,
     logs: Option<bool>,
     server_trust: Option<String>,
     server_ca_file: Option<PathBuf>,
-    identity_material_dir: Option<PathBuf>,
-    reconnect_interval: Option<u64>,
+    identity_dir: Option<PathBuf>,
     #[serde(default)]
     services: Vec<RawClientServiceConfig>,
 }

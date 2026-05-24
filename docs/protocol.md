@@ -40,10 +40,10 @@ The buffered ClientHello must never be logged or echoed back in diagnostics. Whe
 
 ## Tunnel connection handshake
 
-Each **Client instance** establishes one long-lived QUIC connection to `server-hostname:443` over UDP:
+Each **Client instance** establishes one long-lived QUIC connection to `client.server-address` over UDP:
 
-1. Resolve `client.server-hostname`.
-2. Dial UDP port `443`.
+1. Resolve the hostname portion of `client.server-address`.
+2. Dial the UDP port from `client.server-address`, defaulting to `443` when the port is omitted.
 3. Negotiate QUIC with ALPN `runewarp/1`.
 4. Validate the Server certificate for the **Server hostname**, using either system trust or `client.server-trust = "ca-file"` with an exclusive CA bundle.
 5. Present the Client certificate and authenticate the pinned `client-identity` from its public key.
@@ -51,7 +51,7 @@ Each **Client instance** establishes one long-lived QUIC connection to `server-h
 Rules:
 
 - QUIC **0-RTT is disabled**
-- reconnect attempts re-resolve `server-hostname` every time, including the first immediate retry
+- reconnect attempts re-resolve the hostname portion of `client.server-address` every time, including the first immediate retry
 - idle timeout should stay in the **5-10 minute** range
 - keepalive pings should be sent every **2-3 minutes** to survive common NATs and mobile carriers
 
@@ -88,10 +88,10 @@ When a QUIC connection drops, all streams on that connection are lost. They are 
 Client reconnect behavior is:
 
 1. retry immediately once after disconnect
-2. if that fails, wait `reconnect-interval`
-3. keep retrying every `reconnect-interval` seconds
+2. if that fails, wait the runtime reconnect interval
+3. keep retrying on that runtime reconnect interval
 
-`reconnect-interval` must be at least **1 second**.
+The current runtime reconnect interval is **5 seconds** after the first immediate retry. This cadence is runtime-owned rather than configurable.
 
 If a new authenticated connection replaces an older connection for the same **Tunnel**, the older connection closes and any streams on it are lost.
 

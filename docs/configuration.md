@@ -8,7 +8,7 @@ This document defines the Runewarp configuration model. Use [`docs/usage.md`](us
 | --- | --- |
 | `[server]` | Public routing, Server identity, and the Server certificate path |
 | `[[server.tunnels]]` | Explicit **Public hostname** authorization and the pinned **Client identity** for one **Tunnel** |
-| `[client]` | Tunnel dialing, Server trust, Client identity material, and reconnect behavior |
+| `[client]` | Tunnel dialing, Server trust, Client identity material, and runtime-owned reconnect policy |
 | `[[client.services]]` | Local routing from one or more **Public hostnames** to one **Local backend** |
 
 ## Configuration principles
@@ -73,9 +73,7 @@ When the matching config key is omitted, Runewarp uses:
 ```toml
 [server]
 hostname = "tunnel.example.com"
-
-[server.cert]
-material-dir = "/etc/runewarp/server"
+cert-dir = "/etc/runewarp/server"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.com", "api.example.com"]
@@ -101,11 +99,10 @@ client-identity = "4f7b6f7a9b0f0d2b..."
 
 ```toml
 [client]
-server-hostname = "tunnel.example.com"
+server-address = "tunnel.example.com"
 server-trust = "ca-file"
 server-ca-file = "/etc/runewarp/server-ca.crt"
-identity-material-dir = "/etc/runewarp/client"
-reconnect-interval = 5
+identity-dir = "/etc/runewarp/client"
 
 [[client.services]]
 public-hostnames = ["app.example.com", "api.example.com"]
@@ -120,11 +117,10 @@ backend-address = "nginx.local:443"
 
 ```toml
 [client]
-server-hostname = "tunnel.example.com"
+server-address = "tunnel.example.com"
 server-trust = "ca-file"
 server-ca-file = "/etc/runewarp/server-ca.crt"
-identity-material-dir = "/etc/runewarp/client"
-reconnect-interval = 5
+identity-dir = "/etc/runewarp/client"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -155,11 +151,10 @@ client-identity = "2a6cc0f0a14b4b21..."
 
 ```toml
 [client]
-server-hostname = "tunnel.example.com"
+server-address = "tunnel.example.com"
 server-trust = "ca-file"
 server-ca-file = "/etc/runewarp/server-ca.crt"
-identity-material-dir = "/etc/runewarp/client"
-reconnect-interval = 5
+identity-dir = "/etc/runewarp/client"
 
 [[client.services]]
 public-hostnames = ["app.example.com", "api.example.com"]
@@ -178,7 +173,9 @@ The grouping of hostnames into **Tunnels** and **Services** may differ. One Tunn
 | --- | --- | --- |
 | `server.hostname` | yes | **Server hostname** for the Runewarp edge itself. Used for TLS validation and ACME. |
 | `server.logs` | no | Boolean controlling human-readable Server runtime logs. Defaults to `true`. |
-| `server.cert.material-dir` | no | Directory containing the deployed Server leaf material. Defaults to the XDG data path for manual/private-CA Server material. |
+| `server.cert-dir` | no | Directory containing the deployed Server leaf material for the manual/private-CA path. Defaults to the XDG data path for manual/private-CA Server material when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
+| `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
+| `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** tunnel connections. Defaults to `0.0.0.0:443`. |
 | `server.acme.email` | with ACME | ACME contact address. TLS-ALPN-01 only. |
 | `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp uses and creates the XDG default state directory at startup. |
 | `server.tunnels[].public-hostnames` | yes | One or more exact **Public hostnames** routed through this Tunnel. |
@@ -188,18 +185,17 @@ The grouping of hostnames into **Tunnels** and **Services** may differ. One Tunn
 
 | Key | Required | Notes |
 | --- | --- | --- |
-| `client.server-hostname` | yes | **Server hostname** the Client dials on UDP port `443`. Re-resolved on every reconnect attempt. |
+| `client.server-address` | yes | **Server address** the Client dials for its tunnel connection, written as `hostname[:port]`. The host part must be a hostname, not a raw IP literal. When the port is omitted, Runewarp uses UDP port `443`. |
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`; otherwise system trust is used. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
-| `client.identity-material-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG data path for Client identity material. |
+| `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG data path for Client identity material. |
 | `client.logs` | no | Boolean controlling human-readable Client runtime logs. Defaults to `true`. |
-| `client.reconnect-interval` | no | Fixed reconnect delay after the first immediate retry. Minimum `1` second. |
 | `client.services[].public-hostnames` | when exact-match local routing is desired | Exact **Public hostnames** this Service accepts locally. Omit only on the sole Catch-all Service. |
 | `client.services[].backend-address` | yes | TCP endpoint for the forwarded traffic. This backend must terminate TLS. |
 
 ## Trust and material directories
 
-### `server.cert.material-dir`
+### `server.cert-dir`
 
 The manual/private-CA directory layout is:
 
@@ -210,9 +206,9 @@ The manual/private-CA directory layout is:
 
 `runewarp server cert renew` reissues `server.crt` from the existing **Server CA**. `runewarp server cert rotate-ca` changes the trust anchor itself and requires Clients to trust a new CA.
 
-When omitted, `server.cert.material-dir` defaults to the XDG data location for Server certificate material.
+When omitted and `[server.acme]` is absent, `server.cert-dir` defaults to the XDG data location for Server certificate material.
 
-### `client.identity-material-dir`
+### `client.identity-dir`
 
 The Client identity directory layout is:
 
@@ -222,7 +218,7 @@ The Client identity directory layout is:
 
 `runewarp client identity renew` reissues `client.crt` with the same key, so the `client-identity` stays stable. `runewarp client identity rotate` changes the key and therefore changes the `client-identity`.
 
-When omitted, `client.identity-material-dir` defaults to the XDG data location for Client identity material.
+When omitted, `client.identity-dir` defaults to the XDG data location for Client identity material.
 
 ### `client.server-trust`
 
@@ -241,15 +237,15 @@ Runewarp rejects config that violates any of these rules:
 
 - the selected role must have a matching `[server]` or `[client]` section
 - `server.hostname` must be present
-- exactly one of `[server.acme]` or `[server.cert]` must be present for Server mode
-- `client.server-hostname` must be present
+- `[server.acme]` and `server.cert-dir` are mutually exclusive; when `[server.acme]` is absent, Runewarp uses the manual/private-CA path with `server.cert-dir` or its default XDG location
+- `client.server-address` must be present
 - there must be at least one `[[server.tunnels]]` entry
 - there must be at least one `[[client.services]]` entry
 - `client.server-trust` must be either `system` or `ca-file`
 - `client.server-ca-file` may be set only when `client.server-trust = "ca-file"`
 - all `client-identity` values must be lowercase hex without colons
 - all `client-identity` values must be unique across Server Tunnels
-- `reconnect-interval` must be at least `1`
+- `server.public-bind-address` and `server.tunnel-bind-address` must be literal socket addresses
 - the selected or defaulted material directories and files must exist and be readable, except that the default ACME state directory is created automatically when omitted
 - `backend-address` must parse as a TCP address or host:port pair
 
@@ -262,10 +258,11 @@ Runewarp enforces these rules independently on each side:
 - `public-hostnames = []` is an error on either side
 - hostnames are normalized to lowercase and a trailing dot is stripped before comparison
 - `public-hostnames` must be DNS hostnames, including punycode A-labels; raw Unicode, IP literals, and wildcards are rejected
+- the host portion of `client.server-address` must be a DNS hostname; raw IP literals are rejected
 - any exact hostname overlap across Tunnel entries after normalization is an error
 - any exact hostname overlap across Service entries after normalization is an error
 - `server.hostname` itself must not be reused as a routed **Public hostname**
-- `client.server-hostname` overlap on the Client side is permitted; the Client stays agnostic about Server-side routability
+- `client.server-address` does not have to overlap any routed **Public hostname**; the Client stays agnostic about Server-side routability
 
 ### Cross-side hostname coverage
 

@@ -32,9 +32,7 @@ fn server_uses_the_xdg_default_config_path_and_ignores_client_side_errors() {
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "cwd-ignored"
+cert-dir = "cwd-ignored"
 
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -46,9 +44,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "missing-server"
+cert-dir = "missing-server"
 
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -69,8 +65,10 @@ retry-interval = 0
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("missing-server"));
+    assert!(stderr.contains("runewarp server cert init"));
     assert!(!stderr.contains("cwd-ignored"));
     assert!(!stderr.contains("retry-interval"));
+    assert!(!stderr.contains("--config"));
 }
 
 #[test]
@@ -81,9 +79,7 @@ fn server_uses_a_custom_config_path_when_requested() {
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "missing-server"
+cert-dir = "missing-server"
 
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -100,6 +96,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("missing-server"));
+    assert!(stderr.contains("runewarp server cert init --config custom.toml"));
 }
 
 #[test]
@@ -126,9 +123,6 @@ fn server_uses_the_default_material_dir_when_config_omits_it() {
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-
 [[server.tunnels]]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 "#,
@@ -146,7 +140,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
 
     assert!(stderr.contains("server.tunnels[].public-hostnames is required"));
-    assert!(!stderr.contains("server.cert.material-dir"));
+    assert!(!stderr.contains("server.cert-dir"));
 }
 
 #[test]
@@ -211,9 +205,7 @@ fn server_does_not_create_the_default_acme_state_dir_for_invalid_dual_mode_confi
         r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "server-cert"
+cert-dir = "server-cert"
 
 [server.acme]
 email = "admin@example.test"
@@ -235,6 +227,6 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
 
-    assert!(stderr.contains("exactly one of [server.cert] or [server.acme] must be configured"));
+    assert!(stderr.contains("[server.acme] and server.cert-dir are mutually exclusive"));
     assert!(!default_state_dir.exists());
 }

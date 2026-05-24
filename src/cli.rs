@@ -52,7 +52,7 @@ pub struct ServerCertInitArgs {
     #[arg(long = "dir", value_name = "DIR")]
     pub dir: Option<PathBuf>,
     #[arg(long, value_name = "HOSTNAME")]
-    pub hostname: String,
+    pub hostname: Option<String>,
 }
 
 #[derive(Debug, Args)]

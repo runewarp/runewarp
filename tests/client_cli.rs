@@ -34,8 +34,8 @@ fn client_uses_the_xdg_default_config_path_and_ignores_server_side_errors() {
 acme = {}
 
 [client]
-server-hostname = "tunnel.example.test"
-identity-material-dir = "cwd-ignored"
+server-address = "tunnel.example.test"
+identity-dir = "cwd-ignored"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -49,8 +49,8 @@ backend-address = "127.0.0.1:443"
 acme = {}
 
 [client]
-server-hostname = "tunnel.example.test"
-identity-material-dir = "missing-client"
+server-address = "tunnel.example.test"
+identity-dir = "missing-client"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -68,8 +68,10 @@ backend-address = "127.0.0.1:443"
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("missing-client"));
+    assert!(stderr.contains("runewarp client identity init"));
     assert!(!stderr.contains("cwd-ignored"));
     assert!(!stderr.contains("acme"));
+    assert!(!stderr.contains("--config"));
 }
 
 #[test]
@@ -79,8 +81,8 @@ fn client_uses_a_custom_config_path_when_requested() {
         tempdir.path().join("custom.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
-identity-material-dir = "missing-client"
+server-address = "tunnel.example.test"
+identity-dir = "missing-client"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -97,6 +99,7 @@ backend-address = "127.0.0.1:443"
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("missing-client"));
+    assert!(stderr.contains("runewarp client identity init --config custom.toml"));
 }
 
 #[test]
@@ -116,7 +119,7 @@ fn client_uses_the_default_identity_material_dir_when_config_omits_it() {
         tempdir.path().join("client.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
+server-address = "tunnel.example.test"
 "#,
     )
     .unwrap();
@@ -132,5 +135,5 @@ server-hostname = "tunnel.example.test"
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
 
     assert!(stderr.contains("at least one [[client.services]] entry is required"));
-    assert!(!stderr.contains("identity-material-dir"));
+    assert!(!stderr.contains("identity-dir"));
 }

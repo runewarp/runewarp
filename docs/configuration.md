@@ -27,7 +27,7 @@ This document defines the Runewarp configuration model. Use [`docs/usage.md`](us
 | Exact-match on both sides | Every Tunnel lists explicit `public-hostnames` | Every Service lists explicit `public-hostnames` |
 | One-sided Catch-all | Every Tunnel lists explicit `public-hostnames` | The sole Service omits `public-hostnames` |
 
-Server Catch-all is not part of the committed model.
+Server Catch-all is intentionally not supported.
 
 ## CLI entry points
 

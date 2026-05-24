@@ -6,13 +6,13 @@ This document describes the committed Runewarp wire behavior and runtime invaria
 
 | Listener | Traffic | Behavior |
 | --- | --- | --- |
-| `443/tcp` | Visitor TLS | Read ClientHello, extract SNI, and route raw bytes without terminating customer TLS |
-| `443/tcp` | ACME for the **Server hostname** | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
-| `443/udp` | Client **Tunnel connections** | QUIC/TLS with ALPN `runewarp/1` |
+| `server.public-bind-address` (default `0.0.0.0:443/tcp`) | Visitor TLS | Read ClientHello, extract SNI, and route raw bytes without terminating customer TLS |
+| `server.public-bind-address` (same TCP listener) | ACME for the **Server hostname** | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
+| `server.tunnel-bind-address` (default `0.0.0.0:443/udp`) | Client **Tunnel connections** | QUIC/TLS with ALPN `runewarp/1` |
 
 ## Public TLS routing
 
-For each inbound TCP connection on port `443`:
+For each inbound TCP connection on the configured `server.public-bind-address`:
 
 1. Buffer bytes until the TLS ClientHello can be parsed, up to a hard cap of **16 KB**.
 2. If the cap is hit before SNI is extracted, drop the connection.
@@ -31,7 +31,7 @@ The buffered ClientHello must never be logged or echoed back in diagnostics. Whe
 
 | Condition | Result |
 | --- | --- |
-| Non-TLS traffic on `443/tcp` | Drop immediately |
+| Non-TLS traffic on the public TCP listener | Drop immediately |
 | TLS without SNI | Drop immediately |
 | Application traffic addressed to the **Server hostname** | Drop unless it is ACME TLS-ALPN-01 |
 | Unauthorized **Public hostname** | Drop immediately |

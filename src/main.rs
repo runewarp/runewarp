@@ -137,7 +137,7 @@ async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Erro
     PreparedServer::bind(
         &settings,
         settings.public_bind_address,
-        settings.tunnel_bind_address,
+        settings.tunnel_connection_bind_address,
     )
     .await?
     .run()

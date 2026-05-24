@@ -103,6 +103,41 @@ backend-address = "127.0.0.1:443"
 }
 
 #[test]
+fn client_reports_missing_identity_files_with_a_recovery_hint() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder certificate",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("custom.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[[client.services]]
+backend-address = "127.0.0.1:443"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "--config", "custom.toml"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("client-identity/client.key"));
+    assert!(stderr.contains("client-identity/client-identity.txt"));
+    assert!(stderr.contains("runewarp client identity init --config custom.toml"));
+}
+
+#[test]
 fn client_uses_the_default_identity_material_dir_when_config_omits_it() {
     let tempdir = tempdir().unwrap();
     let xdg_data_home = tempdir.path().join("xdg-data");

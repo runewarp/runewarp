@@ -52,7 +52,7 @@ async fn forwards_tls_passthrough_end_to_end() {
 
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
@@ -216,7 +216,7 @@ async fn drops_public_tls_when_no_client_is_connected() {
     let trusted_client = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
@@ -268,7 +268,7 @@ async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
 
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
@@ -338,7 +338,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
 
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
@@ -432,7 +432,7 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
     ));
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
@@ -526,7 +526,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
     let trusted_client = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
@@ -582,7 +582,7 @@ async fn library_constructors_expose_addresses_before_running() {
     let trusted_client = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         logs: true,
@@ -630,7 +630,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_hostnames() {
 
     let error = match Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![
             configured_tunnel(&["App.Example.Test."], &first_client),
@@ -662,7 +662,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_client_identities() {
 
     let error = match Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![
             configured_tunnel(&["app.example.test"], &shared_client),
@@ -695,7 +695,7 @@ async fn server_bind_rejects_empty_configured_tunnels() {
 
     let error = match Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: Vec::new(),
         logs: true,
@@ -739,7 +739,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
     let shared_client = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         logs: true,
@@ -816,7 +816,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
 
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         logs: true,
@@ -871,7 +871,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
 
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         logs: true,
@@ -936,7 +936,7 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
     let shared_client = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         logs: true,

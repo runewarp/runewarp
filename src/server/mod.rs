@@ -16,7 +16,7 @@ use self::visitor_stream::VisitorStreamHandler;
 
 pub struct ServerConfig {
     pub public_bind_addr: SocketAddr,
-    pub tunnel_bind_addr: SocketAddr,
+    pub tunnel_connection_bind_addr: SocketAddr,
     pub server_hostname: String,
     pub configured_tunnels: Vec<ServerTunnelSettings>,
     pub logs: bool,
@@ -48,7 +48,10 @@ impl Server {
             config.public_tls_config.clone(),
         )?;
         let public_listener = TcpListener::bind(config.public_bind_addr).await?;
-        let tunnel_endpoint = Endpoint::server(config.quic_server_config, config.tunnel_bind_addr)?;
+        let tunnel_endpoint = Endpoint::server(
+            config.quic_server_config,
+            config.tunnel_connection_bind_addr,
+        )?;
 
         Ok(Self {
             public_listener,

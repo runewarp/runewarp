@@ -71,7 +71,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         }
     );
     assert_eq!(settings.public_bind_address, "0.0.0.0:443".parse().unwrap());
-    assert_eq!(settings.tunnel_bind_address, "0.0.0.0:443".parse().unwrap());
+    assert_eq!(
+        settings.tunnel_connection_bind_address,
+        "0.0.0.0:443".parse().unwrap()
+    );
     assert_eq!(
         settings.tunnels[0].public_hostnames,
         vec!["app.example.test", "api.example.test"]
@@ -109,9 +112,41 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         "127.0.0.1:8443".parse().unwrap()
     );
     assert_eq!(
-        settings.tunnel_bind_address,
+        settings.tunnel_connection_bind_address,
         "127.0.0.1:9443".parse().unwrap()
     );
+}
+
+#[test]
+fn server_settings_reject_non_literal_listener_bind_addresses() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+public-bind-address = "public.example.test:443"
+tunnel-bind-address = "tunnel.example.test:443"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("server.public-bind-address is invalid"));
+    assert!(message.contains("server.tunnel-bind-address is invalid"));
+    assert!(!message.contains("failed to parse [server]"));
 }
 
 #[test]

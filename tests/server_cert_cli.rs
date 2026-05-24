@@ -247,6 +247,57 @@ cert-dir = "configured/server-cert"
 }
 
 #[test]
+fn server_cert_rotate_ca_rejects_a_hostname_that_conflicts_with_config() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/server-cert");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "configured/server-cert"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "configured/server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "rotate-ca",
+            "--config",
+            "server.toml",
+            "--hostname",
+            "other.example.test",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("--hostname `other.example.test`"));
+    assert!(stderr.contains("configured server.hostname `tunnel.example.test`"));
+    assert!(configured_dir.join("server.crt").is_file());
+}
+
+#[test]
 fn server_cert_renew_accepts_config_before_the_leaf_subcommand() {
     let tempdir = tempdir().unwrap();
     let configured_dir = tempdir.path().join("configured/server-cert");

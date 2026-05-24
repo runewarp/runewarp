@@ -22,7 +22,7 @@ async fn prepared_client_connects_from_validated_settings() {
     let client_identity = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![ServerTunnelSettings {
             public_hostnames: vec!["app.example.test".to_owned()],
@@ -95,7 +95,7 @@ async fn prepared_client_uses_the_configured_server_address_port() {
     let client_identity = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
-        tunnel_bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+        tunnel_connection_bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
         server_hostname: "localhost".to_owned(),
         configured_tunnels: vec![ServerTunnelSettings {
             public_hostnames: vec!["app.example.test".to_owned()],
@@ -180,7 +180,7 @@ async fn prepared_client_rejects_settings_without_services() {
     let client_identity = generate_client_identity().unwrap();
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
-        tunnel_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![ServerTunnelSettings {
             public_hostnames: vec!["app.example.test".to_owned()],

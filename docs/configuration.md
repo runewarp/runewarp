@@ -8,7 +8,7 @@ This document defines the Runewarp configuration model. Use [`docs/usage.md`](us
 | --- | --- |
 | `[server]` | Public routing, Server identity, and the Server certificate path |
 | `[[server.tunnels]]` | Explicit **Public hostname** authorization and the pinned **Client identity** for one **Tunnel** |
-| `[client]` | Tunnel dialing, Server trust, Client identity material, and runtime-owned reconnect policy |
+| `[client]` | Tunnel dialing, Server trust, and Client identity material |
 | `[[client.services]]` | Local routing from one or more **Public hostnames** to one **Local backend** |
 
 ## Configuration principles
@@ -176,7 +176,7 @@ The grouping of hostnames into **Tunnels** and **Services** may differ. One Tunn
 | `server.cert-dir` | no | Directory containing the deployed Server leaf material for the manual/private-CA path. Defaults to the XDG data path for manual/private-CA Server material when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
 | `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
 | `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** tunnel connections. Defaults to `0.0.0.0:443`. |
-| `server.acme.email` | with ACME | ACME contact address. TLS-ALPN-01 only. |
+| `server.acme.email` | with ACME | Let's Encrypt ACME contact address. TLS-ALPN-01 only. |
 | `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp uses and creates the XDG default state directory at startup. |
 | `server.tunnels[].public-hostnames` | yes | One or more exact **Public hostnames** routed through this Tunnel. |
 | `server.tunnels[].client-identity` | yes | Lowercase hex SHA-256 fingerprint of the Client public key's SubjectPublicKeyInfo. |
@@ -262,8 +262,6 @@ Runewarp enforces these rules independently on each side:
 - any exact hostname overlap across Tunnel entries after normalization is an error
 - any exact hostname overlap across Service entries after normalization is an error
 - `server.hostname` itself must not be reused as a routed **Public hostname**
-- `client.server-address` does not have to overlap any routed **Public hostname**; the Client stays agnostic about Server-side routability
-
 ### Cross-side hostname coverage
 
 Runewarp does not validate cross-side hostname coverage at runtime:

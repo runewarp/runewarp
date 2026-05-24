@@ -28,7 +28,7 @@ pub struct ServerSettings {
     pub logs: bool,
     pub certificate: ServerCertificateSettings,
     pub public_bind_address: SocketAddr,
-    pub tunnel_bind_address: SocketAddr,
+    pub tunnel_connection_bind_address: SocketAddr,
     pub tunnels: Vec<ServerTunnelSettings>,
 }
 
@@ -332,12 +332,22 @@ fn validate_server_settings(
     };
 
     let logs = raw.logs.unwrap_or(true);
-    let public_bind_address = raw
-        .public_bind_address
-        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 443)));
-    let tunnel_bind_address = raw
-        .tunnel_bind_address
-        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 443)));
+    let public_bind_address = match raw.public_bind_address {
+        Some(bind_address) => validate_socket_address_field(
+            "server.public-bind-address",
+            bind_address,
+            &mut messages,
+        ),
+        None => Some(SocketAddr::from(([0, 0, 0, 0], 443))),
+    };
+    let tunnel_connection_bind_address = match raw.tunnel_bind_address {
+        Some(bind_address) => validate_socket_address_field(
+            "server.tunnel-bind-address",
+            bind_address,
+            &mut messages,
+        ),
+        None => Some(SocketAddr::from(([0, 0, 0, 0], 443))),
+    };
     if raw.tunnels.is_empty() {
         messages.push("at least one [[server.tunnels]] entry is required".to_owned());
     }
@@ -358,8 +368,10 @@ fn validate_server_settings(
             hostname,
             logs,
             certificate: certificate.expect("validated server certificate settings"),
-            public_bind_address,
-            tunnel_bind_address,
+            public_bind_address: public_bind_address
+                .expect("validated server.public-bind-address"),
+            tunnel_connection_bind_address: tunnel_connection_bind_address
+                .expect("validated server.tunnel-bind-address"),
             tunnels,
         })
     } else {
@@ -754,6 +766,22 @@ fn validate_server_address_field(
     }
 }
 
+fn validate_socket_address_field(
+    field_name: &str,
+    socket_address: String,
+    messages: &mut Vec<String>,
+) -> Option<SocketAddr> {
+    match socket_address.parse::<SocketAddr>() {
+        Ok(socket_address) => Some(socket_address),
+        Err(_) => {
+            messages.push(format!(
+                "{field_name} is invalid: must be a literal socket address"
+            ));
+            None
+        }
+    }
+}
+
 fn validate_required_public_hostnames(
     field_name: &str,
     raw_hostnames: Option<Vec<String>>,
@@ -998,8 +1026,8 @@ struct RawServerConfig {
     logs: Option<bool>,
     cert_dir: Option<PathBuf>,
     acme: Option<RawServerAcmeConfig>,
-    public_bind_address: Option<SocketAddr>,
-    tunnel_bind_address: Option<SocketAddr>,
+    public_bind_address: Option<String>,
+    tunnel_bind_address: Option<String>,
     #[serde(default)]
     tunnels: Vec<RawServerTunnelConfig>,
 }

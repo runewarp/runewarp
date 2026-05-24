@@ -114,9 +114,7 @@ fn server_cert_init_uses_the_configured_material_dir_when_config_is_provided() {
         tempdir.path().join("server.toml"),
         r#"
 [server]
-
-[server.cert]
-material-dir = "configured/server-cert"
+cert-dir = "configured/server-cert"
 "#,
     )
     .unwrap();
@@ -142,6 +140,113 @@ material-dir = "configured/server-cert"
 }
 
 #[test]
+fn server_cert_init_uses_the_configured_hostname_when_hostname_is_omitted() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/server-cert");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[server]
+hostname = "Tunnel.Example.Test."
+cert-dir = "configured/server-cert"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["server", "cert", "init", "--config", "server.toml"])
+        .assert()
+        .success();
+
+    assert_exists(configured_dir.join("server.crt").as_path());
+    assert_exists(configured_dir.join("server.key").as_path());
+    assert_exists(configured_dir.join("server-ca.crt").as_path());
+
+    let stored_hostname =
+        fs::read_to_string(configured_dir.join("state/server-hostname.txt")).unwrap();
+    assert_eq!(stored_hostname.trim(), "tunnel.example.test");
+}
+
+#[test]
+fn server_cert_init_rejects_a_hostname_that_conflicts_with_config() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "configured/server-cert"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--config",
+            "server.toml",
+            "--hostname",
+            "other.example.test",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("--hostname `other.example.test`"));
+    assert!(stderr.contains("configured server.hostname `tunnel.example.test`"));
+}
+
+#[test]
+fn server_cert_rotate_ca_uses_the_configured_hostname_when_hostname_is_omitted() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/server-cert");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[server]
+hostname = "rotated.example.test"
+cert-dir = "configured/server-cert"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "configured/server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["server", "cert", "rotate-ca", "--config", "server.toml"])
+        .assert()
+        .success();
+
+    let stored_hostname =
+        fs::read_to_string(configured_dir.join("state/server-hostname.txt")).unwrap();
+    assert_eq!(stored_hostname.trim(), "rotated.example.test");
+}
+
+#[test]
 fn server_cert_renew_accepts_config_before_the_leaf_subcommand() {
     let tempdir = tempdir().unwrap();
     let configured_dir = tempdir.path().join("configured/server-cert");
@@ -150,9 +255,7 @@ fn server_cert_renew_accepts_config_before_the_leaf_subcommand() {
         tempdir.path().join("server.toml"),
         r#"
 [server]
-
-[server.cert]
-material-dir = "configured/server-cert"
+cert-dir = "configured/server-cert"
 "#,
     )
     .unwrap();
@@ -190,7 +293,7 @@ material-dir = "configured/server-cert"
 }
 
 #[test]
-fn server_cert_init_rejects_the_legacy_directory_key_in_config() {
+fn server_cert_init_rejects_the_legacy_nested_cert_table_in_config() {
     let tempdir = tempdir().unwrap();
     let xdg_data_home = tempdir.path().join("xdg-data");
     fs::write(
@@ -222,7 +325,7 @@ directory = "legacy/server-cert"
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
 
-    assert!(stderr.contains("unknown field `directory`"));
+    assert!(stderr.contains("unknown field `cert`"));
     assert!(
         !xdg_data_home
             .join("runewarp/server/cert/server.crt")

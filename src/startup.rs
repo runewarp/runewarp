@@ -126,9 +126,10 @@ impl PreparedClient {
         settings: &ClientSettings,
         local_bind_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
-        let mut server_addrs = lookup_host((settings.server_hostname.as_str(), 443))
-            .await
-            .map_err(ClientStartupError::Resolve)?;
+        let mut server_addrs =
+            lookup_host((settings.server_hostname.as_str(), settings.server_port))
+                .await
+                .map_err(ClientStartupError::Resolve)?;
         let Some(server_addr) = server_addrs.next() else {
             return Err(ClientStartupError::MissingServerAddress {
                 server_hostname: settings.server_hostname.clone(),

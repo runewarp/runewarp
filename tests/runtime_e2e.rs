@@ -157,9 +157,7 @@ async fn forwards_tls_passthrough_end_to_end_with_manual_private_ca_material() {
             r#"
 [server]
 hostname = "tunnel.example.test"
-
-[server.cert]
-material-dir = "server-cert"
+cert-dir = "server-cert"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -173,10 +171,10 @@ client-identity = "{}"
         tempdir.path().join("client.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
+server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-material-dir = "client-identity"
+identity-dir = "client-identity"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -456,10 +454,10 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
         tempdir.path().join("client-a.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
+server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-a.pem"
-identity-material-dir = "."
+identity-dir = "."
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -491,10 +489,10 @@ backend-address = "__BACKEND_ADDRESS__"
         tempdir.path().join("client-b.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
+server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-b.pem"
-identity-material-dir = "."
+identity-dir = "."
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"

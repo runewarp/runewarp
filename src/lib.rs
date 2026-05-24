@@ -8,6 +8,7 @@ mod proxy;
 mod quic;
 pub mod runtime_log;
 mod server;
+mod server_address;
 mod server_cert;
 mod settings;
 mod startup;
@@ -46,6 +47,6 @@ pub use settings::{
     ClientServiceSettings, ClientSettings, DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS,
     ServerCertificateSettings, ServerSettings, ServerTunnelSettings, SettingsError,
     load_client_settings, load_server_settings, resolve_client_identity_material_dir_from_config,
-    resolve_server_cert_material_dir_from_config,
+    resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
 };
 pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};

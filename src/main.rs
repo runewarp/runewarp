@@ -18,7 +18,8 @@ use runewarp::{
     initialize_manual_server_certificate, load_client_settings, load_server_settings,
     renew_client_identity_certificate, renew_manual_server_certificate,
     resolve_client_identity_material_dir_from_config, resolve_server_cert_material_dir_from_config,
-    rotate_client_identity, rotate_manual_server_certificate_authority,
+    resolve_server_hostname_from_config, rotate_client_identity,
+    rotate_manual_server_certificate_authority,
 };
 use time::OffsetDateTime;
 
@@ -131,11 +132,16 @@ async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Erro
     }
 
     let config_path = config_path_or_default(config)?;
-    let settings = load_server_settings(&config_path)?;
-    PreparedServer::bind(&settings, wildcard(443), wildcard(443))
-        .await?
-        .run()
-        .await?;
+    let settings = load_server_settings(&config_path)
+        .map_err(|error| wrap_server_settings_error(error, &config_path))?;
+    PreparedServer::bind(
+        &settings,
+        settings.public_bind_address,
+        settings.tunnel_bind_address,
+    )
+    .await?
+    .run()
+    .await?;
     Ok(())
 }
 
@@ -145,8 +151,9 @@ fn run_server_cert_command(
 ) -> Result<(), Box<dyn Error>> {
     match command.command {
         cli::ServerCertSubcommand::Init(args) => {
+            let hostname = resolve_server_cert_hostname(config.clone(), args.hostname)?;
             let directory = resolve_server_cert_dir(config, args.dir)?;
-            initialize_manual_server_certificate(&directory, &args.hostname)?;
+            initialize_manual_server_certificate(&directory, &hostname)?;
             Ok(())
         }
         cli::ServerCertSubcommand::Renew(args) => {
@@ -155,8 +162,9 @@ fn run_server_cert_command(
             Ok(())
         }
         cli::ServerCertSubcommand::RotateCa(args) => {
+            let hostname = resolve_server_cert_hostname(config.clone(), args.hostname)?;
             let directory = resolve_server_cert_dir(config, args.dir)?;
-            rotate_manual_server_certificate_authority(&directory, &args.hostname)?;
+            rotate_manual_server_certificate_authority(&directory, &hostname)?;
             Ok(())
         }
     }
@@ -169,7 +177,8 @@ async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box
     }
 
     let config_path = config_path_or_default(config)?;
-    let settings = load_client_settings(&config_path)?;
+    let settings = load_client_settings(&config_path)
+        .map_err(|error| wrap_client_settings_error(error, &config_path))?;
     run_client_command(&settings, wildcard(0)).await
 }
 
@@ -271,6 +280,37 @@ fn resolve_client_identity_dir(
     )
 }
 
+fn resolve_server_cert_hostname(
+    config: Option<std::path::PathBuf>,
+    hostname: Option<String>,
+) -> Result<String, Box<dyn Error>> {
+    let configured_hostname = if let Some(config_path) = candidate_config_path(config.clone()) {
+        resolve_server_hostname_from_config(&config_path)
+            .map_err(|error| -> Box<dyn Error> { Box::new(error) })?
+    } else {
+        None
+    };
+
+    match (hostname, configured_hostname) {
+        (Some(hostname), Some(configured_hostname)) => {
+            if normalized_hostname_for_match(&hostname)
+                != normalized_hostname_for_match(&configured_hostname)
+            {
+                return Err(format!(
+                    "--hostname `{hostname}` does not match configured server.hostname `{configured_hostname}`"
+                )
+                .into());
+            }
+            Ok(hostname)
+        }
+        (Some(hostname), None) => Ok(hostname),
+        (None, Some(configured_hostname)) => Ok(configured_hostname),
+        (None, None) => {
+            Err("server hostname is required via --hostname or server.hostname in config".into())
+        }
+    }
+}
+
 fn resolve_material_dir(
     config: Option<std::path::PathBuf>,
     directory: Option<std::path::PathBuf>,
@@ -297,6 +337,77 @@ fn candidate_config_path(config: Option<std::path::PathBuf>) -> Option<std::path
         None => default_config_path()
             .ok()
             .filter(|default_config_path| default_config_path.is_file()),
+    }
+}
+
+fn normalized_hostname_for_match(hostname: &str) -> String {
+    hostname
+        .strip_suffix('.')
+        .unwrap_or(hostname)
+        .to_ascii_lowercase()
+}
+
+fn wrap_server_settings_error(error: SettingsError, config_path: &Path) -> Box<dyn Error> {
+    if server_material_missing(&error) {
+        return Box::new(io::Error::other(format!(
+            "{error}\nHint: {}",
+            server_cert_init_hint(config_path)
+        )));
+    }
+    Box::new(error)
+}
+
+fn wrap_client_settings_error(error: SettingsError, config_path: &Path) -> Box<dyn Error> {
+    if client_identity_missing(&error) {
+        return Box::new(io::Error::other(format!(
+            "{error}\nHint: {}",
+            client_identity_init_hint(config_path)
+        )));
+    }
+    Box::new(error)
+}
+
+fn server_material_missing(error: &SettingsError) -> bool {
+    settings_messages(error).iter().any(|message| {
+        message.starts_with("server.cert-dir directory not found:")
+            || message.starts_with("server.cert-dir file not found:")
+    })
+}
+
+fn client_identity_missing(error: &SettingsError) -> bool {
+    settings_messages(error).iter().any(|message| {
+        message.starts_with("client.identity-dir directory not found:")
+            || message.starts_with("client.identity-dir file not found:")
+    })
+}
+
+fn settings_messages(error: &SettingsError) -> &[String] {
+    match error {
+        SettingsError::Validation { messages, .. } => messages,
+        SettingsError::Read { .. } | SettingsError::Parse { .. } => &[],
+    }
+}
+
+fn server_cert_init_hint(config_path: &Path) -> String {
+    hint_command("runewarp server cert init", config_path)
+}
+
+fn client_identity_init_hint(config_path: &Path) -> String {
+    hint_command("runewarp client identity init", config_path)
+}
+
+fn hint_command(base: &str, config_path: &Path) -> String {
+    if uses_nondefault_config_path(config_path) {
+        format!("{base} --config {}", config_path.display())
+    } else {
+        base.to_owned()
+    }
+}
+
+fn uses_nondefault_config_path(config_path: &Path) -> bool {
+    match default_config_path() {
+        Ok(default_path) => default_path != config_path,
+        Err(_) => true,
     }
 }
 

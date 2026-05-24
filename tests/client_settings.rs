@@ -26,8 +26,8 @@ fn client_settings_accept_exact_match_services_and_default_logs_to_true() {
         tempdir.path().join("config.toml"),
         r#"
 [client]
-server-hostname = "Tunnel.Example.Test."
-identity-material-dir = "client-identity"
+server-address = "Tunnel.Example.Test."
+identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test.", "api.example.test"]
@@ -39,6 +39,7 @@ backend-address = "caddy.local:443"
     let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
+    assert_eq!(settings.server_port, 443);
     assert!(settings.logs);
     assert_eq!(
         settings.services[0].public_hostnames,
@@ -46,6 +47,98 @@ backend-address = "caddy.local:443"
             "app.example.test".to_owned(),
             "api.example.test".to_owned(),
         ])
+    );
+}
+
+#[test]
+fn client_settings_accept_server_address_with_default_port_and_flat_identity_dir() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "Tunnel.Example.Test."
+identity-dir = "client-identity"
+
+[[client.services]]
+public-hostnames = ["App.Example.Test.", "api.example.test"]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(settings.server_hostname, "tunnel.example.test");
+    assert_eq!(settings.server_port, 443);
+    assert_eq!(
+        settings.identity_directory,
+        tempdir.path().join("client-identity")
+    );
+    assert!(settings.logs);
+    assert_eq!(
+        settings.services[0].public_hostnames,
+        Some(vec![
+            "app.example.test".to_owned(),
+            "api.example.test".to_owned(),
+        ])
+    );
+}
+
+#[test]
+fn client_settings_reject_ip_literals_in_server_address() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "127.0.0.1:443"
+identity-dir = "client-identity"
+
+[[client.services]]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("client.server-address is invalid: IP literals are not supported")
     );
 }
 
@@ -71,9 +164,9 @@ backend-address = "127.0.0.1:443"
     let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
     let message = error.to_string();
 
-    assert!(message.contains("client.server-hostname is required"));
-    assert!(message.contains("client.identity-material-dir directory not found"));
-    assert!(message.contains("client.reconnect-interval must be at least 1"));
+    assert!(message.contains("client.server-address is required"));
+    assert!(message.contains("client.identity-dir directory not found"));
+    assert!(message.contains("unknown field `reconnect-interval`"));
     assert!(message.contains(
         "client.services[].public-hostnames may be omitted only when there is exactly one service"
     ));
@@ -90,7 +183,8 @@ fn client_settings_reject_the_legacy_flat_client_surface() {
         tempdir.path().join("config.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
 cert-file = "client.crt"
 key-file = "client.key"
 
@@ -107,7 +201,7 @@ local-addr = "127.0.0.1:443"
     assert!(message.contains("unknown field `cert-file`"));
     assert!(message.contains("unknown field `key-file`"));
     assert!(message.contains("unknown field `local-addr`"));
-    assert!(message.contains("client.identity-material-dir directory not found"));
+    assert!(message.contains("client.identity-dir directory not found"));
     assert!(message.contains("client.services[].backend-address is required"));
 }
 
@@ -135,9 +229,9 @@ fn client_settings_reject_server_ca_file_without_ca_file_trust_mode() {
         tempdir.path().join("config.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
+server-address = "tunnel.example.test"
 server-ca-file = "server-ca.pem"
-identity-material-dir = "client-identity"
+identity-dir = "client-identity"
 
 [[client.services]]
 backend-address = "caddy.local:443"
@@ -178,10 +272,10 @@ fn client_settings_accept_ca_file_trust_with_an_explicit_server_ca_file() {
         tempdir.path().join("config.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
+server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-ca.pem"
-identity-material-dir = "client-identity"
+identity-dir = "client-identity"
 
 [[client.services]]
 backend-address = "caddy.local:443"
@@ -220,8 +314,8 @@ fn client_settings_reject_duplicate_public_hostnames_after_normalization() {
         tempdir.path().join("config.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
-identity-material-dir = "client-identity"
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test."]
@@ -264,8 +358,8 @@ fn client_settings_reject_empty_public_hostname_lists() {
         tempdir.path().join("config.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
-identity-material-dir = "client-identity"
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = []
@@ -306,8 +400,8 @@ fn client_settings_report_duplicate_hostnames_even_when_another_hostname_is_inva
         tempdir.path().join("config.toml"),
         r#"
 [client]
-server-hostname = "tunnel.example.test"
-identity-material-dir = "client-identity"
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test."]

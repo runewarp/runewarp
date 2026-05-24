@@ -71,6 +71,8 @@ Manual/private-CA initialization:
 runewarp server cert init --hostname tunnel.example.com
 ```
 
+When `server.hostname` is already set in config, `runewarp server cert init --config /path/to/server.toml` and `runewarp server cert rotate-ca --config /path/to/server.toml` can omit `--hostname`.
+
 ### 3. Prepare the Client identity
 
 Create the Client keypair, certificate, and durable `client-identity`:
@@ -86,7 +88,7 @@ If you omit `--dir`, Runewarp uses the default XDG data locations:
 - Client identity material: `$XDG_DATA_HOME/runewarp/client/identity/` or `~/.local/share/runewarp/client/identity/`
 - Manual/private-CA Server material: `$XDG_DATA_HOME/runewarp/server/cert/` or `~/.local/share/runewarp/server/cert/`
 
-If you prefer custom directories, pass `--dir` during setup and point the matching config keys at those paths: `server.cert.material-dir`, `client.identity-material-dir`, and, when needed, `client.server-ca-file`.
+If you prefer custom directories, pass `--dir` during setup and point the matching config keys at those paths: `server.cert-dir`, `client.identity-dir`, and, when needed, `client.server-ca-file`.
 
 For the manual/private-CA path, either copy the generated `server-ca.crt` to `$XDG_DATA_HOME/runewarp/client/server-ca.crt` (or `~/.local/share/runewarp/client/server-ca.crt`) on each Client or set `client.server-ca-file` to the deployed CA bundle path.
 
@@ -110,14 +112,15 @@ client-identity = "4f7b6f7a9b0f0d2b..."
 ```toml
 # /etc/runewarp/client.toml
 [client]
-server-hostname = "tunnel.example.com"
-reconnect-interval = 5
+server-address = "tunnel.example.com"
 
 [[client.services]]
 backend-address = "caddy.local:443"
 ```
 
 That Client has a **Catch-all Service**: the Server stays explicit about the authorized **Public hostnames**, while the sole Client **Service** forwards every admitted hostname to one TLS-terminating backend.
+
+If the Client must dial a non-default tunnel port, append it to `server-address` as `hostname:port`.
 
 If you are using the manual/private-CA Server path, add:
 

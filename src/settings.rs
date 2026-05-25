@@ -15,9 +15,9 @@ use crate::tls_material::{
 use crate::trust::{ClientServerTrust, resolve_client_server_trust};
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
-    SERVER_CA_FILENAME, XdgPathError, default_client_identity_material_dir,
-    default_server_acme_state_dir, default_server_cert_material_dir,
-    hostname::validate_public_hostname,
+    SERVER_CA_FILENAME, XdgPathError, default_client_acme_state_dir,
+    default_client_identity_material_dir, default_server_acme_state_dir,
+    default_server_cert_material_dir, hostname::validate_public_hostname,
 };
 
 pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
@@ -58,12 +58,27 @@ pub struct ClientSettings {
     pub identity_directory: PathBuf,
     pub reconnect_interval: Duration,
     pub services: Vec<ClientServiceSettings>,
+    pub public_cert_config: Option<ClientPublicCertConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClientPublicCertConfig {
+    Manual { directory: PathBuf },
+    Acme { email: String, state_directory: PathBuf },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientServiceSettings {
     pub public_hostnames: Option<Vec<String>>,
     pub backend_address: String,
+    pub tls_mode: ClientTlsMode,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ClientTlsMode {
+    #[default]
+    Passthrough,
+    Terminate,
 }
 
 struct ValidatedRequiredPublicHostnames {
@@ -86,6 +101,7 @@ struct ValidatedServerTunnel {
 struct ValidatedClientService {
     settings: Option<ClientServiceSettings>,
     public_hostnames: Vec<String>,
+    parsed_tls_mode: Option<ClientTlsMode>,
 }
 
 #[derive(Debug)]
@@ -226,6 +242,25 @@ pub fn resolve_server_hostname_from_config(path: &Path) -> Result<Option<String>
             messages,
         })
     }
+}
+
+pub fn resolve_client_public_cert_material_dir_from_config(
+    path: &Path,
+) -> Result<Option<PathBuf>, SettingsError> {
+    let base_dir = config_dir(path);
+    let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
+        return Ok(None);
+    };
+    let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
+    if !unknown_field_messages.is_empty() {
+        return Err(SettingsError::Validation {
+            path: path.to_path_buf(),
+            section: "client",
+            messages: unknown_field_messages,
+        });
+    }
+    let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
+    Ok(raw.public_cert_dir.map(|p| resolve_path(base_dir, &p)))
 }
 
 pub fn resolve_client_identity_material_dir_from_config(
@@ -439,6 +474,44 @@ pub(crate) fn validate_client_settings_with_default_identity_dir(
         );
     }
 
+    let manual_cert_present = raw.public_cert_dir.is_some();
+    let acme_present = raw.acme.is_some();
+    if manual_cert_present && acme_present {
+        messages.push(
+            "[client.acme] and client.public-cert-dir are mutually exclusive".to_owned(),
+        );
+    }
+    let manual_cert = if !acme_present {
+        raw.public_cert_dir.and_then(|dir| {
+            let resolved = resolve_path(config_dir, &dir);
+            if !resolved.is_dir() {
+                messages.push(format!(
+                    "client.public-cert-dir directory not found: {}",
+                    resolved.display()
+                ));
+                None
+            } else {
+                Some(resolved)
+            }
+        })
+    } else {
+        None
+    };
+    let acme = if acme_present && !manual_cert_present {
+        raw.acme.and_then(|acme| {
+            validate_client_acme_settings(acme, config_dir, &mut messages)
+        })
+    } else {
+        None
+    };
+    let public_cert_config = match acme_present {
+        false => manual_cert.map(|directory| ClientPublicCertConfig::Manual { directory }),
+        true => acme.map(|(email, state_directory)| ClientPublicCertConfig::Acme {
+            email,
+            state_directory,
+        }),
+    };
+
     let logs = raw.logs.unwrap_or(true);
     let service_count = raw.services.len();
     let omitted_service_public_hostnames = raw
@@ -460,6 +533,23 @@ pub(crate) fn validate_client_settings_with_default_identity_dir(
         &mut messages,
     );
     validate_unique_client_service_hostnames(&validated_services, &mut messages);
+
+    let has_terminating_service = validated_services
+        .iter()
+        .any(|s| s.parsed_tls_mode == Some(ClientTlsMode::Terminate));
+    if has_terminating_service && public_cert_config.is_none() && !(manual_cert_present && acme_present) {
+        messages.push(
+            "client.public-cert-dir or [client.acme] is required when any service uses tls-mode = \"terminate\""
+                .to_owned(),
+        );
+    }
+    if (manual_cert_present || acme_present) && !has_terminating_service {
+        messages.push(
+            "client.public-cert-dir and [client.acme] require at least one service with tls-mode = \"terminate\""
+                .to_owned(),
+        );
+    }
+
     let services = validated_services
         .into_iter()
         .filter_map(|service| service.settings)
@@ -481,6 +571,7 @@ pub(crate) fn validate_client_settings_with_default_identity_dir(
             identity_directory: identity_directory.expect("validated client.identity-dir"),
             reconnect_interval: Duration::from_secs(DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS),
             services,
+            public_cert_config,
         })
     } else {
         Err(SettingsError::Validation {
@@ -618,7 +709,7 @@ fn validate_server_acme_settings(
             config_dir,
             messages,
         ),
-        None => validate_default_acme_state_directory(messages),
+        None => validate_default_server_acme_state_directory(messages),
     };
 
     if email.is_empty() || state_directory.is_none() {
@@ -628,7 +719,33 @@ fn validate_server_acme_settings(
     Some((email, state_directory.expect("validated state directory")))
 }
 
-fn validate_default_acme_state_directory(messages: &mut Vec<String>) -> Option<PathBuf> {
+fn validate_client_acme_settings(
+    raw: RawClientAcmeConfig,
+    config_dir: &Path,
+    messages: &mut Vec<String>,
+) -> Option<(String, PathBuf)> {
+    let email = raw.email.unwrap_or_else(|| {
+        messages.push("client.acme.email is required".to_owned());
+        String::new()
+    });
+    let state_directory = match raw.state_dir {
+        Some(state_dir) => validate_required_directory(
+            "client.acme.state-dir",
+            Some(state_dir),
+            config_dir,
+            messages,
+        ),
+        None => validate_default_client_acme_state_directory(messages),
+    };
+
+    if email.is_empty() || state_directory.is_none() {
+        return None;
+    }
+
+    Some((email, state_directory.expect("validated state directory")))
+}
+
+fn validate_default_server_acme_state_directory(messages: &mut Vec<String>) -> Option<PathBuf> {
     let state_directory = match default_server_acme_state_dir() {
         Ok(state_directory) => state_directory,
         Err(error) => {
@@ -640,6 +757,26 @@ fn validate_default_acme_state_directory(messages: &mut Vec<String>) -> Option<P
     if let Err(source) = fs::create_dir_all(&state_directory) {
         messages.push(format!(
             "failed to create server.acme.state-dir directory {}: {source}",
+            state_directory.display()
+        ));
+        return None;
+    }
+
+    Some(state_directory)
+}
+
+fn validate_default_client_acme_state_directory(messages: &mut Vec<String>) -> Option<PathBuf> {
+    let state_directory = match default_client_acme_state_dir() {
+        Ok(state_directory) => state_directory,
+        Err(error) => {
+            messages.push(error.to_string());
+            return None;
+        }
+    };
+
+    if let Err(source) = fs::create_dir_all(&state_directory) {
+        messages.push(format!(
+            "failed to create client.acme.state-dir directory {}: {source}",
             state_directory.display()
         ));
         return None;
@@ -720,10 +857,29 @@ fn validate_client_service(
         }
     };
 
-    let settings = if public_hostnames.is_valid {
+    let parsed_tls_mode = match raw.tls_mode.as_deref() {
+        None | Some("passthrough") => Some(ClientTlsMode::Passthrough),
+        Some("terminate") => Some(ClientTlsMode::Terminate),
+        Some(_) => {
+            messages.push(
+                "client.services[].tls-mode must be \"passthrough\" or \"terminate\"".to_owned(),
+            );
+            None
+        }
+    };
+
+    if parsed_tls_mode == Some(ClientTlsMode::Terminate) && public_hostnames.values.is_none() {
+        messages.push(
+            "client.services[].tls-mode = \"terminate\" requires explicit public-hostnames"
+                .to_owned(),
+        );
+    }
+
+    let settings = if public_hostnames.is_valid && parsed_tls_mode.is_some() {
         backend_address.map(|backend_address| ClientServiceSettings {
             public_hostnames: public_hostnames.values.clone(),
             backend_address,
+            tls_mode: parsed_tls_mode.clone().unwrap_or_default(),
         })
     } else {
         None
@@ -732,6 +888,7 @@ fn validate_client_service(
     ValidatedClientService {
         settings,
         public_hostnames: public_hostnames.valid_hostnames,
+        parsed_tls_mode,
     }
 }
 
@@ -984,17 +1141,23 @@ pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value)
             "server-trust",
             "server-ca-file",
             "identity-dir",
+            "public-cert-dir",
+            "acme",
             "services",
         ],
         &mut messages,
     );
+
+    if let Some(acme) = client.get("acme").and_then(toml::Value::as_table) {
+        push_unknown_table_fields(acme, &["email", "state-dir"], &mut messages);
+    }
 
     if let Some(services) = client.get("services").and_then(toml::Value::as_array) {
         for service in services {
             if let Some(service) = service.as_table() {
                 push_unknown_table_fields(
                     service,
-                    &["public-hostnames", "backend-address"],
+                    &["public-hostnames", "backend-address", "tls-mode"],
                     &mut messages,
                 );
             }
@@ -1051,8 +1214,17 @@ pub(crate) struct RawClientConfig {
     pub(crate) server_trust: Option<String>,
     pub(crate) server_ca_file: Option<PathBuf>,
     pub(crate) identity_dir: Option<PathBuf>,
+    pub(crate) public_cert_dir: Option<PathBuf>,
+    pub(crate) acme: Option<RawClientAcmeConfig>,
     #[serde(default)]
     pub(crate) services: Vec<RawClientServiceConfig>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct RawClientAcmeConfig {
+    pub(crate) email: Option<String>,
+    pub(crate) state_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1060,6 +1232,7 @@ pub(crate) struct RawClientConfig {
 pub(crate) struct RawClientServiceConfig {
     pub(crate) public_hostnames: Option<Vec<String>>,
     pub(crate) backend_address: Option<String>,
+    pub(crate) tls_mode: Option<String>,
 }
 
 #[cfg(test)]

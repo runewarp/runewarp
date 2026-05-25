@@ -8,8 +8,8 @@ This document defines the Runewarp configuration model. Use [`docs/usage.md`](us
 | --- | --- |
 | `[server]` | Public routing, Server identity, and the Server certificate path |
 | `[[server.tunnels]]` | Explicit **Public hostname** authorization and the pinned **Client identity** for one **Tunnel** |
-| `[client]` | Tunnel dialing, Server trust, and Client identity material |
-| `[[client.services]]` | Local routing from one or more **Public hostnames** to one **Local backend** |
+| `[client]` | Tunnel dialing, Server trust, Client identity material, and optional TLS termination certificate config |
+| `[[client.services]]` | Local routing from one or more **Public hostnames** to one **Local backend**, with per-Service TLS mode |
 
 ## Configuration principles
 
@@ -17,7 +17,8 @@ This document defines the Runewarp configuration model. Use [`docs/usage.md`](us
 - Client config owns local **Service** selection
 - the Server routes only explicitly authorized **Public hostnames** into a **Tunnel**
 - **Hostname mirroring** and **One-sided Catch-all** are the two supported routing topologies
-- TLS passthrough is the product boundary, so **Local backends** must terminate TLS
+- TLS passthrough is the default; Local backends terminate TLS in that mode
+- Client TLS termination is opt-in per Service via `tls-mode = "terminate"`; the termination certificate is managed at client level via `client.public-cert-dir` (manual) or `[client.acme]`
 - config keys should name the product concept rather than an encoding detail
 
 ## Supported routing shapes
@@ -27,7 +28,7 @@ This document defines the Runewarp configuration model. Use [`docs/usage.md`](us
 | Exact-match on both sides | Every Tunnel lists explicit `public-hostnames` | Every Service lists explicit `public-hostnames` |
 | One-sided Catch-all | Every Tunnel lists explicit `public-hostnames` | The sole Service omits `public-hostnames` |
 
-Server Catch-all is intentionally not supported.
+Server Catch-all is intentionally not supported. Catch-all Services must use `tls-mode = "passthrough"` (the default); they cannot opt into TLS termination.
 
 ## CLI entry points
 
@@ -84,7 +85,8 @@ When the matching config key is omitted, Runewarp uses:
 | Manual/private-CA Server material | `$XDG_DATA_HOME/runewarp/server/cert/` or `~/.local/share/runewarp/server/cert/` |
 | Client identity material | `$XDG_DATA_HOME/runewarp/client/identity/` or `~/.local/share/runewarp/client/identity/` |
 | Client CA bundle for `server-trust = "ca-file"` | `$XDG_DATA_HOME/runewarp/client/server-ca.crt` or `~/.local/share/runewarp/client/server-ca.crt` |
-| ACME state | `$XDG_STATE_HOME/runewarp/server/acme/` or `~/.local/state/runewarp/server/acme/` |
+| Server ACME state | `$XDG_STATE_HOME/runewarp/server/acme/` or `~/.local/state/runewarp/server/acme/` |
+| Client ACME state | `$XDG_STATE_HOME/runewarp/client/acme/` or `~/.local/state/runewarp/client/acme/` |
 
 ## Example: Server with manual/private-CA certificates
 
@@ -185,6 +187,39 @@ backend-address = "caddy.local:8443"
 
 The grouping of hostnames into **Tunnels** and **Services** may differ. One Tunnel can serve multiple Services, and one Service can own multiple **Public hostnames** when they share one **Local backend**.
 
+## Example: Client TLS termination with manual certificate
+
+```toml
+[client]
+server-address = "tunnel.example.com"
+identity-dir = "/etc/runewarp/client"
+public-cert-dir = "/etc/runewarp/client/public-cert"
+
+[[client.services]]
+public-hostnames = ["app.example.com"]
+backend-address = "127.0.0.1:8080"
+tls-mode = "terminate"
+```
+
+## Example: Client TLS termination with ACME
+
+```toml
+[client]
+server-address = "tunnel.example.com"
+identity-dir = "/etc/runewarp/client"
+
+[client.acme]
+email = "admin@example.com"
+state-dir = "/var/lib/runewarp/client/acme"
+
+[[client.services]]
+public-hostnames = ["app.example.com"]
+backend-address = "127.0.0.1:8080"
+tls-mode = "terminate"
+```
+
+`tls-mode = "terminate"` requires explicit `public-hostnames` (Catch-all Services cannot terminate). `client.public-cert-dir` and `[client.acme]` are mutually exclusive and both require at least one Service using `tls-mode = "terminate"`.
+
 ## Server reference
 
 | Key | Required | Notes |
@@ -208,8 +243,12 @@ The grouping of hostnames into **Tunnels** and **Services** may differ. One Tunn
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`; otherwise system trust is used. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
 | `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG data path for Client identity material. |
 | `client.logs` | no | Boolean controlling human-readable Client runtime logs. Defaults to `true`. |
-| `client.services[].public-hostnames` | when exact-match local routing is desired | Exact **Public hostnames** this Service accepts locally. Omit only on the sole Catch-all Service. |
-| `client.services[].backend-address` | yes, per Service block | TCP endpoint for the forwarded traffic. This backend must terminate TLS. `runewarp client --backend-address` may synthesize the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks at all. |
+| `client.public-cert-dir` | when using manual TLS termination | Directory containing the public certificate material for Client-side TLS termination. Mutually exclusive with `[client.acme]`. Required when any Service uses `tls-mode = "terminate"` and no `[client.acme]` is present. |
+| `client.acme.email` | with Client ACME | ACME contact address for the Client public certificate. Required when `[client.acme]` is present. |
+| `client.acme.state-dir` | no | Writable path for durable ACME account and certificate state for the Client. When omitted, Runewarp uses and creates the XDG default client ACME state directory at startup. |
+| `client.services[].public-hostnames` | when exact-match local routing is desired | Exact **Public hostnames** this Service accepts locally. Omit only on the sole Catch-all Service. Required when `tls-mode = "terminate"`. |
+| `client.services[].backend-address` | yes, per Service block | TCP endpoint for the forwarded traffic. When `tls-mode = "passthrough"` (default), this backend must terminate TLS. When `tls-mode = "terminate"`, the Client terminates TLS and connects to the backend in plaintext. `runewarp client --backend-address` may synthesize the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks at all. |
+| `client.services[].tls-mode` | no | `passthrough` or `terminate`. Defaults to `passthrough`. Catch-all Services must use `passthrough`. |
 
 ## Trust and material directories
 
@@ -237,6 +276,31 @@ The Client identity directory layout is:
 `runewarp client identity renew` reissues `client.crt` with the same key, so the `client-identity` stays stable. `runewarp client identity rotate` changes the key and therefore changes the `client-identity`.
 
 When omitted, `client.identity-dir` defaults to the XDG data location for Client identity material.
+
+### `client.public-cert-dir`
+
+When one or more Services use `tls-mode = "terminate"`, the Client needs a public certificate authority and per-hostname leaf certificates. Bootstrap these with:
+
+```
+runewarp client public-cert init --hostname app.example.com
+```
+
+The directory layout is:
+
+- `public-ca.crt` — CA certificate (share this with Visitors as their trust anchor)
+- `state/public-ca.key` — CA private key (keep private)
+- `{hostname}/server.crt` — Leaf certificate for the named hostname
+- `{hostname}/server.key` — Leaf key for the named hostname
+
+To add a certificate for another hostname in the same directory:
+
+```
+runewarp client public-cert init --dir ./public-cert --hostname api.example.com
+```
+
+`runewarp client public-cert init` refuses to overwrite an existing CA, so running it a second time with a new hostname reuses the original CA and only writes new leaf material. The Visitor-facing `public-ca.crt` therefore stays stable across additions.
+
+When omitted, `client.public-cert-dir` defaults to the XDG data location for Client public certificate material.
 
 ### `client.server-trust`
 
@@ -266,8 +330,19 @@ Runewarp rejects config and startup inputs that violate any of these rules:
 - all `client-identity` values must be lowercase hex without colons
 - all `client-identity` values must be unique across Server Tunnels
 - `server.public-bind-address` and `server.tunnel-bind-address` must be literal socket addresses
-- the selected or defaulted material directories and files must exist and be readable, except that the default ACME state directory is created automatically when omitted
+- the selected or defaulted material directories and files must exist and be readable, except that default ACME state directories are created automatically when omitted
 - `backend-address` must parse as a TCP address or host:port pair
+
+### Client TLS termination validation
+
+- `client.services[].tls-mode` must be `"passthrough"` or `"terminate"`; defaults to `"passthrough"`
+- `client.services[].tls-mode = "terminate"` requires explicit `public-hostnames` on that Service; Catch-all Services cannot opt into termination
+- when any Service uses `tls-mode = "terminate"`, either `client.public-cert-dir` or `[client.acme]` must be present
+- `client.public-cert-dir` and `[client.acme]` require at least one Service with `tls-mode = "terminate"`; the config is rejected when no terminating Service is present
+- `client.public-cert-dir` and `[client.acme]` are mutually exclusive
+- `client.public-cert-dir` must be an existing directory
+- `client.acme.email` is required when `[client.acme]` is present
+- `client.acme.state-dir` must be an existing directory when specified; when omitted, the XDG default is used and created automatically
 
 ### Hostname rules
 
@@ -293,6 +368,6 @@ Runewarp does not validate cross-side hostname coverage at runtime:
 ## Operational notes
 
 - `backend-address` is opened only when traffic arrives
-- **Local backends** must terminate TLS
+- **Local backends** must terminate TLS when `tls-mode = "passthrough"` (default)
 - `client.server-trust = "ca-file"` is exclusive; the Client does not also use system roots for that Tunnel connection
 - binding to `443` on Linux typically requires either elevated privileges or `CAP_NET_BIND_SERVICE`

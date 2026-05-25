@@ -81,6 +81,18 @@ pub fn default_server_acme_state_dir() -> Result<PathBuf, XdgPathError> {
         .join("acme"))
 }
 
+pub fn default_client_public_cert_material_dir() -> Result<PathBuf, XdgPathError> {
+    Ok(runewarp_dir(XdgDirectory::Data)?
+        .join("client")
+        .join("public-cert"))
+}
+
+pub fn default_client_acme_state_dir() -> Result<PathBuf, XdgPathError> {
+    Ok(runewarp_dir(XdgDirectory::State)?
+        .join("client")
+        .join("acme"))
+}
+
 fn runewarp_dir(directory: XdgDirectory) -> Result<PathBuf, XdgPathError> {
     Ok(xdg_base_dir(directory)?.join("runewarp"))
 }

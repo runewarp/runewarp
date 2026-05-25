@@ -14,10 +14,12 @@ use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientRuntimeArgs,
     ClientSettingsResolutionError, PreparedClient, PreparedServer, SettingsError, XdgPathError,
-    default_client_identity_material_dir, default_config_path, default_server_cert_material_dir,
-    generate_client_identity, initialize_manual_server_certificate, load_server_settings,
-    renew_client_identity_certificate, renew_manual_server_certificate,
-    resolve_client_identity_material_dir_from_config, resolve_client_settings_from_cli,
+    default_client_identity_material_dir, default_client_public_cert_material_dir,
+    default_config_path, default_server_cert_material_dir, generate_client_identity,
+    initialize_manual_client_public_cert, initialize_manual_server_certificate,
+    load_server_settings, renew_client_identity_certificate, renew_manual_server_certificate,
+    resolve_client_identity_material_dir_from_config,
+    resolve_client_public_cert_material_dir_from_config, resolve_client_settings_from_cli,
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
     rotate_client_identity, rotate_manual_server_certificate_authority,
 };
@@ -193,6 +195,10 @@ async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box
         return run_client_identity_command(config, command);
     }
 
+    if let Some(cli::ClientSubcommand::PublicCert(command)) = command {
+        return run_client_public_cert_command(config, command);
+    }
+
     let settings = resolve_client_settings_from_cli(
         config,
         ClientRuntimeArgs {
@@ -244,6 +250,39 @@ fn run_client_identity_command(
             Ok(())
         }
     }
+}
+
+fn run_client_public_cert_command(
+    config: Option<std::path::PathBuf>,
+    command: cli::ClientPublicCertArgs,
+) -> Result<(), Box<dyn Error>> {
+    match command.command {
+        cli::ClientPublicCertSubcommand::Init(args) => {
+            let hostname = args
+                .hostname
+                .ok_or("--hostname is required for `client public-cert init`")?;
+            let directory = resolve_client_public_cert_dir(config, args.dir)?;
+            initialize_manual_client_public_cert(&directory, &hostname)?;
+            println!("Client public CA: {}", directory.join(runewarp::CLIENT_PUBLIC_CA_FILENAME).display());
+            println!(
+                "Leaf certificate lifetime: {} days",
+                runewarp::CLIENT_PUBLIC_CERT_LIFETIME_DAYS
+            );
+            Ok(())
+        }
+    }
+}
+
+fn resolve_client_public_cert_dir(
+    config: Option<std::path::PathBuf>,
+    directory: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, Box<dyn Error>> {
+    resolve_material_dir(
+        config,
+        directory,
+        resolve_client_public_cert_material_dir_from_config,
+        default_client_public_cert_material_dir,
+    )
 }
 
 fn should_retry_client_connect_error(error: &runewarp::ClientStartupError) -> bool {

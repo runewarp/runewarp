@@ -1,21 +1,25 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use tokio::net::lookup_host;
 
 use crate::acme::{ManagedAcmeState, build_acme_state, run_acme_state};
+use crate::client_public_cert::client_public_cert_leaf_dir;
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, TlsMaterialError, load_certificate_chain,
     load_private_key,
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConnectError, ClientIdentity,
-    ClientSettings, QuicConfigError, Server, ServerCertificateSettings, ServerConfig,
-    ServerSettings, client::validate_services, make_client_quic_config_with_client_auth,
-    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
+    ClientPublicCertConfig, ClientSettings, ClientTlsMode, QuicConfigError, Server,
+    ServerCertificateSettings, ServerConfig, ServerSettings, client::validate_services,
+    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth_resolver,
 };
 
 pub struct PreparedServer {
@@ -150,6 +154,10 @@ impl PreparedClient {
         }
         let services = validate_services(&settings.services)
             .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
+
+        let hostname_tls_configs =
+            load_termination_tls_configs(settings).map_err(ClientStartupError::InvalidSettings)?;
+
         let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
         let cert_chain =
             load_certificate_chain(&settings.identity_directory.join(CLIENT_CERT_FILENAME))
@@ -166,6 +174,7 @@ impl PreparedClient {
             services,
             logs: settings.logs,
             quic_client_config,
+            hostname_tls_configs,
         })
         .await
         .map_err(ClientStartupError::Connect)?;
@@ -389,6 +398,57 @@ fn build_root_store(
         #[cfg(test)]
         loaded_root_count,
     })
+}
+
+/// Loads and validates TLS server configs for every terminating hostname across all services.
+/// Returns a map from normalized hostname to the rustls::ServerConfig for that hostname.
+fn load_termination_tls_configs(
+    settings: &ClientSettings,
+) -> Result<HashMap<String, Arc<rustls::ServerConfig>>, String> {
+    let Some(ClientPublicCertConfig::Manual { directory }) = &settings.public_cert_config else {
+        // No manual cert config: if any terminating service exists, that's a bug caught by
+        // settings validation. At runtime we just return an empty map.
+        return Ok(HashMap::new());
+    };
+
+    let mut configs = HashMap::new();
+    for service in &settings.services {
+        if service.tls_mode != ClientTlsMode::Terminate {
+            continue;
+        }
+        let Some(hostnames) = &service.public_hostnames else {
+            continue;
+        };
+        for hostname in hostnames {
+            if configs.contains_key(hostname) {
+                continue;
+            }
+            let leaf_dir = client_public_cert_leaf_dir(directory, hostname);
+            let cert_chain = load_certificate_chain(&leaf_dir.join(SERVER_CERT_FILENAME))
+                .map_err(|_| {
+                    format!(
+                        "missing certificate for terminating hostname {hostname}: \
+                         run `runewarp client public-cert init --hostname {hostname}`"
+                    )
+                })?;
+            let private_key = load_private_key(&leaf_dir.join(SERVER_KEY_FILENAME)).map_err(
+                |_| {
+                    format!(
+                        "missing private key for terminating hostname {hostname}: \
+                         run `runewarp client public-cert init --hostname {hostname}`"
+                    )
+                },
+            )?;
+            let tls_config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(cert_chain, private_key)
+                .map_err(|e| {
+                    format!("invalid TLS material for terminating hostname {hostname}: {e}")
+                })?;
+            configs.insert(hostname.clone(), Arc::new(tls_config));
+        }
+    }
+    Ok(configs)
 }
 
 #[cfg(test)]

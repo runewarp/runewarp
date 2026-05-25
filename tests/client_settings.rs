@@ -1,6 +1,6 @@
 use std::fs;
 
-use runewarp::load_client_settings;
+use runewarp::{ClientTlsMode, load_client_settings};
 use tempfile::tempdir;
 
 #[test]
@@ -503,4 +503,425 @@ backend-address = "nginx.local:443"
     assert!(message.contains(
         "client.services[].public-hostnames must be unique after normalization: app.example.test"
     ));
+}
+
+// ── Slice 1: tls-mode field on services ──────────────────────────────────────
+
+fn write_base_client_identity(tempdir: &std::path::Path) {
+    fs::create_dir(tempdir.join("client-identity")).unwrap();
+    fs::write(tempdir.join("client-identity/client.crt"), "placeholder").unwrap();
+    fs::write(tempdir.join("client-identity/client.key"), "placeholder").unwrap();
+    fs::write(
+        tempdir.join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+}
+
+#[test]
+fn client_settings_default_tls_mode_is_passthrough() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(settings.services[0].tls_mode, ClientTlsMode::Passthrough);
+}
+
+#[test]
+fn client_settings_accept_explicit_passthrough_tls_mode() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+tls-mode = "passthrough"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(settings.services[0].tls_mode, ClientTlsMode::Passthrough);
+}
+
+#[test]
+fn client_settings_reject_unknown_tls_mode_value() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+tls-mode = "proxy"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("client.services[].tls-mode must be \"passthrough\" or \"terminate\""),
+        "unexpected error: {error}"
+    );
+}
+
+// ── Slice 2: catch-all cannot opt into termination ───────────────────────────
+
+#[test]
+fn client_settings_reject_terminate_on_catch_all_service() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::create_dir(tempdir.path().join("certs")).unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+public-cert-dir = "certs"
+
+[[client.services]]
+backend-address = "caddy.local:443"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error.to_string().contains(
+            "client.services[].tls-mode = \"terminate\" requires explicit public-hostnames"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+// ── Slice 3: terminating service requires a Client public-cert config ─────────
+
+#[test]
+fn client_settings_reject_terminate_without_any_cert_config() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error.to_string().contains(
+            "client.public-cert-dir or [client.acme] is required when any service uses tls-mode = \"terminate\""
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+// ── Slice 4: client.public-cert-dir validation ────────────────────────────────
+
+#[test]
+fn client_settings_accept_terminate_with_public_cert_dir() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::create_dir(tempdir.path().join("certs")).unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+public-cert-dir = "certs"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(settings.services[0].tls_mode, ClientTlsMode::Terminate);
+    assert!(
+        matches!(
+            &settings.public_cert_config,
+            Some(runewarp::ClientPublicCertConfig::Manual { directory }) if *directory == tempdir.path().join("certs")
+        ),
+        "expected Manual cert config, got {:?}",
+        settings.public_cert_config
+    );
+}
+
+#[test]
+fn client_settings_reject_public_cert_dir_not_found() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+public-cert-dir = "missing-certs"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("client.public-cert-dir directory not found"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn client_settings_reject_public_cert_dir_without_any_terminating_service() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::create_dir(tempdir.path().join("certs")).unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+public-cert-dir = "certs"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error.to_string().contains(
+            "client.public-cert-dir and [client.acme] require at least one service with tls-mode = \"terminate\""
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn client_settings_reject_acme_without_any_terminating_service() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::create_dir(tempdir.path().join("acme-state")).unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[client.acme]
+email = "admin@example.test"
+state-dir = "acme-state"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error.to_string().contains(
+            "client.public-cert-dir and [client.acme] require at least one service with tls-mode = \"terminate\""
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+// ── Slice 5: [client.acme] validation ────────────────────────────────────────
+
+#[test]
+fn client_settings_accept_terminate_with_acme_and_explicit_state_dir() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::create_dir(tempdir.path().join("acme-state")).unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[client.acme]
+email = "admin@example.test"
+state-dir = "acme-state"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(settings.services[0].tls_mode, ClientTlsMode::Terminate);
+    assert!(
+        matches!(
+            &settings.public_cert_config,
+            Some(runewarp::ClientPublicCertConfig::Acme { email, .. }) if email == "admin@example.test"
+        ),
+        "expected ACME cert config, got {:?}",
+        settings.public_cert_config
+    );
+}
+
+#[test]
+fn client_settings_reject_acme_without_email() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::create_dir(tempdir.path().join("acme-state")).unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[client.acme]
+state-dir = "acme-state"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error.to_string().contains("client.acme.email is required"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn client_settings_reject_acme_state_dir_not_found() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[client.acme]
+email = "admin@example.test"
+state-dir = "missing-acme-state"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("client.acme.state-dir directory not found"),
+        "unexpected error: {error}"
+    );
+}
+
+// ── Slice 6: mutual exclusion of cert config modes ───────────────────────────
+
+#[test]
+fn client_settings_reject_both_public_cert_dir_and_acme() {
+    let tempdir = tempdir().unwrap();
+    write_base_client_identity(tempdir.path());
+    fs::create_dir(tempdir.path().join("certs")).unwrap();
+    fs::create_dir(tempdir.path().join("acme-state")).unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+public-cert-dir = "certs"
+
+[client.acme]
+email = "admin@example.test"
+state-dir = "acme-state"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("[client.acme] and client.public-cert-dir are mutually exclusive"),
+        "unexpected error: {error}"
+    );
 }

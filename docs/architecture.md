@@ -1,14 +1,14 @@
 # Architecture
 
-This document describes the committed Runewarp design: TLS passthrough on the public edge, Server-authoritative hostname routing, mutually authenticated tunnel connections, and Client-side forwarding to operator-run TLS backends.
+This document describes the committed Runewarp design: TLS passthrough on the public edge by default, Server-authoritative hostname routing, mutually authenticated tunnel connections, and Client-side forwarding to operator-run TLS backends. Client-side TLS termination is opt-in per Service.
 
 ## At a glance
 
 | Concern | Runewarp design |
 | --- | --- |
-| Public traffic | TLS passthrough; the public edge does not terminate customer TLS |
+| Public traffic | TLS passthrough by default; the public edge does not terminate customer TLS |
 | Routing authority | The **Server** selects the **Tunnel** from explicit Server-configured **Public hostnames** |
-| Client behavior | The **Client** selects a **Service** locally and forwards traffic to a TLS-terminating **Local backend** |
+| Client behavior | The **Client** selects a **Service** locally and either forwards TLS bytes to a TLS-terminating **Local backend** (passthrough) or terminates TLS itself before proxying plaintext to the **Local backend** (terminate) |
 | Tunnel transport | One long-lived QUIC/TLS **Tunnel connection** per **Client instance** |
 | Trust model | Server certificate validation plus pinned **Client identity** authentication |
 
@@ -19,7 +19,7 @@ This document describes the committed Runewarp design: TLS passthrough on the pu
 | **Visitor** | Connects to a **Public hostname** over TLS |
 | **Server** | Accepts Visitor traffic, extracts SNI, selects a **Tunnel**, and forwards the original encrypted stream |
 | **Client instance** | Maintains one **Tunnel connection**, selects a **Service**, and forwards traffic to a **Local backend** |
-| **Local backend** | Terminates TLS and serves the operator application |
+| **Local backend** | Terminates TLS (passthrough mode) or receives plaintext (terminate mode) and serves the operator application |
 
 ## End-to-end flow
 
@@ -28,10 +28,10 @@ flowchart LR
     V[Visitor] -->|"TLS for a Public hostname"| S[Server]
     S -->|"Select Tunnel by Public hostname"| T["Tunnel connection<br/>QUIC/TLS"]
     T --> C[Client instance]
-    C -->|"Select Service and proxy bytes"| B[Local backend]
+    C -->|"Select Service and proxy"| B[Local backend]
 ```
 
-Runewarp adds no routing header to public traffic. The forwarded byte stream begins with the Visitor's original ClientHello and stays encrypted until the Local backend terminates TLS.
+In **passthrough** mode (default), the forwarded byte stream begins with the Visitor's original ClientHello and stays encrypted until the Local backend terminates TLS. In **terminate** mode, the Client terminates TLS using its own certificate material and proxies plaintext TCP to the Local backend.
 
 ## Routing authority
 
@@ -55,6 +55,8 @@ In both shapes, the Server remains the routing authority for public ingress.
 
 ## Data path
 
+### Passthrough (default)
+
 1. A **Visitor** connects to the **Server** on its configured public TCP listener, `server.public-bind-address`, which defaults to `0.0.0.0:443`.
 2. The Server buffers enough of the ClientHello to extract SNI.
 3. The Server rejects non-TLS traffic, missing-SNI traffic, and non-ACME application traffic addressed to the **Server hostname**.
@@ -65,6 +67,16 @@ In both shapes, the Server remains the routing authority for public ingress.
 8. If no Client Service matches, the Client rejects the stream.
 9. The Local backend terminates TLS and serves the application.
 
+### Terminate (opt-in per Service)
+
+Steps 1–8 are the same. In step 7, when the matched Service has `tls-mode = "terminate"`:
+
+7a. The Client completes the TLS handshake with the Visitor using the per-hostname leaf certificate from `client.public-cert-dir`.
+7b. The Client connects to the Local backend in plaintext TCP.
+7c. The Client proxies decrypted data between the TLS stream and the plaintext backend connection.
+
+The Local backend receives unencrypted bytes directly and does not need to terminate TLS.
+
 ## Trust model
 
 | Trust boundary | Design |
@@ -74,6 +86,7 @@ In both shapes, the Server remains the routing authority for public ingress.
 | **Server CA** | Optional private trust anchor for the manual Server-certificate path |
 | **Client identity** | Pinned public-key identity used to authenticate the Client to the Server |
 | **Public hostname authorization** | Owned by Server config through explicit `server.tunnels[].public-hostnames` |
+| **Client public-cert CA** | Manual trust anchor shared with Visitors when `tls-mode = "terminate"` is in use |
 
 The Client validates the Server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The Server authenticates the pinned `client-identity` from the Client public key rather than from a certificate lifetime.
 
@@ -87,7 +100,7 @@ The Client validates the Server certificate either through system trust or throu
 
 ## Product boundaries
 
-- TLS passthrough is the product boundary
-- customer TLS is terminated only on the **Local backend**
-- plain HTTP backends are out of scope
-- edge TLS termination for customer traffic is out of scope
+- TLS passthrough is the default and the lowest-privilege mode
+- customer TLS may be terminated on the **Local backend** (passthrough, default) or on the **Client** (terminate, opt-in)
+- plain HTTP backends require `tls-mode = "terminate"` on the matching Service
+- edge TLS termination managed by the Server for customer traffic is out of scope

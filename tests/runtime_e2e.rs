@@ -6,11 +6,12 @@ use std::time::Duration;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
-    GeneratedClientIdentity, PreparedClient, PreparedServer, Server, ServerConfig,
-    ServerTunnelSettings, generate_client_identity, initialize_manual_server_certificate,
-    load_client_settings, load_server_settings, make_client_quic_config,
-    make_client_quic_config_with_client_auth, make_server_quic_config,
-    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
+    ClientRuntimeArgs, ClientSettingsResolutionDefaults, GeneratedClientIdentity, PreparedClient,
+    PreparedServer, SelectedClientConfig, Server, ServerConfig, ServerTunnelSettings,
+    generate_client_identity, initialize_manual_server_certificate, load_client_settings,
+    load_server_settings, make_client_quic_config, make_client_quic_config_with_client_auth,
+    make_server_quic_config, make_server_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth_resolver, resolve_selected_client_settings,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -208,6 +209,109 @@ backend-address = "__BACKEND_ADDRESS__"
     let _ = backend.1.await;
     let _ = server_task.await;
     let _ = client_task.await;
+}
+
+#[tokio::test]
+async fn resolver_built_catch_all_settings_forward_end_to_end()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )?;
+
+    let client_identity = generate_client_identity()?;
+    std::fs::create_dir(tempdir.path().join("client-identity"))?;
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
+        &client_identity.certificate_pem,
+    )?;
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
+        &client_identity.private_key_pem,
+    )?;
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_IDENTITY_FILENAME),
+        client_identity.client_identity.to_string(),
+    )?;
+
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let backend = spawn_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"pong",
+    )
+    .await;
+
+    std::fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+"#,
+            client_identity.client_identity
+        ),
+    )?;
+    std::fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-trust = "ca-file"
+server-ca-file = "server-cert/server-ca.crt"
+identity-dir = "client-identity"
+"#,
+    )?;
+
+    let server_settings = load_server_settings(&tempdir.path().join("server.toml"))?;
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0)).await?;
+    let public_addr = server.public_addr()?;
+    let tunnel_addr = server.tunnel_addr()?;
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = resolve_selected_client_settings(
+        SelectedClientConfig::Explicit(tempdir.path().join("client.toml")),
+        &ClientRuntimeArgs {
+            server_address: Some("tunnel.example.test".to_owned()),
+            backend_address: Some(backend.0.to_string()),
+        },
+        &ClientSettingsResolutionDefaults {
+            identity_directory: tempdir.path().join("unused-default"),
+        },
+    )?;
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr).await?;
+    let client_task = tokio::spawn(client.run());
+
+    let result = async {
+        let response =
+            wait_for_tls_response(public_addr, &backend_cert, "app.example.test").await?;
+        assert_eq!(response, *b"pong");
+        Ok::<(), std::io::Error>(())
+    }
+    .await;
+
+    backend.1.abort();
+    server_task.abort();
+    client_task.abort();
+    let _ = backend.1.await;
+    let _ = server_task.await;
+    let _ = client_task.await;
+
+    result.map_err(Into::into)
 }
 
 #[tokio::test]

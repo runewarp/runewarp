@@ -129,9 +129,11 @@ pub fn resolve_client_settings_from_cli(
 ) -> Result<ClientSettings, ClientSettingsResolutionError> {
     let selected_config =
         select_client_config(config).map_err(ClientSettingsResolutionError::XdgPath)?;
-    let defaults = ClientSettingsResolutionDefaults::from_xdg()
-        .map_err(ClientSettingsResolutionError::XdgPath)?;
-    resolve_selected_client_settings(selected_config, &runtime, &defaults)
+    resolve_selected_client_settings_with_default_identity_dir(
+        selected_config,
+        &runtime,
+        &default_client_identity_material_dir,
+    )
 }
 
 pub fn resolve_selected_client_settings(
@@ -139,10 +141,25 @@ pub fn resolve_selected_client_settings(
     runtime: &ClientRuntimeArgs,
     defaults: &ClientSettingsResolutionDefaults,
 ) -> Result<ClientSettings, ClientSettingsResolutionError> {
+    let default_identity_directory = || Ok(defaults.identity_directory.clone());
+    resolve_selected_client_settings_with_default_identity_dir(
+        selected_config,
+        runtime,
+        &default_identity_directory,
+    )
+}
+
+fn resolve_selected_client_settings_with_default_identity_dir(
+    selected_config: SelectedClientConfig,
+    runtime: &ClientRuntimeArgs,
+    default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+) -> Result<ClientSettings, ClientSettingsResolutionError> {
     match selected_config {
-        SelectedClientConfig::None => resolve_cli_only_settings(None, runtime, defaults),
+        SelectedClientConfig::None => {
+            resolve_cli_only_settings(None, runtime, default_identity_directory)
+        }
         SelectedClientConfig::Explicit(path) | SelectedClientConfig::Discovered(path) => {
-            resolve_selected_config_settings(path, runtime, defaults)
+            resolve_selected_config_settings(path, runtime, default_identity_directory)
         }
     }
 }
@@ -150,7 +167,7 @@ pub fn resolve_selected_client_settings(
 fn resolve_cli_only_settings(
     selected_path: Option<&Path>,
     runtime: &ClientRuntimeArgs,
-    defaults: &ClientSettingsResolutionDefaults,
+    default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Result<ClientSettings, ClientSettingsResolutionError> {
     let mut messages = Vec::new();
     let missing_context = match selected_path {
@@ -188,19 +205,19 @@ fn resolve_cli_only_settings(
             }],
         },
         Vec::new(),
-        defaults,
+        default_identity_directory,
     )
 }
 
 fn resolve_selected_config_settings(
     path: PathBuf,
     runtime: &ClientRuntimeArgs,
-    defaults: &ClientSettingsResolutionDefaults,
+    default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Result<ClientSettings, ClientSettingsResolutionError> {
     let section_value = load_optional_selected_section_value(&path, "client")
         .map_err(ClientSettingsResolutionError::Settings)?;
     let Some(section_value) = section_value else {
-        return resolve_cli_only_settings(Some(&path), runtime, defaults);
+        return resolve_cli_only_settings(Some(&path), runtime, default_identity_directory);
     };
 
     let service_block_count = selected_service_block_count(&section_value);
@@ -226,7 +243,7 @@ fn resolve_selected_config_settings(
         }
     }
 
-    validate_resolved_client_settings(Some(&path), raw, messages, defaults)
+    validate_resolved_client_settings(Some(&path), raw, messages, default_identity_directory)
 }
 
 fn selected_service_block_count(section_value: &toml::Value) -> usize {
@@ -241,11 +258,11 @@ fn validate_resolved_client_settings(
     selected_path: Option<&Path>,
     raw: RawClientConfig,
     messages: Vec<String>,
-    defaults: &ClientSettingsResolutionDefaults,
+    default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Result<ClientSettings, ClientSettingsResolutionError> {
     let validation_path = selected_path.unwrap_or_else(|| Path::new("."));
     validate_client_settings_with_default_identity_dir(validation_path, raw, messages, || {
-        Ok(defaults.identity_directory.clone())
+        default_identity_directory()
     })
     .map_err(|error| match (selected_path, error) {
         (

@@ -218,11 +218,10 @@ fn client_identity_init_matches_the_generated_certificate_subject_public_key_inf
 }
 
 #[test]
-fn client_identity_init_rejects_runtime_routing_flags() {
-    let tempdir = tempdir().unwrap();
+fn client_identity_init_rejects_runtime_routing_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+    let assert = Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
         .args([
             "client",
@@ -236,11 +235,12 @@ fn client_identity_init_rejects_runtime_routing_flags() {
         .assert()
         .failure();
 
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
 
     assert!(stderr.contains("runewarp client identity"));
     assert!(stderr.contains("--server-address"));
     assert!(stderr.contains("--backend-address"));
+    Ok(())
 }
 
 #[test]

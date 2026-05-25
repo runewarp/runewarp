@@ -88,6 +88,10 @@ pub struct ClientPublicCertArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ClientPublicCertSubcommand {
+    /// Create the shared Client public CA and a leaf certificate for one
+    /// hostname (--hostname) or for all config-derived terminating hostnames
+    /// when --hostname is omitted. Requires --config when --hostname is not
+    /// provided.
     Init(ClientPublicCertInitArgs),
     /// Renew the leaf certificate for one hostname (--hostname) or all
     /// config-derived terminating hostnames when --hostname is omitted.

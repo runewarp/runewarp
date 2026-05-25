@@ -79,11 +79,11 @@ When one or more Services use `tls-mode = "terminate"`, the Client needs public 
 
 **Manual path** (`client.public-cert-dir`) — operator creates and manages a private CA and per-hostname leaf certificates:
 
-- `runewarp client public-cert init --hostname app.example.com` creates a private **Client public CA** and an initial leaf certificate for the named hostname
+- `runewarp client public-cert init` creates a private **Client public CA** and one or more initial leaf certificates, using `--hostname` or the config-derived terminating hostname set
 - running it again with a different hostname reuses the existing CA and adds a new leaf without replacing the trust anchor
 - the CA private key lives in `{public-cert-dir}/state/public-ca.key` and must be kept private
 
-Visitors must trust `public-ca.crt`; this file never changes after the initial init call. Leaf certificates are **90 days** by default; the CA is **3650 days**.
+Visitors must trust `public-ca.crt`; it stays stable across additional `init` calls and leaf renewals, but `runewarp client public-cert rotate-ca` replaces it. Per-host leaf material lives at `{public-cert-dir}/{hostname}/public.crt` and `{public-cert-dir}/{hostname}/public.key`. Leaf certificates are **90 days** by default; the CA is **3650 days**.
 
 **ACME path** (`[client.acme]`) — the Client automatically provisions and renews certificates from Let's Encrypt for the **Public hostnames** of all terminating Services. No pre-generated material is needed; configure `[client.acme]` in the Client config instead of `client.public-cert-dir`. The Client starts with a live ACME manager at startup without blocking on certificate readiness. Terminating hostnames without a ready certificate fail closed at the TLS handshake; there is no fallback to passthrough.
 

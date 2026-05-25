@@ -10,11 +10,12 @@ use rcgen::{
 use time::{Duration, OffsetDateTime};
 
 use crate::hostname::normalize_public_hostname;
-use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
 
 pub const CLIENT_PUBLIC_CA_FILENAME: &str = "public-ca.crt";
 pub const CLIENT_PUBLIC_CA_LIFETIME_DAYS: u64 = 3650;
 pub const CLIENT_PUBLIC_CERT_LIFETIME_DAYS: u64 = 90;
+pub const CLIENT_PUBLIC_CERT_FILENAME: &str = "public.crt";
+pub const CLIENT_PUBLIC_KEY_FILENAME: &str = "public.key";
 
 const CLIENT_PUBLIC_STATE_DIR: &str = "state";
 const CLIENT_PUBLIC_CA_KEY_FILENAME: &str = "public-ca.key";
@@ -76,8 +77,8 @@ impl From<rcgen::Error> for ClientPublicCertError {
 /// Layout under `directory`:
 /// ```text
 /// public-ca.crt                   # Visitor trust anchor (distribute this)
-/// {hostname}/server.crt           # leaf cert for the terminating hostname
-/// {hostname}/server.key           # leaf key for the terminating hostname
+/// {hostname}/public.crt           # leaf cert for the terminating hostname
+/// {hostname}/public.key           # leaf key for the terminating hostname
 /// state/public-ca.key             # CA private key (keep private)
 /// ```
 pub fn initialize_manual_client_public_cert(
@@ -94,8 +95,8 @@ pub fn initialize_manual_client_public_cert(
     create_directory(&state_dir, 0o700)?;
     create_directory(&leaf_dir, 0o755)?;
 
-    let leaf_cert_path = leaf_dir.join(SERVER_CERT_FILENAME);
-    let leaf_key_path = leaf_dir.join(SERVER_KEY_FILENAME);
+    let leaf_cert_path = leaf_dir.join(CLIENT_PUBLIC_CERT_FILENAME);
+    let leaf_key_path = leaf_dir.join(CLIENT_PUBLIC_KEY_FILENAME);
 
     if ca_key_path.exists() {
         // CA already initialized: reuse it and issue a new leaf only.
@@ -123,7 +124,7 @@ pub fn client_public_cert_leaf_dir(directory: &Path, hostname: &str) -> PathBuf 
 /// Renews the leaf certificate for `hostname` under `directory`, reusing the
 /// existing shared Client public CA. The CA itself is not changed.
 ///
-/// Replaces `{hostname}/server.crt` and `{hostname}/server.key` atomically.
+/// Replaces `{hostname}/public.crt` and `{hostname}/public.key` atomically.
 pub fn renew_manual_client_public_cert(
     directory: &Path,
     hostname: &str,
@@ -139,12 +140,12 @@ pub fn renew_manual_client_public_cert(
         generate_leaf_from_existing_ca(&ca_cert_path, &ca_key_path, &hostname)?;
 
     replace_file_atomically_with_mode(
-        &leaf_dir.join(SERVER_CERT_FILENAME),
+        &leaf_dir.join(CLIENT_PUBLIC_CERT_FILENAME),
         leaf_cert_pem.as_bytes(),
         0o644,
     )?;
     replace_file_atomically_with_mode(
-        &leaf_dir.join(SERVER_KEY_FILENAME),
+        &leaf_dir.join(CLIENT_PUBLIC_KEY_FILENAME),
         leaf_key_pem.as_bytes(),
         0o600,
     )?;
@@ -200,12 +201,12 @@ pub fn rotate_manual_client_public_cert_authority(
     for (hostname, leaf_cert_pem, leaf_key_pem) in leaves {
         let leaf_dir = directory.join(&hostname);
         replace_file_atomically_with_mode(
-            &leaf_dir.join(SERVER_CERT_FILENAME),
+            &leaf_dir.join(CLIENT_PUBLIC_CERT_FILENAME),
             leaf_cert_pem.as_bytes(),
             0o644,
         )?;
         replace_file_atomically_with_mode(
-            &leaf_dir.join(SERVER_KEY_FILENAME),
+            &leaf_dir.join(CLIENT_PUBLIC_KEY_FILENAME),
             leaf_key_pem.as_bytes(),
             0o600,
         )?;
@@ -437,9 +438,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::tls_material::{
-        SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, load_certificate_chain, load_private_key,
-    };
+    use crate::tls_material::{load_certificate_chain, load_private_key};
 
     #[test]
     fn init_writes_all_expected_artifacts() {
@@ -449,8 +448,8 @@ mod tests {
 
         assert!(dir.path().join("public-ca.crt").is_file());
         assert!(dir.path().join("state/public-ca.key").is_file());
-        assert!(dir.path().join("app.example.test/server.crt").is_file());
-        assert!(dir.path().join("app.example.test/server.key").is_file());
+        assert!(dir.path().join("app.example.test/public.crt").is_file());
+        assert!(dir.path().join("app.example.test/public.key").is_file());
     }
 
     #[test]
@@ -459,8 +458,8 @@ mod tests {
 
         initialize_manual_client_public_cert(dir.path(), "App.Example.Test.").unwrap();
 
-        assert!(dir.path().join("app.example.test/server.crt").is_file());
-        assert!(dir.path().join("app.example.test/server.key").is_file());
+        assert!(dir.path().join("app.example.test/public.crt").is_file());
+        assert!(dir.path().join("app.example.test/public.key").is_file());
     }
 
     #[test]
@@ -472,9 +471,9 @@ mod tests {
         let ca_pem = fs::read_to_string(dir.path().join("public-ca.crt")).unwrap();
         let ca_key_pem = fs::read_to_string(dir.path().join("state/public-ca.key")).unwrap();
         let leaf_cert_pem =
-            fs::read_to_string(dir.path().join("app.example.test/server.crt")).unwrap();
+            fs::read_to_string(dir.path().join("app.example.test/public.crt")).unwrap();
         let leaf_key_pem =
-            fs::read_to_string(dir.path().join("app.example.test/server.key")).unwrap();
+            fs::read_to_string(dir.path().join("app.example.test/public.key")).unwrap();
 
         assert!(ca_pem.starts_with("-----BEGIN CERTIFICATE-----"));
         assert!(ca_key_pem.starts_with("-----BEGIN PRIVATE KEY-----"));
@@ -503,8 +502,8 @@ mod tests {
             result.is_ok(),
             "second init with a new hostname should succeed: {result:?}"
         );
-        assert!(dir.path().join("api.example.test/server.crt").is_file());
-        assert!(dir.path().join("api.example.test/server.key").is_file());
+        assert!(dir.path().join("api.example.test/public.crt").is_file());
+        assert!(dir.path().join("api.example.test/public.key").is_file());
     }
 
     #[test]
@@ -531,9 +530,9 @@ mod tests {
         initialize_manual_client_public_cert(dir.path(), "api.example.test").unwrap();
 
         let app_certs =
-            load_certificate_chain(&dir.path().join("app.example.test/server.crt")).unwrap();
+            load_certificate_chain(&dir.path().join("app.example.test/public.crt")).unwrap();
         let api_certs =
-            load_certificate_chain(&dir.path().join("api.example.test/server.crt")).unwrap();
+            load_certificate_chain(&dir.path().join("api.example.test/public.crt")).unwrap();
 
         assert!(!app_certs.is_empty());
         assert!(!api_certs.is_empty());
@@ -551,8 +550,8 @@ mod tests {
         initialize_manual_client_public_cert(dir.path(), "app.example.test").unwrap();
 
         let leaf_dir = dir.path().join("app.example.test");
-        let certs = load_certificate_chain(&leaf_dir.join(SERVER_CERT_FILENAME)).unwrap();
-        let _key = load_private_key(&leaf_dir.join(SERVER_KEY_FILENAME)).unwrap();
+        let certs = load_certificate_chain(&leaf_dir.join(CLIENT_PUBLIC_CERT_FILENAME)).unwrap();
+        let _key = load_private_key(&leaf_dir.join(CLIENT_PUBLIC_KEY_FILENAME)).unwrap();
 
         assert!(!certs.is_empty());
     }

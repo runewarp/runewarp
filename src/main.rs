@@ -259,16 +259,20 @@ fn run_client_public_cert_command(
 ) -> Result<(), Box<dyn Error>> {
     match command.command {
         cli::ClientPublicCertSubcommand::Init(args) => {
-            let hostname = args
-                .hostname
-                .ok_or("--hostname is required for `client public-cert init`")?;
-            let directory = resolve_client_public_cert_dir(config, args.dir)?;
-            initialize_manual_client_public_cert(&directory, &hostname)?;
+            let directory = resolve_client_public_cert_dir(config.clone(), args.dir)?;
+            let hostnames = resolve_client_public_cert_hostnames(config, args.hostname)?;
+            for hostname in &hostnames {
+                initialize_manual_client_public_cert(&directory, hostname)?;
+            }
             println!(
                 "Client public CA: {}",
                 directory
                     .join(runewarp::CLIENT_PUBLIC_CA_FILENAME)
                     .display()
+            );
+            println!(
+                "Initialized leaf certificate(s) for: {}",
+                hostnames.join(", ")
             );
             println!(
                 "Leaf certificate lifetime: {} days",
@@ -309,7 +313,8 @@ fn run_client_public_cert_command(
     }
 }
 
-/// Resolves the set of hostnames to target for `client public-cert renew`.
+/// Resolves the set of hostnames to target for `client public-cert init` or
+/// `client public-cert renew`.
 ///
 /// - If `--hostname H` was supplied explicitly, returns `[H]`.
 /// - If `--hostname` was omitted and a config path is available, derives the

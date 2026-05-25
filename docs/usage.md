@@ -15,7 +15,7 @@ Runewarp assumes:
 
 - a public **Server** reachable on its configured `server.public-bind-address` for **Visitor** TLS traffic and `server.tunnel-bind-address` for **Client** **Tunnel connections**; both default to `0.0.0.0:443`
 - one or more operator-owned **Public hostnames** that resolve to the Server
-- a TLS-terminating **Local backend** behind the Client
+- a **Local backend** behind the Client — TLS-terminating in passthrough mode, or plaintext in terminate mode
 - a decision about the Server certificate path: ACME for the **Server hostname** or the manual/private-CA path
 
 If the product language in this guide feels unfamiliar, read [`CONTEXT.md`](../CONTEXT.md) first.
@@ -98,18 +98,21 @@ If any Client Service uses `tls-mode = "terminate"`, choose one of the two suppo
 
 | Path | When to use it | What to do |
 | --- | --- | --- |
-| Manual (`client.public-cert-dir`) | Private deployments or operator-managed trust; Visitors need a shared CA | Create material with `runewarp client public-cert init`; distribute `public-ca.crt` to Visitors |
+| Manual (`client.public-cert-dir`) | Private deployments or operator-managed trust; Visitors need a shared CA | Create material with `runewarp client public-cert init`, set `client.public-cert-dir`, and distribute `public-ca.crt` to Visitors |
 | ACME (`[client.acme]`) | Publicly routable Public hostnames and standard public trust | Configure `[client.acme]` in Client config; no pre-generated material needed |
 
 **Manual path:**
 
 ```bash
 runewarp client public-cert init --hostname app.example.com
+
+# or derive every terminating hostname from config:
+runewarp client --config client.toml public-cert init
 ```
 
-Run once per terminating hostname; a second run with a new hostname reuses the existing CA and adds only the new leaf certificate. Share `public-ca.crt` with each Visitor as their trust anchor. When the CA already exists, `runewarp client public-cert init` refuses to replace it, keeping the Visitor-facing trust anchor stable.
+Run once per terminating hostname, or omit `--hostname` and supply `--config` to derive the full terminating-hostname set from `client.services[].public-hostnames` where `tls-mode = "terminate"`. A second run with a new hostname reuses the existing CA and adds only the new leaf certificate. Share `public-ca.crt` with each Visitor as their trust anchor. When the CA already exists, `runewarp client public-cert init` refuses to replace it, keeping the Visitor-facing trust anchor stable until you explicitly run `rotate-ca`.
 
-Set `client.public-cert-dir` in the Client config to the directory where the material was written (defaults to the XDG data location for Client public certificate material).
+Set `client.public-cert-dir` in the Client config to the directory where the material was written. The `client public-cert` commands resolve their working directory from `--dir`, then `client.public-cert-dir`, then the XDG default when neither is set, but runtime validation does **not** make manual mode implicit from that default path: terminating Services still require explicit `client.public-cert-dir` in config unless you use `[client.acme]`.
 
 **Renewing leaf certificates (manual path):**
 
@@ -125,7 +128,7 @@ To renew all terminating hostnames derived from config (requires `--config`):
 runewarp client --config client.toml public-cert renew
 ```
 
-The `--hostname` set comes from `public-hostnames` on `tls-mode = "terminate"` services in the config. Omitting `--hostname` without a config file is an error.
+For `init` and `renew`, the `--hostname` set comes from `public-hostnames` on `tls-mode = "terminate"` services in the config when `--hostname` is omitted. Omitting `--hostname` without a config file is an error.
 
 **Rotating the Client public CA (manual path):**
 
@@ -215,7 +218,7 @@ The routing flags belong only to the runtime `runewarp client` form. `runewarp c
 
 1. Point each **Public hostname** at the Server.
 2. Make a TLS request to the Public hostname.
-3. Confirm the backend answers with its own certificate and application response.
+3. Confirm the request succeeds and the expected application answers. In passthrough mode the backend's own certificate should appear; in terminate mode the Client-presented public certificate should appear and the backend should receive plaintext.
 
 When logs are enabled, the Server and Client emit human-readable routing diagnostics that help confirm:
 
@@ -231,4 +234,5 @@ When logs are enabled, the Server and Client emit human-readable routing diagnos
 | Client cannot connect to the Server | Wrong Server trust path | Check `client.server-trust = "ca-file"` and the selected `client.server-ca-file` path for the manual/private-CA path, or confirm the ACME/public-CA chain is trusted |
 | Server drops a Public hostname | Hostname is not authorized on any Server `[[tunnels]]` entry | Check `server.tunnels[].public-hostnames` |
 | Client rejects the stream | No matching **Service** on the Client | Check Client `public-hostnames`, or confirm the sole Service is intentionally Catch-all |
-| Backend handshake fails | Backend is not terminating TLS | Confirm `backend-address` points at a TLS-speaking endpoint |
+| Passthrough backend handshake fails | Backend is not terminating TLS | Confirm `backend-address` points at a TLS-speaking endpoint for `tls-mode = "passthrough"` |
+| Terminate-mode backend fails immediately | Backend still expects TLS after the Client terminated it | Confirm the matching Service uses `tls-mode = "terminate"` and the backend speaks plaintext TCP |

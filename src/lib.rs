@@ -25,8 +25,9 @@ pub use client_hello::{
     CLIENT_HELLO_BUFFER_LIMIT, ClientHelloError, ParsedClientHello, read_client_hello,
 };
 pub use client_public_cert::{
-    CLIENT_PUBLIC_CA_FILENAME, CLIENT_PUBLIC_CA_LIFETIME_DAYS, CLIENT_PUBLIC_CERT_LIFETIME_DAYS,
-    ClientPublicCertError, client_public_cert_leaf_dir, initialize_manual_client_public_cert,
+    CLIENT_PUBLIC_CA_FILENAME, CLIENT_PUBLIC_CA_LIFETIME_DAYS, CLIENT_PUBLIC_CERT_FILENAME,
+    CLIENT_PUBLIC_CERT_LIFETIME_DAYS, CLIENT_PUBLIC_KEY_FILENAME, ClientPublicCertError,
+    client_public_cert_leaf_dir, initialize_manual_client_public_cert,
     renew_manual_client_public_cert, rotate_manual_client_public_cert_authority,
 };
 pub use identity::{

@@ -38,13 +38,13 @@ fn client_public_cert_init_writes_all_artifacts_to_the_requested_directory() {
     assert_exists(
         tempdir
             .path()
-            .join("client-public-cert/app.example.test/server.crt")
+            .join("client-public-cert/app.example.test/public.crt")
             .as_path(),
     );
     assert_exists(
         tempdir
             .path()
-            .join("client-public-cert/app.example.test/server.key")
+            .join("client-public-cert/app.example.test/public.key")
             .as_path(),
     );
 }
@@ -71,7 +71,40 @@ fn client_public_cert_init_normalizes_hostname_in_subdirectory() {
     assert_exists(
         tempdir
             .path()
-            .join("client-public-cert/app.example.test/server.crt")
+            .join("client-public-cert/app.example.test/public.crt")
+            .as_path(),
+    );
+}
+
+#[test]
+fn client_public_cert_init_writes_public_named_leaf_files() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "client-public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    assert_exists(
+        tempdir
+            .path()
+            .join("client-public-cert/app.example.test/public.crt")
+            .as_path(),
+    );
+    assert_exists(
+        tempdir
+            .path()
+            .join("client-public-cert/app.example.test/public.key")
             .as_path(),
     );
 }
@@ -100,7 +133,7 @@ fn client_public_cert_init_writes_pem_artifacts_and_reports_output() {
     let leaf_cert_pem = fs::read_to_string(
         tempdir
             .path()
-            .join("client-public-cert/app.example.test/server.crt"),
+            .join("client-public-cert/app.example.test/public.crt"),
     )
     .unwrap();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
@@ -147,7 +180,7 @@ fn client_public_cert_init_refuses_to_overwrite_existing_artifacts() {
 }
 
 #[test]
-fn client_public_cert_init_requires_hostname() {
+fn client_public_cert_init_requires_hostname_or_config() {
     let tempdir = tempdir().unwrap();
 
     let assert = Command::cargo_bin("runewarp")
@@ -164,7 +197,10 @@ fn client_public_cert_init_requires_hostname() {
         .failure();
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    assert!(stderr.contains("--hostname") || stderr.contains("hostname"));
+    assert!(
+        stderr.contains("--hostname") || stderr.contains("config"),
+        "expected error mentioning --hostname or config, got: {stderr}"
+    );
 }
 
 #[test]
@@ -193,7 +229,7 @@ fn client_public_cert_init_uses_the_xdg_default_directory_when_dir_is_omitted() 
     );
     assert_exists(
         xdg_data_home
-            .join("runewarp/client/public-cert/app.example.test/server.crt")
+            .join("runewarp/client/public-cert/app.example.test/public.crt")
             .as_path(),
     );
 }
@@ -228,7 +264,44 @@ public-cert-dir = "configured/public-cert"
         .success();
 
     assert_exists(configured_dir.join("public-ca.crt").as_path());
-    assert_exists(configured_dir.join("app.example.test/server.crt").as_path());
+    assert_exists(configured_dir.join("app.example.test/public.crt").as_path());
+}
+
+#[test]
+fn client_public_cert_init_without_hostname_uses_configured_terminating_hostnames() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/public-cert");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+public-cert-dir = "configured/public-cert"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "127.0.0.1:3000"
+tls-mode = "terminate"
+
+[[client.services]]
+public-hostnames = ["api.example.test"]
+backend-address = "127.0.0.1:4000"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "--config", "client.toml", "public-cert", "init"])
+        .assert()
+        .success();
+
+    assert_exists(configured_dir.join("public-ca.crt").as_path());
+    assert_exists(configured_dir.join("app.example.test/public.crt").as_path());
+    assert_exists(configured_dir.join("api.example.test/public.crt").as_path());
 }
 
 fn assert_exists(path: &Path) {
@@ -265,13 +338,13 @@ fn client_public_cert_renew_with_hostname_replaces_leaf_but_keeps_ca() {
     let original_leaf = fs::read(
         tempdir
             .path()
-            .join("public-cert/app.example.test/server.crt"),
+            .join("public-cert/app.example.test/public.crt"),
     )
     .unwrap();
     let original_key = fs::read(
         tempdir
             .path()
-            .join("public-cert/app.example.test/server.key"),
+            .join("public-cert/app.example.test/public.key"),
     )
     .unwrap();
 
@@ -299,7 +372,7 @@ fn client_public_cert_renew_with_hostname_replaces_leaf_but_keeps_ca() {
         fs::read(
             tempdir
                 .path()
-                .join("public-cert/app.example.test/server.crt")
+                .join("public-cert/app.example.test/public.crt")
         )
         .unwrap(),
         original_leaf,
@@ -309,7 +382,7 @@ fn client_public_cert_renew_with_hostname_replaces_leaf_but_keeps_ca() {
         fs::read(
             tempdir
                 .path()
-                .join("public-cert/app.example.test/server.key")
+                .join("public-cert/app.example.test/public.key")
         )
         .unwrap(),
         original_key,
@@ -381,13 +454,13 @@ tls-mode = "terminate"
     let original_app_leaf = fs::read(
         tempdir
             .path()
-            .join("public-cert/app.example.test/server.crt"),
+            .join("public-cert/app.example.test/public.crt"),
     )
     .unwrap();
     let original_api_leaf = fs::read(
         tempdir
             .path()
-            .join("public-cert/api.example.test/server.crt"),
+            .join("public-cert/api.example.test/public.crt"),
     )
     .unwrap();
 
@@ -403,7 +476,7 @@ tls-mode = "terminate"
         fs::read(
             tempdir
                 .path()
-                .join("public-cert/app.example.test/server.crt")
+                .join("public-cert/app.example.test/public.crt")
         )
         .unwrap(),
         original_app_leaf,
@@ -413,7 +486,7 @@ tls-mode = "terminate"
         fs::read(
             tempdir
                 .path()
-                .join("public-cert/api.example.test/server.crt")
+                .join("public-cert/api.example.test/public.crt")
         )
         .unwrap(),
         original_api_leaf,
@@ -487,13 +560,13 @@ tls-mode = "terminate"
     let original_app_leaf = fs::read(
         tempdir
             .path()
-            .join("public-cert/app.example.test/server.crt"),
+            .join("public-cert/app.example.test/public.crt"),
     )
     .unwrap();
     let original_api_leaf = fs::read(
         tempdir
             .path()
-            .join("public-cert/api.example.test/server.crt"),
+            .join("public-cert/api.example.test/public.crt"),
     )
     .unwrap();
 
@@ -524,7 +597,7 @@ tls-mode = "terminate"
         fs::read(
             tempdir
                 .path()
-                .join("public-cert/app.example.test/server.crt")
+                .join("public-cert/app.example.test/public.crt")
         )
         .unwrap(),
         original_app_leaf,
@@ -534,7 +607,7 @@ tls-mode = "terminate"
         fs::read(
             tempdir
                 .path()
-                .join("public-cert/api.example.test/server.crt")
+                .join("public-cert/api.example.test/public.crt")
         )
         .unwrap(),
         original_api_leaf,
@@ -579,13 +652,13 @@ fn client_public_cert_second_init_with_different_hostname_succeeds() {
     assert_exists(
         tempdir
             .path()
-            .join("public-cert/api.example.test/server.crt")
+            .join("public-cert/api.example.test/public.crt")
             .as_path(),
     );
     assert_exists(
         tempdir
             .path()
-            .join("public-cert/api.example.test/server.key")
+            .join("public-cert/api.example.test/public.key")
             .as_path(),
     );
 }

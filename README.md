@@ -4,12 +4,12 @@
   </h1>
 </div>
 
-Runewarp is a self-hostable ingress tunneling tool to privately forward TLS traffic to local services.
+Runewarp is a self-hostable ingress tunneling tool for private TLS passthrough by default, with optional Client-side TLS termination.
 
 ## Goals
 
 - **TLS passthrough ingress tunneling** — Server routes traffic by SNI without terminating or inspecting TLS
-- **Privacy-respecting by design** — sees SNI, IPs, but never HTTP headers or application plaintext
+- **Privacy-respecting by design** — the Server sees SNI and IPs, and customer plaintext reaches Runewarp only on the Client in opt-in terminate mode
 - **Traverse NAT and firewalls** — Clients initiate outbound QUIC connections, so no port forwarding needed
 - **Self-hostable and operator-controlled** — single Rust binary, Apache 2.0
 - **Remain operationally simple** — TOML config, a handful of CLI subcommands, no runtime dependencies

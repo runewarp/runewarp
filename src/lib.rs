@@ -24,6 +24,11 @@ pub use client::{
 pub use client_hello::{
     CLIENT_HELLO_BUFFER_LIMIT, ClientHelloError, ParsedClientHello, read_client_hello,
 };
+pub use client_public_cert::{
+    CLIENT_PUBLIC_CA_FILENAME, CLIENT_PUBLIC_CA_LIFETIME_DAYS, CLIENT_PUBLIC_CERT_LIFETIME_DAYS,
+    ClientPublicCertError, client_public_cert_leaf_dir, initialize_manual_client_public_cert,
+    renew_manual_client_public_cert, rotate_manual_client_public_cert_authority,
+};
 pub use identity::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientCertificateRenewalDecision,
@@ -35,8 +40,8 @@ pub use identity::{
 };
 pub use paths::{
     XdgPathError, default_client_acme_state_dir, default_client_identity_material_dir,
-    default_client_public_cert_material_dir, default_client_server_ca_path,
-    default_config_path, default_server_acme_state_dir, default_server_cert_material_dir,
+    default_client_public_cert_material_dir, default_client_server_ca_path, default_config_path,
+    default_server_acme_state_dir, default_server_cert_material_dir,
 };
 pub use quic::{
     IDLE_TIMEOUT, KEEPALIVE_INTERVAL, MAX_SERVER_OPENED_BIDI_STREAMS, QuicConfigError,
@@ -45,10 +50,6 @@ pub use quic::{
     make_server_quic_config_with_client_auth_resolver,
 };
 pub use server::{Server, ServerConfig};
-pub use client_public_cert::{
-    CLIENT_PUBLIC_CA_FILENAME, CLIENT_PUBLIC_CA_LIFETIME_DAYS, CLIENT_PUBLIC_CERT_LIFETIME_DAYS,
-    ClientPublicCertError, client_public_cert_leaf_dir, initialize_manual_client_public_cert,
-};
 pub use server_cert::{
     SERVER_CA_FILENAME, initialize_manual_server_certificate, renew_manual_server_certificate,
     rotate_manual_server_certificate_authority,
@@ -60,5 +61,6 @@ pub use settings::{
     resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config,
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
+    resolve_terminating_hostnames_from_config,
 };
 pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};

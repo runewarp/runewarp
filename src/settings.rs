@@ -63,8 +63,13 @@ pub struct ClientSettings {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientPublicCertConfig {
-    Manual { directory: PathBuf },
-    Acme { email: String, state_directory: PathBuf },
+    Manual {
+        directory: PathBuf,
+    },
+    Acme {
+        email: String,
+        state_directory: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,6 +266,27 @@ pub fn resolve_client_public_cert_material_dir_from_config(
     }
     let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
     Ok(raw.public_cert_dir.map(|p| resolve_path(base_dir, &p)))
+}
+
+/// Returns the deduplicated, normalized list of `public-hostnames` from every
+/// `[[client.services]]` entry whose `tls-mode` is `"terminate"`. Returns
+/// `None` when no `[client]` section exists in the config file.
+pub fn resolve_terminating_hostnames_from_config(
+    path: &Path,
+) -> Result<Option<Vec<String>>, SettingsError> {
+    let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
+        return Ok(None);
+    };
+    let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
+    let mut hostnames: Vec<String> = raw
+        .services
+        .into_iter()
+        .filter(|s| s.tls_mode.as_deref() == Some("terminate"))
+        .flat_map(|s| s.public_hostnames.unwrap_or_default())
+        .collect();
+    hostnames.sort();
+    hostnames.dedup();
+    Ok(Some(hostnames))
 }
 
 pub fn resolve_client_identity_material_dir_from_config(
@@ -477,9 +503,7 @@ pub(crate) fn validate_client_settings_with_default_identity_dir(
     let manual_cert_present = raw.public_cert_dir.is_some();
     let acme_present = raw.acme.is_some();
     if manual_cert_present && acme_present {
-        messages.push(
-            "[client.acme] and client.public-cert-dir are mutually exclusive".to_owned(),
-        );
+        messages.push("[client.acme] and client.public-cert-dir are mutually exclusive".to_owned());
     }
     let manual_cert = if !acme_present {
         raw.public_cert_dir.and_then(|dir| {
@@ -498,9 +522,8 @@ pub(crate) fn validate_client_settings_with_default_identity_dir(
         None
     };
     let acme = if acme_present && !manual_cert_present {
-        raw.acme.and_then(|acme| {
-            validate_client_acme_settings(acme, config_dir, &mut messages)
-        })
+        raw.acme
+            .and_then(|acme| validate_client_acme_settings(acme, config_dir, &mut messages))
     } else {
         None
     };
@@ -537,7 +560,10 @@ pub(crate) fn validate_client_settings_with_default_identity_dir(
     let has_terminating_service = validated_services
         .iter()
         .any(|s| s.parsed_tls_mode == Some(ClientTlsMode::Terminate));
-    if has_terminating_service && public_cert_config.is_none() && !(manual_cert_present && acme_present) {
+    if has_terminating_service
+        && public_cert_config.is_none()
+        && !(manual_cert_present && acme_present)
+    {
         messages.push(
             "client.public-cert-dir or [client.acme] is required when any service uses tls-mode = \"terminate\""
                 .to_owned(),

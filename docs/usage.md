@@ -111,6 +111,32 @@ Run once per terminating hostname; a second run with a new hostname reuses the e
 
 Set `client.public-cert-dir` in the Client config to the directory where the material was written (defaults to the XDG data location for Client public certificate material).
 
+**Renewing leaf certificates (manual path):**
+
+To renew a leaf certificate for a single hostname:
+
+```bash
+runewarp client public-cert renew --hostname app.example.com
+```
+
+To renew all terminating hostnames derived from config (requires `--config`):
+
+```bash
+runewarp client --config client.toml public-cert renew
+```
+
+The `--hostname` set comes from `public-hostnames` on `tls-mode = "terminate"` services in the config. Omitting `--hostname` without a config file is an error.
+
+**Rotating the Client public CA (manual path):**
+
+`rotate-ca` replaces the trust anchor and reissues every managed leaf certificate. Visitors must trust the new `public-ca.crt` after rotation. Requires `--config` so Runewarp can determine which hostnames are managed:
+
+```bash
+runewarp client --config client.toml public-cert rotate-ca
+```
+
+The managed hostname set comes from `public-hostnames` on `tls-mode = "terminate"` services in the config. Scanning on-disk leaf directories is not used.
+
 **ACME path:**
 
 Add `[client.acme]` to the Client config instead of `client.public-cert-dir`. The Client automatically provisions and renews certificates from Let's Encrypt for every **Public hostname** on a terminating Service. No pre-generated material is needed. The Client starts with a live ACME manager at startup without blocking on certificate readiness; a terminating hostname without a ready certificate fails closed at the TLS handshake until the certificate is issued. `acme-tls/1` challenge traffic for **Public hostnames** is routed through the Server to the Client using the same path as ordinary Visitor TLS.

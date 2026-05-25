@@ -17,11 +17,12 @@ use runewarp::{
     default_client_identity_material_dir, default_client_public_cert_material_dir,
     default_config_path, default_server_cert_material_dir, generate_client_identity,
     initialize_manual_client_public_cert, initialize_manual_server_certificate,
-    load_server_settings, renew_client_identity_certificate, renew_manual_server_certificate,
-    resolve_client_identity_material_dir_from_config,
+    load_server_settings, renew_client_identity_certificate, renew_manual_client_public_cert,
+    renew_manual_server_certificate, resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config, resolve_client_settings_from_cli,
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
-    rotate_client_identity, rotate_manual_server_certificate_authority,
+    resolve_terminating_hostnames_from_config, rotate_client_identity,
+    rotate_manual_client_public_cert_authority, rotate_manual_server_certificate_authority,
 };
 use time::OffsetDateTime;
 
@@ -263,7 +264,42 @@ fn run_client_public_cert_command(
                 .ok_or("--hostname is required for `client public-cert init`")?;
             let directory = resolve_client_public_cert_dir(config, args.dir)?;
             initialize_manual_client_public_cert(&directory, &hostname)?;
-            println!("Client public CA: {}", directory.join(runewarp::CLIENT_PUBLIC_CA_FILENAME).display());
+            println!(
+                "Client public CA: {}",
+                directory
+                    .join(runewarp::CLIENT_PUBLIC_CA_FILENAME)
+                    .display()
+            );
+            println!(
+                "Leaf certificate lifetime: {} days",
+                runewarp::CLIENT_PUBLIC_CERT_LIFETIME_DAYS
+            );
+            Ok(())
+        }
+        cli::ClientPublicCertSubcommand::Renew(args) => {
+            let directory = resolve_client_public_cert_dir(config.clone(), args.dir)?;
+            let hostnames = resolve_client_public_cert_hostnames(config, args.hostname)?;
+            for hostname in &hostnames {
+                renew_manual_client_public_cert(&directory, hostname)?;
+            }
+            println!("Renewed leaf certificate(s) for: {}", hostnames.join(", "));
+            println!(
+                "Leaf certificate lifetime: {} days",
+                runewarp::CLIENT_PUBLIC_CERT_LIFETIME_DAYS
+            );
+            Ok(())
+        }
+        cli::ClientPublicCertSubcommand::RotateCa(args) => {
+            let directory = resolve_client_public_cert_dir(config.clone(), args.dir)?;
+            let hostnames = resolve_client_public_cert_hostnames_from_config_required(config)?;
+            rotate_manual_client_public_cert_authority(&directory, &hostnames)?;
+            println!(
+                "Client public CA rotated: {}",
+                directory
+                    .join(runewarp::CLIENT_PUBLIC_CA_FILENAME)
+                    .display()
+            );
+            println!("Reissued leaf certificate(s) for: {}", hostnames.join(", "));
             println!(
                 "Leaf certificate lifetime: {} days",
                 runewarp::CLIENT_PUBLIC_CERT_LIFETIME_DAYS
@@ -271,6 +307,76 @@ fn run_client_public_cert_command(
             Ok(())
         }
     }
+}
+
+/// Resolves the set of hostnames to target for `client public-cert renew`.
+///
+/// - If `--hostname H` was supplied explicitly, returns `[H]`.
+/// - If `--hostname` was omitted and a config path is available, derives the
+///   set from `public-hostnames` on terminating services in the config.
+/// - If neither source is available, returns an error prompting the operator
+///   to supply one.
+fn resolve_client_public_cert_hostnames(
+    config: Option<std::path::PathBuf>,
+    hostname: Option<String>,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    if let Some(h) = hostname {
+        return Ok(vec![h]);
+    }
+    let Some(config_path) = config else {
+        return Err(
+            "--hostname is required, or supply --config to derive targets from \
+             client.services[].public-hostnames (tls-mode = \"terminate\")"
+                .into(),
+        );
+    };
+    let Some(hostnames) = resolve_terminating_hostnames_from_config(&config_path)? else {
+        return Err(format!(
+            "config file {} has no [client] section; cannot derive terminating hostnames",
+            config_path.display()
+        )
+        .into());
+    };
+    if hostnames.is_empty() {
+        return Err(format!(
+            "config file {} has no tls-mode = \"terminate\" services with explicit \
+             public-hostnames; use --hostname to specify the target explicitly",
+            config_path.display()
+        )
+        .into());
+    }
+    Ok(hostnames)
+}
+
+/// Like `resolve_client_public_cert_hostnames` but always requires config
+/// (used by `rotate-ca` which has no `--hostname` flag).
+fn resolve_client_public_cert_hostnames_from_config_required(
+    config: Option<std::path::PathBuf>,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let Some(config_path) = config else {
+        return Err(
+            "--config is required for `client public-cert rotate-ca`; the managed hostname \
+             set is derived from client.services[].public-hostnames \
+             (tls-mode = \"terminate\")"
+                .into(),
+        );
+    };
+    let Some(hostnames) = resolve_terminating_hostnames_from_config(&config_path)? else {
+        return Err(format!(
+            "config file {} has no [client] section; cannot derive terminating hostnames",
+            config_path.display()
+        )
+        .into());
+    };
+    if hostnames.is_empty() {
+        return Err(format!(
+            "config file {} has no tls-mode = \"terminate\" services with explicit \
+             public-hostnames",
+            config_path.display()
+        )
+        .into());
+    }
+    Ok(hostnames)
 }
 
 fn resolve_client_public_cert_dir(

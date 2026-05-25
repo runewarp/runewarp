@@ -228,3 +228,95 @@ fn assert_exists(path: &Path) {
         path.display()
     );
 }
+
+#[test]
+fn client_public_cert_second_init_with_different_hostname_succeeds() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "api.example.test",
+        ])
+        .assert()
+        .success();
+
+    assert_exists(
+        tempdir
+            .path()
+            .join("public-cert/api.example.test/server.crt")
+            .as_path(),
+    );
+    assert_exists(
+        tempdir
+            .path()
+            .join("public-cert/api.example.test/server.key")
+            .as_path(),
+    );
+}
+
+#[test]
+fn client_public_cert_second_init_keeps_ca_cert_stable() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let ca_pem_before = fs::read(tempdir.path().join("public-cert/public-ca.crt")).unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "api.example.test",
+        ])
+        .assert()
+        .success();
+
+    let ca_pem_after = fs::read(tempdir.path().join("public-cert/public-ca.crt")).unwrap();
+
+    assert_eq!(
+        ca_pem_before, ca_pem_after,
+        "public-ca.crt must not change on second init with a different hostname"
+    );
+}

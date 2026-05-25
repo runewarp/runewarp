@@ -15,7 +15,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 futures-util = "0.3.32"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 rustls-acme = { version = "0.15.2", default-features = false, features = ["ring", "tokio", "tls12", "webpki-roots"] }
-rcgen = "0.14.8"
+rcgen = { version = "0.14.8", features = ["x509-parser"] }
 quinn = { version = "0.11.9", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23.35", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-native-certs = "0.8.3"

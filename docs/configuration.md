@@ -282,6 +282,7 @@ Runewarp enforces these rules independently on each side:
 - any exact hostname overlap across Tunnel entries after normalization is an error
 - any exact hostname overlap across Service entries after normalization is an error
 - `server.hostname` itself must not be reused as a routed **Public hostname**
+
 ### Cross-side hostname coverage
 
 Runewarp does not validate cross-side hostname coverage at runtime:

@@ -143,6 +143,25 @@ runewarp client --config /etc/runewarp/client.toml
 
 Runewarp loads `--config` from `$XDG_CONFIG_HOME/runewarp/config.toml` when omitted, falling back to `~/.config/runewarp/config.toml` when `XDG_CONFIG_HOME` is unset. Explicit paths are still easier to operate and review.
 
+For the smallest Client startup, `runewarp client` can also run without a selected Client config when you provide both runtime routing flags:
+
+```bash
+runewarp client --server-address tunnel.example.com --backend-address caddy.local:443
+```
+
+That CLI-only shape creates one Client-side **Catch-all Service**, defaults `client.server-trust` to `system`, and still uses the usual omitted-key defaults for the Client identity directory, logs, and reconnect behavior.
+
+Precedence rules for `runewarp client` are:
+
+- an explicit `--config` path is authoritative and a missing explicit path is still an error
+- when `--config` is omitted, a discovered default config file remains authoritative when it exists
+- if the selected file has no `[client]` section, `runewarp client` can still start when both `--server-address` and `--backend-address` are provided
+- when a selected config file exists, `--server-address` may replace `client.server-address` before validation
+- when a selected config file exists, `--backend-address` may supply the sole Catch-all Service only when that file contributes no `[[client.services]]` blocks at all
+- any configured Service blocks `--backend-address`, even when the Service block is malformed
+
+The routing flags belong only to the runtime `runewarp client` form. `runewarp client identity ...` continues to accept only identity-material options.
+
 ### 6. Verify traffic
 
 1. Point each **Public hostname** at the Server.

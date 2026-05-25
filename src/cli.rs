@@ -65,6 +65,10 @@ pub struct ServerCertDirArgs {
 pub struct ClientArgs {
     #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<PathBuf>,
+    #[arg(long, value_name = "HOSTNAME[:PORT]")]
+    pub server_address: Option<String>,
+    #[arg(long, value_name = "ADDRESS")]
+    pub backend_address: Option<String>,
     #[command(subcommand)]
     pub command: Option<ClientSubcommand>,
 }

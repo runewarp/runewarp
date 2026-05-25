@@ -12,14 +12,14 @@ use clap::{CommandFactory, Parser};
 use runewarp::runtime_log::{emit_stderr, warning_line};
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
-    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, PreparedClient, PreparedServer, SettingsError,
-    XdgPathError, default_client_identity_material_dir, default_config_path,
-    default_server_cert_material_dir, generate_client_identity,
-    initialize_manual_server_certificate, load_client_settings, load_server_settings,
+    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientRuntimeArgs,
+    ClientSettingsResolutionError, PreparedClient, PreparedServer, SettingsError, XdgPathError,
+    default_client_identity_material_dir, default_config_path, default_server_cert_material_dir,
+    generate_client_identity, initialize_manual_server_certificate, load_server_settings,
     renew_client_identity_certificate, renew_manual_server_certificate,
-    resolve_client_identity_material_dir_from_config, resolve_server_cert_material_dir_from_config,
-    resolve_server_hostname_from_config, rotate_client_identity,
-    rotate_manual_server_certificate_authority,
+    resolve_client_identity_material_dir_from_config, resolve_client_settings_from_cli,
+    resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
+    rotate_client_identity, rotate_manual_server_certificate_authority,
 };
 use time::OffsetDateTime;
 
@@ -171,15 +171,51 @@ fn run_server_cert_command(
 }
 
 async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box<dyn Error>> {
-    let config = command.config;
-    if let Some(cli::ClientSubcommand::Identity(command)) = command.command {
+    let cli::ClientArgs {
+        config,
+        server_address,
+        backend_address,
+        command,
+    } = command;
+
+    if let Some(cli::ClientSubcommand::Identity(command)) = command {
+        let forbidden_flags = client_identity_forbidden_runtime_flags(
+            server_address.as_deref(),
+            backend_address.as_deref(),
+        );
+        if !forbidden_flags.is_empty() {
+            return Err(format!(
+                "{} may be used only with `runewarp client`, not `runewarp client identity ...`",
+                forbidden_flags.join(" and ")
+            )
+            .into());
+        }
         return run_client_identity_command(config, command);
     }
 
-    let config_path = config_path_or_default(config)?;
-    let settings = load_client_settings(&config_path)
-        .map_err(|error| wrap_client_settings_error(error, &config_path))?;
+    let settings = resolve_client_settings_from_cli(
+        config,
+        ClientRuntimeArgs {
+            server_address,
+            backend_address,
+        },
+    )
+    .map_err(wrap_client_settings_resolution_error)?;
     run_client_command(&settings, wildcard(0)).await
+}
+
+fn client_identity_forbidden_runtime_flags(
+    server_address: Option<&str>,
+    backend_address: Option<&str>,
+) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if server_address.is_some() {
+        flags.push("--server-address");
+    }
+    if backend_address.is_some() {
+        flags.push("--backend-address");
+    }
+    flags
 }
 
 fn run_client_identity_command(
@@ -357,11 +393,14 @@ fn wrap_server_settings_error(error: SettingsError, config_path: &Path) -> Box<d
     Box::new(error)
 }
 
-fn wrap_client_settings_error(error: SettingsError, config_path: &Path) -> Box<dyn Error> {
-    if client_identity_missing(&error) {
+fn wrap_client_settings_resolution_error(error: ClientSettingsResolutionError) -> Box<dyn Error> {
+    if error
+        .validation_messages()
+        .is_some_and(client_identity_messages_missing)
+    {
         return Box::new(io::Error::other(format!(
             "{error}\nHint: {}",
-            client_identity_init_hint(config_path)
+            client_identity_init_hint_from_optional_path(error.selected_config_path())
         )));
     }
     Box::new(error)
@@ -371,13 +410,6 @@ fn server_material_missing(error: &SettingsError) -> bool {
     settings_messages(error).iter().any(|message| {
         message.starts_with("server.cert-dir directory not found:")
             || message.starts_with("server.cert-dir file not found:")
-    })
-}
-
-fn client_identity_missing(error: &SettingsError) -> bool {
-    settings_messages(error).iter().any(|message| {
-        message.starts_with("client.identity-dir directory not found:")
-            || message.starts_with("client.identity-dir file not found:")
     })
 }
 
@@ -394,6 +426,20 @@ fn server_cert_init_hint(config_path: &Path) -> String {
 
 fn client_identity_init_hint(config_path: &Path) -> String {
     hint_command("runewarp client identity init", config_path)
+}
+
+fn client_identity_init_hint_from_optional_path(config_path: Option<&Path>) -> String {
+    config_path.map_or_else(
+        || "runewarp client identity init".to_owned(),
+        client_identity_init_hint,
+    )
+}
+
+fn client_identity_messages_missing(messages: &[String]) -> bool {
+    messages.iter().any(|message| {
+        message.starts_with("client.identity-dir directory not found:")
+            || message.starts_with("client.identity-dir file not found:")
+    })
 }
 
 fn hint_command(base: &str, config_path: &Path) -> String {

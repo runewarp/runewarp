@@ -228,6 +228,7 @@ fn client_settings_report_all_selected_mode_errors_together() {
         tempdir.path().join("config.toml"),
         r#"
 [client]
+identity-dir = "missing-client"
 reconnect-interval = 0
 
 [[client.services]]

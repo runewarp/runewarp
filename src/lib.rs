@@ -15,7 +15,11 @@ mod startup;
 mod tls_material;
 mod trust;
 
-pub use client::{Client, ClientConfig, ClientConnectError};
+pub use client::{
+    Client, ClientConfig, ClientConnectError, ClientRuntimeArgs, ClientSettingsResolutionDefaults,
+    ClientSettingsResolutionError, SelectedClientConfig, resolve_client_settings_from_cli,
+    resolve_selected_client_settings, select_client_config,
+};
 pub use client_hello::{
     CLIENT_HELLO_BUFFER_LIMIT, ClientHelloError, ParsedClientHello, read_client_hello,
 };

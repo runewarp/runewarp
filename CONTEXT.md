@@ -53,7 +53,7 @@ A client-side routing unit that maps incoming traffic to one **Local backend**.
 _Avoid_: Backend, process, app
 
 **Local backend**:
-The operator-run TLS-terminating process or endpoint that a **Client** connects to after it selects a **Service**.
+The operator-run local endpoint that a **Client** connects to after it selects a **Service**. It terminates TLS in passthrough mode and receives plaintext in terminate mode.
 _Avoid_: Service, tunnel
 
 **Client identity**:
@@ -150,7 +150,7 @@ _Avoid_: Mixed mode, asymmetric routing
 - "client" was also used to blur the component and one running process — resolved: **Client** is the component; **Client instance** is one running copy.
 - "server hostname" and routed application hostnames were easy to blur — resolved: **Server hostname** names the Runewarp edge; **Public hostname** names operator application traffic.
 - "server address" and "server hostname" were easy to blur — resolved: **Server address** is the client-configured endpoint; **Server hostname** is the hostname form of that endpoint when a hostname is used.
-- "service" and "backend" were used interchangeably — resolved: **Service** is the client-side config unit; **Local backend** is the actual TLS endpoint the **Client** dials.
+- "service" and "backend" were used interchangeably — resolved: **Service** is the client-side config unit; **Local backend** is the actual local endpoint the **Client** dials, whether it terminates TLS or receives plaintext.
 - "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key, while certificates can rotate without changing that identity.
 - "server certificate" and the trust anchor behind it were easy to conflate — resolved: **Server certificate** is the presented leaf; **Server CA** is the private issuer in the manual Server path.
 - "catch-all" looked like casual prose, but it changes config semantics — resolved: only **Catch-all Service** remains a valid product term; Server **Tunnels** always require explicit **Public hostnames**.

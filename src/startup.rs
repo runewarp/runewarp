@@ -9,7 +9,9 @@ use rustls::pki_types::CertificateDer;
 use tokio::net::lookup_host;
 
 use crate::acme::{ManagedAcmeState, build_acme_state, build_client_acme_state, run_acme_state};
-use crate::client_public_cert::client_public_cert_leaf_dir;
+use crate::client_public_cert::{
+    CLIENT_PUBLIC_CERT_FILENAME, CLIENT_PUBLIC_KEY_FILENAME, client_public_cert_leaf_dir,
+};
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, TlsMaterialError, load_certificate_chain,
     load_private_key,
@@ -475,15 +477,15 @@ fn load_manual_termination_tls_configs(
                 continue;
             }
             let leaf_dir = client_public_cert_leaf_dir(directory, hostname);
-            let cert_chain =
-                load_certificate_chain(&leaf_dir.join(SERVER_CERT_FILENAME)).map_err(|_| {
+            let cert_chain = load_certificate_chain(&leaf_dir.join(CLIENT_PUBLIC_CERT_FILENAME))
+                .map_err(|_| {
                     format!(
                         "missing certificate for terminating hostname {hostname}: \
                          run `runewarp client public-cert init --hostname {hostname}`"
                     )
                 })?;
-            let private_key =
-                load_private_key(&leaf_dir.join(SERVER_KEY_FILENAME)).map_err(|_| {
+            let private_key = load_private_key(&leaf_dir.join(CLIENT_PUBLIC_KEY_FILENAME))
+                .map_err(|_| {
                     format!(
                         "missing private key for terminating hostname {hostname}: \
                          run `runewarp client public-cert init --hostname {hostname}`"

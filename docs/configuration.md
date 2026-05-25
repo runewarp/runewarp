@@ -43,6 +43,11 @@ runewarp client --server-address tunnel.example.com --backend-address 127.0.0.1:
 runewarp client identity init --dir ./client-identity
 runewarp client identity renew --dir ./client-identity
 runewarp client identity rotate --dir ./client-identity
+runewarp client public-cert init --dir ./public-cert --hostname app.example.com
+runewarp client --config config.toml public-cert init
+runewarp client public-cert renew --dir ./public-cert --hostname app.example.com
+runewarp client --config config.toml public-cert renew
+runewarp client --config config.toml public-cert rotate-ca
 ```
 
 `--server-address` and `--backend-address` are runtime-only flags on `runewarp client`. They are not accepted by `runewarp client identity ...`.
@@ -275,7 +280,7 @@ client route api.example.com -> passthrough
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`; otherwise system trust is used. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
 | `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG data path for Client identity material. |
 | `client.logs` | no | Boolean controlling human-readable Client runtime logs. Defaults to `true`. |
-| `client.public-cert-dir` | when using manual TLS termination | Directory containing the public certificate material for Client-side TLS termination. Mutually exclusive with `[client.acme]`. Required when any Service uses `tls-mode = "terminate"` and no `[client.acme]` is present. |
+| `client.public-cert-dir` | when using manual TLS termination | Directory containing the public certificate material for Client-side TLS termination. Mutually exclusive with `[client.acme]`. Required when any Service uses `tls-mode = "terminate"` and no `[client.acme]` is present; runtime validation does not implicitly enable manual mode from the XDG default path. |
 | `client.acme.email` | with Client ACME | ACME contact address for the Client public certificate. Required when `[client.acme]` is present. |
 | `client.acme.state-dir` | no | Writable path for durable ACME account and certificate state for the Client. When omitted, Runewarp uses and creates the XDG default client ACME state directory at startup. |
 | `client.services[].public-hostnames` | when exact-match local routing is desired | Exact **Public hostnames** this Service accepts locally. Omit only on the sole Catch-all Service. Required when `tls-mode = "terminate"`. |
@@ -315,14 +320,17 @@ When one or more Services use `tls-mode = "terminate"`, the Client needs a publi
 
 ```
 runewarp client public-cert init --hostname app.example.com
+
+# or derive all terminating hostnames from config:
+runewarp client --config client.toml public-cert init
 ```
 
 The directory layout is:
 
 - `public-ca.crt` — CA certificate (share this with Visitors as their trust anchor)
 - `state/public-ca.key` — CA private key (keep private)
-- `{hostname}/server.crt` — Leaf certificate for the named hostname
-- `{hostname}/server.key` — Leaf key for the named hostname
+- `{hostname}/public.crt` — Leaf certificate for the named hostname
+- `{hostname}/public.key` — Leaf key for the named hostname
 
 To add a certificate for another hostname in the same directory:
 
@@ -330,7 +338,7 @@ To add a certificate for another hostname in the same directory:
 runewarp client public-cert init --dir ./public-cert --hostname api.example.com
 ```
 
-`runewarp client public-cert init` refuses to overwrite an existing CA, so running it a second time with a new hostname reuses the original CA and only writes new leaf material. The Visitor-facing `public-ca.crt` therefore stays stable across additions.
+`runewarp client public-cert init` refuses to overwrite an existing CA, so running it a second time with a new hostname reuses the original CA and only writes new leaf material. The Visitor-facing `public-ca.crt` therefore stays stable across additions and leaf renewals; only `rotate-ca` changes that trust anchor.
 
 **Renewing a leaf certificate:**
 
@@ -352,7 +360,7 @@ runewarp client --config client.toml public-cert rotate-ca
 
 `rotate-ca` replaces the shared CA and reissues every managed leaf certificate. `--config` is required. After rotation, distribute the new `public-ca.crt` to Visitors so they trust the new trust anchor.
 
-When omitted, `client.public-cert-dir` defaults to the XDG data location for Client public certificate material.
+The `client public-cert` commands resolve their working directory from `--dir`, then `client.public-cert-dir`, then the XDG default data location when neither is set. Runtime validation is stricter: manual TLS termination is enabled only when `client.public-cert-dir` is set explicitly in config; Runewarp does not infer manual mode from the XDG default path.
 
 ### `client.server-trust`
 

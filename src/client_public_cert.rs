@@ -65,6 +65,13 @@ impl From<rcgen::Error> for ClientPublicCertError {
 
 /// Bootstraps a shared client public CA and a leaf certificate for `hostname`.
 ///
+/// If the CA already exists in `directory` (detected by the presence of
+/// `state/public-ca.key`), the existing CA is reused and only the leaf
+/// material for `hostname` is generated. This allows adding leaf certificates
+/// for additional hostnames without rotating the Visitor-facing trust anchor.
+///
+/// Refuses to overwrite existing leaf material for the same hostname.
+///
 /// Layout under `directory`:
 /// ```text
 /// public-ca.crt                   # Visitor trust anchor (distribute this)
@@ -79,33 +86,30 @@ pub fn initialize_manual_client_public_cert(
     let hostname = normalize_public_hostname(hostname);
     let state_dir = directory.join(CLIENT_PUBLIC_STATE_DIR);
     let leaf_dir = directory.join(&hostname);
+    let ca_cert_path = directory.join(CLIENT_PUBLIC_CA_FILENAME);
+    let ca_key_path = state_dir.join(CLIENT_PUBLIC_CA_KEY_FILENAME);
 
     create_directory(directory, 0o755)?;
     create_directory(&state_dir, 0o700)?;
     create_directory(&leaf_dir, 0o755)?;
 
-    let generated = generate_client_public_cert_material(&hostname)?;
+    let leaf_cert_path = leaf_dir.join(SERVER_CERT_FILENAME);
+    let leaf_key_path = leaf_dir.join(SERVER_KEY_FILENAME);
 
-    write_new_file_with_mode(
-        &directory.join(CLIENT_PUBLIC_CA_FILENAME),
-        generated.ca_pem.as_bytes(),
-        0o644,
-    )?;
-    write_new_file_with_mode(
-        &state_dir.join(CLIENT_PUBLIC_CA_KEY_FILENAME),
-        generated.ca_key_pem.as_bytes(),
-        0o600,
-    )?;
-    write_new_file_with_mode(
-        &leaf_dir.join(SERVER_CERT_FILENAME),
-        generated.leaf_cert_pem.as_bytes(),
-        0o644,
-    )?;
-    write_new_file_with_mode(
-        &leaf_dir.join(SERVER_KEY_FILENAME),
-        generated.leaf_key_pem.as_bytes(),
-        0o600,
-    )?;
+    if ca_key_path.exists() {
+        // CA already initialized: reuse it and issue a new leaf only.
+        let (leaf_cert_pem, leaf_key_pem) =
+            generate_leaf_from_existing_ca(&ca_cert_path, &ca_key_path, &hostname)?;
+        write_new_file_with_mode(&leaf_cert_path, leaf_cert_pem.as_bytes(), 0o644)?;
+        write_new_file_with_mode(&leaf_key_path, leaf_key_pem.as_bytes(), 0o600)?;
+    } else {
+        // Fresh init: generate CA and first leaf together.
+        let generated = generate_client_public_cert_material(&hostname)?;
+        write_new_file_with_mode(&ca_cert_path, generated.ca_pem.as_bytes(), 0o644)?;
+        write_new_file_with_mode(&ca_key_path, generated.ca_key_pem.as_bytes(), 0o600)?;
+        write_new_file_with_mode(&leaf_cert_path, generated.leaf_cert_pem.as_bytes(), 0o644)?;
+        write_new_file_with_mode(&leaf_key_path, generated.leaf_key_pem.as_bytes(), 0o600)?;
+    }
 
     Ok(())
 }
@@ -144,6 +148,40 @@ fn generate_client_public_cert_material(
         leaf_cert_pem: leaf_cert.pem(),
         leaf_key_pem,
     })
+}
+
+/// Loads an existing CA from `ca_cert_path` and `ca_key_path` and issues a new
+/// leaf certificate for `hostname`. Returns `(leaf_cert_pem, leaf_key_pem)`.
+fn generate_leaf_from_existing_ca(
+    ca_cert_path: &Path,
+    ca_key_path: &Path,
+    hostname: &str,
+) -> Result<(String, String), ClientPublicCertError> {
+    use std::fs;
+
+    let ca_cert_pem = fs::read_to_string(ca_cert_path).map_err(|source| {
+        ClientPublicCertError::ReadFile {
+            path: ca_cert_path.to_path_buf(),
+            source,
+        }
+    })?;
+    let ca_key_pem = fs::read_to_string(ca_key_path).map_err(|source| {
+        ClientPublicCertError::ReadFile {
+            path: ca_key_path.to_path_buf(),
+            source,
+        }
+    })?;
+
+    let ca_key = KeyPair::from_pem(&ca_key_pem)?;
+    let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
+
+    let not_before = OffsetDateTime::now_utc() - Duration::minutes(1);
+    let leaf_key = KeyPair::generate()?;
+    let leaf_key_pem = leaf_key.serialize_pem();
+    let leaf_params = leaf_cert_params(hostname, not_before)?;
+    let leaf_cert = leaf_params.signed_by(&leaf_key, &issuer)?;
+
+    Ok((leaf_cert.pem(), leaf_key_pem))
 }
 
 fn ca_cert_params(not_before: OffsetDateTime) -> Result<CertificateParams, rcgen::Error> {
@@ -280,6 +318,58 @@ mod tests {
         let result = initialize_manual_client_public_cert(dir.path(), "app.example.test");
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn second_init_with_different_hostname_succeeds() {
+        let dir = tempdir().unwrap();
+
+        initialize_manual_client_public_cert(dir.path(), "app.example.test").unwrap();
+        let result = initialize_manual_client_public_cert(dir.path(), "api.example.test");
+
+        assert!(
+            result.is_ok(),
+            "second init with a new hostname should succeed: {result:?}"
+        );
+        assert!(dir.path().join("api.example.test/server.crt").is_file());
+        assert!(dir.path().join("api.example.test/server.key").is_file());
+    }
+
+    #[test]
+    fn second_init_keeps_ca_cert_byte_stable() {
+        let dir = tempdir().unwrap();
+
+        initialize_manual_client_public_cert(dir.path(), "app.example.test").unwrap();
+        let ca_pem_before = fs::read(dir.path().join("public-ca.crt")).unwrap();
+
+        initialize_manual_client_public_cert(dir.path(), "api.example.test").unwrap();
+        let ca_pem_after = fs::read(dir.path().join("public-ca.crt")).unwrap();
+
+        assert_eq!(
+            ca_pem_before, ca_pem_after,
+            "public-ca.crt must be byte-for-byte stable across a second init"
+        );
+    }
+
+    #[test]
+    fn second_init_issues_distinct_leaf_for_new_hostname() {
+        let dir = tempdir().unwrap();
+
+        initialize_manual_client_public_cert(dir.path(), "app.example.test").unwrap();
+        initialize_manual_client_public_cert(dir.path(), "api.example.test").unwrap();
+
+        let app_certs =
+            load_certificate_chain(&dir.path().join("app.example.test/server.crt")).unwrap();
+        let api_certs =
+            load_certificate_chain(&dir.path().join("api.example.test/server.crt")).unwrap();
+
+        assert!(!app_certs.is_empty());
+        assert!(!api_certs.is_empty());
+        assert_ne!(
+            app_certs[0].as_ref(),
+            api_certs[0].as_ref(),
+            "leaf certs for different hostnames must differ"
+        );
     }
 
     #[test]

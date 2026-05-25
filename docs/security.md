@@ -81,7 +81,7 @@ When one or more Services use `tls-mode = "terminate"`, the Client needs a publi
 - running it again with a different hostname reuses the existing CA and adds a new leaf without replacing the trust anchor
 - the CA private key lives in `{public-cert-dir}/state/public-ca.key` and must be kept private
 
-Visitors must trust `public-ca.crt`; this file never changes after the initial init call. Leaf certificates are **365 days** by default; the CA is **3650 days**.
+Visitors must trust `public-ca.crt`; this file never changes after the initial init call. Leaf certificates are **90 days** by default; the CA is **3650 days**.
 
 ## ACME scope
 

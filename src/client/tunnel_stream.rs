@@ -80,7 +80,7 @@ impl TunnelConnectionStreamHandler {
             reject_stream(send, recv);
             return Err(error);
         }
-        emit_stderr(self.logs, &forwarded_route_line(&public_hostname));
+        emit_stderr(self.logs, &passthrough_route_line(&public_hostname));
 
         proxy_tcp_over_quic(backend_stream, Vec::new(), send, recv).await
     }
@@ -233,8 +233,8 @@ fn backend_write_failed_route_line(public_hostname: &str) -> String {
     client_route_line(public_hostname, "backend write failed")
 }
 
-fn forwarded_route_line(public_hostname: &str) -> String {
-    client_route_line(public_hostname, "forwarded")
+fn passthrough_route_line(public_hostname: &str) -> String {
+    client_route_line(public_hostname, "passthrough")
 }
 
 #[cfg(test)]
@@ -796,5 +796,137 @@ mod tests {
             .await
             .map_err(|_| timeout_error("TLS client should close cleanly"))??;
         Ok(response)
+    }
+
+    // ---- Mixed terminate + passthrough tests ----
+
+    /// A handler that owns both a terminating and a passthrough Service routes each stream
+    /// independently: the terminating hostname gets TLS-terminated; the passthrough hostname
+    /// is proxied with the original encrypted bytes intact.
+    #[tokio::test]
+    async fn routes_mixed_terminate_and_passthrough_services() -> io::Result<()> {
+        let terminate_hostname = "app.example.test";
+        let passthrough_hostname = "api.example.test";
+
+        // TLS material for the terminating service (Client terminates, backend gets plaintext)
+        let (terminate_cert, terminate_key) = make_self_signed_cert(terminate_hostname)?;
+        let tls_config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![terminate_cert.clone()],
+                    private_key_from_der(&terminate_key),
+                )
+                .map_err(io::Error::other)?,
+        );
+
+        // Plain-TCP backend for the terminating service
+        let term_backend_listener = TcpListener::bind(localhost(0)).await?;
+        let term_backend_address = term_backend_listener.local_addr()?.to_string();
+        let term_backend_task = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let (mut stream, _) =
+                timeout(Duration::from_secs(1), term_backend_listener.accept())
+                    .await
+                    .map_err(|_| timeout_error("term backend should accept connection"))??;
+            let mut buf = [0_u8; 4];
+            timeout(Duration::from_secs(1), stream.read_exact(&mut buf))
+                .await
+                .map_err(|_| timeout_error("term backend should receive bytes"))??;
+            assert_eq!(&buf, b"ping");
+            timeout(Duration::from_secs(1), stream.write_all(b"pong"))
+                .await
+                .map_err(|_| timeout_error("term backend should send bytes"))??;
+            timeout(Duration::from_secs(1), stream.shutdown())
+                .await
+                .map_err(|_| timeout_error("term backend should close cleanly"))??;
+            Ok::<(), io::Error>(())
+        });
+
+        // TLS-terminating backend for the passthrough service (receives raw TLS)
+        let (pass_cert, pass_key) = make_self_signed_cert(passthrough_hostname)?;
+        let (pass_backend_address, pass_backend_task) = spawn_tls_backend(
+            private_key_from_der(&pass_key),
+            pass_cert.clone(),
+            *b"pong",
+        )
+        .await?;
+
+        let services = vec![
+            ClientServiceSettings {
+                public_hostnames: Some(vec![terminate_hostname.to_owned()]),
+                backend_address: term_backend_address,
+                tls_mode: ClientTlsMode::Terminate,
+            },
+            ClientServiceSettings {
+                public_hostnames: Some(vec![passthrough_hostname.to_owned()]),
+                backend_address: pass_backend_address,
+                tls_mode: ClientTlsMode::Passthrough,
+            },
+        ];
+        let mut tls_configs = HashMap::new();
+        tls_configs.insert(terminate_hostname.to_owned(), tls_config);
+        let stream_handler = TunnelConnectionStreamHandler::new(services, false, tls_configs);
+
+        let fixture = TunnelConnectionFixture::connect().await?;
+        let server_conn_for_term = fixture.server_connection.clone();
+        let server_conn_for_pass = fixture.server_connection.clone();
+        let client_connection = fixture.client_connection.clone();
+
+        // Accept two streams concurrently on the handler side
+        let handler_for_first_stream = stream_handler.clone();
+        let handler_for_second_stream = stream_handler.clone();
+        let first_stream_task = tokio::spawn(async move {
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_bi())
+                .await
+                .map_err(|_| timeout_error("handler should accept first tunnel stream"))?
+                .map_err(io::Error::other)?;
+            handler_for_first_stream.handle(send, recv).await
+        });
+        let fixture2 = TunnelConnectionFixture::connect().await?;
+        let client_connection2 = fixture2.client_connection.clone();
+        let server_conn_for_pass2 = fixture2.server_connection.clone();
+        let second_stream_task = tokio::spawn(async move {
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection2.accept_bi())
+                .await
+                .map_err(|_| timeout_error("handler should accept second tunnel stream"))?
+                .map_err(io::Error::other)?;
+            handler_for_second_stream.handle(send, recv).await
+        });
+
+        // Terminating stream: Visitor sends TLS → Client decrypts → backend gets plaintext
+        let term_response = request_plaintext_response_over_terminated_tunnel(
+            server_conn_for_term,
+            &terminate_cert,
+            terminate_hostname,
+        )
+        .await?;
+        assert_eq!(term_response, *b"pong");
+
+        // Passthrough stream: Visitor sends TLS → Client forwards raw bytes → backend decrypts
+        let pass_response = request_tls_response_over_tunnel(
+            server_conn_for_pass2,
+            &pass_cert,
+            passthrough_hostname,
+        )
+        .await?;
+        assert_eq!(pass_response, *b"pong");
+
+        term_backend_task
+            .await
+            .map_err(|e| join_error("term backend failed", e))??;
+        pass_backend_task
+            .await
+            .map_err(|e| join_error("pass backend failed", e))??;
+        first_stream_task
+            .await
+            .map_err(|e| join_error("first stream handler failed", e))??;
+        second_stream_task
+            .await
+            .map_err(|e| join_error("second stream handler failed", e))??;
+
+        // Suppress unused-variable warnings for connections not used directly
+        drop(server_conn_for_pass);
+        Ok(())
     }
 }

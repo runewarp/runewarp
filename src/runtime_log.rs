@@ -57,8 +57,12 @@ mod tests {
             "server route app.example.test -> forwarded"
         );
         assert_eq!(
-            client_route_line("app.example.test", "backend caddy.local:443"),
-            "client route app.example.test -> backend caddy.local:443"
+            client_route_line("app.example.test", "passthrough"),
+            "client route app.example.test -> passthrough"
+        );
+        assert_eq!(
+            client_route_line("app.example.test", "terminated and forwarded"),
+            "client route app.example.test -> terminated and forwarded"
         );
         assert_eq!(
             warning_line("client", "tunnel connection lost"),

@@ -71,7 +71,7 @@ In both shapes, the Server remains the routing authority for public ingress.
 
 Steps 1–8 are the same. In step 7, when the matched Service has `tls-mode = "terminate"`:
 
-7a. The Client completes the TLS handshake with the Visitor using the per-hostname leaf certificate from `client.public-cert-dir`.
+7a. The Client completes the TLS handshake with the Visitor using the per-hostname leaf certificate — from `client.public-cert-dir` (manual path) or from `[client.acme]` (ACME path). In Client ACME mode the Client starts with a live ACME manager at startup without blocking on certificate readiness; a hostname without a ready certificate fails closed at the TLS handshake with no fallback to passthrough.
 7b. The Client connects to the Local backend in plaintext TCP.
 7c. The Client proxies decrypted data between the TLS stream and the plaintext backend connection.
 
@@ -86,7 +86,8 @@ The Local backend receives unencrypted bytes directly and does not need to termi
 | **Server CA** | Optional private trust anchor for the manual Server-certificate path |
 | **Client identity** | Pinned public-key identity used to authenticate the Client to the Server |
 | **Public hostname authorization** | Owned by Server config through explicit `server.tunnels[].public-hostnames` |
-| **Client public-cert CA** | Manual trust anchor shared with Visitors when `tls-mode = "terminate"` is in use |
+| **Client public-cert CA** (manual) | Private trust anchor in `client.public-cert-dir` shared with Visitors when `tls-mode = "terminate"` is in use |
+| **Client ACME certificates** | Automatically provisioned by Let's Encrypt via `[client.acme]` for **Public hostnames** of terminating Services; `acme-tls/1` challenge traffic for those hostnames is routed through the Server to the Client like ordinary Visitor TLS |
 
 The Client validates the Server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The Server authenticates the pinned `client-identity` from the Client public key rather than from a certificate lifetime.
 

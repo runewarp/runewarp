@@ -92,9 +92,16 @@ If you prefer custom directories, pass `--dir` during setup and point the matchi
 
 For the manual/private-CA path, either copy the generated `server-ca.crt` to `$XDG_DATA_HOME/runewarp/client/server-ca.crt` (or `~/.local/share/runewarp/client/server-ca.crt`) on each Client or set `client.server-ca-file` to the deployed CA bundle path.
 
-### 3a. Bootstrap Client public certificate material (TLS termination only)
+### 3a. Prepare Client public certificate material (TLS termination only)
 
-If any Client Service uses `tls-mode = "terminate"`, create the public certificate material:
+If any Client Service uses `tls-mode = "terminate"`, choose one of the two supported certificate paths:
+
+| Path | When to use it | What to do |
+| --- | --- | --- |
+| Manual (`client.public-cert-dir`) | Private deployments or operator-managed trust; Visitors need a shared CA | Create material with `runewarp client public-cert init`; distribute `public-ca.crt` to Visitors |
+| ACME (`[client.acme]`) | Publicly routable Public hostnames and standard public trust | Configure `[client.acme]` in Client config; no pre-generated material needed |
+
+**Manual path:**
 
 ```bash
 runewarp client public-cert init --hostname app.example.com
@@ -103,6 +110,10 @@ runewarp client public-cert init --hostname app.example.com
 Run once per terminating hostname; a second run with a new hostname reuses the existing CA and adds only the new leaf certificate. Share `public-ca.crt` with each Visitor as their trust anchor. When the CA already exists, `runewarp client public-cert init` refuses to replace it, keeping the Visitor-facing trust anchor stable.
 
 Set `client.public-cert-dir` in the Client config to the directory where the material was written (defaults to the XDG data location for Client public certificate material).
+
+**ACME path:**
+
+Add `[client.acme]` to the Client config instead of `client.public-cert-dir`. The Client automatically provisions and renews certificates from Let's Encrypt for every **Public hostname** on a terminating Service. No pre-generated material is needed. The Client starts with a live ACME manager at startup without blocking on certificate readiness; a terminating hostname without a ready certificate fails closed at the TLS handshake until the certificate is issued. `acme-tls/1` challenge traffic for **Public hostnames** is routed through the Server to the Client using the same path as ordinary Visitor TLS.
 
 ### 4. Write config
 

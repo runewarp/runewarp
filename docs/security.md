@@ -75,7 +75,9 @@ Existing QUIC connections continue with the certificate from their original hand
 
 ### Client public certificate (TLS termination)
 
-When one or more Services use `tls-mode = "terminate"`, the Client needs a public certificate authority and per-hostname leaf certificates. Use the manual path through `runewarp client public-cert init`:
+When one or more Services use `tls-mode = "terminate"`, the Client needs public TLS certificates for those hostnames. Two mutually exclusive paths are supported:
+
+**Manual path** (`client.public-cert-dir`) — operator creates and manages a private CA and per-hostname leaf certificates:
 
 - `runewarp client public-cert init --hostname app.example.com` creates a private **Client public CA** and an initial leaf certificate for the named hostname
 - running it again with a different hostname reuses the existing CA and adds a new leaf without replacing the trust anchor
@@ -83,15 +85,29 @@ When one or more Services use `tls-mode = "terminate"`, the Client needs a publi
 
 Visitors must trust `public-ca.crt`; this file never changes after the initial init call. Leaf certificates are **90 days** by default; the CA is **3650 days**.
 
+**ACME path** (`[client.acme]`) — the Client automatically provisions and renews certificates from Let's Encrypt for the **Public hostnames** of all terminating Services. No pre-generated material is needed; configure `[client.acme]` in the Client config instead of `client.public-cert-dir`. The Client starts with a live ACME manager at startup without blocking on certificate readiness. Terminating hostnames without a ready certificate fail closed at the TLS handshake; there is no fallback to passthrough.
+
 ## ACME scope
 
-Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode.
+Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode. The current ACME config surface is fixed to Let's Encrypt.
 
-- the current ACME config surface is fixed to Let's Encrypt
-- ACME is only for the **Server hostname**
-- ACME never provisions certificates for customer **Public hostnames**
+### Server ACME
+
+`[server.acme]` provisions the certificate for `server.hostname` only. When a Visitor connects to the Server hostname with ALPN `acme-tls/1`, the Server handles the challenge itself. All other application traffic addressed to the Server hostname is dropped.
+
 - when omitted, `server.acme.state-dir` defaults to the XDG state path and is created at startup
 - any explicit `server.acme.state-dir` should be protected like secret-bearing material
+
+### Client ACME
+
+`[client.acme]` provisions certificates for the **Public hostnames** of terminating Services. The managed hostname set is derived from every Service that has both `tls-mode = "terminate"` and explicit `public-hostnames`.
+
+For Client ACME, `acme-tls/1` challenge connections for **Public hostnames** reach the Client through the Server's normal Visitor routing path — the Server does not inspect ALPN for Public hostname traffic and forwards the raw bytes to the Client through the Tunnel. The Client's ACME resolver handles both `acme-tls/1` challenge connections and regular TLS connections for those hostnames.
+
+The Client starts with a live ACME manager at startup and does not block on certificate readiness. Terminating hostnames without a ready ACME certificate fail closed at the TLS handshake; there is no fallback to passthrough.
+
+- `client.acme.state-dir` defaults to the XDG client ACME state path and is created at startup when omitted
+- any explicit `client.acme.state-dir` should be protected like secret-bearing material
 
 ## Operational limits and trade-offs
 

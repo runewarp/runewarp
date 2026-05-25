@@ -1246,6 +1246,156 @@ tls-mode = "terminate"
     let _ = client_task.await;
 }
 
+/// One Client connects with both a terminating service (`app.example.test`) and a
+/// passthrough service (`api.example.test`).  Visitor connections to each hostname
+/// travel through the same tunnel but are routed independently:
+///   - `app.example.test` → Client terminates TLS, backend receives plaintext
+///   - `api.example.test` → Client forwards raw TLS bytes, backend terminates TLS
+#[tokio::test]
+async fn forwards_mixed_tls_terminate_and_passthrough_end_to_end() {
+    use runewarp::{
+        CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
+        initialize_manual_client_public_cert,
+    };
+    let tempdir = tempdir().unwrap();
+
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+
+    std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    let client_identity = generate_client_identity().unwrap();
+    std::fs::write(
+        tempdir.path().join("client-identity").join(CLIENT_CERT_FILENAME),
+        &client_identity.certificate_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir.path().join("client-identity").join(CLIENT_KEY_FILENAME),
+        &client_identity.private_key_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_IDENTITY_FILENAME),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    // Bootstrap public cert material for the terminating service only
+    let public_cert_dir = tempdir.path().join("public-cert");
+    initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
+    let public_ca_cert_pem =
+        std::fs::read_to_string(public_cert_dir.join("public-ca.crt")).unwrap();
+    let terminate_ca_cert = rustls_pemfile::certs(&mut public_ca_cert_pem.as_bytes())
+        .next()
+        .unwrap()
+        .unwrap();
+
+    // Plain TCP backend for the terminating service (receives decrypted bytes)
+    let term_backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let term_backend_addr = term_backend_listener.local_addr().unwrap();
+    let term_backend_task = tokio::spawn(async move {
+        let (mut stream, _) = term_backend_listener.accept().await.unwrap();
+        let mut request = [0_u8; 4];
+        stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"ping");
+        stream.write_all(b"pong").await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+
+    // TLS-terminating backend for the passthrough service (receives raw TLS)
+    let (pass_cert, pass_key) = make_self_signed_cert("api.example.test");
+    let (pass_backend_addr, pass_backend_task) =
+        spawn_tls_backend(private_key_from_der(&pass_key), pass_cert.clone(), *b"pong").await;
+
+    // Server: one tunnel covers both hostnames under one client identity
+    std::fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test", "api.example.test"]
+client-identity = "{}"
+"#,
+            client_identity.client_identity
+        ),
+    )
+    .unwrap();
+
+    // Client: two services — one terminate, one passthrough
+    std::fs::write(
+        tempdir.path().join("client.toml"),
+        format!(
+            r#"
+[client]
+server-address = "tunnel.example.test"
+server-trust = "ca-file"
+server-ca-file = "server-cert/server-ca.crt"
+identity-dir = "client-identity"
+public-cert-dir = "public-cert"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "{term_backend}"
+tls-mode = "terminate"
+
+[[client.services]]
+public-hostnames = ["api.example.test"]
+backend-address = "{pass_backend}"
+tls-mode = "passthrough"
+"#,
+            term_backend = term_backend_addr,
+            pass_backend = pass_backend_addr,
+        ),
+    )
+    .unwrap();
+
+    let server_settings =
+        load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings =
+        load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    // Visitor 1: terminating service — Client decrypts, backend gets plaintext
+    let term_response =
+        wait_for_tls_response(public_addr, &terminate_ca_cert, "app.example.test")
+            .await
+            .unwrap();
+    assert_eq!(term_response, *b"pong");
+    term_backend_task.await.unwrap();
+
+    // Visitor 2: passthrough service — Client proxies raw TLS, backend decrypts
+    let pass_response = wait_for_tls_response(public_addr, &pass_cert, "api.example.test")
+        .await
+        .unwrap();
+    assert_eq!(pass_response, *b"pong");
+    pass_backend_task.abort();
+
+    server_task.abort();
+    client_task.abort();
+    let _ = server_task.await;
+    let _ = client_task.await;
+}
+
 fn localhost(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }

@@ -220,6 +220,38 @@ tls-mode = "terminate"
 
 `tls-mode = "terminate"` requires explicit `public-hostnames` (Catch-all Services cannot terminate). `client.public-cert-dir` and `[client.acme]` are mutually exclusive and both require at least one Service using `tls-mode = "terminate"`.
 
+## Example: Mixed terminate and passthrough services
+
+A single Client can host one Service that terminates TLS and another that passes TLS through unchanged to the local backend:
+
+```toml
+[client]
+server-address = "tunnel.example.com"
+identity-dir = "/etc/runewarp/client"
+public-cert-dir = "/etc/runewarp/client/public-cert"
+
+# Service A: Client terminates TLS; backend receives plaintext
+[[client.services]]
+public-hostnames = ["app.example.com"]
+backend-address = "127.0.0.1:8080"
+tls-mode = "terminate"
+
+# Service B: Client passes raw TLS bytes through; backend terminates TLS
+[[client.services]]
+public-hostnames = ["api.example.com"]
+backend-address = "127.0.0.1:9443"
+tls-mode = "passthrough"
+```
+
+Certificate material in `public-cert-dir` is only required for the terminating hostnames (`app.example.com` above).  The passthrough service (`api.example.com`) requires no certificate material on the Client side — the local backend is responsible for its own TLS certificate.
+
+Runtime logs distinguish the two paths:
+
+```
+client route app.example.com -> terminated and forwarded
+client route api.example.com -> passthrough
+```
+
 ## Server reference
 
 | Key | Required | Notes |

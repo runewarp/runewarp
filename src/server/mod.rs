@@ -19,7 +19,6 @@ pub struct ServerConfig {
     pub tunnel_connection_bind_addr: SocketAddr,
     pub server_hostname: String,
     pub configured_tunnels: Vec<ServerTunnelSettings>,
-    pub logs: bool,
     pub public_tls_config: Option<Arc<rustls::ServerConfig>>,
     pub quic_server_config: quinn::ServerConfig,
 }
@@ -44,7 +43,6 @@ impl Server {
         let visitor_stream_handler = VisitorStreamHandler::new(
             config.server_hostname.clone(),
             tunnel_registry.clone(),
-            config.logs,
             config.public_tls_config.clone(),
         )?;
         let public_listener = TcpListener::bind(config.public_bind_addr).await?;

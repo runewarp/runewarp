@@ -19,6 +19,7 @@ This document defines the Runewarp configuration model. Use [`docs/usage.md`](us
 - the supported routing shapes are **Hostname mirroring** and a **Client with a Catch-all Service**
 - TLS passthrough is the default; Local backends terminate TLS in that mode
 - Client TLS termination is opt-in per Service via `tls-mode = "terminate"`; the termination certificate is managed at client level via `client.public-cert-dir` (manual) or `[client.acme]`
+- one top-level `log-level` controls runtime diagnostics for either `runewarp server` or `runewarp client`
 - config keys should name the product concept rather than an encoding detail
 
 ## Supported routing shapes
@@ -78,7 +79,26 @@ When a selected config file is involved:
 - any configured Service blocks `--backend-address`, even when that Service block is malformed
 - a selected file with no `[client]` section may still start the Client when both runtime flags are present
 
-Pure CLI-only Client startup keeps using the normal omitted-key defaults for `client.server-trust`, `client.identity-dir`, `client.logs`, and the runtime reconnect cadence.
+Pure CLI-only Client startup keeps using the normal omitted-key defaults for `client.server-trust`, `client.identity-dir`, top-level `log-level`, and the runtime reconnect cadence.
+
+## Runtime logging
+
+Runewarp uses one top-level `log-level` key for runtime diagnostics:
+
+```toml
+log-level = "debug"
+```
+
+- place it at the top level of the config file, alongside `[server]` or `[client]`, not inside those tables
+- supported values are `off`, `error`, `warn`, `info`, `debug`, and `trace`
+- output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message
+- omitted `log-level` defaults to `info`
+
+At `info` (default), Runewarp emits tunnel lifecycle events plus warnings and errors. `debug` adds per-connection routing diagnostics such as Server routing outcomes, Client passthrough vs terminate decisions, and rejected ClientHello reasons.
+
+| Key | Required | Notes |
+| --- | --- | --- |
+| `log-level` | no | Top-level runtime stderr log level for the selected role. Supported values: `off`, `error`, `warn`, `info`, `debug`, `trace`. Uses UTC RFC3339 timestamps. Defaults to `info`. |
 
 ## Default locations
 
@@ -250,11 +270,11 @@ tls-mode = "passthrough"
 
 Certificate material in `public-cert-dir` is only required for the terminating hostnames (`app.example.com` above). The **TLS passthrough** Service (`api.example.com`) requires no certificate material on the Client side — the **Local backend** is responsible for its own TLS certificate.
 
-Runtime logs distinguish the two paths:
+Runtime logs distinguish the two paths. The stderr formatter prefixes each emitted message with a UTC RFC3339 timestamp and the selected level:
 
-```
-client route app.example.com -> terminated and forwarded
-client route api.example.com -> passthrough
+```text
+2025-01-01T00:00:00Z DEBUG client route app.example.com -> terminated TLS and forwarded to 127.0.0.1:8080
+2025-01-01T00:00:00Z DEBUG client route api.example.com -> passthrough to 127.0.0.1:9443
 ```
 
 ## Server reference
@@ -262,7 +282,6 @@ client route api.example.com -> passthrough
 | Key | Required | Notes |
 | --- | --- | --- |
 | `server.hostname` | yes | **Server hostname** for the Runewarp edge itself. Used for TLS validation and ACME. |
-| `server.logs` | no | Boolean controlling human-readable Server runtime logs. Defaults to `true`. |
 | `server.cert-dir` | no | Directory containing the deployed Server leaf material for the manual/private-CA path. Defaults to the XDG data path for manual/private-CA Server material when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
 | `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
 | `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** **Tunnel connections**. Defaults to `0.0.0.0:443`. |
@@ -279,7 +298,6 @@ client route api.example.com -> passthrough
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`; otherwise system trust is used. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
 | `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG data path for Client identity material. |
-| `client.logs` | no | Boolean controlling human-readable Client runtime logs. Defaults to `true`. |
 | `client.public-cert-dir` | when using manual TLS termination | Directory containing **Public hostname certificate** material for Client-side TLS termination. Mutually exclusive with `[client.acme]`. Required when any Service uses `tls-mode = "terminate"` and no `[client.acme]` is present; runtime validation does not implicitly enable manual mode from the XDG default path. |
 | `client.acme.email` | with Client ACME | ACME contact address for **Public hostname certificates**. Required when `[client.acme]` is present. |
 | `client.acme.state-dir` | no | Writable path for durable ACME account and certificate state for the Client. When omitted, Runewarp uses and creates the XDG default client ACME state directory at startup. |

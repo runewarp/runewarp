@@ -5,7 +5,8 @@ use std::time::Duration;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientRuntimeArgs,
     ClientSettingsResolutionDefaults, ClientSettingsResolutionError,
-    DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, SelectedClientConfig, resolve_selected_client_settings,
+    DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, LogLevel, SelectedClientConfig,
+    resolve_selected_client_settings,
 };
 use tempfile::tempdir;
 
@@ -29,7 +30,7 @@ fn cli_only_resolution_builds_a_catch_all_service_without_a_selected_config()
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
-    assert!(settings.logs);
+    assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(settings.server_ca_file, None);
     assert_eq!(settings.identity_directory, identity_directory);
     assert_eq!(
@@ -101,6 +102,7 @@ hostname = "tunnel.example.test"
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
     assert_eq!(settings.server_port, 9443);
+    assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(settings.services.len(), 1);
     assert_eq!(settings.services[0].public_hostnames, None);
     assert_eq!(settings.services[0].backend_address, "backend.internal:443");
@@ -116,8 +118,9 @@ fn server_address_runtime_flag_overrides_a_selected_config_before_validation()
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
+log-level = "off"
+
 [client]
-logs = false
 "#,
     )?;
 
@@ -132,7 +135,7 @@ logs = false
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
-    assert!(!settings.logs);
+    assert_eq!(settings.log_level, LogLevel::Off);
     assert_eq!(settings.services.len(), 1);
     assert_eq!(settings.services[0].public_hostnames, None);
     assert_eq!(settings.services[0].backend_address, "backend.internal:443");
@@ -148,9 +151,10 @@ fn server_address_runtime_flag_rescues_an_invalid_selected_config_value()
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
+log-level = "off"
+
 [client]
 server-address = "127.0.0.1:443"
-logs = false
 "#,
     )?;
 
@@ -165,7 +169,7 @@ logs = false
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
-    assert!(!settings.logs);
+    assert_eq!(settings.log_level, LogLevel::Off);
     assert_eq!(settings.services.len(), 1);
     assert_eq!(settings.services[0].public_hostnames, None);
     assert_eq!(settings.services[0].backend_address, "backend.internal:443");

@@ -22,6 +22,10 @@ Runewarp is a private tunneling system. In the default **passthrough** mode it i
 | Backend TLS termination (passthrough) | Keeps customer TLS termination off the public edge in the default mode |
 | **Public hostname CA** (terminate) | Operator-managed trust anchor for Visitors when the Client terminates TLS |
 
+## Diagnostics visibility
+
+Runtime diagnostics follow the same visibility boundary: stderr logs may include the normalized **Public hostname**, routing outcome, connection timing, and transport errors, but never the buffered ClientHello bytes, HTTP headers, bodies, or decrypted application plaintext.
+
 ## Public traffic invariants
 
 - customer TLS is never terminated on the **Server**

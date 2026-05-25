@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use rustls_acme::caches::DirCache;
 use rustls_acme::{AcmeConfig, AcmeState};
 
-use crate::runtime_log::{emit_stderr, warning_line};
+use crate::runtime_log;
 
 pub(crate) const ACME_TLS_ALPN: &[u8] = b"acme-tls/1";
 
@@ -41,18 +41,14 @@ pub(crate) fn build_client_acme_state(
 pub(crate) async fn run_acme_state(
     mut state: ManagedAcmeState,
     component: &str,
-    logs: bool,
 ) -> io::Result<Infallible> {
     loop {
         match state.next().await {
             Some(Ok(_event)) => {}
             Some(Err(error)) => {
-                emit_stderr(
-                    logs,
-                    &warning_line(
-                        component,
-                        &format!("ACME certificate management error: {error}"),
-                    ),
+                runtime_log::warning(
+                    component,
+                    &format!("ACME certificate management error: {error}"),
                 );
             }
             None => {

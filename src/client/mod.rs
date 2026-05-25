@@ -35,7 +35,6 @@ pub(crate) struct RoutedClientConfig {
     pub(crate) server_addr: SocketAddr,
     pub(crate) server_name: String,
     pub(crate) services: Vec<ClientServiceSettings>,
-    pub(crate) logs: bool,
     pub(crate) quic_client_config: quinn::ClientConfig,
     pub(crate) hostname_tls_configs: HashMap<String, Arc<rustls::ServerConfig>>,
 }
@@ -92,7 +91,6 @@ impl Client {
             config.server_addr,
             config.server_name,
             config.quic_client_config,
-            true,
             ClientRouteMode::CatchAll {
                 backend_address: config.backend_address,
             },
@@ -108,7 +106,6 @@ impl Client {
             config.server_addr,
             config.server_name,
             config.quic_client_config,
-            config.logs,
             ClientRouteMode::Routed {
                 services: config.services,
                 hostname_tls_configs: config.hostname_tls_configs,
@@ -122,7 +119,6 @@ impl Client {
         server_addr: SocketAddr,
         server_name: String,
         quic_client_config: quinn::ClientConfig,
-        logs: bool,
         route_mode: ClientRouteMode,
     ) -> Result<Self, ClientConnectError> {
         let mut endpoint = Endpoint::client(local_bind_addr).map_err(ClientConnectError::Bind)?;
@@ -133,10 +129,9 @@ impl Client {
             .map_err(ClientConnectError::Connect)?
             .await
             .map_err(ClientConnectError::Handshake)?;
-
         let (services, hostname_tls_configs) = services_and_configs_for_route_mode(route_mode);
         let tunnel_stream_handler =
-            TunnelConnectionStreamHandler::new(services, logs, hostname_tls_configs);
+            TunnelConnectionStreamHandler::new(services, hostname_tls_configs);
 
         Ok(Self {
             endpoint,

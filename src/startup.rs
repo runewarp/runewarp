@@ -27,7 +27,6 @@ use crate::{
 
 pub struct PreparedServer {
     server: Server,
-    logs: bool,
     trusted_client_identities: Vec<ClientIdentity>,
     acme_state: Option<ManagedAcmeState>,
 }
@@ -75,7 +74,6 @@ impl PreparedServer {
             tunnel_connection_bind_addr,
             server_hostname: settings.hostname.clone(),
             configured_tunnels: settings.tunnels.clone(),
-            logs: settings.logs,
             public_tls_config: acme_state
                 .as_ref()
                 .map(ManagedAcmeState::challenge_rustls_config),
@@ -86,7 +84,6 @@ impl PreparedServer {
 
         Ok(Self {
             server,
-            logs: settings.logs,
             trusted_client_identities,
             acme_state,
         })
@@ -106,15 +103,12 @@ impl PreparedServer {
 
     pub async fn run(self) -> io::Result<()> {
         let Self {
-            server,
-            logs,
-            acme_state,
-            ..
+            server, acme_state, ..
         } = self;
         if let Some(acme_state) = acme_state {
             tokio::select! {
                 server_result = server.run() => server_result,
-                acme_result = run_acme_state(acme_state, "server", logs) => match acme_result {
+                acme_result = run_acme_state(acme_state, "server") => match acme_result {
                     Ok(never) => match never {},
                     Err(error) => Err(error),
                 },
@@ -127,7 +121,6 @@ impl PreparedServer {
 
 pub struct PreparedClient {
     client: Client,
-    logs: bool,
     native_root_error_count: usize,
     acme_state: Option<ManagedAcmeState>,
 }
@@ -183,7 +176,6 @@ impl PreparedClient {
             server_addr,
             server_name: settings.server_hostname.clone(),
             services,
-            logs: settings.logs,
             quic_client_config,
             hostname_tls_configs,
         })
@@ -192,7 +184,6 @@ impl PreparedClient {
 
         Ok(Self {
             client,
-            logs: settings.logs,
             native_root_error_count: loaded_roots.native_root_error_count,
             acme_state,
         })
@@ -208,13 +199,10 @@ impl PreparedClient {
 
     pub async fn run(self) -> Result<(), quinn::ConnectionError> {
         let Self {
-            client,
-            logs,
-            acme_state,
-            ..
+            client, acme_state, ..
         } = self;
         if let Some(acme_state) = acme_state {
-            tokio::spawn(run_acme_state(acme_state, "client", logs));
+            tokio::spawn(run_acme_state(acme_state, "client"));
         }
         client.run().await
     }
@@ -485,6 +473,9 @@ fn build_root_store(
             errors: native_root_error_count,
         });
     }
+    if native_root_error_count > 0 {
+        crate::runtime_log::client_trust_store_warning(native_root_error_count);
+    }
 
     Ok(LoadedRootStore {
         roots,
@@ -626,7 +617,7 @@ mod tests {
         build_root_store,
     };
     use crate::{
-        ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode,
+        ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, LogLevel,
         ServerCertificateSettings, ServerSettings,
     };
 
@@ -776,7 +767,7 @@ mod tests {
         let state_directory = tempdir.path().join("server/acme");
         let settings = ServerSettings {
             hostname: "tunnel.example.test".to_owned(),
-            logs: true,
+            log_level: LogLevel::Info,
             certificate: ServerCertificateSettings::Acme {
                 email: "admin@example.test".to_owned(),
                 state_directory: state_directory.clone(),
@@ -801,7 +792,7 @@ mod tests {
         let settings = ClientSettings {
             server_hostname: "tunnel.example.test".to_owned(),
             server_port: 443,
-            logs: true,
+            log_level: LogLevel::Info,
             server_ca_file: None,
             identity_directory: tempdir.path().join("client-identity"),
             reconnect_interval: Duration::from_secs(5),
@@ -832,7 +823,7 @@ mod tests {
         let state_directory = blocked_parent.join("acme");
         let settings = ServerSettings {
             hostname: "tunnel.example.test".to_owned(),
-            logs: true,
+            log_level: LogLevel::Info,
             certificate: ServerCertificateSettings::Acme {
                 email: "admin@example.test".to_owned(),
                 state_directory: state_directory.clone(),
@@ -869,7 +860,7 @@ mod tests {
         let settings = ClientSettings {
             server_hostname: "tunnel.example.test".to_owned(),
             server_port: 443,
-            logs: true,
+            log_level: LogLevel::Info,
             server_ca_file: None,
             identity_directory: tempdir.path().join("client-identity"),
             reconnect_interval: Duration::from_secs(5),

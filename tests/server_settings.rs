@@ -2,7 +2,7 @@ use std::fs;
 
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    ServerCertificateSettings, initialize_manual_server_certificate, load_server_settings,
+    LogLevel, ServerCertificateSettings, initialize_manual_server_certificate, load_server_settings,
 };
 use tempfile::tempdir;
 
@@ -31,7 +31,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.hostname, "tunnel.example.test");
-    assert!(settings.logs);
+    assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(
         settings.tunnels[0].public_hostnames,
         vec!["app.example.test", "api.example.test"]
@@ -63,7 +63,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.hostname, "tunnel.example.test");
-    assert!(settings.logs);
+    assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(
         settings.certificate,
         ServerCertificateSettings::Manual {
@@ -115,6 +115,65 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         settings.tunnel_connection_bind_address,
         "127.0.0.1:9443".parse().unwrap()
     );
+}
+
+#[test]
+fn server_settings_accept_top_level_log_level() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+log-level = "debug"
+
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(settings.log_level, LogLevel::Debug);
+}
+
+#[test]
+fn server_settings_reject_legacy_server_logs_as_an_unknown_field() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+logs = false
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let message = error.to_string();
+
+    assert!(!message.contains("failed to parse [server]"));
+    assert!(message.contains("unknown field `logs`"));
 }
 
 #[test]

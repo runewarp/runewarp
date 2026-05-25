@@ -10,7 +10,8 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
 use crate::client_hello::read_client_hello;
-use crate::runtime_log::{client_route_line, emit_stderr, warning_line};
+use crate::runtime_log;
+use crate::runtime_log::ClientRouteOutcome;
 use crate::{
     ClientServiceSettings, ClientTlsMode, proxy::proxy_stream_error_code,
     proxy::proxy_tcp_over_quic,
@@ -19,19 +20,16 @@ use crate::{
 #[derive(Clone)]
 pub(crate) struct TunnelConnectionStreamHandler {
     services: Arc<[ClientServiceSettings]>,
-    logs: bool,
     hostname_tls_configs: Arc<HashMap<String, Arc<rustls::ServerConfig>>>,
 }
 
 impl TunnelConnectionStreamHandler {
     pub(crate) fn new(
         services: Vec<ClientServiceSettings>,
-        logs: bool,
         hostname_tls_configs: HashMap<String, Arc<rustls::ServerConfig>>,
     ) -> Self {
         Self {
             services: services.into(),
-            logs,
             hostname_tls_configs: Arc::new(hostname_tls_configs),
         }
     }
@@ -40,19 +38,16 @@ impl TunnelConnectionStreamHandler {
         let parsed_client_hello = match read_client_hello(&mut recv).await {
             Ok(parsed_client_hello) => parsed_client_hello,
             Err(error) => {
-                emit_stderr(
-                    self.logs,
-                    &warning_line("client", &format!("rejected stream: {error}")),
-                );
+                runtime_log::warning("client", &format!("rejected stream: {error}"));
                 reject_stream(send, recv);
                 return Err(io::Error::other(error));
             }
         };
         let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
         let Some(service) = self.select_service(&public_hostname) else {
-            emit_stderr(
-                self.logs,
-                &client_route_line(&public_hostname, "rejected (no matching service)"),
+            runtime_log::client_route(
+                &public_hostname,
+                ClientRouteOutcome::RejectedNoMatchingService,
             );
             reject_stream(send, recv);
             return Ok(());
@@ -67,23 +62,32 @@ impl TunnelConnectionStreamHandler {
         let mut backend_stream = match TcpStream::connect(service.backend_address.as_str()).await {
             Ok(stream) => stream,
             Err(error) => {
-                emit_stderr(
-                    self.logs,
-                    &backend_connect_failed_route_line(&public_hostname),
+                runtime_log::client_route(
+                    &public_hostname,
+                    ClientRouteOutcome::BackendConnectFailed {
+                        backend_address: service.backend_address.as_str(),
+                    },
                 );
                 reject_stream(send, recv);
                 return Err(error);
             }
         };
         if let Err(error) = backend_stream.write_all(&buffered_bytes).await {
-            emit_stderr(
-                self.logs,
-                &backend_write_failed_route_line(&public_hostname),
+            runtime_log::client_route(
+                &public_hostname,
+                ClientRouteOutcome::BackendWriteFailed {
+                    backend_address: service.backend_address.as_str(),
+                },
             );
             reject_stream(send, recv);
             return Err(error);
         }
-        emit_stderr(self.logs, &passthrough_route_line(&public_hostname));
+        runtime_log::client_route(
+            &public_hostname,
+            ClientRouteOutcome::Passthrough {
+                backend_address: service.backend_address.as_str(),
+            },
+        );
 
         proxy_tcp_over_quic(backend_stream, Vec::new(), send, recv).await
     }
@@ -97,13 +101,7 @@ impl TunnelConnectionStreamHandler {
         service: &ClientServiceSettings,
     ) -> io::Result<()> {
         let Some(tls_config) = self.hostname_tls_configs.get(public_hostname) else {
-            emit_stderr(
-                self.logs,
-                &warning_line(
-                    "client",
-                    &format!("no TLS config for terminating hostname {public_hostname}"),
-                ),
-            );
+            runtime_log::client_route(public_hostname, ClientRouteOutcome::MissingTlsConfig);
             let mut s = send;
             let mut r = recv;
             let _ = s.reset(proxy_stream_error_code());
@@ -129,17 +127,21 @@ impl TunnelConnectionStreamHandler {
         let mut backend_stream = match TcpStream::connect(service.backend_address.as_str()).await {
             Ok(stream) => stream,
             Err(error) => {
-                emit_stderr(
-                    self.logs,
-                    &backend_connect_failed_route_line(public_hostname),
+                runtime_log::client_route(
+                    public_hostname,
+                    ClientRouteOutcome::BackendConnectFailed {
+                        backend_address: service.backend_address.as_str(),
+                    },
                 );
                 return Err(error);
             }
         };
 
-        emit_stderr(
-            self.logs,
-            &client_route_line(public_hostname, "terminated and forwarded"),
+        runtime_log::client_route(
+            public_hostname,
+            ClientRouteOutcome::Terminated {
+                backend_address: service.backend_address.as_str(),
+            },
         );
 
         copy_bidirectional(&mut tls_stream, &mut backend_stream)
@@ -228,25 +230,13 @@ fn reject_stream(mut send: SendStream, mut recv: RecvStream) {
     let _ = recv.stop(proxy_stream_error_code());
 }
 
-fn backend_connect_failed_route_line(public_hostname: &str) -> String {
-    client_route_line(public_hostname, "backend connect failed")
-}
-
-fn backend_write_failed_route_line(public_hostname: &str) -> String {
-    client_route_line(public_hostname, "backend write failed")
-}
-
-fn passthrough_route_line(public_hostname: &str) -> String {
-    client_route_line(public_hostname, "passthrough")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::pin::Pin;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
     use std::time::Duration;
 
@@ -259,10 +249,14 @@ mod tests {
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
     use tokio_rustls::{TlsAcceptor, TlsConnector};
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::fmt::writer::MakeWriter;
+    use tracing_subscriber::layer::SubscriberExt;
 
     use super::TunnelConnectionStreamHandler;
     use crate::{
-        ClientServiceSettings, ClientTlsMode, make_client_quic_config, make_server_quic_config,
+        ClientServiceSettings, ClientTlsMode, LogLevel, make_client_quic_config,
+        make_server_quic_config,
     };
 
     #[tokio::test]
@@ -359,6 +353,169 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn routing_logs_include_backend_selection_and_warn_failures() -> io::Result<()> {
+        let debug_output = capture_logs(LogLevel::Debug, async {
+            assert_forwarded_stream_without_spawning_handler(
+                vec![ClientServiceSettings {
+                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                    backend_address: backend_placeholder(),
+                    tls_mode: ClientTlsMode::Passthrough,
+                }],
+                "app.example.test",
+            )
+            .await
+        })
+        .await?;
+
+        assert!(!debug_output.contains("ping"));
+        assert!(!debug_output.contains("pong"));
+
+        let info_output = capture_logs(LogLevel::Info, async {
+            assert_forwarded_stream_without_spawning_handler(
+                vec![ClientServiceSettings {
+                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                    backend_address: backend_placeholder(),
+                    tls_mode: ClientTlsMode::Passthrough,
+                }],
+                "app.example.test",
+            )
+            .await?;
+
+            assert_rejected_stream_without_spawning_handler(
+                vec![ClientServiceSettings {
+                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                    backend_address: "127.0.0.1:443".to_owned(),
+                    tls_mode: ClientTlsMode::Passthrough,
+                }],
+                "api.example.test",
+                |result: io::Result<()>| assert!(result.is_ok()),
+            )
+            .await?;
+
+            let backend_address = unused_localhost_address().await?.to_string();
+            assert_rejected_stream_without_spawning_handler(
+                vec![ClientServiceSettings {
+                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                    backend_address,
+                    tls_mode: ClientTlsMode::Passthrough,
+                }],
+                "app.example.test",
+                |result: io::Result<()>| assert!(result.is_err()),
+            )
+            .await?;
+
+            assert_rejected_stream_without_spawning_handler(
+                vec![ClientServiceSettings {
+                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                    backend_address: "127.0.0.1:8080".to_owned(),
+                    tls_mode: ClientTlsMode::Terminate,
+                }],
+                "app.example.test",
+                |result: io::Result<()>| assert!(result.is_err()),
+            )
+            .await?;
+
+            Ok(())
+        })
+        .await?;
+
+        assert!(!info_output.contains("passthrough to 127.0.0.1:"));
+        assert!(info_output.contains(
+            "WARN client route api.example.test -> unavailable (no matching client service)"
+        ));
+        assert!(
+            info_output
+                .contains("WARN client route app.example.test -> backend connect failed for")
+        );
+        assert!(info_output.contains(
+            "WARN client route app.example.test -> terminate mode unavailable (TLS config missing)"
+        ));
+
+        Ok(())
+    }
+
+    async fn assert_forwarded_stream_without_spawning_handler(
+        mut services: Vec<ClientServiceSettings>,
+        requested_hostname: &str,
+    ) -> io::Result<()> {
+        let (backend_cert, backend_key) = make_self_signed_cert(requested_hostname)?;
+        let (backend_address, backend_task) = spawn_tls_backend(
+            private_key_from_der(&backend_key),
+            backend_cert.clone(),
+            *b"pong",
+        )
+        .await?;
+        for service in &mut services {
+            if service.backend_address == backend_placeholder() {
+                service.backend_address = backend_address.clone();
+            }
+        }
+
+        let stream_handler = TunnelConnectionStreamHandler::new(services, HashMap::new());
+        let fixture = TunnelConnectionFixture::connect().await?;
+        let server_connection = fixture.server_connection.clone();
+        let client_connection = fixture.client_connection.clone();
+
+        let handle_stream = async {
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_bi())
+                .await
+                .map_err(|_| timeout_error("handler should accept a tunnel stream"))?
+                .map_err(io::Error::other)?;
+            stream_handler.handle(send, recv).await
+        };
+        let request_stream =
+            request_tls_response_over_tunnel(server_connection, &backend_cert, requested_hostname);
+        let ((), response) = tokio::try_join!(handle_stream, request_stream)?;
+        assert_eq!(response, *b"pong");
+
+        backend_task
+            .await
+            .map_err(|error| join_error("backend task failed", error))??;
+        Ok(())
+    }
+
+    async fn assert_rejected_stream_without_spawning_handler(
+        services: Vec<ClientServiceSettings>,
+        requested_hostname: &str,
+        assert_handler_result: impl FnOnce(io::Result<()>),
+    ) -> io::Result<()> {
+        let stream_handler = TunnelConnectionStreamHandler::new(services, HashMap::new());
+        let fixture = TunnelConnectionFixture::connect().await?;
+        let server_connection = fixture.server_connection.clone();
+        let client_connection = fixture.client_connection.clone();
+        let client_hello = build_client_hello(requested_hostname)?;
+
+        let handle_stream = async {
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_bi())
+                .await
+                .map_err(|_| timeout_error("handler should accept a tunnel stream"))?
+                .map_err(io::Error::other)?;
+            stream_handler.handle(send, recv).await
+        };
+        let drive_rejected_stream = async {
+            let (mut tunnel_send, mut tunnel_recv) =
+                timeout(Duration::from_secs(1), server_connection.open_bi())
+                    .await
+                    .map_err(|_| timeout_error("test should open a tunnel stream"))?
+                    .map_err(io::Error::other)?;
+            tunnel_send.write_all(&client_hello).await?;
+            tunnel_send.finish().map_err(io::Error::other)?;
+
+            if let Ok(Ok(response)) =
+                timeout(Duration::from_secs(1), tunnel_recv.read_to_end(1)).await
+            {
+                assert!(response.is_empty());
+            }
+
+            Ok::<(), io::Error>(())
+        };
+        let (handler_result, drive_result) = tokio::join!(handle_stream, drive_rejected_stream);
+        drive_result?;
+        assert_handler_result(handler_result);
+        Ok(())
+    }
+
     async fn assert_forwarded_stream(
         mut services: Vec<ClientServiceSettings>,
         requested_hostname: &str,
@@ -376,7 +533,7 @@ mod tests {
             }
         }
 
-        let stream_handler = TunnelConnectionStreamHandler::new(services, false, HashMap::new());
+        let stream_handler = TunnelConnectionStreamHandler::new(services, HashMap::new());
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -408,7 +565,7 @@ mod tests {
         requested_hostname: &str,
         assert_handler_result: impl FnOnce(io::Result<()>) + Send + 'static,
     ) -> io::Result<()> {
-        let stream_handler = TunnelConnectionStreamHandler::new(services, false, HashMap::new());
+        let stream_handler = TunnelConnectionStreamHandler::new(services, HashMap::new());
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -633,6 +790,71 @@ mod tests {
         Ok(roots)
     }
 
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    struct BufferWriter(SharedBuffer);
+
+    impl SharedBuffer {
+        fn read(&self) -> String {
+            String::from_utf8(self.0.lock().expect("buffer mutex poisoned").clone())
+                .expect("runtime log output must be valid UTF-8")
+        }
+    }
+
+    impl std::io::Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .0
+                .lock()
+                .expect("buffer mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for SharedBuffer {
+        type Writer = BufferWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            BufferWriter(self.clone())
+        }
+    }
+
+    async fn capture_logs<Fut>(level: LogLevel, action: Fut) -> io::Result<String>
+    where
+        Fut: std::future::Future<Output = io::Result<()>>,
+    {
+        let buffer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(level_filter(level))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(buffer.clone())
+                    .with_ansi(false)
+                    .without_time()
+                    .with_target(false),
+            );
+        let _guard = tracing::subscriber::set_default(subscriber);
+        action.await?;
+        Ok(buffer.read())
+    }
+
+    fn level_filter(level: LogLevel) -> LevelFilter {
+        match level {
+            LogLevel::Off => LevelFilter::OFF,
+            LogLevel::Error => LevelFilter::ERROR,
+            LogLevel::Warn => LevelFilter::WARN,
+            LogLevel::Info => LevelFilter::INFO,
+            LogLevel::Debug => LevelFilter::DEBUG,
+            LogLevel::Trace => LevelFilter::TRACE,
+        }
+    }
+
     fn timeout_error(message: &'static str) -> io::Error {
         io::Error::new(io::ErrorKind::TimedOut, message)
     }
@@ -732,7 +954,7 @@ mod tests {
         }];
         let mut tls_configs = HashMap::new();
         tls_configs.insert(hostname.to_owned(), tls_config.clone());
-        let stream_handler = TunnelConnectionStreamHandler::new(services, false, tls_configs);
+        let stream_handler = TunnelConnectionStreamHandler::new(services, tls_configs);
 
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
@@ -865,7 +1087,7 @@ mod tests {
         ];
         let mut tls_configs = HashMap::new();
         tls_configs.insert(terminate_hostname.to_owned(), tls_config);
-        let stream_handler = TunnelConnectionStreamHandler::new(services, false, tls_configs);
+        let stream_handler = TunnelConnectionStreamHandler::new(services, tls_configs);
 
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_conn_for_term = fixture.server_connection.clone();

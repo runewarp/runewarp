@@ -58,7 +58,7 @@ pub use server_cert::{
 };
 pub use settings::{
     ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode,
-    DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, ServerCertificateSettings, ServerSettings,
+    DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, LogLevel, ServerCertificateSettings, ServerSettings,
     ServerSettingsResolutionError, ServerTunnelSettings, SettingsError, load_client_settings,
     load_server_settings, resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config,

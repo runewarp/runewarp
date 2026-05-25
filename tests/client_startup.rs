@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, PreparedClient,
-    Server, ServerConfig, ServerTunnelSettings, generate_client_identity,
+    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, LogLevel,
+    PreparedClient, Server, ServerConfig, ServerTunnelSettings, generate_client_identity,
     initialize_manual_client_public_cert, load_client_settings,
     make_server_quic_config_with_client_auth,
 };
@@ -29,7 +29,6 @@ async fn prepared_client_connects_from_validated_settings() {
             public_hostnames: vec!["app.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
-        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -102,7 +101,6 @@ async fn prepared_client_uses_the_configured_server_address_port() {
             public_hostnames: vec!["app.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
-        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -187,7 +185,6 @@ async fn prepared_client_rejects_settings_without_services() {
             public_hostnames: vec!["app.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
-        logs: true,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -221,7 +218,7 @@ async fn prepared_client_rejects_settings_without_services() {
     let settings = ClientSettings {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
-        logs: true,
+        log_level: LogLevel::Info,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().to_path_buf(),
         reconnect_interval: Duration::from_secs(5),
@@ -280,7 +277,7 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
     let settings = ClientSettings {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
-        logs: true,
+        log_level: LogLevel::Info,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         reconnect_interval: Duration::from_secs(5),
@@ -340,7 +337,7 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
     let settings = ClientSettings {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
-        logs: true,
+        log_level: LogLevel::Info,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         reconnect_interval: Duration::from_secs(5),
@@ -397,7 +394,7 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
     let settings = ClientSettings {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
-        logs: false,
+        log_level: LogLevel::Off,
         server_ca_file: None,
         identity_directory: tempdir.path().join("client-identity"),
         reconnect_interval: Duration::from_secs(5),
@@ -439,7 +436,6 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
             public_hostnames: vec!["app.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
-        logs: false,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -476,7 +472,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     let settings = ClientSettings {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
-        logs: false,
+        log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-ca-not-needed.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         reconnect_interval: Duration::from_secs(5),
@@ -546,7 +542,6 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
             public_hostnames: vec!["app.example.test".to_owned(), "api.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
-        logs: false,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -584,7 +579,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     let settings = ClientSettings {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
-        logs: false,
+        log_level: LogLevel::Off,
         server_ca_file: None,
         identity_directory: tempdir.path().join("client-identity"),
         reconnect_interval: Duration::from_secs(5),
@@ -640,7 +635,6 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
             public_hostnames: vec!["app.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
-        logs: false,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -684,7 +678,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
     let settings = ClientSettings {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
-        logs: false,
+        log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         reconnect_interval: Duration::from_secs(5),
@@ -736,7 +730,6 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
             public_hostnames: vec!["app.example.test".to_owned(), "api.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
-        logs: false,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -780,7 +773,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
     let settings = ClientSettings {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
-        logs: false,
+        log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         reconnect_interval: Duration::from_secs(5),

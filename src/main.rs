@@ -9,7 +9,6 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
-use runewarp::runtime_log::{emit_stderr, warning_line};
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientRuntimeArgs,
@@ -27,12 +26,26 @@ use runewarp::{
     rotate_manual_server_certificate_authority,
 };
 use time::OffsetDateTime;
+use tokio::net::lookup_host;
 
 mod cli;
 
 enum RunError {
     Cli(clap::Error),
     Other(Box<dyn Error>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetryAttemptKind {
+    Initial,
+    ImmediateRetry,
+    IntervalRetry,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClientTunnelDialTarget {
+    configured_server_addr: String,
+    resolved_server_addr: SocketAddr,
 }
 
 #[tokio::main]
@@ -76,40 +89,74 @@ async fn run_client_command(
     settings: &runewarp::ClientSettings,
     local_bind_addr: SocketAddr,
 ) -> Result<(), Box<dyn Error>> {
+    let mut connected_once = false;
     loop {
         ensure_client_identity_fresh(&settings.identity_directory)?;
+        let phase = client_tunnel_phase(connected_once);
         let client = retry_with_immediate_retry(
             settings.reconnect_interval,
             should_retry_client_connect_error,
-            || async {
-                let client = PreparedClient::connect(settings, local_bind_addr).await?;
-                if client.native_root_error_count() > 0 {
-                    emit_stderr(
-                        settings.logs,
-                        &warning_line(
-                            "client",
-                            &format!(
-                                "{} system trust-store certificate(s) could not be loaded; continuing with the successfully loaded trust anchors",
-                                client.native_root_error_count()
+            |attempt_kind| async move {
+                let log_attempt_kind = client_tunnel_attempt_kind(attempt_kind);
+                let dial_target = match resolve_client_tunnel_dial_target(settings).await {
+                    Ok(dial_target) => dial_target,
+                    Err(error) => {
+                        runewarp::runtime_log::client_tunnel_resolution_failed(
+                            phase,
+                            log_attempt_kind,
+                            &configured_server_addr(
+                                &settings.server_hostname,
+                                settings.server_port,
                             ),
-                        ),
-                    );
+                            settings.reconnect_interval,
+                            &error.to_string(),
+                        );
+                        return Err(error);
+                    }
+                };
+                runewarp::runtime_log::client_tunnel_connecting(
+                    phase,
+                    log_attempt_kind,
+                    &dial_target.configured_server_addr,
+                    dial_target.resolved_server_addr,
+                    settings.reconnect_interval,
+                );
+                match PreparedClient::connect_to(
+                    settings,
+                    local_bind_addr,
+                    dial_target.resolved_server_addr,
+                )
+                .await
+                {
+                    Ok(client) => {
+                        runewarp::runtime_log::client_tunnel_connected(
+                            phase,
+                            &dial_target.configured_server_addr,
+                            dial_target.resolved_server_addr,
+                        );
+                        Ok(client)
+                    }
+                    Err(error) => {
+                        runewarp::runtime_log::client_tunnel_connect_failed(
+                            phase,
+                            log_attempt_kind,
+                            &dial_target.configured_server_addr,
+                            dial_target.resolved_server_addr,
+                            settings.reconnect_interval,
+                            &error.to_string(),
+                        );
+                        Err(error)
+                    }
                 }
-                Ok(client)
             },
             |delay| tokio::time::sleep(delay),
         )
         .await
         .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
+        connected_once = true;
 
         if let Err(error) = client.run().await {
-            emit_stderr(
-                settings.logs,
-                &warning_line(
-                    "client",
-                    &format!("tunnel connection lost: {error}; reconnecting"),
-                ),
-            );
+            runewarp::runtime_log::client_tunnel_disconnected(&error.to_string());
             continue;
         }
 
@@ -138,6 +185,7 @@ async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Erro
 
     let settings =
         resolve_server_settings_from_cli(config).map_err(wrap_server_settings_resolution_error)?;
+    runewarp::runtime_log::install(settings.log_level)?;
     PreparedServer::bind(
         &settings,
         settings.public_bind_address,
@@ -207,6 +255,7 @@ async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box
     };
     let settings = resolve_client_settings_from_cli(config.clone(), runtime)
         .map_err(wrap_client_settings_resolution_error)?;
+    runewarp::runtime_log::install(settings.log_level)?;
     run_client_command(&settings, wildcard(0)).await
 }
 
@@ -404,6 +453,56 @@ fn should_retry_client_connect_error(error: &runewarp::ClientStartupError) -> bo
     )
 }
 
+fn client_tunnel_phase(connected_once: bool) -> runewarp::runtime_log::ClientTunnelPhase {
+    if connected_once {
+        runewarp::runtime_log::ClientTunnelPhase::Reconnecting
+    } else {
+        runewarp::runtime_log::ClientTunnelPhase::Establishing
+    }
+}
+
+fn client_tunnel_attempt_kind(
+    attempt_kind: RetryAttemptKind,
+) -> runewarp::runtime_log::ClientTunnelAttemptKind {
+    match attempt_kind {
+        RetryAttemptKind::Initial => runewarp::runtime_log::ClientTunnelAttemptKind::Initial,
+        RetryAttemptKind::ImmediateRetry => {
+            runewarp::runtime_log::ClientTunnelAttemptKind::ImmediateRetry
+        }
+        RetryAttemptKind::IntervalRetry => {
+            runewarp::runtime_log::ClientTunnelAttemptKind::IntervalRetry
+        }
+    }
+}
+
+async fn resolve_client_tunnel_dial_target(
+    settings: &runewarp::ClientSettings,
+) -> Result<ClientTunnelDialTarget, runewarp::ClientStartupError> {
+    let mut server_addrs = lookup_host((settings.server_hostname.as_str(), settings.server_port))
+        .await
+        .map_err(runewarp::ClientStartupError::Resolve)?;
+    let Some(resolved_server_addr) = server_addrs.next() else {
+        return Err(runewarp::ClientStartupError::MissingServerAddress {
+            server_hostname: settings.server_hostname.clone(),
+        });
+    };
+    Ok(ClientTunnelDialTarget {
+        configured_server_addr: configured_server_addr(
+            &settings.server_hostname,
+            settings.server_port,
+        ),
+        resolved_server_addr,
+    })
+}
+
+fn configured_server_addr(server_hostname: &str, server_port: u16) -> String {
+    if server_hostname.contains(':') && !server_hostname.starts_with('[') {
+        format!("[{server_hostname}]:{server_port}")
+    } else {
+        format!("{server_hostname}:{server_port}")
+    }
+}
+
 async fn retry_with_immediate_retry<T, E, Attempt, AttemptFuture, Sleep, SleepFuture>(
     retry_interval: Duration,
     should_retry: impl Fn(&E) -> bool,
@@ -411,20 +510,23 @@ async fn retry_with_immediate_retry<T, E, Attempt, AttemptFuture, Sleep, SleepFu
     mut sleep: Sleep,
 ) -> Result<T, E>
 where
-    Attempt: FnMut() -> AttemptFuture,
+    Attempt: FnMut(RetryAttemptKind) -> AttemptFuture,
     AttemptFuture: Future<Output = Result<T, E>>,
     Sleep: FnMut(Duration) -> SleepFuture,
     SleepFuture: Future<Output = ()>,
 {
     let mut used_immediate_retry = false;
+    let mut attempt_kind = RetryAttemptKind::Initial;
     loop {
-        match attempt().await {
+        match attempt(attempt_kind).await {
             Ok(result) => return Ok(result),
             Err(error) if should_retry(&error) => {
                 if used_immediate_retry {
                     sleep(retry_interval).await;
+                    attempt_kind = RetryAttemptKind::IntervalRetry;
                 } else {
                     used_immediate_retry = true;
+                    attempt_kind = RetryAttemptKind::ImmediateRetry;
                 }
             }
             Err(error) => return Err(error),
@@ -646,7 +748,7 @@ mod tests {
         CLIENT_KEY_FILENAME, ClientIdentity,
     };
 
-    use super::{ensure_client_identity_fresh, retry_with_immediate_retry};
+    use super::{RetryAttemptKind, ensure_client_identity_fresh, retry_with_immediate_retry};
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum TestError {
@@ -657,6 +759,7 @@ mod tests {
     #[tokio::test]
     async fn retries_immediately_once_then_waits_for_the_retry_interval() {
         let attempts = Arc::new(Mutex::new(0));
+        let retry_attempts = Arc::new(Mutex::new(Vec::new()));
         let sleeps = Arc::new(Mutex::new(Vec::new()));
         let retry_interval = Duration::from_secs(5);
 
@@ -665,9 +768,12 @@ mod tests {
             |error: &TestError| matches!(error, TestError::Retryable),
             {
                 let attempts = attempts.clone();
-                move || {
+                let retry_attempts = retry_attempts.clone();
+                move |attempt_kind| {
                     let attempts = attempts.clone();
+                    let retry_attempts = retry_attempts.clone();
                     async move {
+                        retry_attempts.lock().unwrap().push(attempt_kind);
                         let mut attempts = attempts.lock().unwrap();
                         *attempts += 1;
                         match *attempts {
@@ -691,6 +797,14 @@ mod tests {
         .await;
 
         assert_eq!(result, Ok(()));
+        assert_eq!(
+            *retry_attempts.lock().unwrap(),
+            vec![
+                RetryAttemptKind::Initial,
+                RetryAttemptKind::ImmediateRetry,
+                RetryAttemptKind::IntervalRetry,
+            ]
+        );
         assert_eq!(*sleeps.lock().unwrap(), vec![retry_interval]);
     }
 
@@ -701,7 +815,7 @@ mod tests {
         let result = retry_with_immediate_retry(
             Duration::from_secs(5),
             |error: &TestError| matches!(error, TestError::Retryable),
-            || async { Result::<(), TestError>::Err(TestError::Permanent) },
+            |_attempt_kind| async { Result::<(), TestError>::Err(TestError::Permanent) },
             {
                 let sleeps = sleeps.clone();
                 move |delay| {

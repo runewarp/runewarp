@@ -138,11 +138,14 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 #[test]
 fn server_uses_the_default_material_dir_when_config_omits_it() {
     let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
     let xdg_data_home = tempdir.path().join("xdg-data");
+    fs::create_dir_all(xdg_config_home.join("runewarp")).unwrap();
 
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
         .env("XDG_DATA_HOME", &xdg_data_home)
         .args([
             "server",
@@ -168,6 +171,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let assert = Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
         .env("XDG_DATA_HOME", &xdg_data_home)
         .args(["server", "--config", "server.toml"])
         .assert()

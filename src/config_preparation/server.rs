@@ -4,8 +4,8 @@ use crate::config_preparation::{
     PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
 };
 use crate::settings::{
-    RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig, SettingsError,
-    collect_server_unknown_field_messages, deserialize_selected_section,
+    LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig, SettingsError,
+    collect_server_unknown_field_messages, deserialize_selected_section, load_log_level_from_path,
     load_optional_selected_section_value,
 };
 use crate::{
@@ -16,7 +16,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreparedServerConfig {
     pub(crate) hostname: Option<String>,
-    pub(crate) logs: bool,
+    pub(crate) log_level: LogLevel,
     pub(crate) public_bind_address: String,
     pub(crate) tunnel_bind_address: String,
     pub(crate) manual_cert_present: bool,
@@ -55,16 +55,24 @@ pub(crate) fn prepare_server_config_from_path(
     };
     let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
     let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
-    Ok(prepare_raw_server_config(path, raw, unknown_field_messages))
+    let log_level = load_log_level_from_path(path)?;
+    Ok(prepare_raw_server_config(
+        path,
+        log_level,
+        raw,
+        unknown_field_messages,
+    ))
 }
 
 fn prepare_raw_server_config(
     path: &Path,
+    log_level: LogLevel,
     raw: RawServerConfig,
     unknown_field_messages: Vec<String>,
 ) -> PreparedServerConfig {
     prepare_raw_server_config_with_defaults(
         path,
+        log_level,
         raw,
         unknown_field_messages,
         &default_server_cert_material_dir,
@@ -74,6 +82,7 @@ fn prepare_raw_server_config(
 
 fn prepare_raw_server_config_with_defaults(
     path: &Path,
+    log_level: LogLevel,
     raw: RawServerConfig,
     unknown_field_messages: Vec<String>,
     default_server_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
@@ -85,7 +94,7 @@ fn prepare_raw_server_config_with_defaults(
 
     PreparedServerConfig {
         hostname: raw.hostname,
-        logs: raw.logs.unwrap_or(true),
+        log_level,
         public_bind_address: raw
             .public_bind_address
             .unwrap_or_else(|| "0.0.0.0:443".to_owned()),
@@ -158,7 +167,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{PreparedDirectory, PreparedValue, prepare_server_config_from_path};
-    use crate::settings::{RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig};
+    use crate::settings::{LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig};
 
     #[test]
     fn server_config_selection_prefers_the_explicit_path() -> Result<(), Box<dyn std::error::Error>>
@@ -205,7 +214,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         let prepared = prepare_server_config_from_path(&tempdir.path().join("config.toml"))?;
 
         assert_eq!(prepared.hostname, Some("tunnel.example.test".to_owned()));
-        assert!(prepared.logs);
+        assert_eq!(prepared.log_level, LogLevel::Info);
         assert_eq!(prepared.public_bind_address, "0.0.0.0:443");
         assert_eq!(prepared.tunnel_bind_address, "0.0.0.0:443");
         assert!(prepared.manual_cert_present);
@@ -231,9 +240,9 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
         let manual = super::prepare_raw_server_config_with_defaults(
             &config_path,
+            LogLevel::Info,
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
-                logs: None,
                 cert_dir: None,
                 acme: None,
                 public_bind_address: None,
@@ -260,9 +269,9 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
         let acme = super::prepare_raw_server_config_with_defaults(
             &config_path,
+            LogLevel::Off,
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
-                logs: Some(false),
                 cert_dir: None,
                 acme: Some(RawServerAcmeConfig {
                     email: Some("admin@example.test".to_owned()),
@@ -283,7 +292,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             &|| Ok(default_acme_state_dir.clone()),
         );
 
-        assert!(!acme.logs);
+        assert_eq!(acme.log_level, LogLevel::Off);
         let prepared_acme = match acme.acme {
             Some(prepared_acme) => prepared_acme,
             None => panic!("expected prepared server acme config"),
@@ -303,9 +312,9 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
         let prepared = super::prepare_raw_server_config_with_defaults(
             &config_path,
+            LogLevel::Off,
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
-                logs: Some(false),
                 cert_dir: None,
                 acme: Some(RawServerAcmeConfig {
                     email: Some("admin@example.test".to_owned()),
@@ -326,7 +335,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             &|| Ok(tempdir.path().join("unused-acme-state")),
         );
 
-        assert!(!prepared.logs);
+        assert_eq!(prepared.log_level, LogLevel::Off);
         assert_eq!(prepared.public_bind_address, "127.0.0.1:8443");
         assert_eq!(prepared.tunnel_bind_address, "127.0.0.1:9443");
         let prepared_acme = match prepared.acme {

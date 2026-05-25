@@ -25,7 +25,7 @@ For each inbound TCP connection on the configured `server.public-bind-address`:
 9. If the selected Tunnel has no active **Tunnel connection**, drop the connection.
 10. Open a bidirectional stream on the selected Tunnel connection, forward the buffered ClientHello bytes, then continue streaming in both directions.
 
-The buffered ClientHello must never be logged or echoed back in diagnostics. When logs are enabled, diagnostics may log the normalized **Public hostname** and the routing outcome only.
+The buffered ClientHello must never be logged or echoed back in diagnostics. With top-level `log-level = "debug"`, stderr diagnostics may log only the normalized **Public hostname** and the routing outcome.
 
 ## Drop conditions
 

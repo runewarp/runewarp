@@ -8,7 +8,10 @@ use crate::settings::{
     collect_server_unknown_field_messages, deserialize_selected_section,
     load_optional_selected_section_value,
 };
-use crate::{default_server_acme_state_dir, default_server_cert_material_dir};
+use crate::{
+    XdgPathError, default_config_path, default_server_acme_state_dir,
+    default_server_cert_material_dir,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreparedServerConfig {
@@ -36,6 +39,10 @@ pub(crate) struct PreparedServerTunnelConfig {
     pub(crate) client_identity: Option<String>,
 }
 
+pub(crate) fn select_server_config_path(config: Option<PathBuf>) -> Result<PathBuf, XdgPathError> {
+    select_server_config_path_with_default(config, default_config_path)
+}
+
 pub(crate) fn prepare_server_config_from_path(
     path: &Path,
 ) -> Result<PreparedServerConfig, SettingsError> {
@@ -56,6 +63,22 @@ fn prepare_raw_server_config(
     raw: RawServerConfig,
     unknown_field_messages: Vec<String>,
 ) -> PreparedServerConfig {
+    prepare_raw_server_config_with_defaults(
+        path,
+        raw,
+        unknown_field_messages,
+        &default_server_cert_material_dir,
+        &default_server_acme_state_dir,
+    )
+}
+
+fn prepare_raw_server_config_with_defaults(
+    path: &Path,
+    raw: RawServerConfig,
+    unknown_field_messages: Vec<String>,
+    default_server_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_server_acme_state_dir: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+) -> PreparedServerConfig {
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let manual_cert_present = raw.cert_dir.is_some();
     let acme_present = raw.acme.is_some();
@@ -75,14 +98,15 @@ fn prepare_raw_server_config(
             Some(resolve_path_with_default(
                 raw.cert_dir,
                 config_dir,
-                default_server_cert_material_dir,
+                default_server_cert_directory,
             ))
         } else {
             None
         },
         acme: if acme_present && !manual_cert_present {
-            raw.acme
-                .map(|acme| prepare_server_acme_config(acme, config_dir))
+            raw.acme.map(|acme| {
+                prepare_server_acme_config(acme, config_dir, default_server_acme_state_dir)
+            })
         } else {
             None
         },
@@ -94,6 +118,7 @@ fn prepare_raw_server_config(
 fn prepare_server_acme_config(
     raw: RawServerAcmeConfig,
     config_dir: &Path,
+    default_server_acme_state_dir: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> PreparedServerAcmeConfig {
     PreparedServerAcmeConfig {
         email: raw.email,
@@ -115,17 +140,55 @@ fn prepare_server_tunnel(raw: RawServerTunnelConfig) -> PreparedServerTunnelConf
     }
 }
 
+fn select_server_config_path_with_default(
+    config: Option<PathBuf>,
+    default_config_path: impl FnOnce() -> Result<PathBuf, XdgPathError>,
+) -> Result<PathBuf, XdgPathError> {
+    match config {
+        Some(path) => Ok(path),
+        None => default_config_path(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use tempfile::tempdir;
 
-    use super::{PreparedValue, prepare_server_config_from_path};
+    use super::{PreparedDirectory, PreparedValue, prepare_server_config_from_path};
+    use crate::settings::{RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig};
 
     #[test]
-    fn server_preparation_defaults_bind_addresses_and_resolves_manual_dir() {
-        let tempdir = tempdir().unwrap();
+    fn server_config_selection_prefers_the_explicit_path() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let explicit = PathBuf::from("/tmp/explicit-server.toml");
+
+        let selected =
+            super::select_server_config_path_with_default(Some(explicit.clone()), || {
+                Ok(PathBuf::from("/tmp/default-server.toml"))
+            })?;
+
+        assert_eq!(selected, explicit);
+        Ok(())
+    }
+
+    #[test]
+    fn server_config_selection_uses_the_default_path_when_omitted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let selected = super::select_server_config_path_with_default(None, || {
+            Ok(PathBuf::from("/tmp/default-server.toml"))
+        })?;
+
+        assert_eq!(selected, PathBuf::from("/tmp/default-server.toml"));
+        Ok(())
+    }
+
+    #[test]
+    fn server_preparation_defaults_bind_addresses_and_resolves_manual_dir()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
         fs::write(
             tempdir.path().join("config.toml"),
             r#"
@@ -137,11 +200,9 @@ cert-dir = "server-cert"
 public-hostnames = ["app.example.test"]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 "#,
-        )
-        .unwrap();
+        )?;
 
-        let prepared =
-            prepare_server_config_from_path(&tempdir.path().join("config.toml")).unwrap();
+        let prepared = prepare_server_config_from_path(&tempdir.path().join("config.toml"))?;
 
         assert_eq!(prepared.hostname, Some("tunnel.example.test".to_owned()));
         assert!(prepared.logs);
@@ -157,5 +218,125 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             prepared.tunnels[0].public_hostnames,
             Some(vec!["app.example.test".to_owned()])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn server_preparation_uses_injected_xdg_defaults_for_manual_material_and_acme_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let config_path = tempdir.path().join("config.toml");
+        let default_cert_dir = tempdir.path().join("xdg-data/server/cert");
+        let default_acme_state_dir = tempdir.path().join("xdg-state/server/acme");
+
+        let manual = super::prepare_raw_server_config_with_defaults(
+            &config_path,
+            RawServerConfig {
+                hostname: Some("tunnel.example.test".to_owned()),
+                logs: None,
+                cert_dir: None,
+                acme: None,
+                public_bind_address: None,
+                tunnel_bind_address: None,
+                tunnels: vec![RawServerTunnelConfig {
+                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                    client_identity: Some(
+                        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                            .to_owned(),
+                    ),
+                }],
+            },
+            Vec::new(),
+            &|| Ok(default_cert_dir.clone()),
+            &|| Ok(default_acme_state_dir.clone()),
+        );
+
+        assert_eq!(
+            manual.manual_certificate_directory,
+            Some(PreparedValue::Ready(default_cert_dir))
+        );
+        assert_eq!(manual.public_bind_address, "0.0.0.0:443");
+        assert_eq!(manual.tunnel_bind_address, "0.0.0.0:443");
+
+        let acme = super::prepare_raw_server_config_with_defaults(
+            &config_path,
+            RawServerConfig {
+                hostname: Some("tunnel.example.test".to_owned()),
+                logs: Some(false),
+                cert_dir: None,
+                acme: Some(RawServerAcmeConfig {
+                    email: Some("admin@example.test".to_owned()),
+                    state_dir: None,
+                }),
+                public_bind_address: None,
+                tunnel_bind_address: None,
+                tunnels: vec![RawServerTunnelConfig {
+                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                    client_identity: Some(
+                        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                            .to_owned(),
+                    ),
+                }],
+            },
+            Vec::new(),
+            &|| Ok(tempdir.path().join("unused-cert-dir")),
+            &|| Ok(default_acme_state_dir.clone()),
+        );
+
+        assert!(!acme.logs);
+        let prepared_acme = match acme.acme {
+            Some(prepared_acme) => prepared_acme,
+            None => panic!("expected prepared server acme config"),
+        };
+        assert_eq!(
+            prepared_acme.state_directory,
+            PreparedDirectory::Defaulted(PreparedValue::Ready(default_acme_state_dir))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_preparation_resolves_relative_acme_state_dir_from_the_config_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let config_path = tempdir.path().join("nested").join("server.toml");
+
+        let prepared = super::prepare_raw_server_config_with_defaults(
+            &config_path,
+            RawServerConfig {
+                hostname: Some("tunnel.example.test".to_owned()),
+                logs: Some(false),
+                cert_dir: None,
+                acme: Some(RawServerAcmeConfig {
+                    email: Some("admin@example.test".to_owned()),
+                    state_dir: Some(PathBuf::from("acme-state")),
+                }),
+                public_bind_address: Some("127.0.0.1:8443".to_owned()),
+                tunnel_bind_address: Some("127.0.0.1:9443".to_owned()),
+                tunnels: vec![RawServerTunnelConfig {
+                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                    client_identity: Some(
+                        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                            .to_owned(),
+                    ),
+                }],
+            },
+            Vec::new(),
+            &|| Ok(tempdir.path().join("unused-cert-dir")),
+            &|| Ok(tempdir.path().join("unused-acme-state")),
+        );
+
+        assert!(!prepared.logs);
+        assert_eq!(prepared.public_bind_address, "127.0.0.1:8443");
+        assert_eq!(prepared.tunnel_bind_address, "127.0.0.1:9443");
+        let prepared_acme = match prepared.acme {
+            Some(prepared_acme) => prepared_acme,
+            None => panic!("expected prepared server acme config"),
+        };
+        assert_eq!(
+            prepared_acme.state_directory,
+            PreparedDirectory::Explicit(tempdir.path().join("nested/acme-state"))
+        );
+        Ok(())
     }
 }

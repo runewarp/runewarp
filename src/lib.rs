@@ -59,15 +59,10 @@ pub use server_cert::{
 pub use settings::{
     ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode,
     DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, ServerCertificateSettings, ServerSettings,
-    ServerTunnelSettings, SettingsError, load_client_settings, load_server_settings,
-    resolve_client_identity_material_dir_from_config,
+    ServerSettingsResolutionError, ServerTunnelSettings, SettingsError, load_client_settings,
+    load_server_settings, resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config,
-    resolve_default_client_acme_state_dir_from_config,
-    resolve_default_server_acme_state_dir_from_config,
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
-    resolve_terminating_hostnames_from_config,
+    resolve_server_settings_from_cli, resolve_terminating_hostnames_from_config,
 };
-pub use startup::{
-    ClientStartupError, PreparedClient, PreparedServer, ServerStartupError,
-    StartupPreparationError, prepare_client_startup, prepare_server_startup,
-};
+pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};

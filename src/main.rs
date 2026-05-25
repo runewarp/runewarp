@@ -13,18 +13,18 @@ use runewarp::runtime_log::{emit_stderr, warning_line};
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientRuntimeArgs,
-    ClientSettingsResolutionError, PreparedClient, PreparedServer, SettingsError, XdgPathError,
-    default_client_identity_material_dir, default_client_public_cert_material_dir,
-    default_config_path, default_server_cert_material_dir, generate_client_identity,
-    initialize_manual_client_public_cert, initialize_manual_server_certificate,
-    load_server_settings, prepare_client_startup, prepare_server_startup,
-    renew_client_identity_certificate, renew_manual_client_public_cert,
-    renew_manual_server_certificate, resolve_client_identity_material_dir_from_config,
+    ClientSettingsResolutionError, PreparedClient, PreparedServer, ServerSettingsResolutionError,
+    SettingsError, XdgPathError, default_client_identity_material_dir,
+    default_client_public_cert_material_dir, default_config_path, default_server_cert_material_dir,
+    generate_client_identity, initialize_manual_client_public_cert,
+    initialize_manual_server_certificate, renew_client_identity_certificate,
+    renew_manual_client_public_cert, renew_manual_server_certificate,
+    resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config, resolve_client_settings_from_cli,
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
-    resolve_terminating_hostnames_from_config, rotate_client_identity,
-    rotate_manual_client_public_cert_authority, rotate_manual_server_certificate_authority,
-    select_client_config,
+    resolve_server_settings_from_cli, resolve_terminating_hostnames_from_config,
+    rotate_client_identity, rotate_manual_client_public_cert_authority,
+    rotate_manual_server_certificate_authority,
 };
 use time::OffsetDateTime;
 
@@ -136,10 +136,8 @@ async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Erro
         return run_server_cert_command(config, command);
     }
 
-    let config_path = config_path_or_default(config)?;
-    let settings = load_server_settings(&config_path)
-        .map_err(|error| wrap_server_settings_error(error, &config_path))?;
-    prepare_server_startup(&config_path)?;
+    let settings =
+        resolve_server_settings_from_cli(config).map_err(wrap_server_settings_resolution_error)?;
     PreparedServer::bind(
         &settings,
         settings.public_bind_address,
@@ -209,14 +207,6 @@ async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box
     };
     let settings = resolve_client_settings_from_cli(config.clone(), runtime)
         .map_err(wrap_client_settings_resolution_error)?;
-    let default_client_acme_state_dir = match select_client_config(config)
-        .map_err(|error| -> Box<dyn Error> { Box::new(error) })?
-    {
-        runewarp::SelectedClientConfig::Explicit(path)
-        | runewarp::SelectedClientConfig::Discovered(path) => Some(path),
-        runewarp::SelectedClientConfig::None => None,
-    };
-    prepare_client_startup(default_client_acme_state_dir.as_deref())?;
     run_client_command(&settings, wildcard(0)).await
 }
 
@@ -442,15 +432,6 @@ where
     }
 }
 
-fn config_path_or_default(
-    config: Option<std::path::PathBuf>,
-) -> Result<std::path::PathBuf, Box<dyn Error>> {
-    match config {
-        Some(config) => Ok(config),
-        None => default_config_path().map_err(|error| -> Box<dyn Error> { Box::new(error) }),
-    }
-}
-
 fn resolve_server_cert_dir(
     config: Option<std::path::PathBuf>,
     directory: Option<std::path::PathBuf>,
@@ -542,11 +523,14 @@ fn normalized_hostname_for_match(hostname: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn wrap_server_settings_error(error: SettingsError, config_path: &Path) -> Box<dyn Error> {
-    if server_material_missing(&error) {
+fn wrap_server_settings_resolution_error(error: ServerSettingsResolutionError) -> Box<dyn Error> {
+    if error.settings_error().is_some_and(server_material_missing) {
         return Box::new(io::Error::other(format!(
             "{error}\nHint: {}",
-            server_cert_init_hint(config_path)
+            error.selected_config_path().map_or_else(
+                || "runewarp server cert init".to_owned(),
+                server_cert_init_hint
+            )
         )));
     }
     Box::new(error)

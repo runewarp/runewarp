@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::fs;
 use std::io;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rustls::RootCertStore;
@@ -21,84 +20,10 @@ use crate::tls_material::{
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConnectError, ClientIdentity,
     ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, QuicConfigError,
-    Server, ServerCertificateSettings, ServerConfig, ServerSettings, SettingsError,
-    client::validate_services, make_client_quic_config_with_client_auth,
-    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
-    resolve_default_client_acme_state_dir_from_config,
-    resolve_default_server_acme_state_dir_from_config,
+    Server, ServerCertificateSettings, ServerConfig, ServerSettings, client::validate_services,
+    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth_resolver,
 };
-
-#[derive(Debug)]
-pub enum StartupPreparationError {
-    Settings(SettingsError),
-    CreateDirectory {
-        field_name: &'static str,
-        path: PathBuf,
-        source: io::Error,
-    },
-}
-
-impl fmt::Display for StartupPreparationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Settings(source) => write!(formatter, "{source}"),
-            Self::CreateDirectory {
-                field_name,
-                path,
-                source,
-            } => write!(
-                formatter,
-                "failed to create {field_name} directory {}: {source}",
-                path.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for StartupPreparationError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Settings(source) => Some(source),
-            Self::CreateDirectory { source, .. } => Some(source),
-        }
-    }
-}
-
-pub fn prepare_server_startup(config_path: &Path) -> Result<(), StartupPreparationError> {
-    prepare_default_acme_state_dir(
-        resolve_default_server_acme_state_dir_from_config(config_path)
-            .map_err(StartupPreparationError::Settings)?,
-        "server.acme.state-dir",
-    )
-}
-
-pub fn prepare_client_startup(
-    selected_config_path: Option<&Path>,
-) -> Result<(), StartupPreparationError> {
-    let Some(selected_config_path) = selected_config_path else {
-        return Ok(());
-    };
-    prepare_default_acme_state_dir(
-        resolve_default_client_acme_state_dir_from_config(selected_config_path)
-            .map_err(StartupPreparationError::Settings)?,
-        "client.acme.state-dir",
-    )
-}
-
-fn prepare_default_acme_state_dir(
-    state_dir: Option<PathBuf>,
-    field_name: &'static str,
-) -> Result<(), StartupPreparationError> {
-    let Some(state_dir) = state_dir else {
-        return Ok(());
-    };
-    fs::create_dir_all(&state_dir).map_err(|source| StartupPreparationError::CreateDirectory {
-        field_name,
-        path: state_dir,
-        source,
-    })?;
-    Ok(())
-}
 
 pub struct PreparedServer {
     server: Server,
@@ -113,6 +38,7 @@ impl PreparedServer {
         public_bind_addr: SocketAddr,
         tunnel_connection_bind_addr: SocketAddr,
     ) -> Result<Self, ServerStartupError> {
+        prepare_default_server_acme_state_dir(settings)?;
         let trusted_client_identities = settings
             .tunnels
             .iter()
@@ -133,6 +59,7 @@ impl PreparedServer {
             ServerCertificateSettings::Acme {
                 email,
                 state_directory,
+                ..
             } => {
                 let acme_state = build_acme_state(&settings.hostname, email, state_directory);
                 let quic_server_config = make_server_quic_config_with_client_auth_resolver(
@@ -237,6 +164,7 @@ impl PreparedClient {
         }
         let services = validate_services(&settings.services)
             .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
+        prepare_default_client_acme_state_dir(settings)?;
 
         let (hostname_tls_configs, acme_state) =
             load_termination_tls_configs(settings).map_err(ClientStartupError::InvalidSettings)?;
@@ -311,6 +239,11 @@ pub enum ServerStartupError {
     InvalidTlsMaterial(String),
     QuicConfig(QuicConfigError),
     Bind(io::Error),
+    CreateDirectory {
+        field_name: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 impl fmt::Display for ServerStartupError {
@@ -335,6 +268,15 @@ impl fmt::Display for ServerStartupError {
             Self::InvalidTlsMaterial(message) => write!(formatter, "{message}"),
             Self::QuicConfig(source) => write!(formatter, "{source}"),
             Self::Bind(source) => write!(formatter, "failed to bind server listeners: {source}"),
+            Self::CreateDirectory {
+                field_name,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "failed to create {field_name} directory {}: {source}",
+                path.display()
+            ),
         }
     }
 }
@@ -346,6 +288,7 @@ impl std::error::Error for ServerStartupError {
             Self::ParsePem { source, .. } => Some(source),
             Self::QuicConfig(source) => Some(source),
             Self::Bind(source) => Some(source),
+            Self::CreateDirectory { source, .. } => Some(source),
             Self::MissingCertificate { .. }
             | Self::MissingPrivateKey { .. }
             | Self::InvalidTlsMaterial(_) => None,
@@ -377,12 +320,21 @@ impl From<TlsMaterialError> for ServerStartupError {
 pub enum ClientStartupError {
     TlsMaterial(ServerStartupError),
     InvalidSettings(String),
-    NativeRoots { errors: usize },
+    NativeRoots {
+        errors: usize,
+    },
     AddRootCertificate(rustls::Error),
     QuicConfig(QuicConfigError),
     Resolve(io::Error),
-    MissingServerAddress { server_hostname: String },
+    MissingServerAddress {
+        server_hostname: String,
+    },
     Connect(ClientConnectError),
+    CreateDirectory {
+        field_name: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 impl fmt::Display for ClientStartupError {
@@ -409,6 +361,15 @@ impl fmt::Display for ClientStartupError {
                 )
             }
             Self::Connect(source) => write!(formatter, "{source}"),
+            Self::CreateDirectory {
+                field_name,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "failed to create {field_name} directory {}: {source}",
+                path.display()
+            ),
         }
     }
 }
@@ -421,11 +382,50 @@ impl std::error::Error for ClientStartupError {
             Self::QuicConfig(source) => Some(source),
             Self::Resolve(source) => Some(source),
             Self::Connect(source) => Some(source),
+            Self::CreateDirectory { source, .. } => Some(source),
             Self::InvalidSettings(_)
             | Self::NativeRoots { .. }
             | Self::MissingServerAddress { .. } => None,
         }
     }
+}
+
+fn prepare_default_server_acme_state_dir(
+    settings: &ServerSettings,
+) -> Result<(), ServerStartupError> {
+    let ServerCertificateSettings::Acme {
+        state_directory,
+        state_directory_was_defaulted: true,
+        ..
+    } = &settings.certificate
+    else {
+        return Ok(());
+    };
+
+    std::fs::create_dir_all(state_directory).map_err(|source| ServerStartupError::CreateDirectory {
+        field_name: "server.acme.state-dir",
+        path: state_directory.clone(),
+        source,
+    })
+}
+
+fn prepare_default_client_acme_state_dir(
+    settings: &ClientSettings,
+) -> Result<(), ClientStartupError> {
+    let Some(ClientPublicCertConfig::Acme {
+        state_directory,
+        state_directory_was_defaulted: true,
+        ..
+    }) = &settings.public_cert_config
+    else {
+        return Ok(());
+    };
+
+    std::fs::create_dir_all(state_directory).map_err(|source| ClientStartupError::CreateDirectory {
+        field_name: "client.acme.state-dir",
+        path: state_directory.clone(),
+        source,
+    })
 }
 
 #[derive(Debug)]
@@ -528,6 +528,7 @@ fn load_termination_tls_configs(settings: &ClientSettings) -> Result<LoadedTermi
         Some(ClientPublicCertConfig::Acme {
             email,
             state_directory,
+            ..
         }) => {
             let (configs, acme_state) =
                 build_acme_termination_configs(settings, email, state_directory)?;
@@ -615,14 +616,19 @@ fn build_acme_termination_configs(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::time::Duration;
 
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::CertificateDer;
 
     use super::{
-        ClientStartupError, NativeRootsLoad, acme_terminating_hostnames, build_root_store,
+        ClientStartupError, NativeRootsLoad, ServerStartupError, acme_terminating_hostnames,
+        build_root_store,
     };
-    use crate::{ClientServiceSettings, ClientTlsMode};
+    use crate::{
+        ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode,
+        ServerCertificateSettings, ServerSettings,
+    };
 
     #[test]
     fn configured_server_ca_file_still_loads_without_native_roots() {
@@ -761,5 +767,137 @@ mod tests {
         let hostnames = acme_terminating_hostnames(&services);
 
         assert!(hostnames.is_empty());
+    }
+
+    #[test]
+    fn defaulted_server_acme_state_dir_is_created_during_startup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempfile::tempdir()?;
+        let state_directory = tempdir.path().join("server/acme");
+        let settings = ServerSettings {
+            hostname: "tunnel.example.test".to_owned(),
+            logs: true,
+            certificate: ServerCertificateSettings::Acme {
+                email: "admin@example.test".to_owned(),
+                state_directory: state_directory.clone(),
+                state_directory_was_defaulted: true,
+            },
+            public_bind_address: "127.0.0.1:443".parse()?,
+            tunnel_connection_bind_address: "127.0.0.1:443".parse()?,
+            tunnels: Vec::new(),
+        };
+
+        super::prepare_default_server_acme_state_dir(&settings)?;
+
+        assert!(state_directory.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn defaulted_client_acme_state_dir_is_created_during_startup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempfile::tempdir()?;
+        let state_directory = tempdir.path().join("client/acme");
+        let settings = ClientSettings {
+            server_hostname: "tunnel.example.test".to_owned(),
+            server_port: 443,
+            logs: true,
+            server_ca_file: None,
+            identity_directory: tempdir.path().join("client-identity"),
+            reconnect_interval: Duration::from_secs(5),
+            services: vec![ClientServiceSettings {
+                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                backend_address: "127.0.0.1:443".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+            }],
+            public_cert_config: Some(ClientPublicCertConfig::Acme {
+                email: "admin@example.test".to_owned(),
+                state_directory: state_directory.clone(),
+                state_directory_was_defaulted: true,
+            }),
+        };
+
+        super::prepare_default_client_acme_state_dir(&settings)?;
+
+        assert!(state_directory.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn startup_surfaces_defaulted_server_acme_state_dir_creation_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempfile::tempdir()?;
+        let blocked_parent = tempdir.path().join("blocked");
+        fs::write(&blocked_parent, "not a directory")?;
+        let state_directory = blocked_parent.join("acme");
+        let settings = ServerSettings {
+            hostname: "tunnel.example.test".to_owned(),
+            logs: true,
+            certificate: ServerCertificateSettings::Acme {
+                email: "admin@example.test".to_owned(),
+                state_directory: state_directory.clone(),
+                state_directory_was_defaulted: true,
+            },
+            public_bind_address: "127.0.0.1:443".parse()?,
+            tunnel_connection_bind_address: "127.0.0.1:443".parse()?,
+            tunnels: Vec::new(),
+        };
+
+        let error = match super::prepare_default_server_acme_state_dir(&settings) {
+            Ok(()) => panic!("expected startup preparation to fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ServerStartupError::CreateDirectory {
+                field_name: "server.acme.state-dir",
+                path,
+                ..
+            } if path == state_directory
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn startup_surfaces_defaulted_client_acme_state_dir_creation_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempfile::tempdir()?;
+        let blocked_parent = tempdir.path().join("blocked");
+        fs::write(&blocked_parent, "not a directory")?;
+        let state_directory = blocked_parent.join("acme");
+        let settings = ClientSettings {
+            server_hostname: "tunnel.example.test".to_owned(),
+            server_port: 443,
+            logs: true,
+            server_ca_file: None,
+            identity_directory: tempdir.path().join("client-identity"),
+            reconnect_interval: Duration::from_secs(5),
+            services: vec![ClientServiceSettings {
+                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                backend_address: "127.0.0.1:443".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+            }],
+            public_cert_config: Some(ClientPublicCertConfig::Acme {
+                email: "admin@example.test".to_owned(),
+                state_directory: state_directory.clone(),
+                state_directory_was_defaulted: true,
+            }),
+        };
+
+        let error = match super::prepare_default_client_acme_state_dir(&settings) {
+            Ok(()) => panic!("expected startup preparation to fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ClientStartupError::CreateDirectory {
+                field_name: "client.acme.state-dir",
+                path,
+                ..
+            } if path == state_directory
+        ));
+        Ok(())
     }
 }

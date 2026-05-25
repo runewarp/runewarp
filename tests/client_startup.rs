@@ -696,6 +696,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
         public_cert_config: Some(ClientPublicCertConfig::Acme {
             email: "test@example.test".to_owned(),
             state_directory: acme_state_dir,
+            state_directory_was_defaulted: false,
         }),
     };
 
@@ -798,6 +799,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
         public_cert_config: Some(ClientPublicCertConfig::Acme {
             email: "test@example.test".to_owned(),
             state_directory: acme_state_dir,
+            state_directory_was_defaulted: false,
         }),
     };
 

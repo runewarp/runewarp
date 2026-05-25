@@ -10,26 +10,12 @@ Runewarp already ships the following baseline:
 | --- | --- |
 | Core data path | Public TLS passthrough from the **Server** to a **Client**-side **Local backend** |
 | Operator surface and trust | `runewarp server`, `runewarp client`, `runewarp server cert ...`, `runewarp client identity ...`, ACME, manual/private-CA Server certificates, and pinned Client authentication |
-| Explicit routing | Required Server `public-hostnames`, multiple Server **Tunnels**, multiple Client **Services**, **Hostname mirroring**, and **One-sided Catch-all** |
+| Explicit routing | Required Server `public-hostnames`, multiple Server **Tunnels**, multiple Client **Services** |
 | Preview packaging | Shared Docker image, non-root container execution, CI automation, and preview image export workflows |
 
 ## Public release
 
 This track turns the shipped baseline into a clean first public release.
-
-### Release-ready docs surface
-
-**Outcome**
-
-- operators can understand what Runewarp is, what it is not, and how to evaluate or run it without reading internal project history
-
-**Planned work**
-
-- keep the top-level README concise and product-focused
-- keep core reference docs evergreen, with roadmap material moved out of them
-- provide one task-oriented operator guide in `docs/usage.md`
-- document the shipped Docker example as an evaluation path
-- keep the canonical product language and boundaries consistent across the public docs set
 
 ### Release notes and changelog discipline
 
@@ -53,7 +39,6 @@ This track turns the shipped baseline into a clean first public release.
 
 - publish the crate to crates.io
 - publish the shared container image to Docker Hub
-- publish the same container image to GHCR
 - keep binary versioning, image naming, and release tags aligned
 
 ### Install and packaging validation

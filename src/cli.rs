@@ -89,6 +89,15 @@ pub struct ClientPublicCertArgs {
 #[derive(Debug, Subcommand)]
 pub enum ClientPublicCertSubcommand {
     Init(ClientPublicCertInitArgs),
+    /// Renew the leaf certificate for one hostname (--hostname) or all
+    /// config-derived terminating hostnames when --hostname is omitted.
+    /// Requires --config when --hostname is not provided.
+    Renew(ClientPublicCertRenewArgs),
+    /// Rotate the shared Client public CA and reissue every managed leaf
+    /// certificate. The managed hostname set is derived from
+    /// client.services[].public-hostnames for tls-mode = "terminate" entries
+    /// in the config file; --config is therefore required.
+    RotateCa(ClientPublicCertDirArgs),
 }
 
 #[derive(Debug, Args)]
@@ -97,6 +106,22 @@ pub struct ClientPublicCertInitArgs {
     pub dir: Option<PathBuf>,
     #[arg(long, value_name = "HOSTNAME")]
     pub hostname: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ClientPublicCertRenewArgs {
+    #[arg(long = "dir", value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+    /// Hostname whose leaf certificate should be renewed. When omitted, all
+    /// terminating hostnames from the config file are renewed.
+    #[arg(long, value_name = "HOSTNAME")]
+    pub hostname: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ClientPublicCertDirArgs {
+    #[arg(long = "dir", value_name = "DIR")]
+    pub dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

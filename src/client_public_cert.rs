@@ -1,4 +1,5 @@
 use std::fmt;
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -119,6 +120,100 @@ pub fn client_public_cert_leaf_dir(directory: &Path, hostname: &str) -> PathBuf 
     directory.join(normalize_public_hostname(hostname))
 }
 
+/// Renews the leaf certificate for `hostname` under `directory`, reusing the
+/// existing shared Client public CA. The CA itself is not changed.
+///
+/// Replaces `{hostname}/server.crt` and `{hostname}/server.key` atomically.
+pub fn renew_manual_client_public_cert(
+    directory: &Path,
+    hostname: &str,
+) -> Result<(), ClientPublicCertError> {
+    let hostname = normalize_public_hostname(hostname);
+    let ca_cert_path = directory.join(CLIENT_PUBLIC_CA_FILENAME);
+    let ca_key_path = directory
+        .join(CLIENT_PUBLIC_STATE_DIR)
+        .join(CLIENT_PUBLIC_CA_KEY_FILENAME);
+
+    let leaf_dir = directory.join(&hostname);
+    let (leaf_cert_pem, leaf_key_pem) =
+        generate_leaf_from_existing_ca(&ca_cert_path, &ca_key_path, &hostname)?;
+
+    replace_file_atomically_with_mode(
+        &leaf_dir.join(SERVER_CERT_FILENAME),
+        leaf_cert_pem.as_bytes(),
+        0o644,
+    )?;
+    replace_file_atomically_with_mode(
+        &leaf_dir.join(SERVER_KEY_FILENAME),
+        leaf_key_pem.as_bytes(),
+        0o600,
+    )?;
+
+    Ok(())
+}
+
+/// Rotates the shared Client public CA and reissues every leaf certificate for
+/// the given `hostnames`. Both the CA cert and CA private key are replaced;
+/// every managed leaf cert and key are replaced under their hostname
+/// subdirectories.
+pub fn rotate_manual_client_public_cert_authority(
+    directory: &Path,
+    hostnames: &[String],
+) -> Result<(), ClientPublicCertError> {
+    let not_before = OffsetDateTime::now_utc() - Duration::minutes(1);
+    let ca_params = ca_cert_params(not_before)?;
+    let ca_key = KeyPair::generate()?;
+    let ca_key_pem = ca_key.serialize_pem();
+    let ca_cert = ca_params.self_signed(&ca_key)?;
+    let ca_cert_pem = ca_cert.pem();
+    let issuer = Issuer::new(ca_params, ca_key);
+
+    let state_dir = directory.join(CLIENT_PUBLIC_STATE_DIR);
+
+    // Generate all leaf material before writing anything, so failures before
+    // the first write leave the directory unchanged.
+    let leaves: Vec<(String, String, String)> = hostnames
+        .iter()
+        .map(|h| {
+            let h = normalize_public_hostname(h);
+            let leaf_params = leaf_cert_params(&h, not_before)?;
+            let leaf_key = KeyPair::generate()?;
+            let leaf_key_pem = leaf_key.serialize_pem();
+            let leaf_cert = leaf_params.signed_by(&leaf_key, &issuer)?;
+            Ok((h, leaf_cert.pem(), leaf_key_pem))
+        })
+        .collect::<Result<_, rcgen::Error>>()?;
+
+    // Write CA material atomically.
+    replace_file_atomically_with_mode(
+        &directory.join(CLIENT_PUBLIC_CA_FILENAME),
+        ca_cert_pem.as_bytes(),
+        0o644,
+    )?;
+    replace_file_atomically_with_mode(
+        &state_dir.join(CLIENT_PUBLIC_CA_KEY_FILENAME),
+        ca_key_pem.as_bytes(),
+        0o600,
+    )?;
+
+    // Write leaf material for every managed hostname.
+    for (hostname, leaf_cert_pem, leaf_key_pem) in leaves {
+        let leaf_dir = directory.join(&hostname);
+        replace_file_atomically_with_mode(
+            &leaf_dir.join(SERVER_CERT_FILENAME),
+            leaf_cert_pem.as_bytes(),
+            0o644,
+        )?;
+        replace_file_atomically_with_mode(
+            &leaf_dir.join(SERVER_KEY_FILENAME),
+            leaf_key_pem.as_bytes(),
+            0o600,
+        )?;
+    }
+
+    Ok(())
+}
+
 struct GeneratedClientPublicCertMaterial {
     ca_pem: String,
     ca_key_pem: String,
@@ -159,18 +254,16 @@ fn generate_leaf_from_existing_ca(
 ) -> Result<(String, String), ClientPublicCertError> {
     use std::fs;
 
-    let ca_cert_pem = fs::read_to_string(ca_cert_path).map_err(|source| {
-        ClientPublicCertError::ReadFile {
+    let ca_cert_pem =
+        fs::read_to_string(ca_cert_path).map_err(|source| ClientPublicCertError::ReadFile {
             path: ca_cert_path.to_path_buf(),
             source,
-        }
-    })?;
-    let ca_key_pem = fs::read_to_string(ca_key_path).map_err(|source| {
-        ClientPublicCertError::ReadFile {
+        })?;
+    let ca_key_pem =
+        fs::read_to_string(ca_key_path).map_err(|source| ClientPublicCertError::ReadFile {
             path: ca_key_path.to_path_buf(),
             source,
-        }
-    })?;
+        })?;
 
     let ca_key = KeyPair::from_pem(&ca_key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, ca_key)?;
@@ -260,6 +353,83 @@ fn write_new_file_with_mode(
         })
 }
 
+fn open_new_file_with_mode(path: &Path, mode: u32) -> Result<std::fs::File, ClientPublicCertError> {
+    use std::fs::OpenOptions;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(mode);
+    options
+        .open(path)
+        .map_err(|source| ClientPublicCertError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn replace_file_atomically_with_mode(
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+) -> Result<(), ClientPublicCertError> {
+    use std::io::ErrorKind;
+
+    let Some(parent) = path.parent() else {
+        return Err(ClientPublicCertError::WriteFile {
+            path: path.to_path_buf(),
+            source: io::Error::new(ErrorKind::InvalidInput, "missing parent directory"),
+        });
+    };
+
+    let Some(filename) = path.file_name() else {
+        return Err(ClientPublicCertError::WriteFile {
+            path: path.to_path_buf(),
+            source: io::Error::new(ErrorKind::InvalidInput, "missing filename"),
+        });
+    };
+
+    for attempt in 0..16 {
+        let temporary_path = parent.join(format!(
+            ".{}.runewarp-tmp-{}-{attempt}",
+            filename.to_string_lossy(),
+            std::process::id()
+        ));
+        let mut file = match open_new_file_with_mode(&temporary_path, mode) {
+            Ok(file) => file,
+            Err(ClientPublicCertError::WriteFile { source, .. })
+                if source.kind() == ErrorKind::AlreadyExists =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if let Err(source) = file.write_all(contents) {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(ClientPublicCertError::WriteFile {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+        drop(file);
+        if let Err(source) = fs::rename(&temporary_path, path) {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(ClientPublicCertError::WriteFile {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+        return Ok(());
+    }
+
+    Err(ClientPublicCertError::WriteFile {
+        path: path.to_path_buf(),
+        source: io::Error::other("failed to find a unique temporary path after 16 attempts"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -267,7 +437,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, load_certificate_chain, load_private_key};
+    use crate::tls_material::{
+        SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, load_certificate_chain, load_private_key,
+    };
 
     #[test]
     fn init_writes_all_expected_artifacts() {

@@ -332,6 +332,26 @@ runewarp client public-cert init --dir ./public-cert --hostname api.example.com
 
 `runewarp client public-cert init` refuses to overwrite an existing CA, so running it a second time with a new hostname reuses the original CA and only writes new leaf material. The Visitor-facing `public-ca.crt` therefore stays stable across additions.
 
+**Renewing a leaf certificate:**
+
+```bash
+# Explicit hostname:
+runewarp client public-cert renew --hostname app.example.com
+
+# All terminating hostnames from config (--hostname omitted):
+runewarp client --config client.toml public-cert renew
+```
+
+When `--hostname` is omitted the target set is derived from `public-hostnames` on `tls-mode = "terminate"` services in the config. Omitting both `--hostname` and `--config` is an error; Runewarp never infers targets from on-disk directories.
+
+**Rotating the Client public CA:**
+
+```bash
+runewarp client --config client.toml public-cert rotate-ca
+```
+
+`rotate-ca` replaces the shared CA and reissues every managed leaf certificate. `--config` is required. After rotation, distribute the new `public-ca.crt` to Visitors so they trust the new trust anchor.
+
 When omitted, `client.public-cert-dir` defaults to the XDG data location for Client public certificate material.
 
 ### `client.server-trust`

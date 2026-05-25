@@ -23,8 +23,18 @@ fn client_public_cert_init_writes_all_artifacts_to_the_requested_directory() {
         .assert()
         .success();
 
-    assert_exists(tempdir.path().join("client-public-cert/public-ca.crt").as_path());
-    assert_exists(tempdir.path().join("client-public-cert/state/public-ca.key").as_path());
+    assert_exists(
+        tempdir
+            .path()
+            .join("client-public-cert/public-ca.crt")
+            .as_path(),
+    );
+    assert_exists(
+        tempdir
+            .path()
+            .join("client-public-cert/state/public-ca.key")
+            .as_path(),
+    );
     assert_exists(
         tempdir
             .path()
@@ -226,6 +236,309 @@ fn assert_exists(path: &Path) {
         path.exists(),
         "expected {} to exist after `runewarp client public-cert init`",
         path.display()
+    );
+}
+
+// ── renew ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn client_public_cert_renew_with_hostname_replaces_leaf_but_keeps_ca() {
+    let tempdir = tempdir().unwrap();
+
+    // Set up initial certs.
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let original_ca = fs::read(tempdir.path().join("public-cert/public-ca.crt")).unwrap();
+    let original_leaf = fs::read(
+        tempdir
+            .path()
+            .join("public-cert/app.example.test/server.crt"),
+    )
+    .unwrap();
+    let original_key = fs::read(
+        tempdir
+            .path()
+            .join("public-cert/app.example.test/server.key"),
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "renew",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read(tempdir.path().join("public-cert/public-ca.crt")).unwrap(),
+        original_ca,
+        "renew should preserve the public CA certificate"
+    );
+    assert_ne!(
+        fs::read(
+            tempdir
+                .path()
+                .join("public-cert/app.example.test/server.crt")
+        )
+        .unwrap(),
+        original_leaf,
+        "renew should replace the leaf certificate"
+    );
+    assert_ne!(
+        fs::read(
+            tempdir
+                .path()
+                .join("public-cert/app.example.test/server.key")
+        )
+        .unwrap(),
+        original_key,
+        "renew should replace the leaf private key"
+    );
+}
+
+#[test]
+fn client_public_cert_renew_requires_hostname_or_config() {
+    let tempdir = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "public-cert", "renew", "--dir", "public-cert"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--hostname") || stderr.contains("config"),
+        "expected error mentioning --hostname or config, got: {stderr}"
+    );
+}
+
+#[test]
+fn client_public_cert_renew_with_config_renews_all_terminating_hostnames() {
+    let tempdir = tempdir().unwrap();
+
+    // Write config with two terminating services.
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+public-cert-dir = "public-cert"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "127.0.0.1:3000"
+tls-mode = "terminate"
+
+[[client.services]]
+public-hostnames = ["api.example.test"]
+backend-address = "127.0.0.1:4000"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    // Initialize both hostnames.
+    for hostname in &["app.example.test", "api.example.test"] {
+        Command::cargo_bin("runewarp")
+            .unwrap()
+            .current_dir(tempdir.path())
+            .args([
+                "client",
+                "public-cert",
+                "init",
+                "--dir",
+                "public-cert",
+                "--hostname",
+                hostname,
+            ])
+            .assert()
+            .success();
+    }
+
+    let original_app_leaf = fs::read(
+        tempdir
+            .path()
+            .join("public-cert/app.example.test/server.crt"),
+    )
+    .unwrap();
+    let original_api_leaf = fs::read(
+        tempdir
+            .path()
+            .join("public-cert/api.example.test/server.crt"),
+    )
+    .unwrap();
+
+    // Renew without --hostname; should derive targets from config.
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "--config", "client.toml", "public-cert", "renew"])
+        .assert()
+        .success();
+
+    assert_ne!(
+        fs::read(
+            tempdir
+                .path()
+                .join("public-cert/app.example.test/server.crt")
+        )
+        .unwrap(),
+        original_app_leaf,
+        "renew should replace app leaf when driven by config"
+    );
+    assert_ne!(
+        fs::read(
+            tempdir
+                .path()
+                .join("public-cert/api.example.test/server.crt")
+        )
+        .unwrap(),
+        original_api_leaf,
+        "renew should replace api leaf when driven by config"
+    );
+}
+
+// ── rotate-ca ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn client_public_cert_rotate_ca_requires_config() {
+    let tempdir = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "public-cert", "rotate-ca", "--dir", "public-cert"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("config") || stderr.contains("hostname"),
+        "expected error mentioning config or hostname, got: {stderr}"
+    );
+}
+
+#[test]
+fn client_public_cert_rotate_ca_replaces_ca_and_reissues_all_leaves() {
+    let tempdir = tempdir().unwrap();
+
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+public-cert-dir = "public-cert"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "127.0.0.1:3000"
+tls-mode = "terminate"
+
+[[client.services]]
+public-hostnames = ["api.example.test"]
+backend-address = "127.0.0.1:4000"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    for hostname in &["app.example.test", "api.example.test"] {
+        Command::cargo_bin("runewarp")
+            .unwrap()
+            .current_dir(tempdir.path())
+            .args([
+                "client",
+                "public-cert",
+                "init",
+                "--dir",
+                "public-cert",
+                "--hostname",
+                hostname,
+            ])
+            .assert()
+            .success();
+    }
+
+    let original_ca = fs::read(tempdir.path().join("public-cert/public-ca.crt")).unwrap();
+    let original_ca_key = fs::read(tempdir.path().join("public-cert/state/public-ca.key")).unwrap();
+    let original_app_leaf = fs::read(
+        tempdir
+            .path()
+            .join("public-cert/app.example.test/server.crt"),
+    )
+    .unwrap();
+    let original_api_leaf = fs::read(
+        tempdir
+            .path()
+            .join("public-cert/api.example.test/server.crt"),
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "--config",
+            "client.toml",
+            "public-cert",
+            "rotate-ca",
+        ])
+        .assert()
+        .success();
+
+    assert_ne!(
+        fs::read(tempdir.path().join("public-cert/public-ca.crt")).unwrap(),
+        original_ca,
+        "rotate-ca should replace the public CA certificate"
+    );
+    assert_ne!(
+        fs::read(tempdir.path().join("public-cert/state/public-ca.key")).unwrap(),
+        original_ca_key,
+        "rotate-ca should replace the CA private key"
+    );
+    assert_ne!(
+        fs::read(
+            tempdir
+                .path()
+                .join("public-cert/app.example.test/server.crt")
+        )
+        .unwrap(),
+        original_app_leaf,
+        "rotate-ca should reissue the app leaf certificate"
+    );
+    assert_ne!(
+        fs::read(
+            tempdir
+                .path()
+                .join("public-cert/api.example.test/server.crt")
+        )
+        .unwrap(),
+        original_api_leaf,
+        "rotate-ca should reissue the api leaf certificate"
     );
 }
 

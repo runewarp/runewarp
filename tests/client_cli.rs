@@ -339,3 +339,50 @@ backend-address = "127.0.0.1:443"
     assert!(!stderr.contains("unable to resolve the XDG data base directory"));
     Ok(())
 }
+
+#[test]
+fn client_auto_creates_the_default_acme_state_dir_after_validation_succeeds()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+    let xdg_state_home = tempdir.path().join("xdg-state");
+    let default_state_dir = xdg_state_home.join("runewarp/client/acme");
+
+    Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .assert()
+        .success();
+    fs::write(tempdir.path().join("server-ca.pem"), "not a certificate")?;
+
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "localhost"
+server-trust = "ca-file"
+server-ca-file = "server-ca.pem"
+identity-dir = "client-identity"
+
+[client.acme]
+email = "admin@example.test"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "127.0.0.1:443"
+tls-mode = "terminate"
+"#,
+    )?;
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .env("XDG_STATE_HOME", &xdg_state_home)
+        .args(["client", "--config", "client.toml"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
+
+    assert!(!stderr.contains("client.acme.state-dir"));
+    assert!(default_state_dir.is_dir());
+    Ok(())
+}

@@ -17,12 +17,14 @@ use runewarp::{
     default_client_identity_material_dir, default_client_public_cert_material_dir,
     default_config_path, default_server_cert_material_dir, generate_client_identity,
     initialize_manual_client_public_cert, initialize_manual_server_certificate,
-    load_server_settings, renew_client_identity_certificate, renew_manual_client_public_cert,
+    load_server_settings, prepare_client_startup, prepare_server_startup,
+    renew_client_identity_certificate, renew_manual_client_public_cert,
     renew_manual_server_certificate, resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config, resolve_client_settings_from_cli,
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
     resolve_terminating_hostnames_from_config, rotate_client_identity,
     rotate_manual_client_public_cert_authority, rotate_manual_server_certificate_authority,
+    select_client_config,
 };
 use time::OffsetDateTime;
 
@@ -137,6 +139,7 @@ async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Erro
     let config_path = config_path_or_default(config)?;
     let settings = load_server_settings(&config_path)
         .map_err(|error| wrap_server_settings_error(error, &config_path))?;
+    prepare_server_startup(&config_path)?;
     PreparedServer::bind(
         &settings,
         settings.public_bind_address,
@@ -200,14 +203,20 @@ async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box
         return run_client_public_cert_command(config, command);
     }
 
-    let settings = resolve_client_settings_from_cli(
-        config,
-        ClientRuntimeArgs {
-            server_address,
-            backend_address,
-        },
-    )
-    .map_err(wrap_client_settings_resolution_error)?;
+    let runtime = ClientRuntimeArgs {
+        server_address,
+        backend_address,
+    };
+    let settings = resolve_client_settings_from_cli(config.clone(), runtime)
+        .map_err(wrap_client_settings_resolution_error)?;
+    let default_client_acme_state_dir = match select_client_config(config)
+        .map_err(|error| -> Box<dyn Error> { Box::new(error) })?
+    {
+        runewarp::SelectedClientConfig::Explicit(path)
+        | runewarp::SelectedClientConfig::Discovered(path) => Some(path),
+        runewarp::SelectedClientConfig::None => None,
+    };
+    prepare_client_startup(default_client_acme_state_dir.as_deref())?;
     run_client_command(&settings, wildcard(0)).await
 }
 

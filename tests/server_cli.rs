@@ -180,7 +180,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 }
 
 #[test]
-fn server_auto_creates_the_default_acme_state_dir_when_config_omits_it() {
+fn server_does_not_create_the_default_acme_state_dir_when_validation_fails() {
     let tempdir = tempdir().unwrap();
     let xdg_state_home = tempdir.path().join("xdg-state");
     let default_state_dir = xdg_state_home.join("runewarp/server/acme");
@@ -212,7 +212,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
     assert!(stderr.contains("server.tunnels[].public-hostnames is required"));
     assert!(!stderr.contains("server.acme.state-dir"));
-    assert!(default_state_dir.is_dir());
+    assert!(!default_state_dir.exists());
 }
 
 #[test]

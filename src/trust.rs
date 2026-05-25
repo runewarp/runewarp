@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::{XdgPathError, default_client_server_ca_path};
+use crate::XdgPathError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientServerTrust {
@@ -40,20 +40,7 @@ impl std::error::Error for ResolveClientServerTrustError {
     }
 }
 
-pub fn resolve_client_server_trust(
-    trust_mode: Option<&str>,
-    server_ca_file: Option<PathBuf>,
-    config_dir: &Path,
-) -> Result<ClientServerTrust, ResolveClientServerTrustError> {
-    resolve_client_server_trust_with_default(
-        trust_mode,
-        server_ca_file,
-        config_dir,
-        default_client_server_ca_path,
-    )
-}
-
-fn resolve_client_server_trust_with_default(
+pub(crate) fn resolve_client_server_trust_with_default(
     trust_mode: Option<&str>,
     server_ca_file: Option<PathBuf>,
     config_dir: &Path,

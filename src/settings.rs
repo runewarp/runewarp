@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use crate::config_preparation::PreparedDirectory;
 use crate::config_preparation::client::{
     PreparedClientAcmeConfig, PreparedClientConfig, PreparedClientServiceConfig,
     PreparedClientTlsMode, PreparedClientTrust,
@@ -15,14 +16,13 @@ use crate::config_preparation::client::{
 use crate::config_preparation::server::{
     PreparedServerAcmeConfig, PreparedServerConfig, PreparedServerTunnelConfig,
 };
-use crate::config_preparation::{PreparedDirectory, PreparedValue};
 use crate::server_address::ServerAddress;
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, validate_server_tls_material,
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
-    SERVER_CA_FILENAME, hostname::validate_public_hostname,
+    SERVER_CA_FILENAME, XdgPathError, hostname::validate_public_hostname,
 };
 
 pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
@@ -51,6 +51,7 @@ pub enum ServerCertificateSettings {
     Acme {
         email: String,
         state_directory: PathBuf,
+        state_directory_was_defaulted: bool,
     },
 }
 
@@ -74,6 +75,7 @@ pub enum ClientPublicCertConfig {
     Acme {
         email: String,
         state_directory: PathBuf,
+        state_directory_was_defaulted: bool,
     },
 }
 
@@ -112,6 +114,11 @@ struct ValidatedClientService {
     settings: Option<ClientServiceSettings>,
     public_hostnames: Vec<String>,
     parsed_tls_mode: Option<ClientTlsMode>,
+}
+
+struct ValidatedAcmeStateDirectory {
+    path: PathBuf,
+    was_defaulted: bool,
 }
 
 #[derive(Debug)]
@@ -172,9 +179,59 @@ impl std::error::Error for SettingsError {
     }
 }
 
+#[derive(Debug)]
+pub enum ServerSettingsResolutionError {
+    XdgPath(XdgPathError),
+    Settings(SettingsError),
+}
+
+impl ServerSettingsResolutionError {
+    pub fn selected_config_path(&self) -> Option<&Path> {
+        match self {
+            Self::Settings(SettingsError::Read { path, .. })
+            | Self::Settings(SettingsError::Parse { path, .. })
+            | Self::Settings(SettingsError::Validation { path, .. }) => Some(path.as_path()),
+            Self::XdgPath(_) => None,
+        }
+    }
+
+    pub fn settings_error(&self) -> Option<&SettingsError> {
+        match self {
+            Self::Settings(error) => Some(error),
+            Self::XdgPath(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for ServerSettingsResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::XdgPath(error) => write!(formatter, "{error}"),
+            Self::Settings(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ServerSettingsResolutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::XdgPath(error) => Some(error),
+            Self::Settings(error) => Some(error),
+        }
+    }
+}
+
 pub fn load_server_settings(path: &Path) -> Result<ServerSettings, SettingsError> {
     let prepared = crate::config_preparation::server::prepare_server_config_from_path(path)?;
     validate_prepared_server_settings(path, prepared)
+}
+
+pub fn resolve_server_settings_from_cli(
+    config: Option<PathBuf>,
+) -> Result<ServerSettings, ServerSettingsResolutionError> {
+    let config_path = crate::config_preparation::server::select_server_config_path(config)
+        .map_err(ServerSettingsResolutionError::XdgPath)?;
+    load_server_settings(&config_path).map_err(ServerSettingsResolutionError::Settings)
 }
 
 pub fn load_client_settings(path: &Path) -> Result<ClientSettings, SettingsError> {
@@ -288,52 +345,6 @@ pub fn resolve_client_identity_material_dir_from_config(
     Ok(raw.identity_dir.map(|path| resolve_path(base_dir, &path)))
 }
 
-pub fn resolve_default_server_acme_state_dir_from_config(
-    path: &Path,
-) -> Result<Option<PathBuf>, SettingsError> {
-    let prepared = crate::config_preparation::server::prepare_server_config_from_path(path)?;
-    if !prepared.acme_present || prepared.manual_cert_present {
-        return Ok(None);
-    }
-
-    match prepared.acme.map(|acme| acme.state_directory) {
-        Some(PreparedDirectory::Defaulted(PreparedValue::Ready(path))) => Ok(Some(path)),
-        Some(PreparedDirectory::Defaulted(PreparedValue::Error(message))) => {
-            Err(SettingsError::Validation {
-                path: path.to_path_buf(),
-                section: "server",
-                messages: vec![message],
-            })
-        }
-        Some(PreparedDirectory::Explicit(_)) | None => Ok(None),
-    }
-}
-
-pub fn resolve_default_client_acme_state_dir_from_config(
-    path: &Path,
-) -> Result<Option<PathBuf>, SettingsError> {
-    let Some(prepared) =
-        crate::config_preparation::client::prepare_optional_client_config_from_path(path)?
-    else {
-        return Ok(None);
-    };
-    if !prepared.acme_present || prepared.manual_public_cert_present {
-        return Ok(None);
-    }
-
-    match prepared.acme.map(|acme| acme.state_directory) {
-        Some(PreparedDirectory::Defaulted(PreparedValue::Ready(path))) => Ok(Some(path)),
-        Some(PreparedDirectory::Defaulted(PreparedValue::Error(message))) => {
-            Err(SettingsError::Validation {
-                path: path.to_path_buf(),
-                section: "client",
-                messages: vec![message],
-            })
-        }
-        Some(PreparedDirectory::Explicit(_)) | None => Ok(None),
-    }
-}
-
 pub(crate) fn load_optional_selected_section_value(
     path: &Path,
     section: &'static str,
@@ -426,7 +437,8 @@ fn validate_prepared_server_settings(
         false => manual.map(|directory| ServerCertificateSettings::Manual { directory }),
         true => acme.map(|(email, state_directory)| ServerCertificateSettings::Acme {
             email,
-            state_directory,
+            state_directory: state_directory.path,
+            state_directory_was_defaulted: state_directory.was_defaulted,
         }),
     };
 
@@ -569,7 +581,8 @@ pub(crate) fn validate_prepared_client_settings(
         false => manual_cert.map(|directory| ClientPublicCertConfig::Manual { directory }),
         true => acme.map(|(email, state_directory)| ClientPublicCertConfig::Acme {
             email,
-            state_directory,
+            state_directory: state_directory.path,
+            state_directory_was_defaulted: state_directory.was_defaulted,
         }),
     };
 
@@ -646,7 +659,7 @@ pub(crate) fn validate_prepared_client_settings(
 fn validate_prepared_client_acme_settings(
     raw: PreparedClientAcmeConfig,
     messages: &mut Vec<String>,
-) -> Option<(String, PathBuf)> {
+) -> Option<(String, ValidatedAcmeStateDirectory)> {
     let email = raw.email.unwrap_or_else(|| {
         messages.push("client.acme.email is required".to_owned());
         String::new()
@@ -697,7 +710,7 @@ fn validate_prepared_server_manual_cert_settings(
 fn validate_prepared_server_acme_settings(
     raw: PreparedServerAcmeConfig,
     messages: &mut Vec<String>,
-) -> Option<(String, PathBuf)> {
+) -> Option<(String, ValidatedAcmeStateDirectory)> {
     let email = raw.email.unwrap_or_else(|| {
         messages.push("server.acme.email is required".to_owned());
         String::new()
@@ -719,12 +732,23 @@ fn validate_prepared_acme_state_directory(
     field_name: &str,
     directory: PreparedDirectory,
     messages: &mut Vec<String>,
-) -> Option<PathBuf> {
+) -> Option<ValidatedAcmeStateDirectory> {
     match directory {
         PreparedDirectory::Explicit(path) => {
-            validate_existing_directory_path(field_name, path, messages)
+            validate_existing_directory_path(field_name, path, messages).map(|path| {
+                ValidatedAcmeStateDirectory {
+                    path,
+                    was_defaulted: false,
+                }
+            })
         }
-        PreparedDirectory::Defaulted(path) => path.into_option(messages),
+        PreparedDirectory::Defaulted(path) => {
+            path.into_option(messages)
+                .map(|path| ValidatedAcmeStateDirectory {
+                    path,
+                    was_defaulted: true,
+                })
+        }
     }
 }
 

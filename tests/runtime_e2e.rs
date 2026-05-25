@@ -1507,6 +1507,7 @@ client-identity = "{}"
         public_cert_config: Some(ClientPublicCertConfig::Acme {
             email: "test@example.test".to_owned(),
             state_directory: acme_state_dir,
+            state_directory_was_defaulted: false,
         }),
     };
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
@@ -1645,6 +1646,7 @@ client-identity = "{}"
         public_cert_config: Some(ClientPublicCertConfig::Acme {
             email: "test@example.test".to_owned(),
             state_directory: acme_state_dir,
+            state_directory_was_defaulted: false,
         }),
     };
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)

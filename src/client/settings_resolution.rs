@@ -5,10 +5,7 @@ use crate::config_preparation::client::{
     PreparedClientConfig, prepare_client_settings_from_cli, prepare_selected_client_config,
 };
 use crate::settings::validate_prepared_client_settings;
-use crate::{
-    ClientSettings, SettingsError, XdgPathError, default_client_identity_material_dir,
-    default_config_path,
-};
+use crate::{ClientSettings, SettingsError, XdgPathError, default_client_identity_material_dir};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClientRuntimeArgs {
@@ -109,17 +106,7 @@ impl std::error::Error for ClientSettingsResolutionError {
 }
 
 pub fn select_client_config(config: Option<PathBuf>) -> Result<SelectedClientConfig, XdgPathError> {
-    match config {
-        Some(path) => Ok(SelectedClientConfig::Explicit(path)),
-        None => {
-            let path = default_config_path()?;
-            if path.is_file() {
-                Ok(SelectedClientConfig::Discovered(path))
-            } else {
-                Ok(SelectedClientConfig::None)
-            }
-        }
-    }
+    crate::config_preparation::client::select_client_config(config)
 }
 
 pub fn resolve_client_settings_from_cli(

@@ -4,6 +4,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
@@ -473,7 +474,7 @@ fn build_root_store(
             errors: native_root_error_count,
         });
     }
-    if native_root_error_count > 0 {
+    if maybe_emit_client_trust_store_warning(native_root_error_count) {
         crate::runtime_log::client_trust_store_warning(native_root_error_count);
     }
 
@@ -483,6 +484,15 @@ fn build_root_store(
         #[cfg(test)]
         loaded_root_count,
     })
+}
+
+fn maybe_emit_client_trust_store_warning(errors: usize) -> bool {
+    static CLIENT_TRUST_STORE_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
+    should_emit_client_trust_store_warning(errors, &CLIENT_TRUST_STORE_WARNING_EMITTED)
+}
+
+fn should_emit_client_trust_store_warning(errors: usize, emitted: &AtomicBool) -> bool {
+    errors > 0 && !emitted.swap(true, Ordering::AcqRel)
 }
 
 /// Returns the set of explicit public hostnames for all terminating services.
@@ -607,6 +617,7 @@ fn build_acme_termination_configs(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
     use rcgen::generate_simple_self_signed;
@@ -675,6 +686,24 @@ mod tests {
         assert!(matches!(
             error,
             ClientStartupError::NativeRoots { errors: 2 }
+        ));
+    }
+
+    #[test]
+    fn client_trust_store_warning_only_emits_once_per_process_session() {
+        let warning_emitted = AtomicBool::new(false);
+
+        assert!(super::should_emit_client_trust_store_warning(
+            2,
+            &warning_emitted
+        ));
+        assert!(!super::should_emit_client_trust_store_warning(
+            2,
+            &warning_emitted
+        ));
+        assert!(!super::should_emit_client_trust_store_warning(
+            0,
+            &warning_emitted
         ));
     }
 

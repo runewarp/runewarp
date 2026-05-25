@@ -94,11 +94,11 @@ log-level = "debug"
 - output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message
 - omitted `log-level` defaults to `info`
 
-At `info` (default), Runewarp emits tunnel lifecycle events plus warnings and errors. `debug` adds per-connection routing diagnostics such as Server routing outcomes, Client passthrough vs terminate decisions, and rejected ClientHello reasons.
+At `info` (default), Runewarp emits tunnel lifecycle events plus warnings and errors. `debug` adds per-connection routing diagnostics such as Server routing outcomes, Client passthrough vs terminate decisions, and rejected ClientHello reasons. `trace` is also accepted, but Runewarp does not currently emit any trace-only runtime events, so today it produces the same runtime output as `debug`.
 
 | Key | Required | Notes |
 | --- | --- | --- |
-| `log-level` | no | Top-level runtime stderr log level for the selected role. Supported values: `off`, `error`, `warn`, `info`, `debug`, `trace`. Uses UTC RFC3339 timestamps. Defaults to `info`. |
+| `log-level` | no | Top-level runtime stderr log level for the selected role. Supported values: `off`, `error`, `warn`, `info`, `debug`, `trace`. Uses UTC RFC3339 timestamps. Defaults to `info`. `trace` is accepted, but no trace-only runtime events are emitted today, so it currently behaves the same as `debug`. |
 
 ## Default locations
 

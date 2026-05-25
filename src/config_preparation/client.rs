@@ -5,9 +5,9 @@ use crate::config_preparation::{
     PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
 };
 use crate::settings::{
-    DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, RawClientAcmeConfig, RawClientConfig,
+    DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, LogLevel, RawClientAcmeConfig, RawClientConfig,
     RawClientServiceConfig, SettingsError, collect_client_unknown_field_messages,
-    deserialize_selected_section, load_optional_selected_section_value,
+    deserialize_selected_section, load_log_level_from_path, load_optional_selected_section_value,
 };
 use crate::trust::{
     ClientServerTrust, ResolveClientServerTrustError, resolve_client_server_trust_with_default,
@@ -21,7 +21,7 @@ use crate::{
 pub(crate) struct PreparedClientConfig {
     pub(crate) selected_path: Option<PathBuf>,
     pub(crate) server_address: Option<String>,
-    pub(crate) logs: bool,
+    pub(crate) log_level: LogLevel,
     pub(crate) trust: PreparedClientTrust,
     pub(crate) identity_directory: PreparedValue<PathBuf>,
     pub(crate) reconnect_interval: Duration,
@@ -97,8 +97,10 @@ pub(crate) fn prepare_optional_client_config_from_path(
     };
     let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
     let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
+    let log_level = load_log_level_from_path(path)?;
     Ok(Some(prepare_raw_client_config(
         Some(path.to_path_buf()),
+        log_level,
         raw,
         unknown_field_messages,
         &default_identity_material_dir,
@@ -111,9 +113,12 @@ pub(crate) fn prepare_selected_client_config(
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
     match selected_config {
-        SelectedClientConfig::None => {
-            prepare_cli_only_client_config(None, runtime, default_identity_directory)
-        }
+        SelectedClientConfig::None => prepare_cli_only_client_config(
+            None,
+            LogLevel::default(),
+            runtime,
+            default_identity_directory,
+        ),
         SelectedClientConfig::Explicit(path) | SelectedClientConfig::Discovered(path) => {
             prepare_selected_config_client_config(path, runtime, default_identity_directory)
         }
@@ -127,8 +132,15 @@ fn prepare_selected_config_client_config(
 ) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
     let section_value = load_optional_selected_section_value(&path, "client")
         .map_err(ClientSettingsResolutionError::Settings)?;
+    let log_level =
+        load_log_level_from_path(&path).map_err(ClientSettingsResolutionError::Settings)?;
     let Some(section_value) = section_value else {
-        return prepare_cli_only_client_config(Some(&path), runtime, default_identity_directory);
+        return prepare_cli_only_client_config(
+            Some(&path),
+            log_level,
+            runtime,
+            default_identity_directory,
+        );
     };
 
     let service_block_count = selected_service_block_count(&section_value);
@@ -157,6 +169,7 @@ fn prepare_selected_config_client_config(
 
     Ok(prepare_raw_client_config(
         Some(path),
+        log_level,
         raw,
         messages,
         default_identity_directory,
@@ -165,6 +178,7 @@ fn prepare_selected_config_client_config(
 
 fn prepare_cli_only_client_config(
     selected_path: Option<&Path>,
+    log_level: LogLevel,
     runtime: &ClientRuntimeArgs,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
@@ -192,9 +206,9 @@ fn prepare_cli_only_client_config(
 
     Ok(prepare_raw_client_config(
         selected_path.map(Path::to_path_buf),
+        log_level,
         RawClientConfig {
             server_address: runtime.server_address.clone(),
-            logs: None,
             server_trust: None,
             server_ca_file: None,
             identity_dir: None,
@@ -213,12 +227,14 @@ fn prepare_cli_only_client_config(
 
 pub(crate) fn prepare_raw_client_config(
     selected_path: Option<PathBuf>,
+    log_level: LogLevel,
     raw: RawClientConfig,
     unknown_field_messages: Vec<String>,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> PreparedClientConfig {
     prepare_raw_client_config_with_defaults(
         selected_path,
+        log_level,
         raw,
         unknown_field_messages,
         default_identity_directory,
@@ -229,6 +245,7 @@ pub(crate) fn prepare_raw_client_config(
 
 fn prepare_raw_client_config_with_defaults(
     selected_path: Option<PathBuf>,
+    log_level: LogLevel,
     raw: RawClientConfig,
     unknown_field_messages: Vec<String>,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
@@ -246,7 +263,7 @@ fn prepare_raw_client_config_with_defaults(
     PreparedClientConfig {
         selected_path,
         server_address: raw.server_address,
-        logs: raw.logs.unwrap_or(true),
+        log_level,
         trust: prepare_client_trust(
             raw.server_trust.as_deref(),
             raw.server_ca_file,
@@ -379,7 +396,7 @@ mod tests {
         PreparedClientTlsMode, PreparedClientTrust, PreparedDirectory, PreparedValue,
         prepare_selected_client_config,
     };
-    use crate::settings::{RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig};
+    use crate::settings::{LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig};
     use crate::{ClientRuntimeArgs, SelectedClientConfig};
 
     #[test]
@@ -419,7 +436,7 @@ mod tests {
             prepared.server_address,
             Some("tunnel.example.test".to_owned())
         );
-        assert!(prepared.logs);
+        assert_eq!(prepared.log_level, LogLevel::Info);
         assert_eq!(
             prepared.reconnect_interval,
             Duration::from_secs(crate::DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS)
@@ -490,9 +507,9 @@ hostname = "tunnel.example.test"
 
         let prepared = super::prepare_raw_client_config_with_defaults(
             Some(config_path),
+            LogLevel::Info,
             RawClientConfig {
                 server_address: Some("tunnel.example.test".to_owned()),
-                logs: None,
                 server_trust: Some("ca-file".to_owned()),
                 server_ca_file: None,
                 identity_dir: None,
@@ -513,7 +530,7 @@ hostname = "tunnel.example.test"
             &|| Ok(acme_state_dir.clone()),
         );
 
-        assert!(prepared.logs);
+        assert_eq!(prepared.log_level, LogLevel::Info);
         assert_eq!(
             prepared.reconnect_interval,
             Duration::from_secs(crate::DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS)
@@ -548,9 +565,9 @@ hostname = "tunnel.example.test"
 
         let prepared = super::prepare_raw_client_config_with_defaults(
             Some(config_path.clone()),
+            LogLevel::Off,
             RawClientConfig {
                 server_address: Some("tunnel.example.test".to_owned()),
-                logs: Some(false),
                 server_trust: Some("ca-file".to_owned()),
                 server_ca_file: Some(PathBuf::from("trust/server-ca.pem")),
                 identity_dir: Some(PathBuf::from("identity")),
@@ -568,7 +585,7 @@ hostname = "tunnel.example.test"
             &|| Ok(default_acme_state_dir.clone()),
         );
 
-        assert!(!prepared.logs);
+        assert_eq!(prepared.log_level, LogLevel::Off);
         assert_eq!(
             prepared.identity_directory,
             PreparedValue::Ready(tempdir.path().join("nested/identity"))
@@ -595,8 +612,9 @@ hostname = "tunnel.example.test"
         fs::write(
             tempdir.path().join("config.toml"),
             r#"
+log-level = "off"
+
 [client]
-logs = false
 "#,
         )?;
 
@@ -617,7 +635,7 @@ logs = false
             prepared.server_address,
             Some("Tunnel.Example.Test.".to_owned())
         );
-        assert!(!prepared.logs);
+        assert_eq!(prepared.log_level, LogLevel::Off);
         assert_eq!(prepared.services.len(), 1);
         assert_eq!(prepared.services[0].public_hostnames, None);
         assert_eq!(

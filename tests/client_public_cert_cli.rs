@@ -206,11 +206,14 @@ fn client_public_cert_init_requires_hostname_or_config() {
 #[test]
 fn client_public_cert_init_uses_the_xdg_default_directory_when_dir_is_omitted() {
     let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
     let xdg_data_home = tempdir.path().join("xdg-data");
+    std::fs::create_dir_all(xdg_config_home.join("runewarp")).unwrap();
 
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
         .env("XDG_DATA_HOME", &xdg_data_home)
         .args([
             "client",

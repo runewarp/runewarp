@@ -31,11 +31,14 @@ fn client_identity_init_writes_identity_artifacts_to_the_requested_directory() {
 #[test]
 fn client_identity_init_uses_the_xdg_default_directory_when_dir_is_omitted() {
     let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
     let xdg_data_home = tempdir.path().join("xdg-data");
+    fs::create_dir_all(xdg_config_home.join("runewarp")).unwrap();
 
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
         .env("XDG_DATA_HOME", &xdg_data_home)
         .args(["client", "identity", "init"])
         .assert()

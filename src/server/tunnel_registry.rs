@@ -131,16 +131,23 @@ impl TunnelRegistry {
     }
 
     pub(crate) async fn register(&self, connection: Connection) {
-        let Some(tunnel_index) = self.tunnel_index_for_connection(&connection) else {
+        let Some((tunnel_index, client_identity)) = self.tunnel_registration_context(&connection)
+        else {
             connection.close(0_u32.into(), b"unmapped client identity");
             return;
         };
-        self.tunnel_slots[tunnel_index].register(connection).await;
+        self.tunnel_slots[tunnel_index]
+            .register(connection, client_identity)
+            .await;
     }
 
-    fn tunnel_index_for_connection(&self, connection: &Connection) -> Option<usize> {
+    fn tunnel_registration_context(
+        &self,
+        connection: &Connection,
+    ) -> Option<(usize, ClientIdentity)> {
         let identity = client_identity_from_connection(connection)?;
-        self.client_identity_to_tunnel.get(&identity).copied()
+        let tunnel_index = self.client_identity_to_tunnel.get(&identity).copied()?;
+        Some((tunnel_index, identity))
     }
 }
 

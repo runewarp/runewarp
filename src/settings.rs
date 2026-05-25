@@ -27,10 +27,28 @@ use crate::{
 
 pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogLevel {
+    Off,
+    Error,
+    Warn,
+    #[default]
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    pub const fn is_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerSettings {
     pub hostname: String,
-    pub logs: bool,
+    pub log_level: LogLevel,
     pub certificate: ServerCertificateSettings,
     pub public_bind_address: SocketAddr,
     pub tunnel_connection_bind_address: SocketAddr,
@@ -59,7 +77,7 @@ pub enum ServerCertificateSettings {
 pub struct ClientSettings {
     pub server_hostname: String,
     pub server_port: u16,
-    pub logs: bool,
+    pub log_level: LogLevel,
     pub server_ca_file: Option<PathBuf>,
     pub identity_directory: PathBuf,
     pub reconnect_interval: Duration,
@@ -314,6 +332,14 @@ pub fn resolve_terminating_hostnames_from_config(
     let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
         return Ok(None);
     };
+    let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
+    if !unknown_field_messages.is_empty() {
+        return Err(SettingsError::Validation {
+            path: path.to_path_buf(),
+            section: "client",
+            messages: unknown_field_messages,
+        });
+    }
     let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
     let mut hostnames: Vec<String> = raw
         .services
@@ -349,6 +375,23 @@ pub(crate) fn load_optional_selected_section_value(
     path: &Path,
     section: &'static str,
 ) -> Result<Option<toml::Value>, SettingsError> {
+    let document = load_config_document(path, section)?;
+    Ok(document.get(section).cloned())
+}
+
+pub(crate) fn load_log_level_from_path(path: &Path) -> Result<LogLevel, SettingsError> {
+    let document = load_config_document(path, "config")?;
+    document
+        .try_into::<RawGlobalConfig>()
+        .map(|raw| raw.log_level.unwrap_or_default())
+        .map_err(|source| SettingsError::Parse {
+            path: path.to_path_buf(),
+            section: "config",
+            source: Box::new(source),
+        })
+}
+
+fn load_config_document(path: &Path, section: &'static str) -> Result<toml::Value, SettingsError> {
     let contents = fs::read_to_string(path).map_err(|source| SettingsError::Read {
         path: path.to_path_buf(),
         source,
@@ -359,7 +402,7 @@ pub(crate) fn load_optional_selected_section_value(
             section,
             source: Box::new(source),
         })?;
-    Ok(document.get(section).cloned())
+    Ok(document)
 }
 
 fn config_dir(path: &Path) -> &Path {
@@ -390,7 +433,7 @@ fn validate_prepared_server_settings(
 ) -> Result<ServerSettings, SettingsError> {
     let PreparedServerConfig {
         hostname,
-        logs,
+        log_level,
         public_bind_address,
         tunnel_bind_address,
         manual_cert_present,
@@ -469,7 +512,7 @@ fn validate_prepared_server_settings(
     if messages.is_empty() {
         Ok(ServerSettings {
             hostname,
-            logs,
+            log_level,
             certificate: certificate.expect("validated server certificate settings"),
             public_bind_address: public_bind_address.expect("validated server.public-bind-address"),
             tunnel_connection_bind_address: tunnel_connection_bind_address
@@ -491,7 +534,7 @@ pub(crate) fn validate_prepared_client_settings(
 ) -> Result<ClientSettings, SettingsError> {
     let PreparedClientConfig {
         server_address,
-        logs,
+        log_level,
         trust,
         identity_directory,
         reconnect_interval,
@@ -640,7 +683,7 @@ pub(crate) fn validate_prepared_client_settings(
                 .as_ref()
                 .expect("validated client.server-address")
                 .port(),
-            logs,
+            log_level,
             server_ca_file,
             identity_directory: identity_directory.expect("validated client.identity-dir"),
             reconnect_interval,
@@ -1106,7 +1149,6 @@ pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value)
         server,
         &[
             "hostname",
-            "logs",
             "cert-dir",
             "acme",
             "public-bind-address",
@@ -1145,7 +1187,6 @@ pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value)
         client,
         &[
             "server-address",
-            "logs",
             "server-trust",
             "server-ca-file",
             "identity-dir",
@@ -1191,7 +1232,6 @@ fn push_unknown_table_fields(
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct RawServerConfig {
     pub(crate) hostname: Option<String>,
-    pub(crate) logs: Option<bool>,
     pub(crate) cert_dir: Option<PathBuf>,
     pub(crate) acme: Option<RawServerAcmeConfig>,
     pub(crate) public_bind_address: Option<String>,
@@ -1218,7 +1258,6 @@ pub(crate) struct RawServerTunnelConfig {
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct RawClientConfig {
     pub(crate) server_address: Option<String>,
-    pub(crate) logs: Option<bool>,
     pub(crate) server_trust: Option<String>,
     pub(crate) server_ca_file: Option<PathBuf>,
     pub(crate) identity_dir: Option<PathBuf>,
@@ -1241,6 +1280,12 @@ pub(crate) struct RawClientServiceConfig {
     pub(crate) public_hostnames: Option<Vec<String>>,
     pub(crate) backend_address: Option<String>,
     pub(crate) tls_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct RawGlobalConfig {
+    log_level: Option<LogLevel>,
 }
 
 #[cfg(test)]

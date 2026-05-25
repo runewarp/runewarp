@@ -201,7 +201,7 @@ For the smallest Client startup, `runewarp client` can also run without a select
 runewarp client --server-address tunnel.example.com --backend-address caddy.local:443
 ```
 
-That CLI-only shape creates one Client-side **Catch-all Service**, defaults `client.server-trust` to `system`, and still uses the usual omitted-key defaults for the Client identity directory, logs, and reconnect behavior.
+That CLI-only shape creates one Client-side **Catch-all Service**, defaults `client.server-trust` to `system`, and still uses the usual omitted-key defaults for the Client identity directory, top-level `log-level` (`info`), and reconnect behavior.
 
 Precedence rules for `runewarp client` are:
 
@@ -220,7 +220,11 @@ The routing flags belong only to the runtime `runewarp client` form. `runewarp c
 2. Make a TLS request to the Public hostname.
 3. Confirm the request succeeds and the expected application answers. Under **TLS passthrough** the backend's own certificate should appear; in **Terminate mode** the Client-presented **Public hostname certificate** should appear and the backend should receive plaintext.
 
-When logs are enabled, the Server and Client emit human-readable routing diagnostics that help confirm:
+Runtime diagnostics are stderr-only. Each emitted line uses a UTC RFC3339 timestamp, level, and message.
+
+At the default top-level `log-level = "info"`, Runewarp shows tunnel lifecycle plus warnings and errors. Set `log-level = "debug"` to add routing diagnostics for successful route selection and Client passthrough vs terminate decisions.
+
+When routing diagnostics are enabled, the Server and Client help confirm:
 
 - which **Public hostname** was selected
 - which **Tunnel** was chosen

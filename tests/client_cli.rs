@@ -154,11 +154,14 @@ backend-address = "127.0.0.1:443"
 #[test]
 fn client_uses_the_default_identity_material_dir_when_config_omits_it() {
     let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
     let xdg_data_home = tempdir.path().join("xdg-data");
+    fs::create_dir_all(xdg_config_home.join("runewarp")).unwrap();
 
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
         .env("XDG_DATA_HOME", &xdg_data_home)
         .args(["client", "identity", "init"])
         .assert()
@@ -176,6 +179,7 @@ server-address = "tunnel.example.test"
     let assert = Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
         .env("XDG_DATA_HOME", &xdg_data_home)
         .args(["client", "--config", "client.toml"])
         .assert()

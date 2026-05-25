@@ -1,10 +1,10 @@
 use std::fs;
 
-use runewarp::{ClientTlsMode, load_client_settings};
+use runewarp::{ClientTlsMode, LogLevel, load_client_settings};
 use tempfile::tempdir;
 
 #[test]
-fn client_settings_accept_exact_match_services_and_default_logs_to_true() {
+fn client_settings_accept_exact_match_services_and_default_log_level_to_info() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -40,7 +40,7 @@ backend-address = "caddy.local:443"
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
-    assert!(settings.logs);
+    assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(
         settings.services[0].public_hostnames,
         Some(vec![
@@ -91,7 +91,7 @@ backend-address = "caddy.local:443"
         settings.identity_directory,
         tempdir.path().join("client-identity")
     );
-    assert!(settings.logs);
+    assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(
         settings.services[0].public_hostnames,
         Some(vec![
@@ -137,6 +137,96 @@ backend-address = "caddy.local:443"
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
     assert_eq!(settings.server_port, 9443);
+}
+
+#[test]
+fn client_settings_accept_top_level_log_level_values() {
+    for (raw_level, expected_level) in [
+        ("off", LogLevel::Off),
+        ("error", LogLevel::Error),
+        ("warn", LogLevel::Warn),
+        ("info", LogLevel::Info),
+        ("debug", LogLevel::Debug),
+        ("trace", LogLevel::Trace),
+    ] {
+        let tempdir = tempdir().unwrap();
+        fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+        fs::write(
+            tempdir.path().join("client-identity/client.crt"),
+            "placeholder",
+        )
+        .unwrap();
+        fs::write(
+            tempdir.path().join("client-identity/client.key"),
+            "placeholder",
+        )
+        .unwrap();
+        fs::write(
+            tempdir.path().join("client-identity/client-identity.txt"),
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        )
+        .unwrap();
+        fs::write(
+            tempdir.path().join("config.toml"),
+            format!(
+                r#"
+log-level = "{raw_level}"
+
+[client]
+server-address = "Tunnel.Example.Test."
+identity-dir = "client-identity"
+
+[[client.services]]
+backend-address = "caddy.local:443"
+"#
+            ),
+        )
+        .unwrap();
+
+        let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+
+        assert_eq!(settings.log_level, expected_level);
+    }
+}
+
+#[test]
+fn client_settings_reject_legacy_client_logs_as_an_unknown_field() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "Tunnel.Example.Test."
+identity-dir = "client-identity"
+logs = false
+
+[[client.services]]
+backend-address = "caddy.local:443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let message = error.to_string();
+
+    assert!(!message.contains("failed to parse [client]"));
+    assert!(message.contains("unknown field `logs`"));
 }
 
 #[test]

@@ -751,7 +751,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_hostnames() {
     })
     .await
     {
-        Ok(_) => panic!("expected server bind to reject duplicate configured tunnel hostnames"),
+        Ok(_) => panic!("expected server bind to reject duplicate configured Public hostnames"),
         Err(error) => error,
     };
 
@@ -1175,7 +1175,7 @@ async fn forwards_tls_terminate_end_to_end() {
     )
     .unwrap();
 
-    // Bootstrap the public cert material used for terminating Visitor TLS
+    // Bootstrap the Public hostname certificate material used for terminating Visitor TLS
     let public_cert_dir = tempdir.path().join("public-cert");
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
     let public_ca_cert_pem =
@@ -1246,7 +1246,7 @@ tls-mode = "terminate"
         .unwrap();
     let client_task = tokio::spawn(client.run());
 
-    // Visitor connects with TLS using the public CA — backend receives plaintext
+    // Visitor connects with TLS using the Public hostname CA — backend receives plaintext
     let response = wait_for_tls_response(public_addr, &public_ca_cert, "app.example.test")
         .await
         .unwrap();
@@ -1305,7 +1305,7 @@ async fn forwards_mixed_tls_terminate_and_passthrough_end_to_end() {
     )
     .unwrap();
 
-    // Bootstrap public cert material for the terminating service only
+    // Bootstrap Public hostname certificate material for the terminating Service only
     let public_cert_dir = tempdir.path().join("public-cert");
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
     let public_ca_cert_pem =

@@ -15,7 +15,7 @@ This document defines the Runewarp configuration model. Use [`docs/usage.md`](us
 
 - Server config owns public routing
 - Client config owns local **Service** selection
-- the Server routes only explicitly authorized **Public hostnames** into a **Tunnel**
+- the Server uses **Public hostname authorization** to route only explicit **Public hostnames** into a **Tunnel**
 - the supported routing shapes are **Hostname mirroring** and a **Client with a Catch-all Service**
 - TLS passthrough is the default; Local backends terminate TLS in that mode
 - Client TLS termination is opt-in per Service via `tls-mode = "terminate"`; the termination certificate is managed at client level via `client.public-cert-dir` (manual) or `[client.acme]`
@@ -248,7 +248,7 @@ backend-address = "127.0.0.1:9443"
 tls-mode = "passthrough"
 ```
 
-Certificate material in `public-cert-dir` is only required for the terminating hostnames (`app.example.com` above).  The passthrough service (`api.example.com`) requires no certificate material on the Client side — the local backend is responsible for its own TLS certificate.
+Certificate material in `public-cert-dir` is only required for the terminating hostnames (`app.example.com` above). The **TLS passthrough** Service (`api.example.com`) requires no certificate material on the Client side — the **Local backend** is responsible for its own TLS certificate.
 
 Runtime logs distinguish the two paths:
 
@@ -265,7 +265,7 @@ client route api.example.com -> passthrough
 | `server.logs` | no | Boolean controlling human-readable Server runtime logs. Defaults to `true`. |
 | `server.cert-dir` | no | Directory containing the deployed Server leaf material for the manual/private-CA path. Defaults to the XDG data path for manual/private-CA Server material when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
 | `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
-| `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** tunnel connections. Defaults to `0.0.0.0:443`. |
+| `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** **Tunnel connections**. Defaults to `0.0.0.0:443`. |
 | `server.acme.email` | with ACME | Let's Encrypt ACME contact address. TLS-ALPN-01 only. |
 | `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp resolves the XDG default path during config preparation and creates that directory during startup after validation succeeds. |
 | `server.tunnels[].public-hostnames` | yes | One or more exact **Public hostnames** routed through this Tunnel. |
@@ -275,7 +275,7 @@ client route api.example.com -> passthrough
 
 | Key | Required | Notes |
 | --- | --- | --- |
-| `client.server-address` | runtime or config | **Server address** the Client dials for its tunnel connection, written as `hostname[:port]`. The host part must be a hostname, not a raw IP literal. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, `--server-address` may supply or replace this value before validation. |
+| `client.server-address` | runtime or config | **Server address** the Client dials for its **Tunnel connection**, written as `hostname[:port]`. The host part must be a hostname, not a raw IP literal. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, `--server-address` may supply or replace this value before validation. |
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`; otherwise system trust is used. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
 | `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG data path for Client identity material. |
@@ -284,7 +284,7 @@ client route api.example.com -> passthrough
 | `client.acme.email` | with Client ACME | ACME contact address for **Public hostname certificates**. Required when `[client.acme]` is present. |
 | `client.acme.state-dir` | no | Writable path for durable ACME account and certificate state for the Client. When omitted, Runewarp uses and creates the XDG default client ACME state directory at startup. |
 | `client.services[].public-hostnames` | when exact-match local routing is desired | Exact **Public hostnames** this Service accepts locally. Omit only on the sole Catch-all Service. Required when `tls-mode = "terminate"`. |
-| `client.services[].backend-address` | yes, per Service block | TCP endpoint for the forwarded traffic. When `tls-mode = "passthrough"` (default), this backend must terminate TLS. When `tls-mode = "terminate"`, the Client terminates TLS and connects to the backend in plaintext. `runewarp client --backend-address` may synthesize the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks at all. |
+| `client.services[].backend-address` | yes, per Service block | TCP endpoint for the forwarded traffic. When `tls-mode = "passthrough"` (default), the **Local backend** must terminate TLS. When `tls-mode = "terminate"`, the **Client** terminates TLS and connects to the **Local backend** in plaintext. `runewarp client --backend-address` may synthesize the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks at all. |
 | `client.services[].tls-mode` | no | `passthrough` or `terminate`. Defaults to `passthrough`. Catch-all Services must use `passthrough`. |
 
 ## Trust and material directories

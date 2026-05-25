@@ -264,7 +264,7 @@ fn run_client_public_cert_command(
                 initialize_manual_client_public_cert(&directory, hostname)?;
             }
             println!(
-                "Client public CA: {}",
+                "Public hostname CA: {}",
                 directory
                     .join(runewarp::CLIENT_PUBLIC_CA_FILENAME)
                     .display()
@@ -297,7 +297,7 @@ fn run_client_public_cert_command(
             let hostnames = resolve_client_public_cert_hostnames_from_config_required(config)?;
             rotate_manual_client_public_cert_authority(&directory, &hostnames)?;
             println!(
-                "Client public CA rotated: {}",
+                "Public hostname CA rotated: {}",
                 directory
                     .join(runewarp::CLIENT_PUBLIC_CA_FILENAME)
                     .display()

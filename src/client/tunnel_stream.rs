@@ -746,7 +746,7 @@ mod tests {
             stream_handler.handle(send, recv).await
         });
 
-        // The tunnel sends a real TLS connection using the public cert as CA
+        // The tunnel sends a real TLS connection using the Public hostname CA
         let response = request_plaintext_response_over_terminated_tunnel(
             server_connection,
             &public_cert,

@@ -42,7 +42,7 @@ impl fmt::Display for ClientPublicCertError {
             }
             Self::Generate(source) => write!(
                 formatter,
-                "failed to generate client public certificates: {source}"
+                "failed to generate Public hostname certificate material: {source}"
             ),
         }
     }
@@ -65,7 +65,7 @@ impl From<rcgen::Error> for ClientPublicCertError {
     }
 }
 
-/// Bootstraps a shared client public CA and a leaf certificate for `hostname`.
+/// Bootstraps a shared Public hostname CA and a leaf certificate for `hostname`.
 ///
 /// If the CA already exists in `directory` (detected by the presence of
 /// `state/public-ca.key`), the existing CA is reused and only the leaf
@@ -122,7 +122,7 @@ pub fn client_public_cert_leaf_dir(directory: &Path, hostname: &str) -> PathBuf 
 }
 
 /// Renews the leaf certificate for `hostname` under `directory`, reusing the
-/// existing shared Client public CA. The CA itself is not changed.
+/// existing shared Public hostname CA. The CA itself is not changed.
 ///
 /// Replaces `{hostname}/public.crt` and `{hostname}/public.key` atomically.
 pub fn renew_manual_client_public_cert(
@@ -153,7 +153,7 @@ pub fn renew_manual_client_public_cert(
     Ok(())
 }
 
-/// Rotates the shared Client public CA and reissues every leaf certificate for
+/// Rotates the shared Public hostname CA and reissues every leaf certificate for
 /// the given `hostnames`. Both the CA cert and CA private key are replaced;
 /// every managed leaf cert and key are replaced under their hostname
 /// subdirectories.
@@ -285,7 +285,7 @@ fn ca_cert_params(not_before: OffsetDateTime) -> Result<CertificateParams, rcgen
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params
         .distinguished_name
-        .push(DnType::CommonName, "Runewarp Client Public CA");
+        .push(DnType::CommonName, "Runewarp Public Hostname CA");
     params.key_usages.push(KeyUsagePurpose::DigitalSignature);
     params.key_usages.push(KeyUsagePurpose::KeyCertSign);
     params.key_usages.push(KeyUsagePurpose::CrlSign);

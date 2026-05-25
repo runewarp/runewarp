@@ -17,10 +17,10 @@ Runewarp is a private tunneling system. In the default **passthrough** mode it i
 | --- | --- |
 | Server-side **Public hostname** authorization | Prevents random public traffic from entering a Tunnel just because some Client is connected |
 | Server certificate validation | Confirms the Client is connected to the intended **Server hostname** |
-| Exclusive `ca-file` trust | Limits trust for the Tunnel connection to the configured CA bundle |
+| **Exclusive CA trust** | Limits trust for the Tunnel connection to the configured CA bundle |
 | Pinned **Client identity** | Confirms the Client public key authorized for the selected Tunnel |
 | Backend TLS termination (passthrough) | Keeps customer TLS termination off the public edge in the default mode |
-| Client public-cert CA (terminate) | Operator-managed trust anchor for Visitors when the Client terminates TLS |
+| **Public hostname CA** (terminate) | Operator-managed trust anchor for Visitors when the Client terminates TLS |
 
 ## Public traffic invariants
 
@@ -73,17 +73,17 @@ In the manual/private-CA path:
 
 Existing QUIC connections continue with the certificate from their original handshake until they reconnect.
 
-### Client public certificate (TLS termination)
+### Public hostname certificates (TLS termination)
 
 When one or more Services use `tls-mode = "terminate"`, the Client needs public TLS certificates for those hostnames. Two mutually exclusive paths are supported:
 
-**Manual path** (`client.public-cert-dir`) — operator creates and manages a private CA and per-hostname leaf certificates:
+**Manual path** (`client.public-cert-dir`) — operator creates and manages a private **Public hostname CA** and per-hostname leaf certificates:
 
-- `runewarp client public-cert init` creates a private **Client public CA** and one or more initial leaf certificates, using `--hostname` or the config-derived terminating hostname set
+- `runewarp client public-cert init` creates a private **Public hostname CA** and one or more initial **Public hostname certificates**, using `--hostname` or the config-derived terminating hostname set
 - running it again with a different hostname reuses the existing CA and adds a new leaf without replacing the trust anchor
 - the CA private key lives in `{public-cert-dir}/state/public-ca.key` and must be kept private
 
-Visitors must trust `public-ca.crt`; it stays stable across additional `init` calls and leaf renewals, but `runewarp client public-cert rotate-ca` replaces it. Per-host leaf material lives at `{public-cert-dir}/{hostname}/public.crt` and `{public-cert-dir}/{hostname}/public.key`. Leaf certificates are **90 days** by default; the CA is **3650 days**.
+Visitors must trust `public-ca.crt`; it stays stable across additional `init` calls and leaf renewals, but `runewarp client public-cert rotate-ca` replaces it. Per-host certificate material lives at `{public-cert-dir}/{hostname}/public.crt` and `{public-cert-dir}/{hostname}/public.key`. **Public hostname certificates** are **90 days** by default; the **Public hostname CA** is **3650 days**.
 
 **ACME path** (`[client.acme]`) — the Client automatically provisions and renews certificates from Let's Encrypt for the **Public hostnames** of all terminating Services. No pre-generated material is needed; configure `[client.acme]` in the Client config instead of `client.public-cert-dir`. The Client starts with a live ACME manager at startup without blocking on certificate readiness. Terminating hostnames without a ready certificate fail closed at the TLS handshake; there is no fallback to passthrough.
 
@@ -116,7 +116,7 @@ The Client starts with a live ACME manager at startup and does not block on cert
 | Cross-side hostname drift | The runtime does not validate cross-side hostname coverage under **Hostname mirroring** |
 | Local backend health | There is no pre-flight Local backend health check |
 | Manual/private-CA convenience | The simple manual path may keep private Server CA material on the public Server |
-| Client public-cert CA location | The manual path keeps the Client public CA private key on the Client machine alongside the running service |
+| Public hostname CA location | The manual path keeps the Public hostname CA private key on the Client machine alongside the running service |
 | Same-Tunnel availability | The runtime keeps one active connection per Tunnel rather than a load-balanced pool |
 
 These are deliberate boundaries and current limits, not hidden guarantees.

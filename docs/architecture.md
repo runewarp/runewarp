@@ -54,14 +54,14 @@ Runewarp keeps ingress authority on the **Server**:
 
 This keeps public hostname ownership explicit even when the Client chooses a different local routing shape.
 
-## Routing topologies
+## Routing shapes
 
-| Topology | Server side | Client side | Use when |
+| Shape | Server side | Client side | Use when |
 | --- | --- | --- | --- |
 | **Hostname mirroring** | Explicit **Public hostnames** on each **Tunnel** | Explicit **Public hostnames** on each **Service** | The Client needs per-host local routing decisions |
-| **One-sided Catch-all** | Explicit **Public hostnames** on each **Tunnel** | One sole **Service** with no `public-hostnames` | One backend should receive every hostname the Server already authorized for that Tunnel |
+| **Client with a Catch-all Service** | Explicit **Public hostnames** on each **Tunnel** | One sole **Service** with no `public-hostnames` | One backend should receive every hostname the Server already authorized for that Tunnel |
 
-In both shapes, the Server remains the routing authority for public ingress.
+Both shapes still use **Server-authoritative routing** for public ingress.
 
 ## Data path
 
@@ -96,8 +96,8 @@ The Local backend receives unencrypted bytes directly and does not need to termi
 | **Server CA** | Optional private trust anchor for the manual Server-certificate path |
 | **Client identity** | Pinned public-key identity used to authenticate the Client to the Server |
 | **Public hostname authorization** | Owned by Server config through explicit `server.tunnels[].public-hostnames` |
-| **Client public-cert CA** (manual) | Private trust anchor in `client.public-cert-dir` shared with Visitors when `tls-mode = "terminate"` is in use |
-| **Client ACME certificates** | Automatically provisioned by Let's Encrypt via `[client.acme]` for **Public hostnames** of terminating Services; `acme-tls/1` challenge traffic for those hostnames is routed through the Server to the Client like ordinary Visitor TLS |
+| **Public hostname CA** (manual) | Private trust anchor in `client.public-cert-dir` shared with Visitors when `tls-mode = "terminate"` is in use |
+| **Public hostname certificates via Client ACME** | Automatically provisioned by Let's Encrypt via `[client.acme]` for **Public hostnames** of terminating Services; `acme-tls/1` challenge traffic for those hostnames is routed through the Server to the Client like ordinary Visitor TLS |
 
 The Client validates the Server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The Server authenticates the pinned `client-identity` from the Client public key rather than from a certificate lifetime.
 

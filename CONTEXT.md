@@ -40,20 +40,60 @@ _Avoid_: Server hostname, bind address
 The certificate the **Server** presents for the **Server hostname** on the tunnel endpoint.
 _Avoid_: Public hostname certificate, app certificate
 
+**Exclusive CA trust**:
+The Client trust model where the **Client** validates the **Server certificate** only against a configured CA bundle instead of the system trust store.
+_Avoid_: System trust, mixed trust
+
 **Server CA**:
 The operator-managed private certificate authority used to issue a **Server certificate** in the manual Server-certificate path.
 _Avoid_: public CA, app CA
+
+**Server ACME**:
+The automatic certificate path where the **Server** provisions and renews a certificate for the **Server hostname**.
+_Avoid_: Client ACME, Public hostname ACME
+
+**Public hostname CA**:
+The operator-managed private certificate authority used to issue **Public hostname certificates** for Services in **Terminate mode** on the manual Client certificate path.
+_Avoid_: Server CA, public CA
+
+**Client ACME**:
+The automatic certificate path where the **Client** provisions and renews **Public hostname certificates** for **Public hostnames** of Services in **Terminate mode**.
+_Avoid_: Server ACME, tunnel ACME
 
 **Public hostname**:
 An operator-owned application hostname that the **Server** routes through a **Tunnel**.
 _Avoid_: Server hostname, tunnel hostname
 
+**Public hostname authorization**:
+The Server-owned rule that allows a **Tunnel** to admit traffic only for its explicit **Public hostnames**.
+_Avoid_: Client registration, wildcard routing
+
+**Public hostname certificate**:
+The certificate presented to a **Visitor** for a **Public hostname** when a **Service** is in **Terminate mode**.
+_Avoid_: Server certificate, public certificate
+
 **Service**:
 A client-side routing unit that maps incoming traffic to one **Local backend**.
 _Avoid_: Backend, process, app
 
+**Service hostname matching**:
+The Client-side rule that selects a **Service** from explicit **Public hostnames** after traffic has already been admitted into a **Tunnel**.
+_Avoid_: Public hostname authorization, Client registration
+
+**TLS passthrough**:
+The Visitor-traffic behavior where Runewarp forwards customer TLS without decrypting it on the public edge. The **Server** always uses **TLS passthrough** for routed application traffic, and a **Service** preserves that behavior when its `tls-mode` is `passthrough`.
+_Avoid_: Raw proxy mode
+
+**Terminate mode**:
+The **Service** behavior selected by `tls-mode = "terminate"`, where the **Client** terminates TLS itself and forwards plaintext TCP to the **Local backend**.
+_Avoid_: Edge termination, decrypted mode
+
+**TLS mode**:
+The **Service** setting that chooses whether traffic stays in **TLS passthrough** or switches to **Terminate mode** at the **Client**.
+_Avoid_: Server mode, tunnel mode
+
 **Local backend**:
-The operator-run local endpoint that a **Client** connects to after it selects a **Service**. It terminates TLS in passthrough mode and receives plaintext in terminate mode.
+The operator-run local endpoint that a **Client** connects to after it selects a **Service**. It terminates TLS under **TLS passthrough** and receives plaintext in **Terminate mode**.
 _Avoid_: Service, tunnel
 
 **Client identity**:
@@ -64,6 +104,10 @@ _Avoid_: Certificate, serial number
 The set of live **Tunnel connections** and their serving **Client instances** currently available for one **Tunnel**.
 _Avoid_: Tunnel, cluster
 
+**Server-authoritative routing**:
+The routing rule where the **Server** chooses the **Tunnel** from **Public hostname authorization**, and the **Client** only performs **Service hostname matching** after that selection.
+_Avoid_: Client registration, Client-authoritative routing
+
 **Catch-all Service**:
 The only configured **Service** in a Client config, which receives every proxied **Public hostname**; this is determined by the Client side alone.
 _Avoid_: Default service, wildcard service
@@ -71,10 +115,6 @@ _Avoid_: Default service, wildcard service
 **Hostname mirroring**:
 The operator practice of repeating **Public hostnames** in Server **Tunnels** and Client **Services** when both sides use explicit hostname matching, so both sides can route the same traffic without extra protocol metadata even when their grouping differs.
 _Avoid_: Duplicate hostname config, registration
-
-**One-sided Catch-all**:
-A routing topology where the Server uses explicit **Public hostnames** and the Client uses a **Catch-all Service**.
-_Avoid_: Mixed mode, asymmetric routing
 
 **Config preparation**:
 The internal module that selects the active config input, applies CLI/XDG/hardcoded defaults, resolves config-relative paths, and emits prepared **Server** or **Client** config before validation and startup side effects.
@@ -94,17 +134,28 @@ _Avoid_: Settings loader, validation pass, startup defaults
 - A **Server hostname** identifies the public edge, not an operator application
 - The host part of a **Server address** is the **Server hostname**
 - A **Server certificate** belongs to exactly one **Server hostname**
+- **Exclusive CA trust** validates the **Server certificate** against exactly one configured CA bundle
 - A **Server CA** can issue one or more **Server certificates**
+- **Server ACME** manages certificates only for the **Server hostname**
+- A **Public hostname CA** can issue one or more **Public hostname certificates** for Services in **Terminate mode**
+- **Client ACME** manages certificates only for **Public hostnames** of Services in **Terminate mode**
 - A **Public hostname** is routed through exactly one **Tunnel** at a time
+- **Public hostname authorization** belongs to exactly one **Tunnel**
+- A **Public hostname certificate** belongs to exactly one **Public hostname**
 - A **Service** maps traffic from one or more **Public hostnames** to one **Local backend**
+- **Service hostname matching** belongs to exactly one **Service**
+- The **Server** preserves **TLS passthrough** for routed application traffic
+- A **Service** has exactly one **TLS mode**
+- Under **TLS passthrough**, a **Local backend** terminates TLS for the selected **Service**
+- In **Terminate mode**, the **Client** terminates TLS before forwarding traffic to the **Local backend**
 - A **Client instance** forwards proxied traffic from its **Tunnel connection** to a **Local backend** through a selected **Service**
 - A **Client instance** uses exactly one **Client identity** at a time
 - A **Client identity** can be used by one or more **Client instances**
 - A **Tunnel pool** belongs to exactly one **Tunnel**
+- **Server-authoritative routing** uses **Public hostname authorization** before **Service hostname matching**
 - A **Tunnel** owns one or more explicit **Public hostnames**
 - A **Catch-all Service** is valid only when there is exactly one configured **Service**
 - **Hostname mirroring** repeats one set of **Public hostnames** across **Tunnels** and **Services**, but the grouping does not have to line up one-to-one
-- **One-sided Catch-all** combines explicit **Public hostnames** on the Server with a **Catch-all Service** on the Client
 
 ## Example dialogue
 
@@ -123,6 +174,9 @@ _Avoid_: Settings loader, validation pass, startup defaults
 > **Dev:** "Is the `caddy.local:443` target the **Service**?"
 > **Domain expert:** "No. The **Service** is the routing rule in client config. `caddy.local:443` is the **Local backend** it selects."
 >
+> **Dev:** "What changes when a **Service** switches its **TLS mode**?"
+> **Domain expert:** "Under **TLS passthrough** the **Client** forwards the TLS bytes unchanged and the **Local backend** terminates TLS. In **Terminate mode** the **Client** terminates TLS and the **Local backend** receives plaintext."
+>
 > **Dev:** "If I start two **Client instances**, do they need different **Client identities**?"
 > **Domain expert:** "No. They may share one **Client identity** or use separate ones."
 >
@@ -132,8 +186,23 @@ _Avoid_: Settings loader, validation pass, startup defaults
 > **Dev:** "Why does the manual Server path trust a **Server CA** instead of the leaf cert directly?"
 > **Domain expert:** "Because the **Server CA** signs the **Server certificate**, so the Server leaf can renew without changing the Client's trust anchor."
 >
+> **Dev:** "What changes when the Client uses **Exclusive CA trust**?"
+> **Domain expert:** "The **Client** trusts only the configured CA bundle for the **Server certificate** instead of also trusting the system roots."
+>
+> **Dev:** "What is the difference between **Server ACME** and **Client ACME**?"
+> **Domain expert:** "**Server ACME** manages the certificate for the **Server hostname**. **Client ACME** manages **Public hostname certificates** for terminating **Public hostnames** on the **Client** side."
+>
 > **Dev:** "Why do both sides list `app.example.com`?"
 > **Domain expert:** "That's **Hostname mirroring**. The **Server** uses it to choose the **Tunnel** and the **Client** uses it to choose the **Service**."
+>
+> **Dev:** "So who actually owns ingress routing?"
+> **Domain expert:** "**Server-authoritative routing** means the **Server** chooses the **Tunnel** first. The **Client** only matches the traffic to a **Service** after that."
+>
+> **Dev:** "What prevents a connected Client from receiving some random hostname?"
+> **Domain expert:** "**Public hostname authorization**. The **Server** only admits traffic for the explicit **Public hostnames** owned by that **Tunnel**."
+>
+> **Dev:** "Then what do the Client-side hostnames do?"
+> **Domain expert:** "**Service hostname matching**. They choose the **Service** after the **Server** has already admitted the traffic into the **Tunnel**."
 >
 > **Dev:** "Why did omitting the **Public hostnames** suddenly change routing behavior?"
 > **Domain expert:** "Because this config uses a **Catch-all Service**. The Server still has to list explicit **Public hostnames** on its **Tunnels**."
@@ -142,7 +211,7 @@ _Avoid_: Settings loader, validation pass, startup defaults
 > **Domain expert:** "No. A **Catch-all Service** is still valid when the Client has exactly one **Service**. Catch-all vs exact-match is decided independently on each side."
 >
 > **Dev:** "Is that still **Hostname mirroring** if the **Client** uses a **Catch-all Service**?"
-> **Domain expert:** "No. That is **One-sided Catch-all**. **Hostname mirroring** is only when both sides repeat explicit **Public hostnames**."
+> **Domain expert:** "No. **Hostname mirroring** is only when both sides repeat explicit **Public hostnames**. Here the **Client** is using a **Catch-all Service** instead."
 >
 > **Dev:** "If the **Server** puts `app.example.com` and `api.example.com` in one **Tunnel**, but the **Client** splits them across two **Services**, is that still **Hostname mirroring**?"
 > **Domain expert:** "Yes. **Hostname mirroring** repeats the hostname set across both sides; the grouping into **Tunnels** and **Services** can differ."
@@ -155,10 +224,17 @@ _Avoid_: Settings loader, validation pass, startup defaults
 - "server hostname" and routed application hostnames were easy to blur — resolved: **Server hostname** names the Runewarp edge; **Public hostname** names operator application traffic.
 - "server address" and "server hostname" were easy to blur — resolved: **Server address** is the client-configured endpoint; **Server hostname** is the hostname form of that endpoint when a hostname is used.
 - "service" and "backend" were used interchangeably — resolved: **Service** is the client-side config unit; **Local backend** is the actual local endpoint the **Client** dials, whether it terminates TLS or receives plaintext.
+- "passthrough" could blur Server behavior with Service behavior — resolved: **TLS passthrough** is the broad traffic behavior, while **TLS mode** is the **Service** setting that can keep passthrough or switch to **Terminate mode**.
 - "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key, while certificates can rotate without changing that identity.
 - "server certificate" and the trust anchor behind it were easy to conflate — resolved: **Server certificate** is the presented leaf; **Server CA** is the private issuer in the manual Server path.
+- "ca-file trust" sounded like a file-path detail instead of a trust model — resolved: **Exclusive CA trust** means the **Client** trusts only the configured CA bundle for the **Server certificate**.
+- "public CA" was too vague once Client-side TLS termination existed — resolved: **Public hostname CA** is the issuer for manual **Public hostname certificates**, distinct from the **Server CA**.
+- "ACME" was too broad once both sides could obtain certificates automatically — resolved: **Server ACME** covers the **Server hostname** only, while **Client ACME** covers terminating **Public hostnames** only.
+- "authorized hostname" was being described ad hoc — resolved: **Public hostname authorization** is the Server-owned rule that binds explicit **Public hostnames** to a **Tunnel**.
+- "hostnames on Services" looked like the same mechanism as the Server side — resolved: **Service hostname matching** is a Client-side routing decision after Server admission, not a second authorization layer.
+- "who routes traffic?" was easy to answer loosely — resolved: **Server-authoritative routing** means the **Server** chooses the **Tunnel**, while the **Client** only chooses the **Service** within that admitted traffic.
 - "catch-all" looked like casual prose, but it changes config semantics — resolved: only **Catch-all Service** remains a valid product term; Server **Tunnels** always require explicit **Public hostnames**.
-- "catch-all mode" could sound like one cross-side mode — resolved: **One-sided Catch-all** means Server exact-match with a Client **Catch-all Service**.
-- "Hostname mirroring" could sound like it covered every valid routing topology — resolved: **Hostname mirroring** means both-sides explicit hostname matching; **One-sided Catch-all** is the mixed topology.
+- "catch-all mode" could sound like one cross-side mode — resolved: we describe the Client behavior directly as a **Catch-all Service** instead of inventing a separate topology name.
+- "Hostname mirroring" could sound like it covered every valid routing topology — resolved: **Hostname mirroring** means both-sides explicit hostname matching; a **Catch-all Service** on the Client is described directly rather than named as a separate topology.
 - "Hostname mirroring" could sound like Tunnel and Service groups had to line up exactly — resolved: the mirrored unit is the explicit hostname set, not a one-to-one grouping.
 - "duplicate hostname config" sounded accidental — resolved: **Hostname mirroring** is the deliberate routing pattern.

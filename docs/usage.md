@@ -92,13 +92,13 @@ If you prefer custom directories, pass `--dir` during setup and point the matchi
 
 For the manual/private-CA path, either copy the generated `server-ca.crt` to `$XDG_DATA_HOME/runewarp/client/server-ca.crt` (or `~/.local/share/runewarp/client/server-ca.crt`) on each Client or set `client.server-ca-file` to the deployed CA bundle path.
 
-### 3a. Prepare Client public certificate material (TLS termination only)
+### 3a. Prepare Public hostname certificate material (TLS termination only)
 
 If any Client Service uses `tls-mode = "terminate"`, choose one of the two supported certificate paths:
 
 | Path | When to use it | What to do |
 | --- | --- | --- |
-| Manual (`client.public-cert-dir`) | Private deployments or operator-managed trust; Visitors need a shared CA | Create material with `runewarp client public-cert init`, set `client.public-cert-dir`, and distribute `public-ca.crt` to Visitors |
+| Manual (`client.public-cert-dir`) | Private deployments or operator-managed trust; Visitors need a shared **Public hostname CA** | Create material with `runewarp client public-cert init`, set `client.public-cert-dir`, and distribute `public-ca.crt` to Visitors |
 | ACME (`[client.acme]`) | Publicly routable Public hostnames and standard public trust | Configure `[client.acme]` in Client config; no pre-generated material needed |
 
 **Manual path:**
@@ -110,11 +110,11 @@ runewarp client public-cert init --hostname app.example.com
 runewarp client --config client.toml public-cert init
 ```
 
-Run once per terminating hostname, or omit `--hostname` and supply `--config` to derive the full terminating-hostname set from `client.services[].public-hostnames` where `tls-mode = "terminate"`. A second run with a new hostname reuses the existing CA and adds only the new leaf certificate. Share `public-ca.crt` with each Visitor as their trust anchor. When the CA already exists, `runewarp client public-cert init` refuses to replace it, keeping the Visitor-facing trust anchor stable until you explicitly run `rotate-ca`.
+Run once per terminating hostname, or omit `--hostname` and supply `--config` to derive the full terminating-hostname set from `client.services[].public-hostnames` where `tls-mode = "terminate"`. A second run with a new hostname reuses the existing **Public hostname CA** and adds only the new **Public hostname certificate**. Share `public-ca.crt` with each Visitor as their trust anchor. When the CA already exists, `runewarp client public-cert init` refuses to replace it, keeping that trust anchor stable until you explicitly run `rotate-ca`.
 
 Set `client.public-cert-dir` in the Client config to the directory where the material was written. The `client public-cert` commands resolve their working directory from `--dir`, then `client.public-cert-dir`, then the XDG default when neither is set, but runtime validation does **not** make manual mode implicit from that default path: terminating Services still require explicit `client.public-cert-dir` in config unless you use `[client.acme]`.
 
-**Renewing leaf certificates (manual path):**
+**Renewing Public hostname certificates (manual path):**
 
 To renew a leaf certificate for a single hostname:
 
@@ -130,7 +130,7 @@ runewarp client --config client.toml public-cert renew
 
 For `init` and `renew`, the `--hostname` set comes from `public-hostnames` on `tls-mode = "terminate"` services in the config when `--hostname` is omitted. Omitting `--hostname` without a config file is an error.
 
-**Rotating the Client public CA (manual path):**
+**Rotating the Public hostname CA (manual path):**
 
 `rotate-ca` replaces the trust anchor and reissues every managed leaf certificate. Visitors must trust the new `public-ca.crt` after rotation. Requires `--config` so Runewarp can determine which hostnames are managed:
 

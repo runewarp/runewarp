@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::fs;
 use std::io;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustls::RootCertStore;
@@ -19,10 +21,84 @@ use crate::tls_material::{
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConnectError, ClientIdentity,
     ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, QuicConfigError,
-    Server, ServerCertificateSettings, ServerConfig, ServerSettings, client::validate_services,
-    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
-    make_server_quic_config_with_client_auth_resolver,
+    Server, ServerCertificateSettings, ServerConfig, ServerSettings, SettingsError,
+    client::validate_services, make_client_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
+    resolve_default_client_acme_state_dir_from_config,
+    resolve_default_server_acme_state_dir_from_config,
 };
+
+#[derive(Debug)]
+pub enum StartupPreparationError {
+    Settings(SettingsError),
+    CreateDirectory {
+        field_name: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+}
+
+impl fmt::Display for StartupPreparationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Settings(source) => write!(formatter, "{source}"),
+            Self::CreateDirectory {
+                field_name,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "failed to create {field_name} directory {}: {source}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StartupPreparationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Settings(source) => Some(source),
+            Self::CreateDirectory { source, .. } => Some(source),
+        }
+    }
+}
+
+pub fn prepare_server_startup(config_path: &Path) -> Result<(), StartupPreparationError> {
+    prepare_default_acme_state_dir(
+        resolve_default_server_acme_state_dir_from_config(config_path)
+            .map_err(StartupPreparationError::Settings)?,
+        "server.acme.state-dir",
+    )
+}
+
+pub fn prepare_client_startup(
+    selected_config_path: Option<&Path>,
+) -> Result<(), StartupPreparationError> {
+    let Some(selected_config_path) = selected_config_path else {
+        return Ok(());
+    };
+    prepare_default_acme_state_dir(
+        resolve_default_client_acme_state_dir_from_config(selected_config_path)
+            .map_err(StartupPreparationError::Settings)?,
+        "client.acme.state-dir",
+    )
+}
+
+fn prepare_default_acme_state_dir(
+    state_dir: Option<PathBuf>,
+    field_name: &'static str,
+) -> Result<(), StartupPreparationError> {
+    let Some(state_dir) = state_dir else {
+        return Ok(());
+    };
+    fs::create_dir_all(&state_dir).map_err(|source| StartupPreparationError::CreateDirectory {
+        field_name,
+        path: state_dir,
+        source,
+    })?;
+    Ok(())
+}
 
 pub struct PreparedServer {
     server: Server,

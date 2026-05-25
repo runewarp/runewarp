@@ -21,6 +21,16 @@ This document describes the committed Runewarp design: TLS passthrough on the pu
 | **Client instance** | Maintains one **Tunnel connection**, selects a **Service**, and forwards traffic to a **Local backend** |
 | **Local backend** | Terminates TLS (passthrough mode) or receives plaintext (terminate mode) and serves the operator application |
 
+## Internal configuration flow
+
+Runewarp keeps configuration handling behind one internal **Config preparation** seam:
+
+- **Config preparation** selects the active config input, applies CLI overlays where allowed, fills XDG and hardcoded defaults, and resolves config-relative paths into concrete paths
+- validation consumes those prepared **Server** and **Client** config shapes and focuses on invariants, mutual exclusion, trust rules, and routing rules
+- startup preparation owns side effects such as creating omitted ACME state directories after validation has succeeded
+
+This split keeps the operator-visible behavior unchanged while giving config precedence and defaulting one obvious home.
+
 ## End-to-end flow
 
 ```mermaid

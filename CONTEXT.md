@@ -76,6 +76,10 @@ _Avoid_: Duplicate hostname config, registration
 A routing topology where the Server uses explicit **Public hostnames** and the Client uses a **Catch-all Service**.
 _Avoid_: Mixed mode, asymmetric routing
 
+**Config preparation**:
+The internal module that selects the active config input, applies CLI/XDG/hardcoded defaults, resolves config-relative paths, and emits prepared **Server** or **Client** config before validation and startup side effects.
+_Avoid_: Settings loader, validation pass, startup defaults
+
 ## Relationships
 
 - A **Server** selects exactly one **Tunnel** for each routed **Public hostname**

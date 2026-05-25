@@ -267,7 +267,7 @@ client route api.example.com -> passthrough
 | `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
 | `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** tunnel connections. Defaults to `0.0.0.0:443`. |
 | `server.acme.email` | with ACME | Let's Encrypt ACME contact address. TLS-ALPN-01 only. |
-| `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp uses and creates the XDG default state directory at startup. |
+| `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp resolves the XDG default path during config preparation and creates that directory during startup after validation succeeds. |
 | `server.tunnels[].public-hostnames` | yes | One or more exact **Public hostnames** routed through this Tunnel. |
 | `server.tunnels[].client-identity` | yes | Lowercase hex SHA-256 fingerprint of the Client public key's SubjectPublicKeyInfo. |
 
@@ -282,7 +282,7 @@ client route api.example.com -> passthrough
 | `client.logs` | no | Boolean controlling human-readable Client runtime logs. Defaults to `true`. |
 | `client.public-cert-dir` | when using manual TLS termination | Directory containing the public certificate material for Client-side TLS termination. Mutually exclusive with `[client.acme]`. Required when any Service uses `tls-mode = "terminate"` and no `[client.acme]` is present; runtime validation does not implicitly enable manual mode from the XDG default path. |
 | `client.acme.email` | with Client ACME | ACME contact address for the Client public certificate. Required when `[client.acme]` is present. |
-| `client.acme.state-dir` | no | Writable path for durable ACME account and certificate state for the Client. When omitted, Runewarp uses and creates the XDG default client ACME state directory at startup. |
+| `client.acme.state-dir` | no | Writable path for durable ACME account and certificate state for the Client. When omitted, Runewarp resolves the XDG default client ACME state path during config preparation and creates that directory during startup after validation succeeds. |
 | `client.services[].public-hostnames` | when exact-match local routing is desired | Exact **Public hostnames** this Service accepts locally. Omit only on the sole Catch-all Service. Required when `tls-mode = "terminate"`. |
 | `client.services[].backend-address` | yes, per Service block | TCP endpoint for the forwarded traffic. When `tls-mode = "passthrough"` (default), this backend must terminate TLS. When `tls-mode = "terminate"`, the Client terminates TLS and connects to the backend in plaintext. `runewarp client --backend-address` may synthesize the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks at all. |
 | `client.services[].tls-mode` | no | `passthrough` or `terminate`. Defaults to `passthrough`. Catch-all Services must use `passthrough`. |
@@ -390,7 +390,7 @@ Runewarp rejects config and startup inputs that violate any of these rules:
 - all `client-identity` values must be lowercase hex without colons
 - all `client-identity` values must be unique across Server Tunnels
 - `server.public-bind-address` and `server.tunnel-bind-address` must be literal socket addresses
-- the selected or defaulted material directories and files must exist and be readable, except that default ACME state directories are created automatically when omitted
+- the selected or defaulted material directories and files must exist and be readable, except that omitted ACME state directories are resolved during config preparation and created only during startup after validation succeeds
 - `backend-address` must parse as a TCP address or host:port pair
 
 ### Client TLS termination validation
@@ -402,7 +402,7 @@ Runewarp rejects config and startup inputs that violate any of these rules:
 - `client.public-cert-dir` and `[client.acme]` are mutually exclusive
 - `client.public-cert-dir` must be an existing directory
 - `client.acme.email` is required when `[client.acme]` is present
-- `client.acme.state-dir` must be an existing directory when specified; when omitted, the XDG default is used and created automatically
+- `client.acme.state-dir` must be an existing directory when specified; when omitted, the XDG default path is used and created automatically during startup after validation succeeds
 
 ### Hostname rules
 

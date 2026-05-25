@@ -2,6 +2,7 @@ mod acme;
 mod client;
 mod client_hello;
 mod client_public_cert;
+mod config_preparation;
 mod hostname;
 mod identity;
 mod paths;
@@ -61,7 +62,12 @@ pub use settings::{
     ServerTunnelSettings, SettingsError, load_client_settings, load_server_settings,
     resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config,
+    resolve_default_client_acme_state_dir_from_config,
+    resolve_default_server_acme_state_dir_from_config,
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
     resolve_terminating_hostnames_from_config,
 };
-pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};
+pub use startup::{
+    ClientStartupError, PreparedClient, PreparedServer, ServerStartupError,
+    StartupPreparationError, prepare_client_startup, prepare_server_startup,
+};

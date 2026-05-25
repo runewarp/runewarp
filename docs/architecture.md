@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the committed Runewarp design: TLS passthrough on the public edge by default, Server-authoritative hostname routing, mutually authenticated tunnel connections, and Client-side forwarding to operator-run TLS backends. Client-side TLS termination is opt-in per Service.
+This document describes the committed Runewarp design: **TLS passthrough** on the public edge by default, **Server-authoritative routing**, mutually authenticated **Tunnel connections**, and Client-side forwarding to operator-run **Local backends**. Client-side TLS termination is opt-in per **Service**.
 
 ## At a glance
 
@@ -8,7 +8,7 @@ This document describes the committed Runewarp design: TLS passthrough on the pu
 | --- | --- |
 | Public traffic | TLS passthrough by default; the public edge does not terminate customer TLS |
 | Routing authority | The **Server** selects the **Tunnel** from explicit Server-configured **Public hostnames** |
-| Client behavior | The **Client** selects a **Service** locally and either forwards TLS bytes to a TLS-terminating **Local backend** (passthrough) or terminates TLS itself before proxying plaintext to the **Local backend** (terminate) |
+| **Client behavior** | The **Client** selects a **Service** locally and either forwards TLS bytes to a TLS-terminating **Local backend** (**TLS passthrough**) or terminates TLS itself before proxying plaintext to the **Local backend** (**Terminate mode**) |
 | Tunnel transport | One long-lived QUIC/TLS **Tunnel connection** per **Client instance** |
 | Trust model | Server certificate validation plus pinned **Client identity** authentication |
 
@@ -19,7 +19,7 @@ This document describes the committed Runewarp design: TLS passthrough on the pu
 | **Visitor** | Connects to a **Public hostname** over TLS |
 | **Server** | Accepts Visitor traffic, extracts SNI, selects a **Tunnel**, and forwards the original encrypted stream |
 | **Client instance** | Maintains one **Tunnel connection**, selects a **Service**, and forwards traffic to a **Local backend** |
-| **Local backend** | Terminates TLS (passthrough mode) or receives plaintext (terminate mode) and serves the operator application |
+| **Local backend** | Terminates TLS under **TLS passthrough** or receives plaintext in **Terminate mode** and serves the operator application |
 
 ## Internal configuration flow
 

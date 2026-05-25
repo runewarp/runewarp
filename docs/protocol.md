@@ -34,7 +34,7 @@ The buffered ClientHello must never be logged or echoed back in diagnostics. Whe
 | Non-TLS traffic on the public TCP listener | Drop immediately |
 | TLS without SNI | Drop immediately |
 | Application traffic addressed to the **Server hostname** | Drop unless it is ACME TLS-ALPN-01 |
-| Unauthorized **Public hostname** | Drop immediately |
+| **Public hostname** not authorized by the selected **Tunnel** | Drop immediately |
 | No active **Tunnel connection** for the selected **Tunnel** | Drop immediately |
 | No matching Client **Service** | Reject the stream on the Client |
 | Terminating hostname with no ready ACME certificate | TLS handshake failure at the Client (fail closed) |

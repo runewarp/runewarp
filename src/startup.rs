@@ -719,7 +719,7 @@ mod tests {
 
         assert!(
             hostnames.is_empty(),
-            "catch-all services must not contribute ACME hostnames"
+            "Catch-all Services must not contribute Client ACME hostnames"
         );
     }
 

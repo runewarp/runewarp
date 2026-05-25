@@ -366,7 +366,7 @@ fn client_public_cert_renew_with_hostname_replaces_leaf_but_keeps_ca() {
     assert_eq!(
         fs::read(tempdir.path().join("public-cert/public-ca.crt")).unwrap(),
         original_ca,
-        "renew should preserve the public CA certificate"
+        "renew should preserve the Public hostname CA certificate"
     );
     assert_ne!(
         fs::read(
@@ -586,7 +586,7 @@ tls-mode = "terminate"
     assert_ne!(
         fs::read(tempdir.path().join("public-cert/public-ca.crt")).unwrap(),
         original_ca,
-        "rotate-ca should replace the public CA certificate"
+        "rotate-ca should replace the Public hostname CA certificate"
     );
     assert_ne!(
         fs::read(tempdir.path().join("public-cert/state/public-ca.key")).unwrap(),

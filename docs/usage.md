@@ -15,7 +15,7 @@ Runewarp assumes:
 
 - a public **Server** reachable on its configured `server.public-bind-address` for **Visitor** TLS traffic and `server.tunnel-bind-address` for **Client** **Tunnel connections**; both default to `0.0.0.0:443`
 - one or more operator-owned **Public hostnames** that resolve to the Server
-- a **Local backend** behind the Client — TLS-terminating in passthrough mode, or plaintext in terminate mode
+- a **Local backend** behind the Client — TLS-terminating under **TLS passthrough**, or plaintext in **Terminate mode**
 - a decision about the Server certificate path: ACME for the **Server hostname** or the manual/private-CA path
 
 If the product language in this guide feels unfamiliar, read [`CONTEXT.md`](../CONTEXT.md) first.
@@ -170,7 +170,7 @@ server-address = "tunnel.example.com"
 backend-address = "caddy.local:443"
 ```
 
-That Client has a **Catch-all Service**: the Server stays explicit about the authorized **Public hostnames**, while the sole Client **Service** forwards every admitted hostname to one TLS-terminating backend.
+That Client has a **Catch-all Service**: the Server stays explicit about **Public hostname authorization**, while the sole Client **Service** forwards every admitted hostname to one TLS-terminating **Local backend**.
 
 If the Client must dial a non-default tunnel port, append it to `server-address` as `hostname:port`.
 
@@ -218,7 +218,7 @@ The routing flags belong only to the runtime `runewarp client` form. `runewarp c
 
 1. Point each **Public hostname** at the Server.
 2. Make a TLS request to the Public hostname.
-3. Confirm the request succeeds and the expected application answers. In passthrough mode the backend's own certificate should appear; in terminate mode the Client-presented public certificate should appear and the backend should receive plaintext.
+3. Confirm the request succeeds and the expected application answers. Under **TLS passthrough** the backend's own certificate should appear; in **Terminate mode** the Client-presented **Public hostname certificate** should appear and the backend should receive plaintext.
 
 When logs are enabled, the Server and Client emit human-readable routing diagnostics that help confirm:
 
@@ -232,7 +232,7 @@ When logs are enabled, the Server and Client emit human-readable routing diagnos
 | --- | --- | --- |
 | No traffic reaches the backend | No active **Tunnel connection** | Confirm the Client is running and can reach the Server on the configured `server.tunnel-bind-address` |
 | Client cannot connect to the Server | Wrong Server trust path | Check `client.server-trust = "ca-file"` and the selected `client.server-ca-file` path for the manual/private-CA path, or confirm the ACME/public-CA chain is trusted |
-| Server drops a Public hostname | Hostname is not authorized on any Server `[[tunnels]]` entry | Check `server.tunnels[].public-hostnames` |
+| Server drops a Public hostname | No Server `[[tunnels]]` entry grants **Public hostname authorization** for it | Check `server.tunnels[].public-hostnames` |
 | Client rejects the stream | No matching **Service** on the Client | Check Client `public-hostnames`, or confirm the sole Service is intentionally Catch-all |
 | Passthrough backend handshake fails | Backend is not terminating TLS | Confirm `backend-address` points at a TLS-speaking endpoint for `tls-mode = "passthrough"` |
 | Terminate-mode backend fails immediately | Backend still expects TLS after the Client terminated it | Confirm the matching Service uses `tls-mode = "terminate"` and the backend speaks plaintext TCP |

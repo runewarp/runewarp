@@ -88,7 +88,7 @@ pub struct ClientPublicCertArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ClientPublicCertSubcommand {
-    /// Create the shared Client public CA and a leaf certificate for one
+    /// Create the shared Public hostname CA and a leaf certificate for one
     /// hostname (--hostname) or for all config-derived terminating hostnames
     /// when --hostname is omitted. Requires --config when --hostname is not
     /// provided.
@@ -97,7 +97,7 @@ pub enum ClientPublicCertSubcommand {
     /// config-derived terminating hostnames when --hostname is omitted.
     /// Requires --config when --hostname is not provided.
     Renew(ClientPublicCertRenewArgs),
-    /// Rotate the shared Client public CA and reissue every managed leaf
+    /// Rotate the shared Public hostname CA and reissue every managed leaf
     /// certificate. The managed hostname set is derived from
     /// client.services[].public-hostnames for tls-mode = "terminate" entries
     /// in the config file; --config is therefore required.

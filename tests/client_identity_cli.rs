@@ -218,6 +218,32 @@ fn client_identity_init_matches_the_generated_certificate_subject_public_key_inf
 }
 
 #[test]
+fn client_identity_init_rejects_runtime_routing_flags() {
+    let tempdir = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "--server-address",
+            "tunnel.example.test",
+            "--backend-address",
+            "localhost:443",
+            "identity",
+            "init",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("runewarp client identity"));
+    assert!(stderr.contains("--server-address"));
+    assert!(stderr.contains("--backend-address"));
+}
+
+#[test]
 fn client_identity_renew_reuses_the_existing_key_and_identity() {
     let tempdir = tempdir().unwrap();
 

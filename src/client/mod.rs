@@ -1,4 +1,5 @@
 mod service;
+mod settings_resolution;
 mod tunnel_stream;
 
 use std::fmt;
@@ -11,6 +12,11 @@ use self::tunnel_stream::TunnelConnectionStreamHandler;
 use crate::ClientServiceSettings;
 
 pub(crate) use service::validate_services;
+pub use settings_resolution::{
+    ClientRuntimeArgs, ClientSettingsResolutionDefaults, ClientSettingsResolutionError,
+    SelectedClientConfig, resolve_client_settings_from_cli, resolve_selected_client_settings,
+    select_client_config,
+};
 
 #[derive(Clone)]
 pub struct ClientConfig {

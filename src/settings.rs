@@ -159,10 +159,11 @@ pub fn load_server_settings(path: &Path) -> Result<ServerSettings, SettingsError
 pub fn load_client_settings(path: &Path) -> Result<ClientSettings, SettingsError> {
     let section_value = load_selected_section_value(path, "client")?;
     let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
-    validate_client_settings(
+    validate_client_settings_with_default_identity_dir(
         path,
         raw,
         collect_client_unknown_field_messages(&section_value),
+        default_client_identity_material_dir,
     )
 }
 
@@ -246,7 +247,7 @@ pub fn resolve_client_identity_material_dir_from_config(
     Ok(raw.identity_dir.map(|path| resolve_path(base_dir, &path)))
 }
 
-fn load_optional_selected_section_value(
+pub(crate) fn load_optional_selected_section_value(
     path: &Path,
     section: &'static str,
 ) -> Result<Option<toml::Value>, SettingsError> {
@@ -267,7 +268,7 @@ fn config_dir(path: &Path) -> &Path {
     path.parent().unwrap_or_else(|| Path::new("."))
 }
 
-fn deserialize_selected_section<T>(
+pub(crate) fn deserialize_selected_section<T>(
     path: &Path,
     section: &'static str,
     section_value: &toml::Value,
@@ -378,10 +379,11 @@ fn validate_server_settings(
     }
 }
 
-fn validate_client_settings(
+pub(crate) fn validate_client_settings_with_default_identity_dir(
     path: &Path,
     raw: RawClientConfig,
     mut messages: Vec<String>,
+    default_identity_dir: impl Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Result<ClientSettings, SettingsError> {
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
@@ -413,7 +415,7 @@ fn validate_client_settings(
         "client.identity-dir",
         raw.identity_dir,
         config_dir,
-        default_client_identity_material_dir,
+        default_identity_dir,
         &mut messages,
     );
     if let Some(identity_directory) = identity_directory.as_deref() {
@@ -914,7 +916,7 @@ fn validate_unique_client_service_hostnames(
     }
 }
 
-fn is_valid_backend_address(backend_address: &str) -> bool {
+pub(crate) fn is_valid_backend_address(backend_address: &str) -> bool {
     backend_address.parse::<std::net::SocketAddr>().is_ok()
         || backend_address
             .rsplit_once(':')
@@ -968,7 +970,7 @@ fn collect_server_unknown_field_messages(section_value: &toml::Value) -> Vec<Str
     messages
 }
 
-fn collect_client_unknown_field_messages(section_value: &toml::Value) -> Vec<String> {
+pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value) -> Vec<String> {
     let mut messages = Vec::new();
     let Some(client) = section_value.as_table() else {
         return messages;
@@ -1041,23 +1043,23 @@ struct RawServerTunnelConfig {
     client_identity: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-struct RawClientConfig {
-    server_address: Option<String>,
-    logs: Option<bool>,
-    server_trust: Option<String>,
-    server_ca_file: Option<PathBuf>,
-    identity_dir: Option<PathBuf>,
+pub(crate) struct RawClientConfig {
+    pub(crate) server_address: Option<String>,
+    pub(crate) logs: Option<bool>,
+    pub(crate) server_trust: Option<String>,
+    pub(crate) server_ca_file: Option<PathBuf>,
+    pub(crate) identity_dir: Option<PathBuf>,
     #[serde(default)]
-    services: Vec<RawClientServiceConfig>,
+    pub(crate) services: Vec<RawClientServiceConfig>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-struct RawClientServiceConfig {
-    public_hostnames: Option<Vec<String>>,
-    backend_address: Option<String>,
+pub(crate) struct RawClientServiceConfig {
+    pub(crate) public_hostnames: Option<Vec<String>>,
+    pub(crate) backend_address: Option<String>,
 }
 
 #[cfg(test)]

@@ -20,6 +20,20 @@ fn client_help_prints_usage_and_subcommands() {
 }
 
 #[test]
+fn client_help_lists_runtime_only_routing_flags() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["client", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("--server-address"));
+    assert!(stdout.contains("--backend-address"));
+}
+
+#[test]
 fn client_uses_the_xdg_default_config_path_and_ignores_server_side_errors() {
     let tempdir = tempdir().unwrap();
     let current_dir = tempdir.path().join("cwd");
@@ -171,4 +185,96 @@ server-address = "tunnel.example.test"
 
     assert!(stderr.contains("at least one [[client.services]] entry is required"));
     assert!(!stderr.contains("identity-dir"));
+}
+
+#[test]
+fn client_can_use_runtime_flags_without_a_discovered_config() {
+    let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
+    let xdg_data_home = tempdir.path().join("xdg-data");
+    fs::create_dir_all(xdg_config_home.join("runewarp")).unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_DATA_HOME", &xdg_data_home)
+        .args([
+            "client",
+            "--server-address",
+            "tunnel.example.test",
+            "--backend-address",
+            "127.0.0.1:443",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("client.identity-dir directory not found"));
+    assert!(stderr.contains("runewarp client identity init"));
+    assert!(!stderr.contains("failed to read"));
+}
+
+#[test]
+fn discovered_config_remains_authoritative_when_runtime_flags_are_present() {
+    let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
+    let xdg_data_home = tempdir.path().join("xdg-data");
+    let xdg_runewarp_dir = xdg_config_home.join("runewarp");
+    fs::create_dir_all(&xdg_runewarp_dir).unwrap();
+    fs::write(
+        xdg_runewarp_dir.join("config.toml"),
+        r#"
+[client]
+identity-dir = "missing-client"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_DATA_HOME", &xdg_data_home)
+        .args([
+            "client",
+            "--server-address",
+            "tunnel.example.test",
+            "--backend-address",
+            "127.0.0.1:443",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("missing-client"));
+    assert!(stderr.contains("runewarp client identity init"));
+    assert!(!stderr.contains("failed to read"));
+}
+
+#[test]
+fn explicit_missing_config_path_remains_a_hard_error_even_with_runtime_flags() {
+    let tempdir = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "--config",
+            "missing.toml",
+            "--server-address",
+            "tunnel.example.test",
+            "--backend-address",
+            "127.0.0.1:443",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("failed to read missing.toml"));
+    assert!(!stderr.contains("runewarp client identity init"));
 }

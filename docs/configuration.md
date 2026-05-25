@@ -38,10 +38,13 @@ runewarp server cert renew --dir ./server-cert
 runewarp server cert rotate-ca --dir ./server-cert --hostname tunnel.example.com
 
 runewarp client --config config.toml
+runewarp client --server-address tunnel.example.com --backend-address 127.0.0.1:443
 runewarp client identity init --dir ./client-identity
 runewarp client identity renew --dir ./client-identity
 runewarp client identity rotate --dir ./client-identity
 ```
+
+`--server-address` and `--backend-address` are runtime-only flags on `runewarp client`. They are not accepted by `runewarp client identity ...`.
 
 Material-management commands also accept `--config` and resolve their working directory with this precedence:
 
@@ -55,6 +58,21 @@ When `runewarp server` or `runewarp client` omit `--config`, Runewarp loads:
 
 - `$XDG_CONFIG_HOME/runewarp/config.toml`, or
 - `~/.config/runewarp/config.toml` when `XDG_CONFIG_HOME` is unset
+
+For `runewarp client`, config/runtime precedence is:
+
+1. an explicit `--config` path selects that file and a missing explicit path remains an error
+2. otherwise, a discovered default config file is selected when it exists
+3. otherwise, there is no selected Client config and `runewarp client` may start in the CLI-only shape when both `--server-address` and `--backend-address` are present
+
+When a selected config file is involved:
+
+- `--server-address` may replace `client.server-address` before validation
+- `--backend-address` may supply the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks
+- any configured Service blocks `--backend-address`, even when that Service block is malformed
+- a selected file with no `[client]` section may still start the Client when both runtime flags are present
+
+Pure CLI-only Client startup keeps using the normal omitted-key defaults for `client.server-trust`, `client.identity-dir`, `client.logs`, and the runtime reconnect cadence.
 
 ## Default locations
 

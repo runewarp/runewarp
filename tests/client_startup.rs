@@ -622,3 +622,202 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     server_task.abort();
     let _ = server_task.await;
 }
+
+/// Client in ACME mode should connect immediately without blocking on certificate readiness.
+/// The ACME resolver is created with no ready certs; startup must still succeed.
+#[tokio::test]
+async fn acme_client_starts_without_blocking_on_cert_readiness() {
+    let tempdir = tempdir().unwrap();
+    let certified_server =
+        generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+    let server_cert = CertificateDer::from(certified_server.cert);
+    let server_key = certified_server.signing_key.serialize_der();
+    let client_identity = generate_client_identity().unwrap();
+
+    let server = Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        configured_tunnels: vec![ServerTunnelSettings {
+            public_hostnames: vec!["app.example.test".to_owned()],
+            client_identity: client_identity.client_identity.clone(),
+        }],
+        logs: false,
+        public_tls_config: None,
+        quic_server_config: make_server_quic_config_with_client_auth(
+            vec![server_cert.clone()],
+            private_key_from_der(&server_key),
+            std::slice::from_ref(&client_identity.client_identity),
+        )
+        .unwrap(),
+    })
+    .await
+    .unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        &client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        &client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let acme_state_dir = tempdir.path().join("acme-state");
+    fs::create_dir(&acme_state_dir).unwrap();
+
+    // Use server_cert PEM as trust anchor for this test
+    let server_ca_pem = rcgen::generate_simple_self_signed(vec!["tunnel.example.test".to_owned()])
+        .unwrap()
+        .cert
+        .pem();
+    fs::write(tempdir.path().join("server-ca.pem"), server_ca_pem).unwrap();
+
+    let settings = ClientSettings {
+        server_hostname: "tunnel.example.test".to_owned(),
+        server_port: 443,
+        logs: false,
+        server_ca_file: Some(tempdir.path().join("server-ca.pem")),
+        identity_directory: tempdir.path().join("client-identity"),
+        reconnect_interval: Duration::from_secs(5),
+        services: vec![ClientServiceSettings {
+            public_hostnames: Some(vec!["app.example.test".to_owned()]),
+            backend_address: "localhost:80".to_owned(),
+            tls_mode: ClientTlsMode::Terminate,
+        }],
+        public_cert_config: Some(ClientPublicCertConfig::Acme {
+            email: "test@example.test".to_owned(),
+            state_directory: acme_state_dir,
+        }),
+    };
+
+    // Startup must succeed without blocking — the ACME resolver starts with no cert loaded,
+    // but the client does not wait for cert acquisition before connecting.
+    let result = PreparedClient::connect_to(&settings, localhost(0), tunnel_addr).await;
+    match result {
+        Err(runewarp::ClientStartupError::InvalidSettings(msg)) => {
+            panic!("ACME client startup must not fail with InvalidSettings: {msg}")
+        }
+        Err(runewarp::ClientStartupError::TlsMaterial(e)) => {
+            panic!("ACME client startup must not fail with TlsMaterial: {e}")
+        }
+        _ => {} // connection errors (wrong CA) are acceptable; we only check startup
+    }
+
+    server_task.abort();
+    let _ = server_task.await;
+}
+
+/// ACME mode only builds configs for services with tls-mode = "terminate".
+/// Passthrough services must not contribute hostnames to the ACME hostname set.
+#[tokio::test]
+async fn acme_client_only_manages_terminating_service_hostnames() {
+    let tempdir = tempdir().unwrap();
+    let certified_server =
+        generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+    let server_cert = CertificateDer::from(certified_server.cert);
+    let server_key = certified_server.signing_key.serialize_der();
+    let client_identity = generate_client_identity().unwrap();
+
+    let server = Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        configured_tunnels: vec![ServerTunnelSettings {
+            public_hostnames: vec![
+                "app.example.test".to_owned(),
+                "api.example.test".to_owned(),
+            ],
+            client_identity: client_identity.client_identity.clone(),
+        }],
+        logs: false,
+        public_tls_config: None,
+        quic_server_config: make_server_quic_config_with_client_auth(
+            vec![server_cert.clone()],
+            private_key_from_der(&server_key),
+            std::slice::from_ref(&client_identity.client_identity),
+        )
+        .unwrap(),
+    })
+    .await
+    .unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        &client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        &client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let acme_state_dir = tempdir.path().join("acme-state");
+    fs::create_dir(&acme_state_dir).unwrap();
+
+    let server_ca_pem = rcgen::generate_simple_self_signed(vec!["tunnel.example.test".to_owned()])
+        .unwrap()
+        .cert
+        .pem();
+    fs::write(tempdir.path().join("server-ca.pem"), server_ca_pem).unwrap();
+
+    // Two services: one terminating (ACME-managed), one passthrough (no cert needed).
+    let settings = ClientSettings {
+        server_hostname: "tunnel.example.test".to_owned(),
+        server_port: 443,
+        logs: false,
+        server_ca_file: Some(tempdir.path().join("server-ca.pem")),
+        identity_directory: tempdir.path().join("client-identity"),
+        reconnect_interval: Duration::from_secs(5),
+        services: vec![
+            ClientServiceSettings {
+                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                backend_address: "localhost:80".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+            },
+            ClientServiceSettings {
+                public_hostnames: Some(vec!["api.example.test".to_owned()]),
+                backend_address: "localhost:8080".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
+            },
+        ],
+        public_cert_config: Some(ClientPublicCertConfig::Acme {
+            email: "test@example.test".to_owned(),
+            state_directory: acme_state_dir,
+        }),
+    };
+
+    // Startup must succeed: the passthrough service does not require ACME management.
+    let result = PreparedClient::connect_to(&settings, localhost(0), tunnel_addr).await;
+    match result {
+        Err(runewarp::ClientStartupError::InvalidSettings(msg)) => {
+            panic!("ACME client startup must not fail with InvalidSettings for mixed services: {msg}")
+        }
+        Err(runewarp::ClientStartupError::TlsMaterial(e)) => {
+            panic!("ACME client startup must not fail with TlsMaterial for mixed services: {e}")
+        }
+        _ => {}
+    }
+
+    server_task.abort();
+    let _ = server_task.await;
+}

@@ -37,6 +37,7 @@ The buffered ClientHello must never be logged or echoed back in diagnostics. Whe
 | Unauthorized **Public hostname** | Drop immediately |
 | No active **Tunnel connection** for the selected **Tunnel** | Drop immediately |
 | No matching Client **Service** | Reject the stream on the Client |
+| Terminating hostname with no ready ACME certificate | TLS handshake failure at the Client (fail closed) |
 
 ## Tunnel connection handshake
 
@@ -64,14 +65,20 @@ When the Client receives a new QUIC stream:
 3. If there is exactly one configured **Service** and it omits `public-hostnames`, select that **Catch-all Service**.
 4. Otherwise, match the hostname to `client.services[*].public-hostnames`.
 5. If no Service matches, reject the stream immediately.
-6. Open a TCP connection to the selected `backend-address`.
-7. Forward the buffered ClientHello bytes, then continue streaming in both directions.
+6. If the matched Service has `tls-mode = "passthrough"` (default):
+   a. Open a TCP connection to the selected `backend-address`.
+   b. Forward the buffered ClientHello bytes, then continue streaming in both directions.
+7. If the matched Service has `tls-mode = "terminate"`:
+   a. Complete the TLS handshake with the Visitor using the per-hostname certificate — from `client.public-cert-dir` (manual path) or from `[client.acme]` (ACME path). If `[client.acme]` is in use and the certificate for that hostname is not yet ready, the TLS handshake fails immediately (fail closed); there is no fallback to passthrough.
+   b. Open a TCP connection to the selected `backend-address`.
+   c. Proxy decrypted data between the TLS stream and the plaintext backend connection.
 
 Notes:
 
 - the ClientHello may span multiple reads on both TCP and QUIC streams
 - the parser must accumulate bytes until the TLS record is complete before attempting to extract SNI
-- `backend-address` must point at a TLS-terminating backend
+- `backend-address` must point at a TLS-terminating backend when `tls-mode = "passthrough"`; it receives plaintext when `tls-mode = "terminate"`
+- when `[client.acme]` is configured, `acme-tls/1` challenge connections for **Public hostnames** arrive through the Server's normal Visitor routing path and are handled by the Client's ACME resolver alongside regular TLS connections for those hostnames
 
 ## Stream lifecycle
 

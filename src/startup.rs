@@ -8,7 +8,7 @@ use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use tokio::net::lookup_host;
 
-use crate::acme::{ManagedAcmeState, build_acme_state, run_acme_state};
+use crate::acme::{ManagedAcmeState, build_acme_state, build_client_acme_state, run_acme_state};
 use crate::client_public_cert::client_public_cert_leaf_dir;
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, TlsMaterialError, load_certificate_chain,
@@ -16,8 +16,8 @@ use crate::tls_material::{
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConnectError, ClientIdentity,
-    ClientPublicCertConfig, ClientSettings, ClientTlsMode, QuicConfigError, Server,
-    ServerCertificateSettings, ServerConfig, ServerSettings, client::validate_services,
+    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, QuicConfigError,
+    Server, ServerCertificateSettings, ServerConfig, ServerSettings, client::validate_services,
     make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
     make_server_quic_config_with_client_auth_resolver,
 };
@@ -109,7 +109,7 @@ impl PreparedServer {
         if let Some(acme_state) = acme_state {
             tokio::select! {
                 server_result = server.run() => server_result,
-                acme_result = run_acme_state(acme_state, logs) => match acme_result {
+                acme_result = run_acme_state(acme_state, "server", logs) => match acme_result {
                     Ok(never) => match never {},
                     Err(error) => Err(error),
                 },
@@ -122,8 +122,13 @@ impl PreparedServer {
 
 pub struct PreparedClient {
     client: Client,
+    logs: bool,
     native_root_error_count: usize,
+    acme_state: Option<ManagedAcmeState>,
 }
+
+type TerminationTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
+type LoadedTerminationTls = (TerminationTlsConfigs, Option<ManagedAcmeState>);
 
 impl PreparedClient {
     pub async fn connect(
@@ -155,7 +160,7 @@ impl PreparedClient {
         let services = validate_services(&settings.services)
             .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
 
-        let hostname_tls_configs =
+        let (hostname_tls_configs, acme_state) =
             load_termination_tls_configs(settings).map_err(ClientStartupError::InvalidSettings)?;
 
         let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
@@ -181,7 +186,9 @@ impl PreparedClient {
 
         Ok(Self {
             client,
+            logs: settings.logs,
             native_root_error_count: loaded_roots.native_root_error_count,
+            acme_state,
         })
     }
 
@@ -194,7 +201,16 @@ impl PreparedClient {
     }
 
     pub async fn run(self) -> Result<(), quinn::ConnectionError> {
-        self.client.run().await
+        let Self {
+            client,
+            logs,
+            acme_state,
+            ..
+        } = self;
+        if let Some(acme_state) = acme_state {
+            tokio::spawn(run_acme_state(acme_state, "client", logs));
+        }
+        client.run().await
     }
 }
 
@@ -400,17 +416,54 @@ fn build_root_store(
     })
 }
 
+/// Returns the set of explicit public hostnames for all terminating services.
+/// Used to determine which hostnames should be managed by ACME.
+pub(crate) fn acme_terminating_hostnames(services: &[ClientServiceSettings]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut hostnames = Vec::new();
+    for service in services {
+        if service.tls_mode != ClientTlsMode::Terminate {
+            continue;
+        }
+        let Some(hs) = &service.public_hostnames else {
+            continue;
+        };
+        for hostname in hs {
+            if seen.insert(hostname.clone()) {
+                hostnames.push(hostname.clone());
+            }
+        }
+    }
+    hostnames
+}
+
 /// Loads and validates TLS server configs for every terminating hostname across all services.
-/// Returns a map from normalized hostname to the rustls::ServerConfig for that hostname.
+/// Returns a map from normalized hostname to the rustls::ServerConfig for that hostname,
+/// plus an optional ACME state that must be driven to keep certificates current.
 fn load_termination_tls_configs(
     settings: &ClientSettings,
-) -> Result<HashMap<String, Arc<rustls::ServerConfig>>, String> {
-    let Some(ClientPublicCertConfig::Manual { directory }) = &settings.public_cert_config else {
-        // No manual cert config: if any terminating service exists, that's a bug caught by
-        // settings validation. At runtime we just return an empty map.
-        return Ok(HashMap::new());
-    };
+) -> Result<LoadedTerminationTls, String> {
+    match &settings.public_cert_config {
+        None => Ok((HashMap::new(), None)),
+        Some(ClientPublicCertConfig::Manual { directory }) => {
+            let configs = load_manual_termination_tls_configs(settings, directory)?;
+            Ok((configs, None))
+        }
+        Some(ClientPublicCertConfig::Acme {
+            email,
+            state_directory,
+        }) => {
+            let (configs, acme_state) =
+                build_acme_termination_configs(settings, email, state_directory)?;
+            Ok((configs, Some(acme_state)))
+        }
+    }
+}
 
+fn load_manual_termination_tls_configs(
+    settings: &ClientSettings,
+    directory: &std::path::Path,
+) -> Result<TerminationTlsConfigs, String> {
     let mut configs = HashMap::new();
     for service in &settings.services {
         if service.tls_mode != ClientTlsMode::Terminate {
@@ -451,6 +504,39 @@ fn load_termination_tls_configs(
     Ok(configs)
 }
 
+/// Builds per-hostname TLS configs backed by a shared ACME state.
+/// All terminating hostnames share one ACME account and one resolver; the resolver
+/// handles both regular TLS connections (once a cert is acquired) and TLS-ALPN-01
+/// challenge connections (while acquisition is in progress). Hostnames without a ready
+/// certificate fail closed at the TLS handshake layer.
+fn build_acme_termination_configs(
+    settings: &ClientSettings,
+    email: &str,
+    state_directory: &std::path::Path,
+) -> Result<(TerminationTlsConfigs, ManagedAcmeState), String> {
+    let hostnames = acme_terminating_hostnames(&settings.services);
+    if hostnames.is_empty() {
+        // Settings validation should prevent this, but guard defensively.
+        return Err(
+            "[client.acme] requires at least one service with tls-mode = \"terminate\" \
+             and explicit public-hostnames"
+                .to_owned(),
+        );
+    }
+
+    let acme_state = build_client_acme_state(&hostnames, email, state_directory);
+    // The resolver handles all managed hostnames: it presents the challenge cert when
+    // the ACME validator connects with acme-tls/1, and the domain cert for normal traffic.
+    // Connections that arrive before the cert is ready fail at TLS handshake (fail closed).
+    let tls_config: Arc<rustls::ServerConfig> = acme_state.challenge_rustls_config();
+
+    let mut configs = HashMap::new();
+    for hostname in hostnames {
+        configs.insert(hostname, tls_config.clone());
+    }
+    Ok((configs, acme_state))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -458,7 +544,8 @@ mod tests {
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::CertificateDer;
 
-    use super::{ClientStartupError, NativeRootsLoad, build_root_store};
+    use super::{ClientStartupError, NativeRootsLoad, acme_terminating_hostnames, build_root_store};
+    use crate::{ClientServiceSettings, ClientTlsMode};
 
     #[test]
     fn configured_server_ca_file_still_loads_without_native_roots() {
@@ -515,5 +602,87 @@ mod tests {
             error,
             ClientStartupError::NativeRoots { errors: 2 }
         ));
+    }
+
+    #[test]
+    fn acme_terminating_hostnames_only_includes_terminate_mode_services() {
+        let services = vec![
+            ClientServiceSettings {
+                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                backend_address: "localhost:80".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+            },
+            ClientServiceSettings {
+                public_hostnames: Some(vec!["api.example.test".to_owned()]),
+                backend_address: "localhost:8080".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
+            },
+        ];
+
+        let hostnames = acme_terminating_hostnames(&services);
+
+        assert_eq!(hostnames, vec!["app.example.test"]);
+    }
+
+    #[test]
+    fn acme_terminating_hostnames_skips_catch_all_service() {
+        let services = vec![ClientServiceSettings {
+            public_hostnames: None, // catch-all has no explicit hostnames
+            backend_address: "localhost:80".to_owned(),
+            tls_mode: ClientTlsMode::Terminate,
+        }];
+
+        let hostnames = acme_terminating_hostnames(&services);
+
+        assert!(
+            hostnames.is_empty(),
+            "catch-all services must not contribute ACME hostnames"
+        );
+    }
+
+    #[test]
+    fn acme_terminating_hostnames_deduplicates_across_services() {
+        let services = vec![
+            ClientServiceSettings {
+                public_hostnames: Some(vec![
+                    "app.example.test".to_owned(),
+                    "api.example.test".to_owned(),
+                ]),
+                backend_address: "localhost:80".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+            },
+            ClientServiceSettings {
+                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                backend_address: "localhost:8080".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+            },
+        ];
+
+        let hostnames = acme_terminating_hostnames(&services);
+
+        let mut sorted = hostnames.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["api.example.test", "app.example.test"]);
+        assert_eq!(hostnames.len(), 2, "each hostname must appear only once");
+    }
+
+    #[test]
+    fn acme_terminating_hostnames_empty_when_no_terminate_services() {
+        let services = vec![
+            ClientServiceSettings {
+                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                backend_address: "localhost:80".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
+            },
+            ClientServiceSettings {
+                public_hostnames: Some(vec!["api.example.test".to_owned()]),
+                backend_address: "localhost:8080".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
+            },
+        ];
+
+        let hostnames = acme_terminating_hostnames(&services);
+
+        assert!(hostnames.is_empty());
     }
 }

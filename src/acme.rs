@@ -24,8 +24,23 @@ pub(crate) fn build_acme_state(
         .state()
 }
 
+/// Builds an ACME state that manages certificates for all of the given hostnames.
+/// All hostnames share a single Let's Encrypt account and state directory.
+pub(crate) fn build_client_acme_state(
+    hostnames: &[String],
+    email: &str,
+    state_directory: &Path,
+) -> ManagedAcmeState {
+    AcmeConfig::new(hostnames)
+        .contact_push(format!("mailto:{email}"))
+        .directory_lets_encrypt(true)
+        .cache(DirCache::new(state_directory.to_path_buf()))
+        .state()
+}
+
 pub(crate) async fn run_acme_state(
     mut state: ManagedAcmeState,
+    component: &str,
     logs: bool,
 ) -> io::Result<Infallible> {
     loop {
@@ -35,7 +50,7 @@ pub(crate) async fn run_acme_state(
                 emit_stderr(
                     logs,
                     &warning_line(
-                        "server",
+                        component,
                         &format!("ACME certificate management error: {error}"),
                     ),
                 );

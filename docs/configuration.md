@@ -203,13 +203,13 @@ The grouping of hostnames into **Tunnels** and **Services** may differ. One Tunn
 
 | Key | Required | Notes |
 | --- | --- | --- |
-| `client.server-address` | yes | **Server address** the Client dials for its tunnel connection, written as `hostname[:port]`. The host part must be a hostname, not a raw IP literal. When the port is omitted, Runewarp uses UDP port `443`. |
+| `client.server-address` | runtime or config | **Server address** the Client dials for its tunnel connection, written as `hostname[:port]`. The host part must be a hostname, not a raw IP literal. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, `--server-address` may supply or replace this value before validation. |
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`; otherwise system trust is used. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
 | `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG data path for Client identity material. |
 | `client.logs` | no | Boolean controlling human-readable Client runtime logs. Defaults to `true`. |
 | `client.services[].public-hostnames` | when exact-match local routing is desired | Exact **Public hostnames** this Service accepts locally. Omit only on the sole Catch-all Service. |
-| `client.services[].backend-address` | yes | TCP endpoint for the forwarded traffic. This backend must terminate TLS. |
+| `client.services[].backend-address` | yes, per Service block | TCP endpoint for the forwarded traffic. This backend must terminate TLS. `runewarp client --backend-address` may synthesize the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks at all. |
 
 ## Trust and material directories
 
@@ -251,16 +251,18 @@ When `client.server-trust = "ca-file"` and `client.server-ca-file` is omitted, R
 
 ### General boot-time validation
 
-Runewarp rejects config that violates any of these rules:
+Runewarp rejects config and startup inputs that violate any of these rules:
 
-- the selected role must have a matching `[server]` or `[client]` section
+- `runewarp server` requires a `[server]` section
+- `runewarp client` requires either a selected `[client]` section or both runtime routing flags when no selected Client config exists or the selected file has no `[client]` section
 - `server.hostname` must be present
 - `[server.acme]` and `server.cert-dir` are mutually exclusive; when `[server.acme]` is absent, Runewarp uses the manual/private-CA path with `server.cert-dir` or its default XDG location
-- `client.server-address` must be present
+- `runewarp client` must end up with a **Server address** after any allowed `--server-address` overlay
 - there must be at least one `[[server.tunnels]]` entry
-- there must be at least one `[[client.services]]` entry
+- `runewarp client` must end up with at least one **Service**, either from config or from the runtime `--backend-address` Catch-all overlay
 - `client.server-trust` must be either `system` or `ca-file`
 - `client.server-ca-file` may be set only when `client.server-trust = "ca-file"`
+- `--backend-address` may be used only when the selected config contributes no `[[client.services]]` blocks
 - all `client-identity` values must be lowercase hex without colons
 - all `client-identity` values must be unique across Server Tunnels
 - `server.public-bind-address` and `server.tunnel-bind-address` must be literal socket addresses

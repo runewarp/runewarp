@@ -1,6 +1,7 @@
 mod acme;
 mod client;
 mod client_hello;
+mod client_public_cert;
 mod hostname;
 mod identity;
 mod paths;
@@ -33,7 +34,8 @@ pub use identity::{
     renew_client_identity_certificate, rotate_client_identity,
 };
 pub use paths::{
-    XdgPathError, default_client_identity_material_dir, default_client_server_ca_path,
+    XdgPathError, default_client_acme_state_dir, default_client_identity_material_dir,
+    default_client_public_cert_material_dir, default_client_server_ca_path,
     default_config_path, default_server_acme_state_dir, default_server_cert_material_dir,
 };
 pub use quic::{
@@ -43,14 +45,20 @@ pub use quic::{
     make_server_quic_config_with_client_auth_resolver,
 };
 pub use server::{Server, ServerConfig};
+pub use client_public_cert::{
+    CLIENT_PUBLIC_CA_FILENAME, CLIENT_PUBLIC_CA_LIFETIME_DAYS, CLIENT_PUBLIC_CERT_LIFETIME_DAYS,
+    ClientPublicCertError, client_public_cert_leaf_dir, initialize_manual_client_public_cert,
+};
 pub use server_cert::{
     SERVER_CA_FILENAME, initialize_manual_server_certificate, renew_manual_server_certificate,
     rotate_manual_server_certificate_authority,
 };
 pub use settings::{
-    ClientServiceSettings, ClientSettings, DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS,
-    ServerCertificateSettings, ServerSettings, ServerTunnelSettings, SettingsError,
-    load_client_settings, load_server_settings, resolve_client_identity_material_dir_from_config,
+    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode,
+    DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, ServerCertificateSettings, ServerSettings,
+    ServerTunnelSettings, SettingsError, load_client_settings, load_server_settings,
+    resolve_client_identity_material_dir_from_config,
+    resolve_client_public_cert_material_dir_from_config,
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
 };
 pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};

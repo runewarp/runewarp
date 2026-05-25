@@ -76,6 +76,27 @@ pub struct ClientArgs {
 #[derive(Debug, Subcommand)]
 pub enum ClientSubcommand {
     Identity(ClientIdentityArgs),
+    PublicCert(ClientPublicCertArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(subcommand_required = true, arg_required_else_help = true)]
+pub struct ClientPublicCertArgs {
+    #[command(subcommand)]
+    pub command: ClientPublicCertSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ClientPublicCertSubcommand {
+    Init(ClientPublicCertInitArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ClientPublicCertInitArgs {
+    #[arg(long = "dir", value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+    #[arg(long, value_name = "HOSTNAME")]
+    pub hostname: Option<String>,
 }
 
 #[derive(Debug, Args)]

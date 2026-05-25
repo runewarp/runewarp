@@ -92,6 +92,18 @@ If you prefer custom directories, pass `--dir` during setup and point the matchi
 
 For the manual/private-CA path, either copy the generated `server-ca.crt` to `$XDG_DATA_HOME/runewarp/client/server-ca.crt` (or `~/.local/share/runewarp/client/server-ca.crt`) on each Client or set `client.server-ca-file` to the deployed CA bundle path.
 
+### 3a. Bootstrap Client public certificate material (TLS termination only)
+
+If any Client Service uses `tls-mode = "terminate"`, create the public certificate material:
+
+```bash
+runewarp client public-cert init --hostname app.example.com
+```
+
+Run once per terminating hostname; a second run with a new hostname reuses the existing CA and adds only the new leaf certificate. Share `public-ca.crt` with each Visitor as their trust anchor. When the CA already exists, `runewarp client public-cert init` refuses to replace it, keeping the Visitor-facing trust anchor stable.
+
+Set `client.public-cert-dir` in the Client config to the directory where the material was written (defaults to the XDG data location for Client public certificate material).
+
 ### 4. Write config
 
 The smallest practical setup is a Server with explicit **Public hostnames** and one Client **Catch-all Service**:

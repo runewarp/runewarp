@@ -1,6 +1,6 @@
 # Security
 
-Runewarp is a private tunneling system for TLS passthrough, not an edge TLS terminator and not a zero-knowledge transport. The **Server** still sees routing metadata so it can authorize **Public hostnames** and forward traffic, but customer TLS is terminated only on the operator's **Local backend**.
+Runewarp is a private tunneling system. In the default **passthrough** mode it is not an edge TLS terminator: the **Server** sees routing metadata to authorize **Public hostnames** and forward traffic, but customer TLS is terminated only on the operator's **Local backend**. The opt-in **terminate** mode allows the **Client** to terminate TLS itself using operator-managed certificate material; in that mode the Local backend receives plaintext.
 
 ## What the Server can and cannot see
 
@@ -19,16 +19,18 @@ Runewarp is a private tunneling system for TLS passthrough, not an edge TLS term
 | Server certificate validation | Confirms the Client is connected to the intended **Server hostname** |
 | Exclusive `ca-file` trust | Limits trust for the Tunnel connection to the configured CA bundle |
 | Pinned **Client identity** | Confirms the Client public key authorized for the selected Tunnel |
-| Backend TLS termination | Keeps customer TLS termination off the public edge |
+| Backend TLS termination (passthrough) | Keeps customer TLS termination off the public edge in the default mode |
+| Client public-cert CA (terminate) | Operator-managed trust anchor for Visitors when the Client terminates TLS |
 
 ## Public traffic invariants
 
-- customer TLS is never terminated on public hostnames
+- customer TLS is never terminated on the **Server**
 - the Server reads only enough of the ClientHello to route
 - the Server routes only **Public hostnames** explicitly authorized on the matched **Tunnel**
 - public traffic must be TLS
 - non-TLS traffic and TLS without SNI are dropped
-- **Local backends** must terminate TLS
+- **Local backends** must terminate TLS when `tls-mode = "passthrough"` (default)
+- the **Client** terminates TLS when `tls-mode = "terminate"`; the Local backend receives plaintext
 
 ## Tunnel authentication
 
@@ -71,6 +73,16 @@ In the manual/private-CA path:
 
 Existing QUIC connections continue with the certificate from their original handshake until they reconnect.
 
+### Client public certificate (TLS termination)
+
+When one or more Services use `tls-mode = "terminate"`, the Client needs a public certificate authority and per-hostname leaf certificates. Use the manual path through `runewarp client public-cert init`:
+
+- `runewarp client public-cert init --hostname app.example.com` creates a private **Client public CA** and an initial leaf certificate for the named hostname
+- running it again with a different hostname reuses the existing CA and adds a new leaf without replacing the trust anchor
+- the CA private key lives in `{public-cert-dir}/state/public-ca.key` and must be kept private
+
+Visitors must trust `public-ca.crt`; this file never changes after the initial init call. Leaf certificates are **365 days** by default; the CA is **3650 days**.
+
 ## ACME scope
 
 Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode.
@@ -88,6 +100,7 @@ Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode.
 | Cross-side hostname drift | The runtime does not validate cross-side hostname coverage under **Hostname mirroring** |
 | Local backend health | There is no pre-flight Local backend health check |
 | Manual/private-CA convenience | The simple manual path may keep private Server CA material on the public Server |
+| Client public-cert CA location | The manual path keeps the Client public CA private key on the Client machine alongside the running service |
 | Same-Tunnel availability | The runtime keeps one active connection per Tunnel rather than a load-balanced pool |
 
 These are deliberate boundaries and current limits, not hidden guarantees.

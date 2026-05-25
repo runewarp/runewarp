@@ -80,6 +80,7 @@ pub(crate) fn validate_services(
         validated_services.push(ClientServiceSettings {
             public_hostnames,
             backend_address: service.backend_address.clone(),
+            tls_mode: service.tls_mode.clone(),
         });
     }
 
@@ -88,7 +89,7 @@ pub(crate) fn validate_services(
 
 #[cfg(test)]
 mod tests {
-    use crate::ClientServiceSettings;
+    use crate::{ClientServiceSettings, ClientTlsMode};
 
     use super::{ClientServiceValidationError, validate_services};
 
@@ -98,10 +99,12 @@ mod tests {
             ClientServiceSettings {
                 public_hostnames: None,
                 backend_address: "127.0.0.1:443".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
             },
             ClientServiceSettings {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "127.0.0.1:8443".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
             },
         ];
 
@@ -117,10 +120,12 @@ mod tests {
             ClientServiceSettings {
                 public_hostnames: Some(vec!["App.Example.Test.".to_owned()]),
                 backend_address: "127.0.0.1:443".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
             },
             ClientServiceSettings {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "127.0.0.1:8443".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
             },
         ];
 

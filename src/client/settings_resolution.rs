@@ -199,9 +199,12 @@ fn resolve_cli_only_settings(
             server_trust: None,
             server_ca_file: None,
             identity_dir: None,
+            public_cert_dir: None,
+            acme: None,
             services: vec![RawClientServiceConfig {
                 public_hostnames: None,
                 backend_address: runtime.backend_address.clone(),
+                tls_mode: None,
             }],
         },
         Vec::new(),
@@ -239,6 +242,7 @@ fn resolve_selected_config_settings(
             raw.services = vec![RawClientServiceConfig {
                 public_hostnames: None,
                 backend_address: Some(backend_address.clone()),
+                tls_mode: None,
             }];
         }
     }

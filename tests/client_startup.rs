@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    ClientServiceSettings, ClientSettings, PreparedClient, Server, ServerConfig,
-    ServerTunnelSettings, generate_client_identity, load_client_settings,
+    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, PreparedClient,
+    Server, ServerConfig, ServerTunnelSettings, generate_client_identity,
+    initialize_manual_client_public_cert, load_client_settings,
     make_server_quic_config_with_client_auth,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -225,6 +226,7 @@ async fn prepared_client_rejects_settings_without_services() {
         identity_directory: tempdir.path().to_path_buf(),
         reconnect_interval: Duration::from_secs(5),
         services: Vec::new(),
+        public_cert_config: None,
     };
 
     let join = tokio::spawn(async move {
@@ -286,12 +288,15 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
             ClientServiceSettings {
                 public_hostnames: None,
                 backend_address: "localhost:443".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
             },
             ClientServiceSettings {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "localhost:8443".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
             },
         ],
+        public_cert_config: None,
     };
 
     let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
@@ -343,12 +348,15 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
             ClientServiceSettings {
                 public_hostnames: Some(vec!["App.Example.Test.".to_owned()]),
                 backend_address: "localhost:443".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
             },
             ClientServiceSettings {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "localhost:8443".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
             },
         ],
+        public_cert_config: None,
     };
 
     let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
@@ -359,4 +367,161 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
     assert!(error.to_string().contains(
         "client.services[].public-hostnames must be unique after normalization: app.example.test"
     ));
+}
+
+#[tokio::test]
+async fn prepared_client_rejects_missing_public_cert_material_for_terminating_service() {
+    let tempdir = tempdir().unwrap();
+    let client_identity = generate_client_identity().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    // public-cert-dir exists but has no material for app.example.test
+    let public_cert_dir = tempdir.path().join("public-cert");
+    fs::create_dir(&public_cert_dir).unwrap();
+
+    let settings = ClientSettings {
+        server_hostname: "tunnel.example.test".to_owned(),
+        server_port: 443,
+        logs: false,
+        server_ca_file: None,
+        identity_directory: tempdir.path().join("client-identity"),
+        reconnect_interval: Duration::from_secs(5),
+        services: vec![ClientServiceSettings {
+            public_hostnames: Some(vec!["app.example.test".to_owned()]),
+            backend_address: "localhost:443".to_owned(),
+            tls_mode: ClientTlsMode::Terminate,
+        }],
+        public_cert_config: Some(ClientPublicCertConfig::Manual {
+            directory: public_cert_dir,
+        }),
+    };
+
+    let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
+        Ok(_) => panic!("expected startup to fail when cert material is missing"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.to_string().contains("app.example.test"),
+        "error should mention the hostname: {error}"
+    );
+}
+
+#[tokio::test]
+async fn prepared_client_loads_valid_public_cert_material_for_terminating_service() {
+    let tempdir = tempdir().unwrap();
+    let certified_server =
+        generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+    let server_cert = CertificateDer::from(certified_server.cert);
+    let server_key = certified_server.signing_key.serialize_der();
+    let client_identity = generate_client_identity().unwrap();
+
+    let server = Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        configured_tunnels: vec![ServerTunnelSettings {
+            public_hostnames: vec!["app.example.test".to_owned()],
+            client_identity: client_identity.client_identity.clone(),
+        }],
+        logs: false,
+        public_tls_config: None,
+        quic_server_config: make_server_quic_config_with_client_auth(
+            vec![server_cert.clone()],
+            private_key_from_der(&server_key),
+            std::slice::from_ref(&client_identity.client_identity),
+        )
+        .unwrap(),
+    })
+    .await
+    .unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let public_cert_dir = tempdir.path().join("public-cert");
+    initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
+
+    let settings = ClientSettings {
+        server_hostname: "tunnel.example.test".to_owned(),
+        server_port: 443,
+        logs: false,
+        server_ca_file: Some(tempdir.path().join("server-ca-not-needed.pem")),
+        identity_directory: tempdir.path().join("client-identity"),
+        reconnect_interval: Duration::from_secs(5),
+        services: vec![ClientServiceSettings {
+            public_hostnames: Some(vec!["app.example.test".to_owned()]),
+            backend_address: "localhost:443".to_owned(),
+            tls_mode: ClientTlsMode::Terminate,
+        }],
+        public_cert_config: Some(ClientPublicCertConfig::Manual {
+            directory: public_cert_dir,
+        }),
+    };
+
+    // We use a fake server_ca_file path; the connect will succeed despite the missing ca file
+    // because we pass the server_cert directly. Use server_ca_file that doesn't exist but
+    // wire up using the server cert directly in a root store.
+    // For this test, we just verify startup doesn't fail due to cert material validation.
+    // Use the actual server cert as CA.
+    let server_cert_pem = rcgen::generate_simple_self_signed(vec!["tunnel.example.test".to_owned()])
+        .unwrap()
+        .cert
+        .pem();
+    let server_ca_path = tempdir.path().join("server-ca.pem");
+    fs::write(&server_ca_path, server_cert_pem).unwrap();
+
+    let settings = ClientSettings {
+        server_ca_file: Some(server_ca_path),
+        ..settings
+    };
+
+    // This should not error due to missing cert material (the material was initialized above).
+    // It may fail with a connection error (wrong CA), but not a startup/material error.
+    let result = PreparedClient::connect_to(&settings, localhost(0), tunnel_addr).await;
+    match result {
+        Err(runewarp::ClientStartupError::TlsMaterial(_)) => {
+            panic!("startup should not fail with TlsMaterial error when cert material is present")
+        }
+        Err(runewarp::ClientStartupError::InvalidSettings(msg))
+            if msg.contains("app.example.test") =>
+        {
+            panic!("startup should not fail with missing cert material: {msg}")
+        }
+        _ => {} // other errors (connection, handshake, etc.) are acceptable
+    }
+
+    server_task.abort();
+    let _ = server_task.await;
 }

@@ -440,9 +440,7 @@ pub(crate) fn acme_terminating_hostnames(services: &[ClientServiceSettings]) -> 
 /// Loads and validates TLS server configs for every terminating hostname across all services.
 /// Returns a map from normalized hostname to the rustls::ServerConfig for that hostname,
 /// plus an optional ACME state that must be driven to keep certificates current.
-fn load_termination_tls_configs(
-    settings: &ClientSettings,
-) -> Result<LoadedTerminationTls, String> {
+fn load_termination_tls_configs(settings: &ClientSettings) -> Result<LoadedTerminationTls, String> {
     match &settings.public_cert_config {
         None => Ok((HashMap::new(), None)),
         Some(ClientPublicCertConfig::Manual { directory }) => {
@@ -477,21 +475,20 @@ fn load_manual_termination_tls_configs(
                 continue;
             }
             let leaf_dir = client_public_cert_leaf_dir(directory, hostname);
-            let cert_chain = load_certificate_chain(&leaf_dir.join(SERVER_CERT_FILENAME))
-                .map_err(|_| {
+            let cert_chain =
+                load_certificate_chain(&leaf_dir.join(SERVER_CERT_FILENAME)).map_err(|_| {
                     format!(
                         "missing certificate for terminating hostname {hostname}: \
                          run `runewarp client public-cert init --hostname {hostname}`"
                     )
                 })?;
-            let private_key = load_private_key(&leaf_dir.join(SERVER_KEY_FILENAME)).map_err(
-                |_| {
+            let private_key =
+                load_private_key(&leaf_dir.join(SERVER_KEY_FILENAME)).map_err(|_| {
                     format!(
                         "missing private key for terminating hostname {hostname}: \
                          run `runewarp client public-cert init --hostname {hostname}`"
                     )
-                },
-            )?;
+                })?;
             let tls_config = rustls::ServerConfig::builder()
                 .with_no_client_auth()
                 .with_single_cert(cert_chain, private_key)
@@ -544,7 +541,9 @@ mod tests {
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::CertificateDer;
 
-    use super::{ClientStartupError, NativeRootsLoad, acme_terminating_hostnames, build_root_store};
+    use super::{
+        ClientStartupError, NativeRootsLoad, acme_terminating_hostnames, build_root_store,
+    };
     use crate::{ClientServiceSettings, ClientTlsMode};
 
     #[test]

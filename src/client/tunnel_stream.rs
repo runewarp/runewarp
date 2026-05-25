@@ -11,7 +11,10 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::client_hello::read_client_hello;
 use crate::runtime_log::{client_route_line, emit_stderr, warning_line};
-use crate::{ClientServiceSettings, ClientTlsMode, proxy::proxy_stream_error_code, proxy::proxy_tcp_over_quic};
+use crate::{
+    ClientServiceSettings, ClientTlsMode, proxy::proxy_stream_error_code,
+    proxy::proxy_tcp_over_quic,
+};
 
 #[derive(Clone)]
 pub(crate) struct TunnelConnectionStreamHandler {
@@ -258,7 +261,9 @@ mod tests {
     use tokio_rustls::{TlsAcceptor, TlsConnector};
 
     use super::TunnelConnectionStreamHandler;
-    use crate::{ClientServiceSettings, ClientTlsMode, make_client_quic_config, make_server_quic_config};
+    use crate::{
+        ClientServiceSettings, ClientTlsMode, make_client_quic_config, make_server_quic_config,
+    };
 
     #[tokio::test]
     async fn forwards_streams_for_exact_match_services() -> io::Result<()> {
@@ -690,10 +695,7 @@ mod tests {
         let tls_config = Arc::new(
             rustls::ServerConfig::builder()
                 .with_no_client_auth()
-                .with_single_cert(
-                    vec![public_cert.clone()],
-                    private_key_from_der(&public_key),
-                )
+                .with_single_cert(vec![public_cert.clone()], private_key_from_der(&public_key))
                 .map_err(io::Error::other)?,
         );
 
@@ -707,16 +709,16 @@ mod tests {
                     .await
                     .map_err(|_| timeout_error("backend should accept a forwarded connection"))??;
             let mut request = [0_u8; 4];
-            timeout(Duration::from_secs(1), backend_stream.read_exact(&mut request))
-                .await
-                .map_err(|_| timeout_error("backend should receive request bytes"))??;
-            assert_eq!(&request, b"ping");
             timeout(
                 Duration::from_secs(1),
-                backend_stream.write_all(b"pong"),
+                backend_stream.read_exact(&mut request),
             )
             .await
-            .map_err(|_| timeout_error("backend should send response bytes"))??;
+            .map_err(|_| timeout_error("backend should receive request bytes"))??;
+            assert_eq!(&request, b"ping");
+            timeout(Duration::from_secs(1), backend_stream.write_all(b"pong"))
+                .await
+                .map_err(|_| timeout_error("backend should send response bytes"))??;
             timeout(Duration::from_secs(1), backend_stream.shutdown())
                 .await
                 .map_err(|_| timeout_error("backend should close cleanly"))??;
@@ -745,9 +747,12 @@ mod tests {
         });
 
         // The tunnel sends a real TLS connection using the public cert as CA
-        let response =
-            request_plaintext_response_over_terminated_tunnel(server_connection, &public_cert, hostname)
-                .await?;
+        let response = request_plaintext_response_over_terminated_tunnel(
+            server_connection,
+            &public_cert,
+            hostname,
+        )
+        .await?;
         assert_eq!(response, *b"pong");
 
         backend_task
@@ -775,8 +780,7 @@ mod tests {
                 .with_root_certificates(root_store_with(public_cert)?)
                 .with_no_client_auth(),
         ));
-        let server_name =
-            ServerName::try_from(hostname.to_owned()).map_err(io::Error::other)?;
+        let server_name = ServerName::try_from(hostname.to_owned()).map_err(io::Error::other)?;
         let mut tls_stream = timeout(
             Duration::from_secs(1),
             connector.connect(server_name, QuicBiStream::new(send, recv)),
@@ -825,10 +829,9 @@ mod tests {
         let term_backend_address = term_backend_listener.local_addr()?.to_string();
         let term_backend_task = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
-            let (mut stream, _) =
-                timeout(Duration::from_secs(1), term_backend_listener.accept())
-                    .await
-                    .map_err(|_| timeout_error("term backend should accept connection"))??;
+            let (mut stream, _) = timeout(Duration::from_secs(1), term_backend_listener.accept())
+                .await
+                .map_err(|_| timeout_error("term backend should accept connection"))??;
             let mut buf = [0_u8; 4];
             timeout(Duration::from_secs(1), stream.read_exact(&mut buf))
                 .await
@@ -845,12 +848,8 @@ mod tests {
 
         // TLS-terminating backend for the passthrough service (receives raw TLS)
         let (pass_cert, pass_key) = make_self_signed_cert(passthrough_hostname)?;
-        let (pass_backend_address, pass_backend_task) = spawn_tls_backend(
-            private_key_from_der(&pass_key),
-            pass_cert.clone(),
-            *b"pong",
-        )
-        .await?;
+        let (pass_backend_address, pass_backend_task) =
+            spawn_tls_backend(private_key_from_der(&pass_key), pass_cert.clone(), *b"pong").await?;
 
         let services = vec![
             ClientServiceSettings {

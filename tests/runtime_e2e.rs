@@ -6,13 +6,13 @@ use std::time::Duration;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
-    ClientPublicCertConfig, ClientRuntimeArgs, ClientServiceSettings, ClientSettings, ClientTlsMode,
-    ClientSettingsResolutionDefaults, GeneratedClientIdentity, PreparedClient, PreparedServer,
-    SelectedClientConfig, Server, ServerConfig, ServerTunnelSettings, generate_client_identity,
-    initialize_manual_server_certificate, load_client_settings, load_server_settings,
-    make_client_quic_config, make_client_quic_config_with_client_auth, make_server_quic_config,
-    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
-    resolve_selected_client_settings,
+    ClientPublicCertConfig, ClientRuntimeArgs, ClientServiceSettings, ClientSettings,
+    ClientSettingsResolutionDefaults, ClientTlsMode, GeneratedClientIdentity, PreparedClient,
+    PreparedServer, SelectedClientConfig, Server, ServerConfig, ServerTunnelSettings,
+    generate_client_identity, initialize_manual_server_certificate, load_client_settings,
+    load_server_settings, make_client_quic_config, make_client_quic_config_with_client_auth,
+    make_server_quic_config, make_server_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth_resolver, resolve_selected_client_settings,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -1137,7 +1137,10 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
 
 #[tokio::test]
 async fn forwards_tls_terminate_end_to_end() {
-    use runewarp::{CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, CLIENT_IDENTITY_FILENAME, initialize_manual_client_public_cert};
+    use runewarp::{
+        CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
+        initialize_manual_client_public_cert,
+    };
     let tempdir = tempdir().unwrap();
 
     initialize_manual_server_certificate(
@@ -1148,17 +1151,26 @@ async fn forwards_tls_terminate_end_to_end() {
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     let client_identity = generate_client_identity().unwrap();
     std::fs::write(
-        tempdir.path().join("client-identity").join(CLIENT_CERT_FILENAME),
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
         &client_identity.certificate_pem,
     )
     .unwrap();
     std::fs::write(
-        tempdir.path().join("client-identity").join(CLIENT_KEY_FILENAME),
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
         &client_identity.private_key_pem,
     )
     .unwrap();
     std::fs::write(
-        tempdir.path().join("client-identity").join(CLIENT_IDENTITY_FILENAME),
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_IDENTITY_FILENAME),
         client_identity.client_identity.to_string(),
     )
     .unwrap();
@@ -1269,12 +1281,18 @@ async fn forwards_mixed_tls_terminate_and_passthrough_end_to_end() {
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     let client_identity = generate_client_identity().unwrap();
     std::fs::write(
-        tempdir.path().join("client-identity").join(CLIENT_CERT_FILENAME),
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
         &client_identity.certificate_pem,
     )
     .unwrap();
     std::fs::write(
-        tempdir.path().join("client-identity").join(CLIENT_KEY_FILENAME),
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
         &client_identity.private_key_pem,
     )
     .unwrap();
@@ -1360,8 +1378,7 @@ tls-mode = "passthrough"
     )
     .unwrap();
 
-    let server_settings =
-        load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -1369,18 +1386,16 @@ tls-mode = "passthrough"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings =
-        load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
     let client_task = tokio::spawn(client.run());
 
     // Visitor 1: terminating service — Client decrypts, backend gets plaintext
-    let term_response =
-        wait_for_tls_response(public_addr, &terminate_ca_cert, "app.example.test")
-            .await
-            .unwrap();
+    let term_response = wait_for_tls_response(public_addr, &terminate_ca_cert, "app.example.test")
+        .await
+        .unwrap();
     assert_eq!(term_response, *b"pong");
     term_backend_task.await.unwrap();
 
@@ -1421,12 +1436,18 @@ async fn server_forwards_acme_tls_alpn_challenges_for_public_hostnames_to_client
     let client_identity = generate_client_identity().unwrap();
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     std::fs::write(
-        tempdir.path().join("client-identity").join(CLIENT_CERT_FILENAME),
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
         &client_identity.certificate_pem,
     )
     .unwrap();
     std::fs::write(
-        tempdir.path().join("client-identity").join(CLIENT_KEY_FILENAME),
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
         &client_identity.private_key_pem,
     )
     .unwrap();
@@ -1519,7 +1540,10 @@ client-identity = "{}"
     // an io::Error; we only assert that the TCP connect succeeds and the connection is
     // attempted, which is already proven by TcpStream::connect succeeding above.
     let handshake_result = connector
-        .connect(ServerName::try_from("app.example.test").unwrap(), tcp_stream)
+        .connect(
+            ServerName::try_from("app.example.test").unwrap(),
+            tcp_stream,
+        )
         .await;
     // Handshake may fail (no ACME cert yet), but must not panic or be a logic error.
     // The connection reached the TLS layer — that is the observable routing proof.
@@ -1550,12 +1574,18 @@ async fn acme_terminating_client_fails_closed_before_cert_is_acquired() {
     let client_identity = generate_client_identity().unwrap();
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     std::fs::write(
-        tempdir.path().join("client-identity").join(CLIENT_CERT_FILENAME),
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
         &client_identity.certificate_pem,
     )
     .unwrap();
     std::fs::write(
-        tempdir.path().join("client-identity").join(CLIENT_KEY_FILENAME),
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
         &client_identity.private_key_pem,
     )
     .unwrap();

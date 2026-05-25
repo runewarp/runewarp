@@ -168,7 +168,10 @@ impl Client {
 
 fn services_and_configs_for_route_mode(
     route_mode: ClientRouteMode,
-) -> (Vec<ClientServiceSettings>, HashMap<String, Arc<rustls::ServerConfig>>) {
+) -> (
+    Vec<ClientServiceSettings>,
+    HashMap<String, Arc<rustls::ServerConfig>>,
+) {
     match route_mode {
         ClientRouteMode::CatchAll { backend_address } => (
             vec![ClientServiceSettings {

@@ -495,10 +495,11 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     // wire up using the server cert directly in a root store.
     // For this test, we just verify startup doesn't fail due to cert material validation.
     // Use the actual server cert as CA.
-    let server_cert_pem = rcgen::generate_simple_self_signed(vec!["tunnel.example.test".to_owned()])
-        .unwrap()
-        .cert
-        .pem();
+    let server_cert_pem =
+        rcgen::generate_simple_self_signed(vec!["tunnel.example.test".to_owned()])
+            .unwrap()
+            .cert
+            .pem();
     let server_ca_path = tempdir.path().join("server-ca.pem");
     fs::write(&server_ca_path, server_cert_pem).unwrap();
 
@@ -542,10 +543,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![ServerTunnelSettings {
-            public_hostnames: vec![
-                "app.example.test".to_owned(),
-                "api.example.test".to_owned(),
-            ],
+            public_hostnames: vec!["app.example.test".to_owned(), "api.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
         logs: false,
@@ -734,10 +732,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
         configured_tunnels: vec![ServerTunnelSettings {
-            public_hostnames: vec![
-                "app.example.test".to_owned(),
-                "api.example.test".to_owned(),
-            ],
+            public_hostnames: vec!["app.example.test".to_owned(), "api.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
         logs: false,
@@ -810,7 +805,9 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
     let result = PreparedClient::connect_to(&settings, localhost(0), tunnel_addr).await;
     match result {
         Err(runewarp::ClientStartupError::InvalidSettings(msg)) => {
-            panic!("ACME client startup must not fail with InvalidSettings for mixed services: {msg}")
+            panic!(
+                "ACME client startup must not fail with InvalidSettings for mixed services: {msg}"
+            )
         }
         Err(runewarp::ClientStartupError::TlsMaterial(e)) => {
             panic!("ACME client startup must not fail with TlsMaterial for mixed services: {e}")

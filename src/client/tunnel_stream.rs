@@ -246,6 +246,7 @@ mod tests {
     use rustls::{ClientConnection, RootCertStore};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
     use tokio::net::TcpListener;
+    use tokio::sync::Mutex as AsyncMutex;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
     use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -258,6 +259,8 @@ mod tests {
         ClientServiceSettings, ClientTlsMode, LogLevel, make_client_quic_config,
         make_server_quic_config,
     };
+
+    static LOG_CAPTURE_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 
     #[tokio::test]
     async fn forwards_streams_for_exact_match_services() -> io::Result<()> {
@@ -355,17 +358,21 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn routing_logs_include_backend_selection_at_debug_and_warn_failures() -> io::Result<()> {
-        let debug_output = capture_logs(LogLevel::Debug, async {
-            assert_forwarded_stream_without_spawning_handler(
-                vec![ClientServiceSettings {
-                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
-                    backend_address: backend_placeholder(),
-                    tls_mode: ClientTlsMode::Passthrough,
-                }],
-                "app.example.test",
-            )
-            .await
-        })
+        let debug_output = capture_logs_with_wait(
+            LogLevel::Debug,
+            "DEBUG client route app.example.test -> passthrough to ",
+            async {
+                assert_forwarded_stream_without_spawning_handler(
+                    vec![ClientServiceSettings {
+                        public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                        backend_address: backend_placeholder(),
+                        tls_mode: ClientTlsMode::Passthrough,
+                    }],
+                    "app.example.test",
+                )
+                .await
+            },
+        )
         .await?;
 
         assert!(!debug_output.contains("ping"));
@@ -373,53 +380,57 @@ mod tests {
         assert!(debug_output.contains("DEBUG client route app.example.test -> passthrough to "));
         assert!(!debug_output.contains(backend_placeholder().as_str()));
 
-        let info_output = capture_logs(LogLevel::Info, async {
-            assert_forwarded_stream_without_spawning_handler(
-                vec![ClientServiceSettings {
-                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
-                    backend_address: backend_placeholder(),
-                    tls_mode: ClientTlsMode::Passthrough,
-                }],
-                "app.example.test",
-            )
-            .await?;
+        let info_output = capture_logs_with_wait(
+            LogLevel::Info,
+            "WARN client route app.example.test -> terminate mode unavailable (TLS config missing)",
+            async {
+                assert_forwarded_stream_without_spawning_handler(
+                    vec![ClientServiceSettings {
+                        public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                        backend_address: backend_placeholder(),
+                        tls_mode: ClientTlsMode::Passthrough,
+                    }],
+                    "app.example.test",
+                )
+                .await?;
 
-            assert_rejected_stream_without_spawning_handler(
-                vec![ClientServiceSettings {
-                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
-                    backend_address: "127.0.0.1:443".to_owned(),
-                    tls_mode: ClientTlsMode::Passthrough,
-                }],
-                "api.example.test",
-                |result: io::Result<()>| assert!(result.is_ok()),
-            )
-            .await?;
+                assert_rejected_stream_without_spawning_handler(
+                    vec![ClientServiceSettings {
+                        public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                        backend_address: "127.0.0.1:443".to_owned(),
+                        tls_mode: ClientTlsMode::Passthrough,
+                    }],
+                    "api.example.test",
+                    |result: io::Result<()>| assert!(result.is_ok()),
+                )
+                .await?;
 
-            let backend_address = unused_localhost_address().await?.to_string();
-            assert_rejected_stream_without_spawning_handler(
-                vec![ClientServiceSettings {
-                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
-                    backend_address,
-                    tls_mode: ClientTlsMode::Passthrough,
-                }],
-                "app.example.test",
-                |result: io::Result<()>| assert!(result.is_err()),
-            )
-            .await?;
+                let backend_address = unused_localhost_address().await?.to_string();
+                assert_rejected_stream_without_spawning_handler(
+                    vec![ClientServiceSettings {
+                        public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                        backend_address,
+                        tls_mode: ClientTlsMode::Passthrough,
+                    }],
+                    "app.example.test",
+                    |result: io::Result<()>| assert!(result.is_err()),
+                )
+                .await?;
 
-            assert_rejected_stream_without_spawning_handler(
-                vec![ClientServiceSettings {
-                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
-                    backend_address: "127.0.0.1:8080".to_owned(),
-                    tls_mode: ClientTlsMode::Terminate,
-                }],
-                "app.example.test",
-                |result: io::Result<()>| assert!(result.is_err()),
-            )
-            .await?;
+                assert_rejected_stream_without_spawning_handler(
+                    vec![ClientServiceSettings {
+                        public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                        backend_address: "127.0.0.1:8080".to_owned(),
+                        tls_mode: ClientTlsMode::Terminate,
+                    }],
+                    "app.example.test",
+                    |result: io::Result<()>| assert!(result.is_err()),
+                )
+                .await?;
 
-            Ok(())
-        })
+                Ok(())
+            },
+        )
         .await?;
 
         assert!(!info_output.contains("passthrough to 127.0.0.1:"));
@@ -827,10 +838,15 @@ mod tests {
         }
     }
 
-    async fn capture_logs<Fut>(level: LogLevel, action: Fut) -> io::Result<String>
+    async fn capture_logs_with_wait<Fut>(
+        level: LogLevel,
+        needle: &str,
+        action: Fut,
+    ) -> io::Result<String>
     where
         Fut: std::future::Future<Output = io::Result<()>>,
     {
+        let _lock = LOG_CAPTURE_LOCK.lock().await;
         let buffer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry()
             .with(level_filter(level))
@@ -843,9 +859,16 @@ mod tests {
             );
         let _guard = tracing::subscriber::set_default(subscriber);
         action.await?;
-        for _ in 0..5 {
-            tokio::task::yield_now().await;
-        }
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if buffer.read().contains(needle) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| timeout_error("expected log line to be emitted within timeout"))?;
         Ok(buffer.read())
     }
 

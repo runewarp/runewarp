@@ -42,6 +42,13 @@ enum RetryAttemptKind {
     IntervalRetry,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetryDisposition {
+    Immediate,
+    Interval,
+    Stop,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ClientTunnelDialTarget {
     configured_server_addr: String,
@@ -95,7 +102,7 @@ async fn run_client_command(
         let phase = client_tunnel_phase(connected_once);
         let (client, connected_dial_target) = retry_with_immediate_retry(
             settings.reconnect_interval,
-            should_retry_client_connect_error,
+            retry_disposition_for_client_connect_error,
             |attempt_kind| async move {
                 let log_attempt_kind = client_tunnel_attempt_kind(attempt_kind);
                 let dial_target = match resolve_client_tunnel_dial_target(settings).await {
@@ -137,14 +144,26 @@ async fn run_client_command(
                         Ok((client, dial_target))
                     }
                     Err(error) => {
-                        runewarp::runtime_log::client_tunnel_connect_failed(
-                            phase,
-                            log_attempt_kind,
-                            &dial_target.configured_server_addr,
-                            dial_target.resolved_server_addr,
-                            settings.reconnect_interval,
-                            &error.to_string(),
-                        );
+                        if error
+                            .source()
+                            .and_then(|source| source.downcast_ref::<runewarp::ClientConnectError>())
+                            .is_some_and(runewarp::ClientConnectError::is_unauthorized_client_identity)
+                        {
+                            runewarp::runtime_log::client_tunnel_unauthorized(
+                                log_attempt_kind,
+                                &dial_target.configured_server_addr,
+                                &error.to_string(),
+                            );
+                        } else {
+                            runewarp::runtime_log::client_tunnel_connect_failed(
+                                phase,
+                                log_attempt_kind,
+                                &dial_target.configured_server_addr,
+                                dial_target.resolved_server_addr,
+                                settings.reconnect_interval,
+                                &error.to_string(),
+                            );
+                        }
                         Err(error)
                     }
                 }
@@ -156,11 +175,20 @@ async fn run_client_command(
         connected_once = true;
 
         if let Err(error) = client.run().await {
-            runewarp::runtime_log::client_tunnel_disconnected(
-                &connected_dial_target.configured_server_addr,
-                connected_dial_target.resolved_server_addr,
-                &error.to_string(),
-            );
+            if is_unauthorized_client_connection_error(&error) {
+                runewarp::runtime_log::client_tunnel_unauthorized(
+                    runewarp::runtime_log::ClientTunnelAttemptKind::Initial,
+                    &connected_dial_target.configured_server_addr,
+                    &error.to_string(),
+                );
+                tokio::time::sleep(settings.reconnect_interval).await;
+            } else {
+                runewarp::runtime_log::client_tunnel_disconnected(
+                    &connected_dial_target.configured_server_addr,
+                    connected_dial_target.resolved_server_addr,
+                    &error.to_string(),
+                );
+            }
             continue;
         }
 
@@ -448,13 +476,20 @@ fn resolve_client_public_cert_dir(
     )
 }
 
-fn should_retry_client_connect_error(error: &runewarp::ClientStartupError) -> bool {
-    matches!(
-        error,
+fn retry_disposition_for_client_connect_error(
+    error: &runewarp::ClientStartupError,
+) -> RetryDisposition {
+    match error {
         runewarp::ClientStartupError::Resolve(_)
-            | runewarp::ClientStartupError::MissingServerAddress { .. }
-            | runewarp::ClientStartupError::Connect(_)
-    )
+        | runewarp::ClientStartupError::MissingServerAddress { .. } => RetryDisposition::Immediate,
+        runewarp::ClientStartupError::Connect(source)
+            if source.is_unauthorized_client_identity() =>
+        {
+            RetryDisposition::Interval
+        }
+        runewarp::ClientStartupError::Connect(_) => RetryDisposition::Immediate,
+        _ => RetryDisposition::Stop,
+    }
 }
 
 fn client_tunnel_phase(connected_once: bool) -> runewarp::runtime_log::ClientTunnelPhase {
@@ -507,9 +542,15 @@ fn configured_server_addr(server_hostname: &str, server_port: u16) -> String {
     }
 }
 
+fn is_unauthorized_client_connection_error(error: &quinn::ConnectionError) -> bool {
+    error
+        .to_string()
+        .contains("ApplicationVerificationFailure")
+}
+
 async fn retry_with_immediate_retry<T, E, Attempt, AttemptFuture, Sleep, SleepFuture>(
     retry_interval: Duration,
-    should_retry: impl Fn(&E) -> bool,
+    retry_disposition: impl Fn(&E) -> RetryDisposition,
     mut attempt: Attempt,
     mut sleep: Sleep,
 ) -> Result<T, E>
@@ -524,16 +565,22 @@ where
     loop {
         match attempt(attempt_kind).await {
             Ok(result) => return Ok(result),
-            Err(error) if should_retry(&error) => {
-                if used_immediate_retry {
+            Err(error) => match retry_disposition(&error) {
+                RetryDisposition::Immediate if used_immediate_retry => {
                     sleep(retry_interval).await;
                     attempt_kind = RetryAttemptKind::IntervalRetry;
-                } else {
+                }
+                RetryDisposition::Immediate => {
                     used_immediate_retry = true;
                     attempt_kind = RetryAttemptKind::ImmediateRetry;
                 }
-            }
-            Err(error) => return Err(error),
+                RetryDisposition::Interval => {
+                    used_immediate_retry = true;
+                    sleep(retry_interval).await;
+                    attempt_kind = RetryAttemptKind::IntervalRetry;
+                }
+                RetryDisposition::Stop => return Err(error),
+            },
         }
     }
 }
@@ -752,11 +799,14 @@ mod tests {
         CLIENT_KEY_FILENAME, ClientIdentity,
     };
 
-    use super::{RetryAttemptKind, ensure_client_identity_fresh, retry_with_immediate_retry};
+    use super::{
+        RetryAttemptKind, RetryDisposition, ensure_client_identity_fresh, retry_with_immediate_retry,
+    };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum TestError {
-        Retryable,
+        ImmediateRetry,
+        IntervalRetry,
         Permanent,
     }
 
@@ -769,7 +819,11 @@ mod tests {
 
         let result = retry_with_immediate_retry(
             retry_interval,
-            |error: &TestError| matches!(error, TestError::Retryable),
+            |error: &TestError| match error {
+                TestError::ImmediateRetry => RetryDisposition::Immediate,
+                TestError::IntervalRetry => RetryDisposition::Interval,
+                TestError::Permanent => RetryDisposition::Stop,
+            },
             {
                 let attempts = attempts.clone();
                 let retry_attempts = retry_attempts.clone();
@@ -781,7 +835,7 @@ mod tests {
                         let mut attempts = attempts.lock().unwrap();
                         *attempts += 1;
                         match *attempts {
-                            1 | 2 => Err(TestError::Retryable),
+                            1 | 2 => Err(TestError::ImmediateRetry),
                             3 => Ok(()),
                             _ => unreachable!(),
                         }
@@ -818,7 +872,11 @@ mod tests {
 
         let result = retry_with_immediate_retry(
             Duration::from_secs(5),
-            |error: &TestError| matches!(error, TestError::Retryable),
+            |error: &TestError| match error {
+                TestError::ImmediateRetry => RetryDisposition::Immediate,
+                TestError::IntervalRetry => RetryDisposition::Interval,
+                TestError::Permanent => RetryDisposition::Stop,
+            },
             |_attempt_kind| async { Result::<(), TestError>::Err(TestError::Permanent) },
             {
                 let sleeps = sleeps.clone();
@@ -834,6 +892,53 @@ mod tests {
 
         assert_eq!(result, Err(TestError::Permanent));
         assert!(sleeps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn interval_retry_errors_skip_the_immediate_retry_attempt() {
+        let retry_attempts = Arc::new(Mutex::new(Vec::new()));
+        let sleeps = Arc::new(Mutex::new(Vec::new()));
+        let retry_interval = Duration::from_secs(5);
+
+        let result = retry_with_immediate_retry(
+            retry_interval,
+            |error: &TestError| match error {
+                TestError::ImmediateRetry => RetryDisposition::Immediate,
+                TestError::IntervalRetry => RetryDisposition::Interval,
+                TestError::Permanent => RetryDisposition::Stop,
+            },
+            {
+                let retry_attempts = retry_attempts.clone();
+                move |attempt_kind| {
+                    let retry_attempts = retry_attempts.clone();
+                    async move {
+                        retry_attempts.lock().unwrap().push(attempt_kind);
+                        if retry_attempts.lock().unwrap().len() == 1 {
+                            Err(TestError::IntervalRetry)
+                        } else {
+                            Ok(())
+                        }
+                    }
+                }
+            },
+            {
+                let sleeps = sleeps.clone();
+                move |delay| {
+                    let sleeps = sleeps.clone();
+                    async move {
+                        sleeps.lock().unwrap().push(delay);
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *retry_attempts.lock().unwrap(),
+            vec![RetryAttemptKind::Initial, RetryAttemptKind::IntervalRetry]
+        );
+        assert_eq!(*sleeps.lock().unwrap(), vec![retry_interval]);
     }
 
     #[test]

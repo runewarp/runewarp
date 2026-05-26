@@ -82,6 +82,12 @@ impl std::error::Error for ClientConnectError {
     }
 }
 
+impl ClientConnectError {
+    pub fn is_unauthorized_client_identity(&self) -> bool {
+        matches!(self, Self::Handshake(error) if error.to_string().contains("ApplicationVerificationFailure"))
+    }
+}
+
 impl Client {
     pub async fn connect(config: ClientConfig) -> Result<Self, ClientConnectError> {
         Self::connect_internal(
@@ -184,8 +190,21 @@ fn services_and_configs_for_route_mode(
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::io::Cursor;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::time::Duration;
 
-    use super::ClientConnectError;
+    use quinn::Endpoint;
+    use rcgen::generate_simple_self_signed;
+    use rustls::RootCertStore;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio::time::timeout;
+
+    use super::{Client, ClientConfig, ClientConnectError};
+    use crate::{
+        GeneratedClientIdentity, generate_client_identity, make_client_quic_config_with_client_auth,
+        make_server_quic_config_with_client_auth,
+    };
 
     #[test]
     fn client_connect_error_display_omits_nested_transport_detail() {
@@ -197,5 +216,113 @@ mod tests {
             ClientConnectError::Handshake(quinn::ConnectionError::TimedOut).to_string(),
             "client QUIC handshake failed"
         );
+    }
+
+    #[tokio::test]
+    async fn handshake_errors_detect_unauthorized_client_identity() -> io::Result<()> {
+        let authorized_client_identity = generate_test_client_identity()?;
+        let unauthorized_client_identity = generate_test_client_identity()?;
+        let (certificate, private_key) = make_self_signed_cert("tunnel.example.test")?;
+        let server_endpoint = Endpoint::server(
+            make_server_quic_config_with_client_auth(
+                vec![certificate.clone()],
+                private_key_from_der(&private_key),
+                std::slice::from_ref(&authorized_client_identity.client_identity),
+            )
+            .map_err(io::Error::other)?,
+            localhost(0),
+        )
+        .map_err(io::Error::other)?;
+
+        let client_config = ClientConfig {
+            local_bind_addr: localhost(0),
+            server_addr: server_endpoint.local_addr()?,
+            server_name: "tunnel.example.test".to_owned(),
+            backend_address: "127.0.0.1:443".to_owned(),
+            quic_client_config: make_client_quic_config_with_client_auth(
+                root_store_with(&certificate)?,
+                client_certificate_chain(&unauthorized_client_identity)?,
+                client_private_key(&unauthorized_client_identity)?,
+            )
+            .map_err(io::Error::other)?,
+        };
+
+        let accept_task = tokio::spawn(async move {
+            let incoming = timeout(Duration::from_secs(1), server_endpoint.accept())
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "accept timed out"))?
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "server endpoint closed"))?;
+            let _ = timeout(Duration::from_secs(1), incoming)
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?;
+            Ok::<(), io::Error>(())
+        });
+
+        match Client::connect(client_config).await {
+            Err(error) => {
+                assert!(error.is_unauthorized_client_identity());
+            }
+            Ok(client) => {
+                let run_error = timeout(Duration::from_secs(1), client.run())
+                    .await
+                    .map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "unauthorized connection should close quickly",
+                        )
+                    })?
+                    .expect_err("unauthorized connection should not stay open");
+                assert!(run_error
+                    .to_string()
+                    .contains("ApplicationVerificationFailure"));
+            }
+        }
+        accept_task
+            .await
+            .map_err(|join_error| io::Error::other(format!("accept task failed: {join_error}")))??;
+        Ok(())
+    }
+
+    fn generate_test_client_identity() -> io::Result<GeneratedClientIdentity> {
+        generate_client_identity().map_err(io::Error::other)
+    }
+
+    fn localhost(port: u16) -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+    }
+
+    fn make_self_signed_cert(server_name: &str) -> io::Result<(CertificateDer<'static>, Vec<u8>)> {
+        let certified_key =
+            generate_simple_self_signed(vec![server_name.to_owned()]).map_err(io::Error::other)?;
+        Ok((
+            CertificateDer::from(certified_key.cert),
+            certified_key.signing_key.serialize_der(),
+        ))
+    }
+
+    fn private_key_from_der(der: &[u8]) -> PrivateKeyDer<'static> {
+        PrivatePkcs8KeyDer::from(der.to_vec()).into()
+    }
+
+    fn client_certificate_chain(
+        client_identity: &GeneratedClientIdentity,
+    ) -> io::Result<Vec<CertificateDer<'static>>> {
+        rustls_pemfile::certs(&mut Cursor::new(client_identity.certificate_pem.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io::Error::other)
+    }
+
+    fn client_private_key(
+        client_identity: &GeneratedClientIdentity,
+    ) -> io::Result<PrivateKeyDer<'static>> {
+        rustls_pemfile::private_key(&mut Cursor::new(client_identity.private_key_pem.as_bytes()))
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing client private key"))
+    }
+
+    fn root_store_with(certificate: &CertificateDer<'static>) -> io::Result<RootCertStore> {
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate.clone()).map_err(io::Error::other)?;
+        Ok(roots)
     }
 }

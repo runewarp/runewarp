@@ -303,12 +303,32 @@ pub fn client_tunnel_disconnected(
     );
 }
 
+pub fn client_tunnel_unauthorized(
+    attempt_kind: ClientTunnelAttemptKind,
+    configured_server_addr: &str,
+    error: &str,
+) {
+    emit_runtime_failure_with_debug_detail(
+        EventLevel::Warn,
+        &client_tunnel_unauthorized_line(attempt_kind, configured_server_addr),
+        client_tunnel_unauthorized_detail_line(attempt_kind, configured_server_addr, error),
+        error,
+    );
+}
+
 pub fn client_trust_store_warning(errors: usize) {
     emit(
         EventLevel::Warn,
         &format!(
             "{errors} system trust-store certificate(s) could not be loaded; continuing with the successfully loaded trust anchors"
         ),
+    );
+}
+
+pub fn server_tunnel_connection_unauthorized(client_identity: &ClientIdentity) {
+    emit(
+        EventLevel::Warn,
+        &server_tunnel_connection_unauthorized_line(client_identity),
     );
 }
 
@@ -515,6 +535,13 @@ fn server_tunnel_connection_closed_line(
     )
 }
 
+fn server_tunnel_connection_unauthorized_line(client_identity: &ClientIdentity) -> String {
+    event_line(
+        "server tunnel connection unauthorized",
+        [("client-identity", Cow::Owned(client_identity.to_string()))],
+    )
+}
+
 fn emit_server_tunnel_connection_dropped(
     client_identity: &ClientIdentity,
     remote_addr: SocketAddr,
@@ -656,6 +683,32 @@ fn client_tunnel_disconnected_detail_line(
     )
 }
 
+fn client_tunnel_unauthorized_line(
+    attempt_kind: ClientTunnelAttemptKind,
+    configured_server_addr: &str,
+) -> String {
+    event_line(
+        "client tunnel connection unauthorized",
+        [("server-address", Cow::Borrowed(configured_server_addr))]
+            .into_iter()
+            .chain(client_tunnel_attempt_field(attempt_kind)),
+    )
+}
+
+fn client_tunnel_unauthorized_detail_line(
+    attempt_kind: ClientTunnelAttemptKind,
+    configured_server_addr: &str,
+    error: &str,
+) -> String {
+    event_line_with_summary(
+        "client tunnel connection unauthorized detail",
+        [("server-address", Cow::Borrowed(configured_server_addr))]
+            .into_iter()
+            .chain(client_tunnel_attempt_field(attempt_kind)),
+        error,
+    )
+}
+
 fn emit_runtime_failure_with_debug_detail(
     level: EventLevel,
     summary_line: &str,
@@ -757,10 +810,11 @@ mod tests {
         ClientRouteOutcome, ClientTunnelAttemptKind, ClientTunnelPhase, EventLevel, InstallOutcome,
         ServerRouteOutcome, build_subscriber, client_route, client_trust_store_warning,
         client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
-        client_tunnel_disconnected, client_tunnel_resolution_failed, emit,
-        emit_server_tunnel_connection_dropped, install, installed_level, server_route,
+        client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_unauthorized,
+        emit, emit_server_tunnel_connection_dropped, install, installed_level, server_route,
         server_route_rejected_client_hello, server_tunnel_connection_accepted,
-        server_tunnel_connection_replaced, server_tunnel_connection_terminated, warning,
+        server_tunnel_connection_replaced, server_tunnel_connection_terminated,
+        server_tunnel_connection_unauthorized, warning,
     };
     use crate::{ClientHelloError, ClientIdentity, LogLevel};
 
@@ -1204,5 +1258,43 @@ mod tests {
         assert!(output.contains(format!(
             "WARN server tunnel connection dropped: client-identity={client_identity} remote-address={second_remote_addr}: timed out"
         ).as_str()));
+    }
+
+    #[test]
+    fn unauthorized_tunnel_diagnostics_stay_concise_at_warn_and_keep_debug_detail() {
+        let configured_server_addr = "tunnel.example.test:443";
+        let client_identity = ClientIdentity::from_str(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+
+        let info_output = capture(LogLevel::Info, || {
+            client_tunnel_unauthorized(
+                ClientTunnelAttemptKind::Initial,
+                configured_server_addr,
+                "client QUIC handshake failed: peer doesn't support any known protocol",
+            );
+            server_tunnel_connection_unauthorized(&client_identity);
+        });
+
+        assert!(info_output.contains(
+            "WARN client tunnel connection unauthorized: server-address=tunnel.example.test:443 retry=initial"
+        ));
+        assert!(info_output.contains(format!(
+            "WARN server tunnel connection unauthorized: client-identity={client_identity}"
+        ).as_str()));
+        assert!(!info_output.contains("peer doesn't support any known protocol"));
+
+        let debug_output = capture(LogLevel::Debug, || {
+            client_tunnel_unauthorized(
+                ClientTunnelAttemptKind::Initial,
+                configured_server_addr,
+                "client QUIC handshake failed: invalid peer certificate: ApplicationVerificationFailure",
+            );
+        });
+
+        assert!(debug_output.contains(
+            "DEBUG client tunnel connection unauthorized detail: server-address=tunnel.example.test:443 retry=initial: client QUIC handshake failed: invalid peer certificate: ApplicationVerificationFailure"
+        ));
     }
 }

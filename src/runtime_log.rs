@@ -297,6 +297,10 @@ pub fn client_tunnel_connected(
     );
 }
 
+pub fn client_ready(configured_server_addr: &str) {
+    emit(EventLevel::Info, &client_ready_line(configured_server_addr));
+}
+
 pub fn client_tunnel_disconnected(
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
@@ -328,6 +332,26 @@ pub fn client_trust_store_warning(errors: usize) {
         EventLevel::Warn,
         &format!(
             "{errors} system trust-store certificate(s) could not be loaded; continuing with the successfully loaded trust anchors"
+        ),
+    );
+}
+
+pub fn server_public_listener_ready(bind_address: SocketAddr) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "server public listener ready",
+            [("bind-address", Cow::Owned(bind_address.to_string()))],
+        ),
+    );
+}
+
+pub fn server_tunnel_listener_ready(bind_address: SocketAddr) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "server tunnel listener ready",
+            [("bind-address", Cow::Owned(bind_address.to_string()))],
         ),
     );
 }
@@ -748,6 +772,13 @@ fn client_tunnel_disconnected_line(
     )
 }
 
+fn client_ready_line(configured_server_addr: &str) -> String {
+    event_line(
+        "client ready",
+        [("server-address", Cow::Borrowed(configured_server_addr))],
+    )
+}
+
 fn client_tunnel_disconnected_detail_line(
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
@@ -889,13 +920,15 @@ mod tests {
 
     use super::{
         ClientRouteOutcome, ClientTunnelAttemptKind, ClientTunnelPhase, EventLevel, InstallOutcome,
-        ServerRouteOutcome, build_subscriber, client_route, client_trust_store_warning,
-        client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
-        client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_unauthorized,
-        emit, emit_server_tunnel_connection_dropped, install, installed_level, server_route,
+        ServerRouteOutcome, build_subscriber, client_ready, client_route,
+        client_trust_store_warning, client_tunnel_connect_failed, client_tunnel_connected,
+        client_tunnel_connecting, client_tunnel_disconnected, client_tunnel_resolution_failed,
+        client_tunnel_unauthorized, emit, emit_server_tunnel_connection_dropped, install,
+        installed_level, server_public_listener_ready, server_route,
         server_route_rejected_client_hello, server_tunnel_connection_accepted,
         server_tunnel_connection_failed, server_tunnel_connection_replaced,
-        server_tunnel_connection_terminated, server_tunnel_connection_unauthorized, warning,
+        server_tunnel_connection_terminated, server_tunnel_connection_unauthorized,
+        server_tunnel_listener_ready, warning,
     };
     use crate::{ClientHelloError, ClientIdentity, LogLevel};
 
@@ -1143,6 +1176,7 @@ mod tests {
                 configured_server_addr,
                 resolved_server_addr,
             );
+            client_ready(configured_server_addr);
             client_tunnel_disconnected(
                 configured_server_addr,
                 resolved_server_addr,
@@ -1163,6 +1197,7 @@ mod tests {
         assert!(output.contains(
             "INFO client tunnel connection connected: server-address=tunnel.example.test:443"
         ));
+        assert!(output.contains("INFO client ready: server-address=tunnel.example.test:443"));
         assert!(output.contains(
             "WARN client tunnel connection dropped: server-address=tunnel.example.test:443: connection reset by peer"
         ));
@@ -1175,6 +1210,17 @@ mod tests {
         assert!(output.contains(
             "WARN 2 system trust-store certificate(s) could not be loaded; continuing with the successfully loaded trust anchors"
         ));
+    }
+
+    #[test]
+    fn server_listener_ready_logs_render_distinct_lines() {
+        let output = capture(LogLevel::Info, || {
+            server_public_listener_ready("127.0.0.1:443".parse().unwrap());
+            server_tunnel_listener_ready("127.0.0.1:443".parse().unwrap());
+        });
+
+        assert!(output.contains("INFO server public listener ready: bind-address=127.0.0.1:443"));
+        assert!(output.contains("INFO server tunnel listener ready: bind-address=127.0.0.1:443"));
     }
 
     #[test]

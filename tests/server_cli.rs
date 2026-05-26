@@ -270,3 +270,54 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert!(stderr.contains("[server.acme] and server.cert-dir are mutually exclusive"));
     assert!(!default_state_dir.exists());
 }
+
+#[test]
+fn server_runtime_bind_failures_are_logged_as_runtime_errors()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+    let occupied_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let public_bind_address = occupied_listener.local_addr()?;
+
+    Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+public-bind-address = "{public_bind_address}"
+tunnel-bind-address = "127.0.0.1:0"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#
+        ),
+    )?;
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args(["server", "--config", "server.toml"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
+
+    assert!(stderr.contains("ERROR"));
+    assert!(stderr.contains("failed to bind server.public-bind-address"));
+    Ok(())
+}

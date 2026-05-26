@@ -177,7 +177,7 @@ async fn run_client_command(
         if let Err(error) = client.run().await {
             if is_unauthorized_client_connection_error(&error) {
                 runewarp::runtime_log::client_tunnel_unauthorized(
-                    runewarp::runtime_log::ClientTunnelAttemptKind::Initial,
+                    client_tunnel_unauthorized_attempt_kind(connected_once),
                     &connected_dial_target.configured_server_addr,
                     &error.to_string(),
                 );
@@ -514,6 +514,16 @@ fn client_tunnel_attempt_kind(
     }
 }
 
+fn client_tunnel_unauthorized_attempt_kind(
+    connected_once: bool,
+) -> runewarp::runtime_log::ClientTunnelAttemptKind {
+    if connected_once {
+        runewarp::runtime_log::ClientTunnelAttemptKind::IntervalRetry
+    } else {
+        runewarp::runtime_log::ClientTunnelAttemptKind::Initial
+    }
+}
+
 async fn resolve_client_tunnel_dial_target(
     settings: &runewarp::ClientSettings,
 ) -> Result<ClientTunnelDialTarget, runewarp::ClientStartupError> {
@@ -800,7 +810,8 @@ mod tests {
     };
 
     use super::{
-        RetryAttemptKind, RetryDisposition, ensure_client_identity_fresh, retry_with_immediate_retry,
+        RetryAttemptKind, RetryDisposition, client_tunnel_unauthorized_attempt_kind,
+        ensure_client_identity_fresh, retry_with_immediate_retry,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -939,6 +950,18 @@ mod tests {
             vec![RetryAttemptKind::Initial, RetryAttemptKind::IntervalRetry]
         );
         assert_eq!(*sleeps.lock().unwrap(), vec![retry_interval]);
+    }
+
+    #[test]
+    fn unauthorized_tunnel_failures_log_the_next_retry_shape() {
+        assert_eq!(
+            client_tunnel_unauthorized_attempt_kind(false),
+            runewarp::runtime_log::ClientTunnelAttemptKind::Initial
+        );
+        assert_eq!(
+            client_tunnel_unauthorized_attempt_kind(true),
+            runewarp::runtime_log::ClientTunnelAttemptKind::IntervalRetry
+        );
     }
 
     #[test]

@@ -34,21 +34,22 @@ Server Catch-all is intentionally not supported. Catch-all Services must use `tl
 ## CLI entry points
 
 ```text
-runewarp server --config config.toml
+runewarp server -c config.toml
 runewarp server cert init --dir ./server-cert --hostname tunnel.example.com
 runewarp server cert renew --dir ./server-cert
 runewarp server cert rotate-ca --dir ./server-cert --hostname tunnel.example.com
 
-runewarp client --config config.toml
+runewarp client -c config.toml
 runewarp client --server-address tunnel.example.com --backend-address 127.0.0.1:443
 runewarp client identity init --dir ./client-identity
 runewarp client identity renew --dir ./client-identity
 runewarp client identity rotate --dir ./client-identity
+runewarp client identity show --dir ./client-identity
 runewarp client public-cert init --dir ./public-cert --hostname app.example.com
-runewarp client --config config.toml public-cert init
+runewarp client -c config.toml public-cert init
 runewarp client public-cert renew --dir ./public-cert --hostname app.example.com
-runewarp client --config config.toml public-cert renew
-runewarp client --config config.toml public-cert rotate-ca
+runewarp client -c config.toml public-cert renew
+runewarp client public-cert rotate-ca
 ```
 
 `--server-address` and `--backend-address` are runtime-only flags on `runewarp client`. They are not accepted by `runewarp client identity ...`.
@@ -94,7 +95,7 @@ log-level = "debug"
 - output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message
 - omitted `log-level` defaults to `info`
 
-At `info` (default), Runewarp emits tunnel connection lifecycle events plus warnings and errors. Client tunnel connection attempt lines include the configured **Server address** and the resolved socket address for that dial attempt; connected and dropped lifecycle lines keep only the configured **Server address**. `debug` adds per-connection routing diagnostics such as Server routing outcomes, Client passthrough vs terminate decisions, selected Client `backend-address` values, rejected ClientHello reasons, and separate detail lines for runtime tunnel failure causes that are shortened at `info`. `trace` is also accepted, but Runewarp does not currently emit any trace-only runtime events, so today it produces the same runtime output as `debug`.
+At `info` (default), Runewarp emits runtime readiness, tunnel connection lifecycle events, warnings, and errors. `runewarp server` logs separate readiness lines for the public listener and the tunnel listener. `runewarp client` logs tunnel connection attempts, then a connected line followed by a ready line after the first successful **Tunnel connection**. Initial startup failures such as bind, resolution, and connect failures are emitted as runtime `ERROR` lines; retry-path failures stay at `WARN`. `debug` adds per-connection routing diagnostics such as Server routing outcomes, Client passthrough vs terminate decisions, selected Client `backend-address` values, rejected ClientHello reasons, and separate detail lines for runtime tunnel failure causes that are shortened at `info`. `trace` is also accepted, but Runewarp does not currently emit any trace-only runtime events, so today it produces the same runtime output as `debug`.
 
 | Key | Required | Notes |
 | --- | --- | --- |
@@ -356,7 +357,7 @@ To add a certificate for another hostname in the same directory:
 runewarp client public-cert init --dir ./public-cert --hostname api.example.com
 ```
 
-`runewarp client public-cert init` refuses to overwrite an existing CA, so running it a second time with a new hostname reuses the original **Public hostname CA** and only writes new certificate material. The shared `public-ca.crt` therefore stays stable across additions and leaf renewals; only `rotate-ca` changes that trust anchor.
+`runewarp client public-cert init` keeps the shared **Public hostname CA** stable. Running it again with a new hostname reuses the existing CA and only writes new leaf material; rerunning it for a hostname whose complete material already exists succeeds idempotently and reports that state on stdout. The shared `public-ca.crt` therefore stays stable across additions and leaf renewals; only `rotate-ca` changes that trust anchor.
 
 **Renewing a Public hostname certificate:**
 
@@ -373,10 +374,13 @@ When `--hostname` is omitted the target set is derived from `public-hostnames` o
 **Rotating the Public hostname CA:**
 
 ```bash
-runewarp client --config client.toml public-cert rotate-ca
+runewarp client public-cert rotate-ca
+
+# or select a specific config file explicitly:
+runewarp client -c client.toml public-cert rotate-ca
 ```
 
-`rotate-ca` replaces the shared CA and reissues every managed leaf certificate. `--config` is required. After rotation, distribute the new `public-ca.crt` to Visitors so they trust the new trust anchor.
+`rotate-ca` replaces the shared CA and reissues every managed leaf certificate. It derives the managed hostname set from the selected config file: an explicit `-c`, `--config` path wins, otherwise Runewarp uses the discovered default config when it exists. After rotation, distribute the new `public-ca.crt` to Visitors so they trust the new trust anchor.
 
 The `client public-cert` commands resolve their working directory from `--dir`, then `client.public-cert-dir`, then the XDG default data location when neither is set. Runtime validation is stricter: manual TLS termination is enabled only when `client.public-cert-dir` is set explicitly in config; Runewarp does not infer manual mode from the XDG default path.
 

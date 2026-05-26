@@ -12,41 +12,42 @@ fn no_args_prints_the_top_level_help() {
 }
 
 #[test]
-fn top_level_help_identifies_runewarp_in_the_product_line() {
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+fn top_level_help_identifies_runewarp_in_the_product_line() -> Result<(), Box<dyn std::error::Error>>
+{
+    let assert = Command::cargo_bin("runewarp")?
         .arg("--help")
         .assert()
         .success();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
     assert!(stdout.starts_with("Runewarp: Private tunneling for TLS passthrough"));
+    Ok(())
 }
 
 #[test]
-fn help_subcommand_prints_the_top_level_help() {
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+fn help_subcommand_prints_the_top_level_help() -> Result<(), Box<dyn std::error::Error>> {
+    let assert = Command::cargo_bin("runewarp")?
         .arg("help")
         .assert()
         .success();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
     assert!(stdout.starts_with("Runewarp: Private tunneling for TLS passthrough"));
     assert!(stdout.contains("Usage: runewarp [COMMAND]"));
+    Ok(())
 }
 
 #[test]
-fn top_level_help_describes_the_main_entry_points() {
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+fn top_level_help_describes_the_main_entry_points() -> Result<(), Box<dyn std::error::Error>> {
+    let assert = Command::cargo_bin("runewarp")?
         .arg("--help")
         .assert()
         .success();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
     assert!(stdout.contains("server  Run the Server runtime and server-side setup commands"));
     assert!(stdout.contains("client  Run the Client runtime and client-side setup commands"));
+    Ok(())
 }
 
 #[test]

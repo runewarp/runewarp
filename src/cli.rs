@@ -42,6 +42,14 @@ Examples:
 Config defaults:
   Commands use the default Runewarp config path unless -c, --config is set.";
 
+const CLIENT_IDENTITY_LEAF_EXAMPLES: &str = "\
+Examples:
+  runewarp client identity init --dir ./client-identity
+  runewarp client identity show
+
+Config defaults:
+  Commands use the default Runewarp config path unless -c, --config is set.";
+
 const CLIENT_PUBLIC_CERT_EXAMPLES: &str = "\
 Examples:
   runewarp client public-cert init --hostname app.example.com
@@ -114,6 +122,7 @@ pub enum ServerCertSubcommand {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = SERVER_CERT_EXAMPLES)]
 pub struct ServerCertInitArgs {
     /// Write certificate material into this directory.
     #[arg(long = "dir", value_name = "DIR")]
@@ -124,6 +133,7 @@ pub struct ServerCertInitArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = SERVER_CERT_EXAMPLES)]
 pub struct ServerCertDirArgs {
     /// Read and write certificate material in this directory.
     #[arg(long = "dir", value_name = "DIR")]
@@ -190,6 +200,7 @@ pub enum ClientPublicCertSubcommand {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = CLIENT_PUBLIC_CERT_EXAMPLES)]
 pub struct ClientPublicCertInitArgs {
     /// Write Public hostname certificate material into this directory.
     #[arg(long = "dir", value_name = "DIR")]
@@ -200,6 +211,7 @@ pub struct ClientPublicCertInitArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = CLIENT_PUBLIC_CERT_EXAMPLES)]
 pub struct ClientPublicCertRenewArgs {
     /// Read and write Public hostname certificate material in this directory.
     #[arg(long = "dir", value_name = "DIR")]
@@ -211,6 +223,7 @@ pub struct ClientPublicCertRenewArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = CLIENT_PUBLIC_CERT_EXAMPLES)]
 pub struct ClientPublicCertDirArgs {
     /// Read and write Public hostname certificate material in this directory.
     #[arg(long = "dir", value_name = "DIR")]
@@ -243,6 +256,7 @@ pub enum ClientIdentitySubcommand {
 }
 
 #[derive(Debug, Args)]
+#[command(after_help = CLIENT_IDENTITY_LEAF_EXAMPLES)]
 pub struct ClientIdentityDirArgs {
     /// Read and write Client identity material in this directory.
     #[arg(long = "dir", value_name = "DIR")]

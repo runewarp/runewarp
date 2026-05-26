@@ -20,27 +20,27 @@ fn client_help_prints_usage_and_subcommands() {
 }
 
 #[test]
-fn client_help_shows_the_config_shorthand() {
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+fn client_help_shows_the_config_shorthand() -> Result<(), Box<dyn std::error::Error>> {
+    let assert = Command::cargo_bin("runewarp")?
         .args(["client", "--help"])
         .assert()
         .success();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
     assert!(stdout.contains("-c, --config <PATH>"));
+    Ok(())
 }
 
 #[test]
-fn client_help_includes_examples_and_default_config_guidance() {
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+fn client_help_includes_examples_and_default_config_guidance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let assert = Command::cargo_bin("runewarp")?
         .args(["client", "--help"])
         .assert()
         .success();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
     assert!(stdout.contains("Examples:"));
     assert!(stdout.contains("runewarp client"));
@@ -48,20 +48,21 @@ fn client_help_includes_examples_and_default_config_guidance() {
         stdout
             .contains("Commands use the default Runewarp config path unless -c, --config is set.")
     );
+    Ok(())
 }
 
 #[test]
-fn client_help_subcommand_prints_client_help() {
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+fn client_help_subcommand_prints_client_help() -> Result<(), Box<dyn std::error::Error>> {
+    let assert = Command::cargo_bin("runewarp")?
         .args(["client", "help"])
         .assert()
         .success();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
     assert!(stdout.contains("Usage: runewarp client [OPTIONS] [COMMAND]"));
     assert!(stdout.contains("Examples:"));
+    Ok(())
 }
 
 #[test]

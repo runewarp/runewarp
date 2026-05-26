@@ -16,7 +16,7 @@ use rustls::{
     CertificateError, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
 };
 
-use crate::{ClientIdentity, client_identity_from_certificate_der};
+use crate::{ClientIdentity, client_identity_from_certificate_der, runtime_log};
 
 pub const RUNEWARP_ALPN: &[u8] = b"runewarp/1";
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -232,6 +232,7 @@ impl ClientCertVerifier for PinnedClientCertVerifier {
         if self.trusted_client_identities.contains(&client_identity) {
             Ok(ClientCertVerified::assertion())
         } else {
+            runtime_log::server_tunnel_connection_unauthorized(&client_identity);
             Err(rustls::Error::InvalidCertificate(
                 CertificateError::ApplicationVerificationFailure,
             ))
@@ -263,11 +264,18 @@ impl ClientCertVerifier for PinnedClientCertVerifier {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Cursor, Write};
+    use std::sync::{Arc, Mutex};
+
     use rcgen::generate_simple_self_signed;
     use rustls::RootCertStore;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::server::danger::ClientCertVerifier;
+    use tracing_subscriber::fmt::writer::MakeWriter;
+    use tracing_subscriber::layer::SubscriberExt;
 
-    use super::{make_client_quic_config, make_server_quic_config};
+    use super::{PinnedClientCertVerifier, make_client_quic_config, make_server_quic_config};
+    use crate::generate_client_identity;
 
     #[test]
     fn server_quic_config_uses_runewarp_transport_defaults() {
@@ -294,6 +302,76 @@ mod tests {
         assert!(debug.contains("keep_alive_interval: Some(120s)"));
     }
 
+    #[test]
+    fn unauthorized_client_identity_verification_emits_a_warn_log() {
+        let generated_client_identity = generate_client_identity().unwrap();
+        let certificate = client_leaf_certificate(&generated_client_identity).unwrap();
+        let client_identity = generated_client_identity.client_identity.clone();
+        let provider = rustls::crypto::ring::default_provider();
+        let verifier = PinnedClientCertVerifier::new(&[], provider.signature_verification_algorithms);
+
+        let output = capture_logs(|| {
+            let result = verifier.verify_client_cert(
+                &certificate,
+                &[],
+                rustls::pki_types::UnixTime::now(),
+            );
+            assert!(result.is_err());
+        });
+
+        assert!(output.contains(format!(
+            "WARN server tunnel connection unauthorized: client-identity={client_identity}"
+        ).as_str()));
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    struct BufferWriter(SharedBuffer);
+
+    impl SharedBuffer {
+        fn read(&self) -> String {
+            String::from_utf8(self.0.lock().expect("buffer mutex poisoned").clone())
+                .expect("runtime log output must be valid UTF-8")
+        }
+    }
+
+    impl Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .0
+                .lock()
+                .expect("buffer mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for SharedBuffer {
+        type Writer = BufferWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            BufferWriter(self.clone())
+        }
+    }
+
+    fn capture_logs(action: impl FnOnce()) -> String {
+        let buffer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(buffer.clone())
+                .with_ansi(false)
+                .without_time()
+                .with_target(false),
+        );
+        tracing::subscriber::with_default(subscriber, action);
+        buffer.read()
+    }
+
     fn make_self_signed_cert(server_name: &str) -> (CertificateDer<'static>, Vec<u8>) {
         let certified_key = generate_simple_self_signed(vec![server_name.to_owned()]).unwrap();
         (
@@ -310,5 +388,15 @@ mod tests {
         let mut roots = RootCertStore::empty();
         roots.add(certificate.clone()).unwrap();
         roots
+    }
+
+    fn client_leaf_certificate(
+        generated_client_identity: &crate::GeneratedClientIdentity,
+    ) -> io::Result<CertificateDer<'static>> {
+        rustls_pemfile::certs(&mut Cursor::new(generated_client_identity.certificate_pem.as_bytes()))
+            .next()
+            .transpose()
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing client certificate"))
     }
 }

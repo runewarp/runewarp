@@ -240,7 +240,7 @@ pub fn client_tunnel_connect_failed(
     error: &str,
 ) {
     emit_runtime_failure_with_debug_detail(
-        EventLevel::Warn,
+        client_tunnel_startup_failure_level(phase, attempt_kind),
         &client_tunnel_connect_failed_line(
             phase,
             attempt_kind,
@@ -268,7 +268,7 @@ pub fn client_tunnel_resolution_failed(
     error: &str,
 ) {
     emit_runtime_failure_with_debug_detail(
-        EventLevel::Warn,
+        client_tunnel_startup_failure_level(phase, attempt_kind),
         &client_tunnel_resolution_failed_line(
             phase,
             attempt_kind,
@@ -877,6 +877,19 @@ fn client_tunnel_retry_field(
     }
 }
 
+fn client_tunnel_startup_failure_level(
+    phase: ClientTunnelPhase,
+    attempt_kind: ClientTunnelAttemptKind,
+) -> EventLevel {
+    if matches!(phase, ClientTunnelPhase::Establishing)
+        && matches!(attempt_kind, ClientTunnelAttemptKind::Initial)
+    {
+        EventLevel::Error
+    } else {
+        EventLevel::Warn
+    }
+}
+
 fn client_tunnel_attempt_field(
     attempt_kind: ClientTunnelAttemptKind,
 ) -> Option<(&'static str, Cow<'static, str>)> {
@@ -1189,7 +1202,7 @@ mod tests {
             "INFO client tunnel connection connecting: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443"
         ));
         assert!(output.contains(
-            "WARN client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: DNS timeout"
+            "ERROR client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: DNS timeout"
         ));
         assert!(output.contains(
             "INFO client tunnel connection retrying: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=interval"
@@ -1253,10 +1266,10 @@ mod tests {
         });
 
         assert!(output.contains(
-            "WARN client tunnel resolution failed: server-address=tunnel.example.test:443 retry=initial: failed to resolve the Server hostname"
+            "ERROR client tunnel resolution failed: server-address=tunnel.example.test:443 retry=initial: failed to resolve the Server hostname"
         ));
         assert!(output.contains(
-            "WARN client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: client QUIC handshake failed"
+            "ERROR client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: client QUIC handshake failed"
         ));
         assert!(output.contains(
             "WARN client tunnel resolution failed: server-address=tunnel.example.test:443 retry=interval: failed to resolve the Server hostname"
@@ -1289,13 +1302,13 @@ mod tests {
         });
 
         assert!(output.contains(
-            "WARN client tunnel resolution failed: server-address=tunnel.example.test:443 retry=initial: failed to resolve the Server hostname"
+            "ERROR client tunnel resolution failed: server-address=tunnel.example.test:443 retry=initial: failed to resolve the Server hostname"
         ));
         assert!(output.contains(
             "DEBUG client tunnel resolution failed detail: server-address=tunnel.example.test:443 retry=initial: failed to resolve the Server hostname: failed to lookup address information: nodename nor servname provided, or not known"
         ));
         assert!(output.contains(
-            "WARN client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: client QUIC handshake failed"
+            "ERROR client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: client QUIC handshake failed"
         ));
         assert!(output.contains(
             "DEBUG client tunnel connection failed detail: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: client QUIC handshake failed: timed out"

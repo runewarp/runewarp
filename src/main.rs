@@ -282,11 +282,11 @@ fn run_server_cert_command(
             let directory = resolve_server_cert_dir(config, args.dir)?;
             if let Ok(existing_state) = inspect_manual_server_certificate(&directory) {
                 if existing_state.hostname == hostname {
-                    println!(
-                        "Server certificate material already exists: {}",
-                        directory.display()
-                    );
-                    println!("Server hostname: {}", existing_state.hostname);
+                    print_server_certificate_summary(
+                        "Server certificate material already exists",
+                        &directory,
+                        &existing_state.hostname,
+                    )?;
                     return Ok(());
                 }
 
@@ -563,13 +563,21 @@ fn resolve_client_public_cert_hostnames(
 fn resolve_client_public_cert_hostnames_from_config_required(
     config: Option<std::path::PathBuf>,
 ) -> Result<Vec<String>, Box<dyn Error>> {
-    let Some(config_path) = config else {
-        return Err(
-            "--config is required for `client public-cert rotate-ca`; the managed hostname \
-             set is derived from client.services[].public-hostnames \
-             (tls-mode = \"terminate\")"
-                .into(),
-        );
+    let config_path = match config {
+        Some(config_path) => config_path,
+        None => {
+            let default_path = default_config_path()?;
+            if default_path.exists() {
+                default_path
+            } else {
+                return Err(format!(
+                    "no selected config file for `client public-cert rotate-ca`; use -c, \
+                     --config or create the default config at {}",
+                    default_path.display()
+                )
+                .into());
+            }
+        }
     };
     let Some(hostnames) = resolve_terminating_hostnames_from_config(&config_path)? else {
         return Err(format!(
@@ -891,8 +899,11 @@ fn wildcard(port: u16) -> SocketAddr {
 }
 fn write_client_identity_artifacts(directory: &Path) -> Result<(), Box<dyn Error>> {
     if let Ok(existing_identity) = read_client_identity(directory) {
-        println!("Client identity already exists: {existing_identity}");
-        println!("Identity directory: {}", directory.display());
+        print_client_identity_summary(
+            "Client identity already exists",
+            directory,
+            existing_identity,
+        )?;
         return Ok(());
     }
 

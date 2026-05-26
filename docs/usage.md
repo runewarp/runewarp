@@ -140,7 +140,7 @@ If any Client Service uses `tls-mode = "terminate"`, choose one of the two suppo
 runewarp client public-cert init --hostname app.example.com
 
 # or derive every terminating hostname from config:
-runewarp client --config client.toml public-cert init
+runewarp client -c client.toml public-cert init
 ```
 
 Run once per terminating hostname, or omit `--hostname` and supply `--config` to derive the full terminating-hostname set from `client.services[].public-hostnames` where `tls-mode = "terminate"`. A second run with a new hostname reuses the existing **Public hostname CA** and adds only the new **Public hostname certificate**. Rerunning `init` for a hostname whose complete material already exists succeeds idempotently and reports that state on stdout instead of treating it as a failure. Share `public-ca.crt` with each Visitor as their trust anchor. The trust anchor stays stable until you explicitly run `rotate-ca`.
@@ -158,17 +158,20 @@ runewarp client public-cert renew --hostname app.example.com
 To renew all terminating hostnames derived from config (requires `--config`):
 
 ```bash
-runewarp client --config client.toml public-cert renew
+runewarp client -c client.toml public-cert renew
 ```
 
 For `init` and `renew`, the `--hostname` set comes from `public-hostnames` on `tls-mode = "terminate"` services in the config when `--hostname` is omitted. Omitting `--hostname` without a config file is an error.
 
 **Rotating the Public hostname CA (manual path):**
 
-`rotate-ca` replaces the trust anchor and reissues every managed leaf certificate. Visitors must trust the new `public-ca.crt` after rotation. Requires `--config` so Runewarp can determine which hostnames are managed:
+`rotate-ca` replaces the trust anchor and reissues every managed leaf certificate. Visitors must trust the new `public-ca.crt` after rotation. Runewarp derives the managed hostname set from the selected config file: an explicit `-c`, `--config` path wins, otherwise the discovered default config is used when it exists:
 
 ```bash
-runewarp client --config client.toml public-cert rotate-ca
+runewarp client public-cert rotate-ca
+
+# or select a specific config file explicitly:
+runewarp client -c client.toml public-cert rotate-ca
 ```
 
 The managed hostname set comes from `public-hostnames` on `tls-mode = "terminate"` services in the config. Scanning on-disk leaf directories is not used.

@@ -180,11 +180,11 @@ fn client_public_cert_init_succeeds_when_artifacts_already_exist() {
 }
 
 #[test]
-fn client_public_cert_init_is_idempotent_when_hostname_material_already_exists() {
-    let tempdir = tempdir().unwrap();
+fn client_public_cert_init_is_idempotent_when_hostname_material_already_exists()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
 
-    Command::cargo_bin("runewarp")
-        .unwrap()
+    Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
         .args([
             "client",
@@ -198,10 +198,9 @@ fn client_public_cert_init_is_idempotent_when_hostname_material_already_exists()
         .assert()
         .success();
 
-    let original_ca = fs::read(tempdir.path().join("client-public-cert/public-ca.crt")).unwrap();
+    let original_ca = fs::read(tempdir.path().join("client-public-cert/public-ca.crt"))?;
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+    let assert = Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
         .args([
             "client",
@@ -215,28 +214,28 @@ fn client_public_cert_init_is_idempotent_when_hostname_material_already_exists()
         .assert()
         .success();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    let current_ca = fs::read(tempdir.path().join("client-public-cert/public-ca.crt")).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+    let current_ca = fs::read(tempdir.path().join("client-public-cert/public-ca.crt"))?;
 
     assert_eq!(current_ca, original_ca);
     assert!(stdout.contains("Public hostname certificate material already exists"));
     assert!(!stdout.contains("os error"));
+    Ok(())
 }
 
 #[test]
-fn client_public_cert_init_reports_repair_guidance_for_partial_material() {
-    let tempdir = tempdir().unwrap();
-    fs::create_dir_all(tempdir.path().join("client-public-cert/app.example.test")).unwrap();
+fn client_public_cert_init_reports_repair_guidance_for_partial_material()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+    fs::create_dir_all(tempdir.path().join("client-public-cert/app.example.test"))?;
     fs::write(
         tempdir
             .path()
             .join("client-public-cert/app.example.test/public.crt"),
         "placeholder certificate",
-    )
-    .unwrap();
+    )?;
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+    let assert = Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
         .args([
             "client",
@@ -250,20 +249,21 @@ fn client_public_cert_init_reports_repair_guidance_for_partial_material() {
         .assert()
         .failure();
 
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
 
     assert!(stderr.contains("incomplete or inconsistent"));
     assert!(stderr.contains("runewarp client public-cert init"));
     assert!(stderr.contains("client-public-cert/app.example.test/public.crt"));
     assert!(!stderr.contains("os error"));
+    Ok(())
 }
 
 #[test]
-fn client_public_cert_init_reports_paths_and_utc_timestamps() {
-    let tempdir = tempdir().unwrap();
+fn client_public_cert_init_reports_paths_and_utc_timestamps()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+    let assert = Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
         .args([
             "client",
@@ -277,13 +277,14 @@ fn client_public_cert_init_reports_paths_and_utc_timestamps() {
         .assert()
         .success();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
     assert!(stdout.contains("Public hostname CA: client-public-cert/public-ca.crt"));
     assert!(stdout.contains("Initialized leaf certificate(s) for: app.example.test"));
     assert!(stdout.contains("Issued at (UTC):"));
     assert!(stdout.contains("Renew after (UTC):"));
     assert!(stdout.contains("Expires at (UTC):"));
+    Ok(())
 }
 
 #[test]
@@ -607,21 +608,50 @@ tls-mode = "terminate"
 // ── rotate-ca ─────────────────────────────────────────────────────────────────
 
 #[test]
-fn client_public_cert_rotate_ca_requires_config() {
-    let tempdir = tempdir().unwrap();
+fn client_public_cert_rotate_ca_uses_the_discovered_default_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+    let xdg_config_home = tempdir.path().join("xdg-config");
+    let xdg_runewarp_dir = xdg_config_home.join("runewarp");
+    fs::create_dir_all(&xdg_runewarp_dir)?;
+    fs::write(
+        xdg_runewarp_dir.join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+public-cert-dir = "public-cert"
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "127.0.0.1:3000"
+tls-mode = "terminate"
+"#,
+    )?;
+
+    Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
         .args(["client", "public-cert", "rotate-ca", "--dir", "public-cert"])
         .assert()
-        .failure();
+        .success();
 
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    assert!(
-        stderr.contains("config") || stderr.contains("hostname"),
-        "expected error mentioning config or hostname, got: {stderr}"
-    );
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+    assert!(stdout.contains("Public hostname CA rotated"));
+    Ok(())
 }
 
 #[test]

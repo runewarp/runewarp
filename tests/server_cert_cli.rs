@@ -208,11 +208,11 @@ cert-dir = "configured/server-cert"
 }
 
 #[test]
-fn server_cert_init_is_idempotent_when_material_already_exists() {
-    let tempdir = tempdir().unwrap();
+fn server_cert_init_is_idempotent_when_material_already_exists()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
 
-    Command::cargo_bin("runewarp")
-        .unwrap()
+    Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
         .args([
             "server",
@@ -227,10 +227,9 @@ fn server_cert_init_is_idempotent_when_material_already_exists() {
         .success();
 
     let original_hostname =
-        fs::read_to_string(tempdir.path().join("server-cert/state/server-hostname.txt")).unwrap();
+        fs::read_to_string(tempdir.path().join("server-cert/state/server-hostname.txt"))?;
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+    let assert = Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
         .args([
             "server",
@@ -244,27 +243,30 @@ fn server_cert_init_is_idempotent_when_material_already_exists() {
         .assert()
         .success();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
     let current_hostname =
-        fs::read_to_string(tempdir.path().join("server-cert/state/server-hostname.txt")).unwrap();
+        fs::read_to_string(tempdir.path().join("server-cert/state/server-hostname.txt"))?;
 
     assert_eq!(current_hostname, original_hostname);
     assert!(stdout.contains("Server certificate material already exists"));
+    assert!(stdout.contains("Issued at (UTC):"));
+    assert!(stdout.contains("Renew after (UTC):"));
+    assert!(stdout.contains("Expires at (UTC):"));
     assert!(!stdout.contains("os error"));
+    Ok(())
 }
 
 #[test]
-fn server_cert_init_reports_repair_guidance_for_partial_material() {
-    let tempdir = tempdir().unwrap();
-    fs::create_dir_all(tempdir.path().join("server-cert")).unwrap();
+fn server_cert_init_reports_repair_guidance_for_partial_material()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+    fs::create_dir_all(tempdir.path().join("server-cert"))?;
     fs::write(
         tempdir.path().join("server-cert/server.crt"),
         "placeholder certificate",
-    )
-    .unwrap();
+    )?;
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+    let assert = Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
         .args([
             "server",
@@ -278,20 +280,20 @@ fn server_cert_init_reports_repair_guidance_for_partial_material() {
         .assert()
         .failure();
 
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
 
     assert!(stderr.contains("incomplete or inconsistent"));
     assert!(stderr.contains("runewarp server cert init"));
     assert!(stderr.contains("server-cert/server.crt"));
     assert!(!stderr.contains("os error"));
+    Ok(())
 }
 
 #[test]
-fn server_cert_init_reports_paths_and_utc_timestamps() {
-    let tempdir = tempdir().unwrap();
+fn server_cert_init_reports_paths_and_utc_timestamps() -> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
+    let assert = Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
         .args([
             "server",
@@ -305,13 +307,14 @@ fn server_cert_init_reports_paths_and_utc_timestamps() {
         .assert()
         .success();
 
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
     assert!(stdout.contains("Server hostname: tunnel.example.test"));
     assert!(stdout.contains("Certificate directory: server-cert"));
     assert!(stdout.contains("Issued at (UTC):"));
     assert!(stdout.contains("Renew after (UTC):"));
     assert!(stdout.contains("Expires at (UTC):"));
+    Ok(())
 }
 
 #[test]

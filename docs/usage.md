@@ -222,13 +222,14 @@ The routing flags belong only to the runtime `runewarp client` form. `runewarp c
 
 Runtime diagnostics are stderr-only. Each emitted line uses a UTC RFC3339 timestamp, level, and message.
 
-At the default top-level `log-level = "info"`, Runewarp shows tunnel lifecycle plus warnings and errors. Set `log-level = "debug"` to add routing diagnostics for successful route selection and Client passthrough vs terminate decisions.
+At the default top-level `log-level = "info"`, Runewarp shows tunnel connection lifecycle plus warnings and errors. Client tunnel connection lifecycle lines include the configured **Server address** and the resolved socket address for that connection. Set `log-level = "debug"` to add routing diagnostics for successful route selection, Client passthrough vs terminate decisions, and the selected Client `backend-address`.
 
 When routing diagnostics are enabled, the Server and Client help confirm:
 
 - which **Public hostname** was selected
 - which **Tunnel** was chosen
 - which **Service** accepted the stream on the Client
+- which Client `backend-address` that **Service** selected
 
 ## Troubleshooting
 

@@ -272,10 +272,16 @@ pub fn client_tunnel_connected(
     );
 }
 
-pub fn client_tunnel_disconnected(error: &str) {
+pub fn client_tunnel_disconnected(
+    configured_server_addr: &str,
+    resolved_server_addr: SocketAddr,
+    error: &str,
+) {
     emit(
         EventLevel::Warn,
-        &format!("client tunnel disconnected: {error}"),
+        &format!(
+            "client tunnel disconnected from {configured_server_addr} (resolved {resolved_server_addr}): {error}"
+        ),
     );
 }
 
@@ -342,9 +348,10 @@ fn server_route_rejected_client_hello_line(reason: &str) -> String {
 
 fn server_route_event(public_hostname: &str, outcome: ServerRouteOutcome) -> (EventLevel, String) {
     let (level, outcome) = match outcome {
-        ServerRouteOutcome::Forwarded => {
-            (EventLevel::Debug, "forwarded to active tunnel".to_owned())
-        }
+        ServerRouteOutcome::Forwarded => (
+            EventLevel::Debug,
+            "forwarded to active tunnel connection".to_owned(),
+        ),
         ServerRouteOutcome::RejectedServerHostname => (
             EventLevel::Debug,
             "rejected non-ACME traffic for server hostname".to_owned(),
@@ -477,7 +484,7 @@ fn client_tunnel_connecting_line(
         (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::IntervalRetry)
         | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::IntervalRetry) => {
             format!(
-                "retrying client tunnel connection in {}s",
+                "retrying client tunnel connection after waiting {}s",
                 retry_interval.as_secs()
             )
         }
@@ -674,7 +681,10 @@ mod tests {
         });
 
         assert!(output.contains("debug detail"));
-        assert!(output.contains("server route app.example.test -> forwarded to active tunnel"));
+        assert!(
+            output
+                .contains("server route app.example.test -> forwarded to active tunnel connection")
+        );
     }
 
     #[test]
@@ -790,7 +800,11 @@ mod tests {
                 configured_server_addr,
                 resolved_server_addr,
             );
-            client_tunnel_disconnected("connection reset by peer");
+            client_tunnel_disconnected(
+                configured_server_addr,
+                resolved_server_addr,
+                "connection reset by peer",
+            );
             client_trust_store_warning(2);
         });
 
@@ -801,12 +815,14 @@ mod tests {
             "WARN initial client tunnel connection failed to tunnel.example.test:443 (resolved 203.0.113.10:443): DNS timeout"
         ));
         assert!(output.contains(
-            "INFO retrying client tunnel connection in 5s to tunnel.example.test:443 (resolved 203.0.113.10:443)"
+            "INFO retrying client tunnel connection after waiting 5s to tunnel.example.test:443 (resolved 203.0.113.10:443)"
         ));
         assert!(output.contains(
             "INFO client tunnel reconnected to tunnel.example.test:443 (resolved 203.0.113.10:443)"
         ));
-        assert!(output.contains("WARN client tunnel disconnected: connection reset by peer"));
+        assert!(output.contains(
+            "WARN client tunnel disconnected from tunnel.example.test:443 (resolved 203.0.113.10:443): connection reset by peer"
+        ));
         assert!(output.contains(
             "WARN 2 system trust-store certificate(s) could not be loaded; continuing with the successfully loaded trust anchors"
         ));

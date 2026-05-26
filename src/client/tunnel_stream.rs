@@ -843,6 +843,9 @@ mod tests {
             );
         let _guard = tracing::subscriber::set_default(subscriber);
         action.await?;
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
         Ok(buffer.read())
     }
 

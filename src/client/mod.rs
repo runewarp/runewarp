@@ -11,7 +11,9 @@ use std::sync::Arc;
 use quinn::{Connection, Endpoint};
 
 use self::tunnel_stream::TunnelConnectionStreamHandler;
-use crate::{ClientServiceSettings, ClientTlsMode};
+use crate::{
+    ClientServiceSettings, ClientTlsMode, HANDSHAKE_TIMEOUT, quic::with_handshake_timeout,
+};
 
 pub(crate) use service::validate_services;
 pub use settings_resolution::{
@@ -128,11 +130,15 @@ impl Client {
         let mut endpoint = Endpoint::client(local_bind_addr).map_err(ClientConnectError::Bind)?;
         endpoint.set_default_client_config(quic_client_config);
 
-        let connection = endpoint
-            .connect(server_addr, &server_name)
-            .map_err(ClientConnectError::Connect)?
-            .await
-            .map_err(ClientConnectError::Handshake)?;
+        let connection = with_handshake_timeout(
+            endpoint
+                .connect(server_addr, &server_name)
+                .map_err(ClientConnectError::Connect)?,
+            HANDSHAKE_TIMEOUT,
+            || quinn::ConnectionError::TimedOut,
+        )
+        .await
+        .map_err(ClientConnectError::Handshake)?;
         let (services, hostname_tls_configs) = services_and_configs_for_route_mode(route_mode);
         let tunnel_stream_handler =
             TunnelConnectionStreamHandler::new(services, hostname_tls_configs);

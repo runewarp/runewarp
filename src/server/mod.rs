@@ -9,7 +9,7 @@ use std::sync::Arc;
 use quinn::Endpoint;
 use tokio::net::TcpListener;
 
-use crate::ServerTunnelSettings;
+use crate::{HANDSHAKE_TIMEOUT, ServerTunnelSettings, quic::with_handshake_timeout, runtime_log};
 
 use self::tunnel_registry::TunnelRegistry;
 use self::visitor_stream::VisitorStreamHandler;
@@ -104,8 +104,29 @@ impl Server {
 
                     let tunnel_registry = self.tunnel_registry.clone();
                     tokio::spawn(async move {
-                        if let Ok(connection) = incoming.await {
-                            tunnel_registry.register(connection).await;
+                        let remote_addr = incoming.remote_address();
+                        let connecting = match incoming.accept() {
+                            Ok(connecting) => connecting,
+                            Err(error) => {
+                                runtime_log::server_tunnel_connection_failed(
+                                    remote_addr,
+                                    &error.to_string(),
+                                );
+                                return;
+                            }
+                        };
+                        match with_handshake_timeout(
+                            connecting,
+                            HANDSHAKE_TIMEOUT,
+                            || quinn::ConnectionError::TimedOut,
+                        )
+                        .await
+                        {
+                            Ok(connection) => tunnel_registry.register(connection).await,
+                            Err(error) => runtime_log::server_tunnel_connection_failed(
+                                remote_addr,
+                                &error.to_string(),
+                            ),
                         }
                     });
                 }

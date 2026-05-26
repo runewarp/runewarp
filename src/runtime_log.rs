@@ -201,6 +201,13 @@ pub fn server_tunnel_connection_terminated(
     }
 }
 
+pub fn server_tunnel_connection_failed(remote_addr: SocketAddr, error: &str) {
+    emit(
+        EventLevel::Warn,
+        &server_tunnel_connection_failed_line(remote_addr, error),
+    );
+}
+
 pub fn warning(role: &str, message: &str) {
     emit(EventLevel::Warn, &warning_line(role, message));
 }
@@ -602,6 +609,13 @@ fn server_tunnel_connection_unauthorized_line(client_identity: &ClientIdentity) 
     )
 }
 
+fn server_tunnel_connection_failed_line(remote_addr: SocketAddr, error: &str) -> String {
+    format!(
+        "server tunnel connection failed: remote-address={remote_addr}: {}",
+        summarize_live_connection_error(error)
+    )
+}
+
 fn emit_server_tunnel_connection_dropped(
     client_identity: &ClientIdentity,
     remote_addr: SocketAddr,
@@ -880,8 +894,8 @@ mod tests {
         client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_unauthorized,
         emit, emit_server_tunnel_connection_dropped, install, installed_level, server_route,
         server_route_rejected_client_hello, server_tunnel_connection_accepted,
-        server_tunnel_connection_replaced, server_tunnel_connection_terminated,
-        server_tunnel_connection_unauthorized, warning,
+        server_tunnel_connection_failed, server_tunnel_connection_replaced,
+        server_tunnel_connection_terminated, server_tunnel_connection_unauthorized, warning,
     };
     use crate::{ClientHelloError, ClientIdentity, LogLevel};
 
@@ -1317,6 +1331,7 @@ mod tests {
                 second_remote_addr,
                 &ConnectionError::TimedOut,
             );
+            server_tunnel_connection_failed(first_remote_addr, "handshake timed out");
         });
 
         assert!(output.contains(format!(
@@ -1327,6 +1342,9 @@ mod tests {
         ).as_str()));
         assert!(output.contains(format!(
             "WARN server tunnel connection dropped: client-identity={client_identity} remote-address={second_remote_addr}: timed out"
+        ).as_str()));
+        assert!(output.contains(format!(
+            "WARN server tunnel connection failed: remote-address={first_remote_addr}: handshake timed out"
         ).as_str()));
     }
 

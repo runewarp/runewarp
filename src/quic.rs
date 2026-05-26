@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,8 +20,9 @@ use rustls::{
 use crate::{ClientIdentity, client_identity_from_certificate_der, runtime_log};
 
 pub const RUNEWARP_ALPN: &[u8] = b"runewarp/1";
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2 * 60);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_SERVER_OPENED_BIDI_STREAMS: u32 = 1024;
 
 #[derive(Debug)]
@@ -139,6 +141,20 @@ pub fn make_client_quic_config(
     client_config.transport_config(Arc::new(client_transport_config()));
 
     Ok(client_config)
+}
+
+pub(crate) async fn with_handshake_timeout<F, T, E>(
+    future: F,
+    timeout: Duration,
+    on_timeout: impl FnOnce() -> E,
+) -> Result<T, E>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => Err(on_timeout()),
+    }
 }
 
 pub fn make_client_quic_config_with_client_auth(
@@ -264,8 +280,10 @@ impl ClientCertVerifier for PinnedClientCertVerifier {
 
 #[cfg(test)]
 mod tests {
+    use std::future::pending;
     use std::io::{self, Cursor, Write};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use rcgen::generate_simple_self_signed;
     use rustls::RootCertStore;
@@ -274,7 +292,10 @@ mod tests {
     use tracing_subscriber::fmt::writer::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
 
-    use super::{PinnedClientCertVerifier, make_client_quic_config, make_server_quic_config};
+    use super::{
+        PinnedClientCertVerifier, make_client_quic_config, make_server_quic_config,
+        with_handshake_timeout,
+    };
     use crate::generate_client_identity;
 
     #[test]
@@ -286,8 +307,8 @@ mod tests {
 
         assert!(debug.contains("max_concurrent_bidi_streams: 0"));
         assert!(debug.contains("max_concurrent_uni_streams: 0"));
-        assert!(debug.contains("max_idle_timeout: Some(300000)"));
-        assert!(debug.contains("keep_alive_interval: Some(120s)"));
+        assert!(debug.contains("max_idle_timeout: Some(60000)"));
+        assert!(debug.contains("keep_alive_interval: Some(20s)"));
     }
 
     #[test]
@@ -298,8 +319,22 @@ mod tests {
 
         assert!(debug.contains("max_concurrent_bidi_streams: 1024"));
         assert!(debug.contains("max_concurrent_uni_streams: 0"));
-        assert!(debug.contains("max_idle_timeout: Some(300000)"));
-        assert!(debug.contains("keep_alive_interval: Some(120s)"));
+        assert!(debug.contains("max_idle_timeout: Some(60000)"));
+        assert!(debug.contains("keep_alive_interval: Some(20s)"));
+    }
+
+    #[tokio::test]
+    async fn handshake_timeout_wrapper_returns_the_timeout_error_after_the_deadline() {
+        let error = with_handshake_timeout(
+            pending::<Result<(), io::Error>>(),
+            Duration::from_millis(10),
+            || io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"),
+        )
+        .await
+        .expect_err("pending handshake should time out");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "handshake timed out");
     }
 
     #[test]

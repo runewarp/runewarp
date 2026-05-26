@@ -413,60 +413,78 @@ where
     line
 }
 
-fn server_route_line(public_hostname: &str, outcome: &str) -> String {
-    format!("server route {public_hostname} -> {outcome}")
-}
-
-fn client_route_line(public_hostname: &str, outcome: &str) -> String {
-    format!("client route {public_hostname} -> {outcome}")
-}
-
-fn server_route_rejected_client_hello_line(reason: &str) -> String {
-    format!("server route rejected -> {reason}")
-}
-
 fn server_route_event(public_hostname: &str, outcome: ServerRouteOutcome) -> (EventLevel, String) {
-    let (level, outcome) = match outcome {
+    let (level, line) = match outcome {
         ServerRouteOutcome::Forwarded => (
             EventLevel::Debug,
-            "forwarded to active tunnel connection".to_owned(),
+            event_line(
+                "server route forwarded",
+                [("public-hostname", Cow::Borrowed(public_hostname))],
+            ),
         ),
         ServerRouteOutcome::RejectedServerHostname => (
             EventLevel::Debug,
-            "rejected non-ACME traffic for server hostname".to_owned(),
+            event_line(
+                "server route rejected",
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("reason", Cow::Borrowed("non-acme-server-hostname")),
+                ],
+            ),
         ),
         ServerRouteOutcome::RejectedUnauthorized => (
             EventLevel::Debug,
-            "rejected unauthorized public hostname".to_owned(),
+            event_line(
+                "server route rejected",
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("reason", Cow::Borrowed("unauthorized-public-hostname")),
+                ],
+            ),
         ),
         ServerRouteOutcome::NoActiveTunnelConnection => (
             EventLevel::Warn,
-            "unavailable (no active tunnel connection)".to_owned(),
+            event_line(
+                "server route unavailable",
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("reason", Cow::Borrowed("no-active-tunnel-connection")),
+                ],
+            ),
         ),
         ServerRouteOutcome::AcmeChallenge => (
             EventLevel::Debug,
-            "handled ACME TLS-ALPN-01 challenge".to_owned(),
+            event_line(
+                "server route acme-challenge",
+                [("public-hostname", Cow::Borrowed(public_hostname))],
+            ),
         ),
         ServerRouteOutcome::MissingAcmeTlsConfig => (
             EventLevel::Warn,
-            "ACME challenge unavailable (TLS config missing)".to_owned(),
+            event_line(
+                "server route unavailable",
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("reason", Cow::Borrowed("acme-tls-config-missing")),
+                ],
+            ),
         ),
     };
-    (level, server_route_line(public_hostname, &outcome))
+    (level, line)
 }
 
 fn server_route_rejected_client_hello_event(error: &ClientHelloError) -> (EventLevel, String) {
     let reason = match error {
-        ClientHelloError::InvalidTls => "rejected non-TLS client hello",
-        ClientHelloError::MissingSni => "rejected TLS client hello without SNI",
-        ClientHelloError::InvalidSni => "rejected TLS client hello with invalid SNI",
-        ClientHelloError::TooLong { .. } => "rejected oversized TLS client hello",
-        ClientHelloError::UnexpectedEof => "rejected incomplete or non-TLS client hello",
-        ClientHelloError::Io(_) => "rejected client hello after IO error",
+        ClientHelloError::InvalidTls => "non-tls-client-hello",
+        ClientHelloError::MissingSni => "missing-sni-client-hello",
+        ClientHelloError::InvalidSni => "invalid-sni-client-hello",
+        ClientHelloError::TooLong { .. } => "oversized-client-hello",
+        ClientHelloError::UnexpectedEof => "incomplete-client-hello",
+        ClientHelloError::Io(_) => "client-hello-io-error",
     };
     (
         EventLevel::Debug,
-        server_route_rejected_client_hello_line(reason),
+        event_line("server route rejected", [("reason", Cow::Borrowed(reason))]),
     )
 }
 
@@ -474,33 +492,71 @@ fn client_route_event(
     public_hostname: &str,
     outcome: ClientRouteOutcome<'_>,
 ) -> (EventLevel, String) {
-    let (level, outcome) = match outcome {
+    let (level, line) = match outcome {
         ClientRouteOutcome::Passthrough { backend_address } => (
             EventLevel::Debug,
-            format!("passthrough to {backend_address}"),
+            event_line(
+                "client route passthrough",
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("backend-address", Cow::Borrowed(backend_address)),
+                ],
+            ),
         ),
         ClientRouteOutcome::Terminated { backend_address } => (
             EventLevel::Debug,
-            format!("terminated TLS and forwarded to {backend_address}"),
+            event_line(
+                "client route terminate",
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("backend-address", Cow::Borrowed(backend_address)),
+                ],
+            ),
         ),
         ClientRouteOutcome::RejectedNoMatchingService => (
             EventLevel::Warn,
-            "unavailable (no matching client service)".to_owned(),
+            event_line(
+                "client route unavailable",
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("reason", Cow::Borrowed("no-matching-service")),
+                ],
+            ),
         ),
         ClientRouteOutcome::BackendConnectFailed { backend_address } => (
             EventLevel::Warn,
-            format!("backend connect failed for {backend_address}"),
+            event_line(
+                "client route unavailable",
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("backend-address", Cow::Borrowed(backend_address)),
+                    ("reason", Cow::Borrowed("backend-connect-failed")),
+                ],
+            ),
         ),
         ClientRouteOutcome::BackendWriteFailed { backend_address } => (
             EventLevel::Warn,
-            format!("backend write failed for {backend_address}"),
+            event_line(
+                "client route unavailable",
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("backend-address", Cow::Borrowed(backend_address)),
+                    ("reason", Cow::Borrowed("backend-write-failed")),
+                ],
+            ),
         ),
         ClientRouteOutcome::MissingTlsConfig => (
             EventLevel::Warn,
-            "terminate mode unavailable (TLS config missing)".to_owned(),
+            event_line(
+                "client route unavailable",
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("reason", Cow::Borrowed("tls-config-missing")),
+                ],
+            ),
         ),
     };
-    (level, client_route_line(public_hostname, outcome.as_ref()))
+    (level, line)
 }
 
 fn warning_line(role: &str, message: &str) -> String {
@@ -897,9 +953,11 @@ mod tests {
         });
 
         assert!(!output.contains("debug detail"));
-        assert!(!output.contains("client route app.example.test -> passthrough to 127.0.0.1:8443"));
+        assert!(!output.contains(
+            "client route passthrough: public-hostname=app.example.test backend-address=127.0.0.1:8443"
+        ));
         assert!(output.contains(
-            "WARN client route api.example.test -> unavailable (no matching client service)"
+            "WARN client route unavailable: public-hostname=api.example.test reason=no-matching-service"
         ));
         assert!(output.contains("client warning: tunnel connection lost"));
     }
@@ -914,7 +972,7 @@ mod tests {
         assert!(output.contains("debug detail"));
         assert!(
             output
-                .contains("server route app.example.test -> forwarded to active tunnel connection")
+                .contains("server route forwarded: public-hostname=app.example.test")
         );
     }
 
@@ -925,9 +983,9 @@ mod tests {
             server_route_rejected_client_hello(&ClientHelloError::MissingSni);
         });
 
-        assert!(output.contains("DEBUG server route rejected -> rejected non-TLS client hello"));
+        assert!(output.contains("DEBUG server route rejected: reason=non-tls-client-hello"));
         assert!(
-            output.contains("DEBUG server route rejected -> rejected TLS client hello without SNI")
+            output.contains("DEBUG server route rejected: reason=missing-sni-client-hello")
         );
     }
 
@@ -950,13 +1008,13 @@ mod tests {
         });
 
         assert!(output.contains(
-            "WARN client route app.example.test -> backend connect failed for 127.0.0.1:8443"
+            "WARN client route unavailable: public-hostname=app.example.test backend-address=127.0.0.1:8443 reason=backend-connect-failed"
         ));
         assert!(output.contains(
-            "WARN client route app.example.test -> backend write failed for 127.0.0.1:8443"
+            "WARN client route unavailable: public-hostname=app.example.test backend-address=127.0.0.1:8443 reason=backend-write-failed"
         ));
         assert!(output.contains(
-            "WARN client route app.example.test -> terminate mode unavailable (TLS config missing)"
+            "WARN client route unavailable: public-hostname=app.example.test reason=tls-config-missing"
         ));
     }
 
@@ -989,7 +1047,7 @@ mod tests {
         assert_eq!(parts[1], "WARN");
         assert_eq!(
             parts[2..].join(" "),
-            "client route app.example.test -> unavailable (no matching client service)"
+            "client route unavailable: public-hostname=app.example.test reason=no-matching-service"
         );
     }
 

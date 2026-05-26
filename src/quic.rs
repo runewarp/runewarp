@@ -32,10 +32,8 @@ pub enum QuicConfigError {
 impl fmt::Display for QuicConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Rustls(error) => write!(formatter, "TLS configuration error: {error}"),
-            Self::NoInitialCipherSuite(error) => {
-                write!(formatter, "QUIC TLS configuration error: {error}")
-            }
+            Self::Rustls(_) => formatter.write_str("TLS configuration error"),
+            Self::NoInitialCipherSuite(_) => formatter.write_str("QUIC TLS configuration error"),
         }
     }
 }

@@ -65,11 +65,9 @@ pub enum ClientConnectError {
 impl fmt::Display for ClientConnectError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bind(error) => write!(formatter, "failed to bind the client endpoint: {error}"),
-            Self::Connect(error) => {
-                write!(formatter, "failed to start the client connection: {error}")
-            }
-            Self::Handshake(error) => write!(formatter, "client QUIC handshake failed: {error}"),
+            Self::Bind(_) => formatter.write_str("failed to bind the client endpoint"),
+            Self::Connect(_) => formatter.write_str("failed to start the client connection"),
+            Self::Handshake(_) => formatter.write_str("client QUIC handshake failed"),
         }
     }
 }
@@ -180,5 +178,24 @@ fn services_and_configs_for_route_mode(
             services,
             hostname_tls_configs,
         } => (services, hostname_tls_configs),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::ClientConnectError;
+
+    #[test]
+    fn client_connect_error_display_omits_nested_transport_detail() {
+        assert_eq!(
+            ClientConnectError::Bind(io::Error::other("address already in use")).to_string(),
+            "failed to bind the client endpoint"
+        );
+        assert_eq!(
+            ClientConnectError::Handshake(quinn::ConnectionError::TimedOut).to_string(),
+            "client QUIC handshake failed"
+        );
     }
 }

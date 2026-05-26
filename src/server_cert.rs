@@ -35,23 +35,19 @@ pub enum ServerCertError {
 impl fmt::Display for ServerCertError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::CreateDirectory { path, source } => {
-                write!(formatter, "failed to create {}: {source}", path.display())
+            Self::CreateDirectory { path, .. } => {
+                write!(formatter, "failed to create {}", path.display())
             }
-            Self::ReadFile { path, source } => {
-                write!(formatter, "failed to read {}: {source}", path.display())
+            Self::ReadFile { path, .. } => {
+                write!(formatter, "failed to read {}", path.display())
             }
-            Self::WriteFile { path, source } => {
-                write!(formatter, "failed to write {}: {source}", path.display())
+            Self::WriteFile { path, .. } => {
+                write!(formatter, "failed to write {}", path.display())
             }
-            Self::Generate(source) => write!(
-                formatter,
-                "failed to generate server certificates: {source}"
-            ),
-            Self::ParseState(source) => write!(
-                formatter,
-                "failed to parse stored server certificate state: {source}"
-            ),
+            Self::Generate(_) => formatter.write_str("failed to generate server certificates"),
+            Self::ParseState(_) => {
+                formatter.write_str("failed to parse stored server certificate state")
+            }
         }
     }
 }

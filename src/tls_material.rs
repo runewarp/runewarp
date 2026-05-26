@@ -54,8 +54,8 @@ pub(crate) enum TlsMaterialError {
 impl fmt::Display for TlsMaterialError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ReadFile { path, source } => {
-                write!(formatter, "failed to read {}: {source}", path.display())
+            Self::ReadFile { path, .. } => {
+                write!(formatter, "failed to read {}", path.display())
             }
             Self::MissingCertificate { path } => {
                 write!(formatter, "no certificates found in {}", path.display())
@@ -63,28 +63,21 @@ impl fmt::Display for TlsMaterialError {
             Self::MissingPrivateKey { path } => {
                 write!(formatter, "no private key found in {}", path.display())
             }
-            Self::ParsePem { path, source } => {
-                write!(
-                    formatter,
-                    "failed to parse PEM in {}: {source}",
-                    path.display()
-                )
+            Self::ParsePem { path, .. } => {
+                write!(formatter, "failed to parse PEM in {}", path.display())
             }
             Self::ParseX509 { path } => {
                 write!(formatter, "failed to parse X.509 DER in {}", path.display())
             }
-            Self::AddRootCertificate { path, source } => {
+            Self::AddRootCertificate { path, .. } => {
                 write!(
                     formatter,
-                    "failed to load root certificate from {}: {source}",
+                    "failed to load root certificate from {}",
                     path.display()
                 )
             }
-            Self::BuildServerVerifier(source) => {
-                write!(
-                    formatter,
-                    "failed to build the server certificate verifier: {source}"
-                )
+            Self::BuildServerVerifier(_) => {
+                formatter.write_str("failed to build the server certificate verifier")
             }
             Self::InvalidServerName { server_name } => {
                 write!(
@@ -97,12 +90,9 @@ impl fmt::Display for TlsMaterialError {
                 "{} must contain a CA certificate that issued the server certificate",
                 path.display()
             ),
-            Self::InvalidServerCertificate {
-                server_name,
-                source,
-            } => write!(
+            Self::InvalidServerCertificate { server_name, .. } => write!(
                 formatter,
-                "server certificate is not valid for {server_name}: {source}"
+                "server certificate is not valid for {server_name}"
             ),
             Self::InvalidConfiguration(source) => write!(formatter, "{source}"),
         }

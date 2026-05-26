@@ -471,7 +471,7 @@ fn client_tunnel_connecting_line(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
-    retry_interval: Duration,
+    _retry_interval: Duration,
 ) -> String {
     let action = match (phase, attempt_kind) {
         (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::Initial) => {
@@ -483,10 +483,7 @@ fn client_tunnel_connecting_line(
         }
         (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::IntervalRetry)
         | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::IntervalRetry) => {
-            format!(
-                "retrying client tunnel connection after waiting {}s",
-                retry_interval.as_secs()
-            )
+            "retrying client tunnel connection".to_owned()
         }
         (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::Initial) => {
             "client tunnel reconnecting".to_owned()
@@ -500,7 +497,7 @@ fn client_tunnel_connect_failed_line(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
-    retry_interval: Duration,
+    _retry_interval: Duration,
     error: &str,
 ) -> String {
     let attempt_label = match (phase, attempt_kind) {
@@ -513,17 +510,15 @@ fn client_tunnel_connect_failed_line(
         }
         (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::IntervalRetry)
         | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::IntervalRetry) => {
-            format!(
-                "client tunnel interval retry failed after waiting {}s",
-                retry_interval.as_secs()
-            )
+            "client tunnel retry failed".to_owned()
         }
         (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::Initial) => {
             "client tunnel reconnect failed".to_owned()
         }
     };
     format!(
-        "{attempt_label} to {configured_server_addr} (resolved {resolved_server_addr}): {error}"
+        "{attempt_label} to {configured_server_addr} (resolved {resolved_server_addr}): {}",
+        summarize_error(error)
     )
 }
 
@@ -531,7 +526,7 @@ fn client_tunnel_resolution_failed_line(
     phase: ClientTunnelPhase,
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
-    retry_interval: Duration,
+    _retry_interval: Duration,
     error: &str,
 ) -> String {
     let attempt_label = match (phase, attempt_kind) {
@@ -544,16 +539,16 @@ fn client_tunnel_resolution_failed_line(
         }
         (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::IntervalRetry)
         | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::IntervalRetry) => {
-            format!(
-                "client tunnel interval retry resolution failed after waiting {}s",
-                retry_interval.as_secs()
-            )
+            "client tunnel retry resolution failed".to_owned()
         }
         (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::Initial) => {
             "client tunnel reconnect resolution failed".to_owned()
         }
     };
-    format!("{attempt_label} for {configured_server_addr}: {error}")
+    format!(
+        "{attempt_label} for {configured_server_addr}: {}",
+        summarize_error(error)
+    )
 }
 
 fn client_tunnel_connected_line(
@@ -566,6 +561,13 @@ fn client_tunnel_connected_line(
         ClientTunnelPhase::Reconnecting => "client tunnel reconnected",
     };
     format!("{action} to {configured_server_addr} (resolved {resolved_server_addr})")
+}
+
+fn summarize_error(error: &str) -> &str {
+    match error.split_once(": ") {
+        Some((summary, _)) => summary,
+        None => error,
+    }
 }
 
 #[cfg(test)]
@@ -585,9 +587,10 @@ mod tests {
         ClientRouteOutcome, ClientTunnelAttemptKind, ClientTunnelPhase, EventLevel, InstallOutcome,
         ServerRouteOutcome, build_subscriber, client_route, client_trust_store_warning,
         client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
-        client_tunnel_disconnected, emit, install, installed_level, server_route,
-        server_route_rejected_client_hello, server_tunnel_connection_accepted,
-        server_tunnel_connection_replaced, server_tunnel_connection_terminated, warning,
+        client_tunnel_disconnected, client_tunnel_resolution_failed, emit, install,
+        installed_level, server_route, server_route_rejected_client_hello,
+        server_tunnel_connection_accepted, server_tunnel_connection_replaced,
+        server_tunnel_connection_terminated, warning,
     };
     use crate::{ClientHelloError, ClientIdentity, LogLevel};
 
@@ -815,7 +818,7 @@ mod tests {
             "WARN initial client tunnel connection failed to tunnel.example.test:443 (resolved 203.0.113.10:443): DNS timeout"
         ));
         assert!(output.contains(
-            "INFO retrying client tunnel connection after waiting 5s to tunnel.example.test:443 (resolved 203.0.113.10:443)"
+            "INFO retrying client tunnel connection to tunnel.example.test:443 (resolved 203.0.113.10:443)"
         ));
         assert!(output.contains(
             "INFO client tunnel reconnected to tunnel.example.test:443 (resolved 203.0.113.10:443)"
@@ -826,6 +829,49 @@ mod tests {
         assert!(output.contains(
             "WARN 2 system trust-store certificate(s) could not be loaded; continuing with the successfully loaded trust anchors"
         ));
+    }
+
+    #[test]
+    fn client_tunnel_failure_logs_drop_nested_error_detail() {
+        let configured_server_addr = "tunnel.example.test:443";
+        let resolved_server_addr: SocketAddr = "203.0.113.10:443".parse().unwrap();
+        let output = capture(LogLevel::Info, || {
+            client_tunnel_resolution_failed(
+                ClientTunnelPhase::Establishing,
+                ClientTunnelAttemptKind::Initial,
+                configured_server_addr,
+                Duration::from_secs(5),
+                "failed to resolve the Server hostname: failed to lookup address information: nodename nor servname provided, or not known",
+            );
+            client_tunnel_connect_failed(
+                ClientTunnelPhase::Establishing,
+                ClientTunnelAttemptKind::Initial,
+                configured_server_addr,
+                resolved_server_addr,
+                Duration::from_secs(5),
+                "client QUIC handshake failed: timed out",
+            );
+            client_tunnel_resolution_failed(
+                ClientTunnelPhase::Reconnecting,
+                ClientTunnelAttemptKind::IntervalRetry,
+                configured_server_addr,
+                Duration::from_secs(5),
+                "failed to resolve the Server hostname: temporary failure in name resolution",
+            );
+        });
+
+        assert!(output.contains(
+            "WARN initial client tunnel resolution failed for tunnel.example.test:443: failed to resolve the Server hostname"
+        ));
+        assert!(output.contains(
+            "WARN initial client tunnel connection failed to tunnel.example.test:443 (resolved 203.0.113.10:443): client QUIC handshake failed"
+        ));
+        assert!(output.contains(
+            "WARN client tunnel retry resolution failed for tunnel.example.test:443: failed to resolve the Server hostname"
+        ));
+        assert!(!output.contains("after waiting 5s"));
+        assert!(!output.contains("timed out"));
+        assert!(!output.contains("failed to lookup address information"));
     }
 
     #[test]

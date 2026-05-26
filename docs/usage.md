@@ -52,9 +52,36 @@ cargo install runewarp
 Runewarp is one binary with role-specific subcommands:
 
 ```bash
+runewarp --help
+runewarp help
 runewarp server --help
 runewarp client --help
 ```
+
+Current top-level help output:
+
+```text
+Runewarp: Private tunneling for TLS passthrough
+
+Usage: runewarp [COMMAND]
+
+Commands:
+  server  Run the Server runtime and server-side setup commands
+  client  Run the Client runtime and client-side setup commands
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+
+Examples:
+  runewarp server
+  runewarp client
+
+Config defaults:
+  Commands use the default Runewarp config path unless -c, --config is set.
+```
+
+Help stays in standard Clap layout. Use `help` subcommands when that is more natural (`runewarp client help`, `runewarp server cert help`). Commands that select config also accept `-c` as the shorthand for `--config`.
 
 ### 2. Prepare the Server certificate path
 
@@ -83,6 +110,12 @@ runewarp client identity init
 
 Read the generated `client-identity.txt` value from the default Client identity directory and place it into the matching Server `[[server.tunnels]]` entry as `client-identity`.
 
+To print only the fingerprint for scripts:
+
+```bash
+runewarp client identity show
+```
+
 If you omit `--dir`, Runewarp uses the default XDG data locations:
 
 - Client identity material: `$XDG_DATA_HOME/runewarp/client/identity/` or `~/.local/share/runewarp/client/identity/`
@@ -110,7 +143,7 @@ runewarp client public-cert init --hostname app.example.com
 runewarp client --config client.toml public-cert init
 ```
 
-Run once per terminating hostname, or omit `--hostname` and supply `--config` to derive the full terminating-hostname set from `client.services[].public-hostnames` where `tls-mode = "terminate"`. A second run with a new hostname reuses the existing **Public hostname CA** and adds only the new **Public hostname certificate**. Share `public-ca.crt` with each Visitor as their trust anchor. When the CA already exists, `runewarp client public-cert init` refuses to replace it, keeping that trust anchor stable until you explicitly run `rotate-ca`.
+Run once per terminating hostname, or omit `--hostname` and supply `--config` to derive the full terminating-hostname set from `client.services[].public-hostnames` where `tls-mode = "terminate"`. A second run with a new hostname reuses the existing **Public hostname CA** and adds only the new **Public hostname certificate**. Rerunning `init` for a hostname whose complete material already exists succeeds idempotently and reports that state on stdout instead of treating it as a failure. Share `public-ca.crt` with each Visitor as their trust anchor. The trust anchor stays stable until you explicitly run `rotate-ca`.
 
 Set `client.public-cert-dir` in the Client config to the directory where the material was written. The `client public-cert` commands resolve their working directory from `--dir`, then `client.public-cert-dir`, then the XDG default when neither is set, but runtime validation does **not** make manual mode implicit from that default path: terminating Services still require explicit `client.public-cert-dir` in config unless you use `[client.acme]`.
 
@@ -189,8 +222,8 @@ See [`docs/configuration.md`](configuration.md) for exact-match Client routing, 
 ### 5. Start the runtime
 
 ```bash
-runewarp server --config /etc/runewarp/server.toml
-runewarp client --config /etc/runewarp/client.toml
+runewarp server -c /etc/runewarp/server.toml
+runewarp client -c /etc/runewarp/client.toml
 ```
 
 Runewarp loads `--config` from `$XDG_CONFIG_HOME/runewarp/config.toml` when omitted, falling back to `~/.config/runewarp/config.toml` when `XDG_CONFIG_HOME` is unset. Explicit paths are still easier to operate and review.
@@ -222,7 +255,7 @@ The routing flags belong only to the runtime `runewarp client` form. `runewarp c
 
 Runtime diagnostics are stderr-only. Each emitted line uses a UTC RFC3339 timestamp, level, and message.
 
-At the default top-level `log-level = "info"`, Runewarp shows tunnel connection lifecycle plus warnings and errors. Client tunnel connection attempt lines include the configured **Server address** and the resolved socket address for that dial attempt; connected and dropped lifecycle lines keep only the configured **Server address**. Set `log-level = "debug"` to add routing diagnostics for successful route selection, Client passthrough vs terminate decisions, the selected Client `backend-address`, and separate detail lines for tunnel failure causes that are shortened at `info`.
+At the default top-level `log-level = "info"`, Runewarp shows runtime readiness, tunnel connection lifecycle, warnings, and errors. `runewarp server` logs separate readiness lines for the public TCP listener and the tunnel UDP listener. `runewarp client` logs tunnel connection attempts, then a connected line followed by a ready line after the first successful **Tunnel connection**. Bind and startup failures are emitted as runtime `ERROR` lines on stderr rather than as plain text. Set `log-level = "debug"` to add routing diagnostics for successful route selection, Client passthrough vs terminate decisions, the selected Client `backend-address`, and separate detail lines for tunnel failure causes that are shortened at `info`.
 
 When routing diagnostics are enabled, the Server and Client help confirm:
 

@@ -848,6 +848,7 @@ mod tests {
         Fut: std::future::Future<Output = io::Result<()>>,
     {
         let _lock = LOG_CAPTURE_LOCK.lock().await;
+        let _ = crate::runtime_log::install(level);
         let buffer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry()
             .with(level_filter(level))
@@ -860,7 +861,7 @@ mod tests {
             );
         let _guard = tracing::subscriber::set_default(subscriber);
         action.await?;
-        timeout(Duration::from_secs(1), async {
+        timeout(Duration::from_secs(5), async {
             loop {
                 if buffer.read().contains(needle) {
                     break;

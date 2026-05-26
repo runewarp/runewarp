@@ -252,7 +252,7 @@ impl fmt::Display for ServerStartupError {
             }
             Self::InvalidTlsMaterial(message) => write!(formatter, "{message}"),
             Self::QuicConfig(source) => write!(formatter, "{source}"),
-            Self::Bind(_) => formatter.write_str("failed to bind server listeners"),
+            Self::Bind(source) => write!(formatter, "{source}"),
             Self::CreateDirectory {
                 field_name, path, ..
             } => write!(
@@ -607,21 +607,24 @@ fn build_acme_termination_configs(
 mod tests {
     use std::fs;
     use std::io;
+    use std::path::Path;
     use std::path::PathBuf;
+    use std::str::FromStr;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
-    use rcgen::generate_simple_self_signed;
+    use rcgen::{CertificateParams, KeyPair, generate_simple_self_signed};
     use rustls::pki_types::CertificateDer;
 
     use super::{
-        ClientStartupError, NativeRootsLoad, ServerStartupError, acme_terminating_hostnames,
-        build_root_store,
+        ClientStartupError, NativeRootsLoad, PreparedServer, ServerStartupError,
+        acme_terminating_hostnames, build_root_store,
     };
     use crate::{
-        ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, LogLevel,
-        ServerCertificateSettings, ServerSettings,
+        ClientIdentity, ClientPublicCertConfig, ClientServiceSettings, ClientSettings,
+        ClientTlsMode, LogLevel, ServerCertificateSettings, ServerSettings, ServerTunnelSettings,
     };
+    use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
 
     #[test]
     fn configured_server_ca_file_still_loads_without_native_roots() {
@@ -699,14 +702,17 @@ mod tests {
     }
 
     #[test]
-    fn startup_error_display_omits_nested_os_detail() {
+    fn startup_error_display_includes_bind_address_and_os_detail() {
         assert_eq!(
             ClientStartupError::Resolve(io::Error::other("lookup failed")).to_string(),
             "failed to resolve the Server hostname"
         );
         assert_eq!(
-            ServerStartupError::Bind(io::Error::other("address already in use")).to_string(),
-            "failed to bind server listeners"
+            ServerStartupError::Bind(io::Error::other(
+                "failed to bind server.public-bind-address 127.0.0.1:443: address already in use",
+            ))
+            .to_string(),
+            "failed to bind server.public-bind-address 127.0.0.1:443: address already in use"
         );
         assert_eq!(
             ClientStartupError::CreateDirectory {
@@ -930,6 +936,114 @@ mod tests {
                 ..
             } if path == state_directory
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn server_startup_reports_public_bind_address_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempfile::tempdir()?;
+        write_manual_server_certificate(tempdir.path())?;
+        let occupied_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let public_bind_address = occupied_listener.local_addr()?;
+
+        let error = match PreparedServer::bind(
+            &server_settings(tempdir.path()),
+            public_bind_address,
+            "127.0.0.1:0".parse()?,
+        )
+        .await
+        {
+            Ok(_) => panic!("expected public listener bind failure"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            &error,
+            ServerStartupError::Bind(source)
+                if source.to_string().starts_with(&format!(
+                    "failed to bind server.public-bind-address {public_bind_address}:"
+                ))
+        ));
+        let message = error.to_string();
+        assert!(
+            message.starts_with(&format!(
+                "failed to bind server.public-bind-address {public_bind_address}:"
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains("Address already in use") || message.contains("address already in use"),
+            "{message}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn server_startup_reports_tunnel_bind_address_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempfile::tempdir()?;
+        write_manual_server_certificate(tempdir.path())?;
+        let occupied_socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let tunnel_bind_address = occupied_socket.local_addr()?;
+
+        let error = match PreparedServer::bind(
+            &server_settings(tempdir.path()),
+            "127.0.0.1:0".parse()?,
+            tunnel_bind_address,
+        )
+        .await
+        {
+            Ok(_) => panic!("expected tunnel listener bind failure"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            &error,
+            ServerStartupError::Bind(source)
+                if source.to_string().starts_with(&format!(
+                    "failed to bind server.tunnel-bind-address {tunnel_bind_address}:"
+                ))
+        ));
+        let message = error.to_string();
+        assert!(
+            message.starts_with(&format!(
+                "failed to bind server.tunnel-bind-address {tunnel_bind_address}:"
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains("Address already in use") || message.contains("address already in use"),
+            "{message}"
+        );
+        Ok(())
+    }
+
+    fn server_settings(certificate_directory: &Path) -> ServerSettings {
+        ServerSettings {
+            hostname: "tunnel.example.test".to_owned(),
+            log_level: LogLevel::Info,
+            certificate: ServerCertificateSettings::Manual {
+                directory: certificate_directory.to_path_buf(),
+            },
+            public_bind_address: "127.0.0.1:0".parse().unwrap(),
+            tunnel_connection_bind_address: "127.0.0.1:0".parse().unwrap(),
+            tunnels: vec![ServerTunnelSettings {
+                public_hostnames: vec!["app.example.test".to_owned()],
+                client_identity: ClientIdentity::from_str(
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .unwrap(),
+            }],
+        }
+    }
+
+    fn write_manual_server_certificate(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let signing_key = KeyPair::generate()?;
+        let certificate = CertificateParams::new(vec!["tunnel.example.test".to_owned()])?
+            .self_signed(&signing_key)?;
+        fs::write(directory.join(SERVER_CERT_FILENAME), certificate.pem())?;
+        fs::write(directory.join(SERVER_KEY_FILENAME), signing_key.serialize_pem())?;
         Ok(())
     }
 }

@@ -177,7 +177,7 @@ fn client_identity_init_writes_pem_artifacts_and_a_client_identity() {
 }
 
 #[test]
-fn client_identity_init_refuses_to_overwrite_existing_identity_artifacts() {
+fn client_identity_init_succeeds_when_identity_artifacts_already_exist() {
     let tempdir = tempdir().unwrap();
 
     Command::cargo_bin("runewarp")
@@ -192,7 +192,7 @@ fn client_identity_init_refuses_to_overwrite_existing_identity_artifacts() {
         .current_dir(tempdir.path())
         .args(["client", "identity", "init", "--dir", "client-identity"])
         .assert()
-        .failure();
+        .success();
 }
 
 #[test]
@@ -330,6 +330,108 @@ fn client_identity_rotate_replaces_the_key_and_client_identity() {
             .to_string(),
         rotated_identity.trim(),
     );
+}
+
+#[test]
+fn client_identity_show_prints_only_the_fingerprint() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .assert()
+        .success();
+
+    let expected_identity =
+        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "show", "--dir", "client-identity"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        String::from_utf8(assert.get_output().stdout.clone()).unwrap(),
+        format!("{}\n", expected_identity.trim())
+    );
+    assert!(assert.get_output().stderr.is_empty());
+}
+
+#[test]
+fn client_identity_init_is_idempotent_when_material_already_exists() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .assert()
+        .success();
+
+    let original_identity =
+        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let current_identity =
+        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
+
+    assert_eq!(current_identity, original_identity);
+    assert!(stdout.contains("Client identity already exists"));
+    assert!(!stdout.contains("os error"));
+}
+
+#[test]
+fn client_identity_init_reports_repair_guidance_for_partial_material() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir_all(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder certificate",
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("incomplete or inconsistent"));
+    assert!(stderr.contains("runewarp client identity init"));
+    assert!(stderr.contains("client-identity/client.crt"));
+    assert!(!stderr.contains("os error"));
+}
+
+#[test]
+fn client_identity_init_reports_paths_and_utc_timestamps() {
+    let tempdir = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Identity directory: client-identity"));
+    assert!(stdout.contains("Issued at (UTC):"));
+    assert!(stdout.contains("Renew after (UTC):"));
+    assert!(stdout.contains("Expires at (UTC):"));
 }
 
 fn assert_exists(path: &Path) {

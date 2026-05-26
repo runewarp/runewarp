@@ -238,6 +238,8 @@ pub enum ClientIdentitySubcommand {
     Renew(ClientIdentityDirArgs),
     /// Rotate the Client keypair and issue a new Client identity.
     Rotate(ClientIdentityDirArgs),
+    /// Print the Client identity fingerprint for scripts.
+    Show(ClientIdentityDirArgs),
 }
 
 #[derive(Debug, Args)]

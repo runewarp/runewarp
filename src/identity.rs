@@ -237,6 +237,12 @@ pub fn inspect_client_certificate_renewal(
     ))
 }
 
+pub fn read_client_identity(
+    directory: &Path,
+) -> Result<ClientIdentity, ClientIdentityMaterialError> {
+    Ok(load_client_identity_material(directory)?.client_identity)
+}
+
 pub fn rotate_client_identity(
     directory: &Path,
 ) -> Result<ClientCertificateState, ClientIdentityMaterialError> {

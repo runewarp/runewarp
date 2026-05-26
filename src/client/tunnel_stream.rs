@@ -360,7 +360,7 @@ mod tests {
     async fn routing_logs_include_backend_selection_at_debug_and_warn_failures() -> io::Result<()> {
         let debug_output = capture_logs_with_wait(
             LogLevel::Debug,
-            "DEBUG client route app.example.test -> passthrough to ",
+            "DEBUG client route passthrough: public-hostname=app.example.test backend-address=",
             async {
                 assert_forwarded_stream_without_spawning_handler(
                     vec![ClientServiceSettings {
@@ -377,12 +377,14 @@ mod tests {
 
         assert!(!debug_output.contains("ping"));
         assert!(!debug_output.contains("pong"));
-        assert!(debug_output.contains("DEBUG client route app.example.test -> passthrough to "));
+        assert!(debug_output.contains(
+            "DEBUG client route passthrough: public-hostname=app.example.test backend-address="
+        ));
         assert!(!debug_output.contains(backend_placeholder().as_str()));
 
         let info_output = capture_logs_with_wait(
             LogLevel::Info,
-            "WARN client route app.example.test -> terminate mode unavailable (TLS config missing)",
+            "WARN client route unavailable: public-hostname=app.example.test reason=tls-config-missing",
             async {
                 assert_forwarded_stream_without_spawning_handler(
                     vec![ClientServiceSettings {
@@ -435,14 +437,14 @@ mod tests {
 
         assert!(!info_output.contains("passthrough to 127.0.0.1:"));
         assert!(info_output.contains(
-            "WARN client route api.example.test -> unavailable (no matching client service)"
+            "WARN client route unavailable: public-hostname=api.example.test reason=no-matching-service"
         ));
         assert!(
             info_output
-                .contains("WARN client route app.example.test -> backend connect failed for")
+                .contains("WARN client route unavailable: public-hostname=app.example.test backend-address=")
         );
         assert!(info_output.contains(
-            "WARN client route app.example.test -> terminate mode unavailable (TLS config missing)"
+            "WARN client route unavailable: public-hostname=app.example.test reason=tls-config-missing"
         ));
 
         Ok(())

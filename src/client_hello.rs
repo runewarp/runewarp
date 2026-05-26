@@ -52,7 +52,7 @@ pub enum ClientHelloError {
 impl fmt::Display for ClientHelloError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(error) => write!(formatter, "client hello IO error: {error}"),
+            Self::Io(_) => formatter.write_str("client hello IO error"),
             Self::InvalidTls => formatter.write_str("invalid TLS client hello"),
             Self::InvalidSni => formatter.write_str("invalid SNI in client hello"),
             Self::MissingSni => formatter.write_str("missing SNI in client hello"),

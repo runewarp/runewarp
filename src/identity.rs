@@ -174,11 +174,11 @@ pub enum ClientIdentityMaterialError {
 impl fmt::Display for ClientIdentityMaterialError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ReadFile { path, source } => {
-                write!(formatter, "failed to read {}: {source}", path.display())
+            Self::ReadFile { path, .. } => {
+                write!(formatter, "failed to read {}", path.display())
             }
-            Self::WriteFile { path, source } => {
-                write!(formatter, "failed to write {}: {source}", path.display())
+            Self::WriteFile { path, .. } => {
+                write!(formatter, "failed to write {}", path.display())
             }
             Self::ParseCertificate { path } => {
                 write!(
@@ -187,14 +187,8 @@ impl fmt::Display for ClientIdentityMaterialError {
                     path.display()
                 )
             }
-            Self::ParseKey(source) => write!(
-                formatter,
-                "failed to parse the client private key: {source}"
-            ),
-            Self::Generate(source) => write!(
-                formatter,
-                "failed to generate a client certificate: {source}"
-            ),
+            Self::ParseKey(_) => formatter.write_str("failed to parse the client private key"),
+            Self::Generate(_) => formatter.write_str("failed to generate a client certificate"),
             Self::IdentityMismatch { stored, derived } => write!(
                 formatter,
                 "stored client identity {stored} does not match the current key or certificate identity {derived}"

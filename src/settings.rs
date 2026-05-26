@@ -160,16 +160,12 @@ pub enum SettingsError {
 impl fmt::Display for SettingsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Read { path, source } => {
-                write!(formatter, "failed to read {}: {source}", path.display())
+            Self::Read { path, .. } => {
+                write!(formatter, "failed to read {}", path.display())
             }
-            Self::Parse {
-                path,
-                section,
-                source,
-            } => write!(
+            Self::Parse { path, section, .. } => write!(
                 formatter,
-                "failed to parse [{section}] in {}: {source}",
+                "failed to parse [{section}] in {}",
                 path.display()
             ),
             Self::Validation {
@@ -1290,9 +1286,10 @@ struct RawGlobalConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::path::PathBuf;
 
-    use super::{is_valid_backend_address, resolve_path};
+    use super::{SettingsError, is_valid_backend_address, resolve_path};
 
     #[test]
     fn resolves_relative_paths_against_the_config_directory() {
@@ -1310,5 +1307,17 @@ mod tests {
         assert!(is_valid_backend_address("caddy.local:443"));
         assert!(is_valid_backend_address("127.0.0.1:443"));
         assert!(!is_valid_backend_address("caddy.local"));
+    }
+
+    #[test]
+    fn settings_error_display_omits_nested_io_detail() {
+        assert_eq!(
+            SettingsError::Read {
+                path: PathBuf::from("/tmp/runewarp/config.toml"),
+                source: io::Error::other("no such file or directory"),
+            }
+            .to_string(),
+            "failed to read /tmp/runewarp/config.toml"
+        );
     }
 }

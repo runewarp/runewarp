@@ -238,8 +238,8 @@ pub enum ServerStartupError {
 impl fmt::Display for ServerStartupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ReadFile { path, source } => {
-                write!(formatter, "failed to read {}: {source}", path.display())
+            Self::ReadFile { path, .. } => {
+                write!(formatter, "failed to read {}", path.display())
             }
             Self::MissingCertificate { path } => {
                 write!(formatter, "no certificates found in {}", path.display())
@@ -247,23 +247,17 @@ impl fmt::Display for ServerStartupError {
             Self::MissingPrivateKey { path } => {
                 write!(formatter, "no private key found in {}", path.display())
             }
-            Self::ParsePem { path, source } => {
-                write!(
-                    formatter,
-                    "failed to parse PEM in {}: {source}",
-                    path.display()
-                )
+            Self::ParsePem { path, .. } => {
+                write!(formatter, "failed to parse PEM in {}", path.display())
             }
             Self::InvalidTlsMaterial(message) => write!(formatter, "{message}"),
             Self::QuicConfig(source) => write!(formatter, "{source}"),
-            Self::Bind(source) => write!(formatter, "failed to bind server listeners: {source}"),
+            Self::Bind(_) => formatter.write_str("failed to bind server listeners"),
             Self::CreateDirectory {
-                field_name,
-                path,
-                source,
+                field_name, path, ..
             } => write!(
                 formatter,
-                "failed to create {field_name} directory {}: {source}",
+                "failed to create {field_name} directory {}",
                 path.display()
             ),
         }
@@ -335,14 +329,11 @@ impl fmt::Display for ClientStartupError {
                 formatter,
                 "failed to load the system trust store: {errors} certificate(s) could not be loaded"
             ),
-            Self::AddRootCertificate(source) => write!(
-                formatter,
-                "failed to add a trusted CA certificate: {source}"
-            ),
-            Self::QuicConfig(source) => write!(formatter, "{source}"),
-            Self::Resolve(source) => {
-                write!(formatter, "failed to resolve the Server hostname: {source}")
+            Self::AddRootCertificate(_) => {
+                formatter.write_str("failed to add a trusted CA certificate")
             }
+            Self::QuicConfig(source) => write!(formatter, "{source}"),
+            Self::Resolve(_) => formatter.write_str("failed to resolve the Server hostname"),
             Self::MissingServerAddress { server_hostname } => {
                 write!(
                     formatter,
@@ -351,12 +342,10 @@ impl fmt::Display for ClientStartupError {
             }
             Self::Connect(source) => write!(formatter, "{source}"),
             Self::CreateDirectory {
-                field_name,
-                path,
-                source,
+                field_name, path, ..
             } => write!(
                 formatter,
-                "failed to create {field_name} directory {}: {source}",
+                "failed to create {field_name} directory {}",
                 path.display()
             ),
         }
@@ -617,6 +606,8 @@ fn build_acme_termination_configs(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io;
+    use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
@@ -705,6 +696,27 @@ mod tests {
             0,
             &warning_emitted
         ));
+    }
+
+    #[test]
+    fn startup_error_display_omits_nested_os_detail() {
+        assert_eq!(
+            ClientStartupError::Resolve(io::Error::other("lookup failed")).to_string(),
+            "failed to resolve the Server hostname"
+        );
+        assert_eq!(
+            ServerStartupError::Bind(io::Error::other("address already in use")).to_string(),
+            "failed to bind server listeners"
+        );
+        assert_eq!(
+            ClientStartupError::CreateDirectory {
+                field_name: "client.acme.state-dir",
+                path: PathBuf::from("/tmp/runewarp/client-acme"),
+                source: io::Error::other("permission denied"),
+            }
+            .to_string(),
+            "failed to create client.acme.state-dir directory /tmp/runewarp/client-acme"
+        );
     }
 
     #[test]

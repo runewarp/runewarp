@@ -208,6 +208,113 @@ cert-dir = "configured/server-cert"
 }
 
 #[test]
+fn server_cert_init_is_idempotent_when_material_already_exists() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    let original_hostname =
+        fs::read_to_string(tempdir.path().join("server-cert/state/server-hostname.txt")).unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let current_hostname =
+        fs::read_to_string(tempdir.path().join("server-cert/state/server-hostname.txt")).unwrap();
+
+    assert_eq!(current_hostname, original_hostname);
+    assert!(stdout.contains("Server certificate material already exists"));
+    assert!(!stdout.contains("os error"));
+}
+
+#[test]
+fn server_cert_init_reports_repair_guidance_for_partial_material() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir_all(tempdir.path().join("server-cert")).unwrap();
+    fs::write(
+        tempdir.path().join("server-cert/server.crt"),
+        "placeholder certificate",
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("incomplete or inconsistent"));
+    assert!(stderr.contains("runewarp server cert init"));
+    assert!(stderr.contains("server-cert/server.crt"));
+    assert!(!stderr.contains("os error"));
+}
+
+#[test]
+fn server_cert_init_reports_paths_and_utc_timestamps() {
+    let tempdir = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Server hostname: tunnel.example.test"));
+    assert!(stdout.contains("Certificate directory: server-cert"));
+    assert!(stdout.contains("Issued at (UTC):"));
+    assert!(stdout.contains("Renew after (UTC):"));
+    assert!(stdout.contains("Expires at (UTC):"));
+}
+
+#[test]
 fn server_cert_rotate_ca_uses_the_configured_hostname_when_hostname_is_omitted() {
     let tempdir = tempdir().unwrap();
     let configured_dir = tempdir.path().join("configured/server-cert");
@@ -388,7 +495,7 @@ directory = "legacy/server-cert"
 }
 
 #[test]
-fn server_cert_init_refuses_to_overwrite_existing_material() {
+fn server_cert_init_succeeds_when_material_already_exists() {
     let tempdir = tempdir().unwrap();
 
     Command::cargo_bin("runewarp")
@@ -419,7 +526,7 @@ fn server_cert_init_refuses_to_overwrite_existing_material() {
             "tunnel.example.test",
         ])
         .assert()
-        .failure();
+        .success();
 }
 
 #[cfg(unix)]

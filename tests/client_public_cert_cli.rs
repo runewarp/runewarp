@@ -145,7 +145,7 @@ fn client_public_cert_init_writes_pem_artifacts_and_reports_output() {
 }
 
 #[test]
-fn client_public_cert_init_refuses_to_overwrite_existing_artifacts() {
+fn client_public_cert_init_succeeds_when_artifacts_already_exist() {
     let tempdir = tempdir().unwrap();
 
     Command::cargo_bin("runewarp")
@@ -176,7 +176,114 @@ fn client_public_cert_init_refuses_to_overwrite_existing_artifacts() {
             "app.example.test",
         ])
         .assert()
+        .success();
+}
+
+#[test]
+fn client_public_cert_init_is_idempotent_when_hostname_material_already_exists() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "client-public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let original_ca = fs::read(tempdir.path().join("client-public-cert/public-ca.crt")).unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "client-public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let current_ca = fs::read(tempdir.path().join("client-public-cert/public-ca.crt")).unwrap();
+
+    assert_eq!(current_ca, original_ca);
+    assert!(stdout.contains("Public hostname certificate material already exists"));
+    assert!(!stdout.contains("os error"));
+}
+
+#[test]
+fn client_public_cert_init_reports_repair_guidance_for_partial_material() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir_all(tempdir.path().join("client-public-cert/app.example.test")).unwrap();
+    fs::write(
+        tempdir
+            .path()
+            .join("client-public-cert/app.example.test/public.crt"),
+        "placeholder certificate",
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "client-public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
         .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+
+    assert!(stderr.contains("incomplete or inconsistent"));
+    assert!(stderr.contains("runewarp client public-cert init"));
+    assert!(stderr.contains("client-public-cert/app.example.test/public.crt"));
+    assert!(!stderr.contains("os error"));
+}
+
+#[test]
+fn client_public_cert_init_reports_paths_and_utc_timestamps() {
+    let tempdir = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "client-public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Public hostname CA: client-public-cert/public-ca.crt"));
+    assert!(stdout.contains("Initialized leaf certificate(s) for: app.example.test"));
+    assert!(stdout.contains("Issued at (UTC):"));
+    assert!(stdout.contains("Renew after (UTC):"));
+    assert!(stdout.contains("Expires at (UTC):"));
 }
 
 #[test]

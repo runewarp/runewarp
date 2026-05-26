@@ -23,6 +23,10 @@ const SERVER_STATE_DIR: &str = "state";
 const SERVER_CA_KEY_FILENAME: &str = "server-ca.key";
 const SERVER_HOSTNAME_FILENAME: &str = "server-hostname.txt";
 
+pub struct ManualServerCertificateState {
+    pub hostname: String,
+}
+
 #[derive(Debug)]
 pub enum ServerCertError {
     CreateDirectory { path: PathBuf, source: io::Error },
@@ -107,6 +111,37 @@ pub fn initialize_manual_server_certificate(
     )?;
 
     Ok(())
+}
+
+pub fn inspect_manual_server_certificate(
+    directory: &Path,
+) -> Result<ManualServerCertificateState, ServerCertError> {
+    let cert_path = directory.join(SERVER_CERT_FILENAME);
+    let key_path = directory.join(SERVER_KEY_FILENAME);
+    let ca_path = directory.join(SERVER_CA_FILENAME);
+    let ca_key_path = manual_state_directory(directory).join(SERVER_CA_KEY_FILENAME);
+
+    let _ = fs::read_to_string(&cert_path).map_err(|source| ServerCertError::ReadFile {
+        path: cert_path,
+        source,
+    })?;
+    let _ = fs::read_to_string(&key_path).map_err(|source| ServerCertError::ReadFile {
+        path: key_path,
+        source,
+    })?;
+    let _ = fs::read_to_string(&ca_path).map_err(|source| ServerCertError::ReadFile {
+        path: ca_path,
+        source,
+    })?;
+    let _ = fs::read_to_string(&ca_key_path).map_err(|source| ServerCertError::ReadFile {
+        path: ca_key_path,
+        source,
+    })?;
+    let _ = load_manual_server_ca_issuer(directory)?;
+
+    Ok(ManualServerCertificateState {
+        hostname: load_stored_hostname(directory)?,
+    })
 }
 
 pub fn renew_manual_server_certificate(directory: &Path) -> Result<(), ServerCertError> {

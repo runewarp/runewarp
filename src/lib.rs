@@ -37,7 +37,7 @@ pub use identity::{
     ClientCertificateState, ClientIdentity, ClientIdentityMaterialError, GeneratedClientIdentity,
     ParseClientIdentityCertificateError, ParseClientIdentityError,
     client_identity_from_certificate_der, decide_client_certificate_renewal,
-    generate_client_identity, inspect_client_certificate_renewal,
+    generate_client_identity, inspect_client_certificate_renewal, read_client_identity,
     renew_client_identity_certificate, rotate_client_identity,
 };
 pub use paths::{
@@ -53,8 +53,8 @@ pub use quic::{
 };
 pub use server::{Server, ServerConfig};
 pub use server_cert::{
-    SERVER_CA_FILENAME, initialize_manual_server_certificate, renew_manual_server_certificate,
-    rotate_manual_server_certificate_authority,
+    SERVER_CA_FILENAME, initialize_manual_server_certificate, inspect_manual_server_certificate,
+    renew_manual_server_certificate, rotate_manual_server_certificate_authority,
 };
 pub use settings::{
     ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode,

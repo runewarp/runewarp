@@ -100,6 +100,8 @@ Client reconnect behavior is:
 
 The current runtime reconnect interval is **5 seconds** after the first immediate retry. This cadence is runtime-owned rather than configurable.
 
+Unauthorized **Client identity** failures are treated differently: after the rejection, the Client skips the extra immediate retry and waits for the normal runtime reconnect interval before trying again.
+
 If a new authenticated connection replaces an older connection for the same **Tunnel**, the older connection closes and any streams on it are lost.
 
 ## Runtime invariants

@@ -94,7 +94,7 @@ log-level = "debug"
 - output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message
 - omitted `log-level` defaults to `info`
 
-At `info` (default), Runewarp emits tunnel connection lifecycle events plus warnings and errors. Client tunnel connection connect, reconnect, and disconnect lines include the configured **Server address** and the resolved socket address for that connection attempt or live session. `debug` adds per-connection routing diagnostics such as Server routing outcomes, Client passthrough vs terminate decisions, selected Client `backend-address` values, rejected ClientHello reasons, and separate detail lines for runtime tunnel failure causes that are shortened at `info`. `trace` is also accepted, but Runewarp does not currently emit any trace-only runtime events, so today it produces the same runtime output as `debug`.
+At `info` (default), Runewarp emits tunnel connection lifecycle events plus warnings and errors. Client tunnel connection attempt lines include the configured **Server address** and the resolved socket address for that dial attempt; connected and dropped lifecycle lines keep only the configured **Server address**. `debug` adds per-connection routing diagnostics such as Server routing outcomes, Client passthrough vs terminate decisions, selected Client `backend-address` values, rejected ClientHello reasons, and separate detail lines for runtime tunnel failure causes that are shortened at `info`. `trace` is also accepted, but Runewarp does not currently emit any trace-only runtime events, so today it produces the same runtime output as `debug`.
 
 | Key | Required | Notes |
 | --- | --- | --- |

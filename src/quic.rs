@@ -308,20 +308,23 @@ mod tests {
         let certificate = client_leaf_certificate(&generated_client_identity).unwrap();
         let client_identity = generated_client_identity.client_identity.clone();
         let provider = rustls::crypto::ring::default_provider();
-        let verifier = PinnedClientCertVerifier::new(&[], provider.signature_verification_algorithms);
+        let verifier =
+            PinnedClientCertVerifier::new(&[], provider.signature_verification_algorithms);
 
         let output = capture_logs(|| {
-            let result = verifier.verify_client_cert(
-                &certificate,
-                &[],
-                rustls::pki_types::UnixTime::now(),
-            );
+            let result =
+                verifier.verify_client_cert(&certificate, &[], rustls::pki_types::UnixTime::now());
             assert!(result.is_err());
         });
 
-        assert!(output.contains(format!(
-            "WARN server tunnel connection unauthorized: client-identity={client_identity}"
-        ).as_str()));
+        assert!(
+            output.contains(
+                format!(
+                    "WARN server tunnel connection unauthorized: client-identity={client_identity}"
+                )
+                .as_str()
+            )
+        );
     }
 
     #[derive(Clone, Default)]
@@ -393,10 +396,12 @@ mod tests {
     fn client_leaf_certificate(
         generated_client_identity: &crate::GeneratedClientIdentity,
     ) -> io::Result<CertificateDer<'static>> {
-        rustls_pemfile::certs(&mut Cursor::new(generated_client_identity.certificate_pem.as_bytes()))
-            .next()
-            .transpose()
-            .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing client certificate"))
+        rustls_pemfile::certs(&mut Cursor::new(
+            generated_client_identity.certificate_pem.as_bytes(),
+        ))
+        .next()
+        .transpose()
+        .map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing client certificate"))
     }
 }

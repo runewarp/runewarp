@@ -202,8 +202,8 @@ mod tests {
 
     use super::{Client, ClientConfig, ClientConnectError};
     use crate::{
-        GeneratedClientIdentity, generate_client_identity, make_client_quic_config_with_client_auth,
-        make_server_quic_config_with_client_auth,
+        GeneratedClientIdentity, generate_client_identity,
+        make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
     };
 
     #[test]
@@ -251,7 +251,9 @@ mod tests {
             let incoming = timeout(Duration::from_secs(1), server_endpoint.accept())
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "accept timed out"))?
-                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "server endpoint closed"))?;
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::UnexpectedEof, "server endpoint closed")
+                })?;
             let _ = timeout(Duration::from_secs(1), incoming)
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?;
@@ -272,14 +274,16 @@ mod tests {
                         )
                     })?
                     .expect_err("unauthorized connection should not stay open");
-                assert!(run_error
-                    .to_string()
-                    .contains("ApplicationVerificationFailure"));
+                assert!(
+                    run_error
+                        .to_string()
+                        .contains("ApplicationVerificationFailure")
+                );
             }
         }
-        accept_task
-            .await
-            .map_err(|join_error| io::Error::other(format!("accept task failed: {join_error}")))??;
+        accept_task.await.map_err(|join_error| {
+            io::Error::other(format!("accept task failed: {join_error}"))
+        })??;
         Ok(())
     }
 

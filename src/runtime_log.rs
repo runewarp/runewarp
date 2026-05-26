@@ -7,8 +7,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use quinn::ConnectionError;
-use tracing::Subscriber;
 use time::format_description::{self, OwnedFormatItem};
+use tracing::Subscriber;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::time::UtcTime;
 use tracing_subscriber::fmt::writer::MakeWriter;
@@ -339,7 +339,11 @@ pub(crate) fn installed_level() -> Option<LogLevel> {
         .map(|logger| *logger.level.lock().expect("runtime logger mutex poisoned"))
 }
 
-fn build_subscriber<W>(level: LogLevel, writer: W, use_ansi: bool) -> (RuntimeSubscriber, ReloadFilter)
+fn build_subscriber<W>(
+    level: LogLevel,
+    writer: W,
+    use_ansi: bool,
+) -> (RuntimeSubscriber, ReloadFilter)
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
@@ -655,7 +659,10 @@ fn client_tunnel_connecting_line(
         event,
         [
             ("server-address", Cow::Borrowed(configured_server_addr)),
-            ("resolved-address", Cow::Owned(resolved_server_addr.to_string())),
+            (
+                "resolved-address",
+                Cow::Owned(resolved_server_addr.to_string()),
+            ),
         ]
         .into_iter()
         .chain(retry),
@@ -674,7 +681,10 @@ fn client_tunnel_connect_failed_line(
         "client tunnel connection failed",
         [
             ("server-address", Cow::Borrowed(configured_server_addr)),
-            ("resolved-address", Cow::Owned(resolved_server_addr.to_string())),
+            (
+                "resolved-address",
+                Cow::Owned(resolved_server_addr.to_string()),
+            ),
         ]
         .into_iter()
         .chain(client_tunnel_attempt_field(attempt_kind)),
@@ -691,11 +701,9 @@ fn client_tunnel_resolution_failed_line(
 ) -> String {
     event_line_with_summary(
         "client tunnel resolution failed",
-        [
-            ("server-address", Cow::Borrowed(configured_server_addr)),
-        ]
-        .into_iter()
-        .chain(client_tunnel_attempt_field(attempt_kind)),
+        [("server-address", Cow::Borrowed(configured_server_addr))]
+            .into_iter()
+            .chain(client_tunnel_attempt_field(attempt_kind)),
         summarize_error(error),
     )
 }
@@ -788,7 +796,10 @@ fn client_tunnel_connect_failed_detail_line(
         "client tunnel connection failed detail",
         [
             ("server-address", Cow::Borrowed(configured_server_addr)),
-            ("resolved-address", Cow::Owned(resolved_server_addr.to_string())),
+            (
+                "resolved-address",
+                Cow::Owned(resolved_server_addr.to_string()),
+            ),
         ]
         .into_iter()
         .chain(client_tunnel_attempt_field(attempt_kind)),
@@ -970,10 +981,7 @@ mod tests {
         });
 
         assert!(output.contains("debug detail"));
-        assert!(
-            output
-                .contains("server route forwarded: public-hostname=app.example.test")
-        );
+        assert!(output.contains("server route forwarded: public-hostname=app.example.test"));
     }
 
     #[test]
@@ -984,9 +992,7 @@ mod tests {
         });
 
         assert!(output.contains("DEBUG server route rejected: reason=non-tls-client-hello"));
-        assert!(
-            output.contains("DEBUG server route rejected: reason=missing-sni-client-hello")
-        );
+        assert!(output.contains("DEBUG server route rejected: reason=missing-sni-client-hello"));
     }
 
     #[test]
@@ -1054,7 +1060,10 @@ mod tests {
     #[test]
     fn formatter_disables_ansi_when_not_requested() {
         let output = capture_with_ansi(LogLevel::Warn, false, || {
-            emit(EventLevel::Warn, "client route: public-hostname=app.example.test");
+            emit(
+                EventLevel::Warn,
+                "client route: public-hostname=app.example.test",
+            );
         });
 
         assert!(!output.contains("\u{1b}["));
@@ -1063,7 +1072,10 @@ mod tests {
     #[test]
     fn formatter_can_enable_ansi_when_requested() {
         let output = capture_with_ansi(LogLevel::Warn, true, || {
-            emit(EventLevel::Warn, "client route: public-hostname=app.example.test");
+            emit(
+                EventLevel::Warn,
+                "client route: public-hostname=app.example.test",
+            );
         });
 
         assert!(output.contains("\u{1b}["));
@@ -1338,9 +1350,14 @@ mod tests {
         assert!(info_output.contains(
             "WARN client tunnel connection unauthorized: server-address=tunnel.example.test:443 retry=initial"
         ));
-        assert!(info_output.contains(format!(
-            "WARN server tunnel connection unauthorized: client-identity={client_identity}"
-        ).as_str()));
+        assert!(
+            info_output.contains(
+                format!(
+                    "WARN server tunnel connection unauthorized: client-identity={client_identity}"
+                )
+                .as_str()
+            )
+        );
         assert!(!info_output.contains("peer doesn't support any known protocol"));
 
         let debug_output = capture(LogLevel::Debug, || {

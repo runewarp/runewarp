@@ -45,17 +45,18 @@ impl Server {
             tunnel_registry.clone(),
             config.public_tls_config.clone(),
         )?;
-        let public_listener = TcpListener::bind(config.public_bind_addr)
-            .await
-            .map_err(|source| {
-                io::Error::new(
-                    source.kind(),
-                    format!(
-                        "failed to bind server.public-bind-address {}: {}",
-                        config.public_bind_addr, source
-                    ),
-                )
-            })?;
+        let public_listener =
+            TcpListener::bind(config.public_bind_addr)
+                .await
+                .map_err(|source| {
+                    io::Error::new(
+                        source.kind(),
+                        format!(
+                            "failed to bind server.public-bind-address {}: {}",
+                            config.public_bind_addr, source
+                        ),
+                    )
+                })?;
         let tunnel_endpoint = Endpoint::server(
             config.quic_server_config,
             config.tunnel_connection_bind_addr,

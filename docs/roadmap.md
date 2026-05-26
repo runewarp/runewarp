@@ -9,7 +9,7 @@ Runewarp already ships the following baseline:
 | Area | Shipped baseline |
 | --- | --- |
 | Core data path | Public TLS passthrough from the **Server** to a **Client**-side **Local backend** |
-| Operator surface and trust | `runewarp server`, `runewarp client`, `runewarp server cert ...`, `runewarp client identity ...`, ACME, manual/private-CA Server certificates, and pinned Client authentication |
+| Operator surface and trust | `runewarp server`, `runewarp client`, `runewarp server cert ...`, `runewarp client identity ...`, ACME, manual/private-CA certificates, and pinned Client authentication |
 | Explicit routing | Required Server `public-hostnames`, multiple Server **Tunnels**, multiple Client **Services** |
 | Preview packaging | Shared Docker image, non-root container execution, CI automation, and preview image export workflows |
 
@@ -55,13 +55,13 @@ This track turns the shipped baseline into a clean first public release.
 
 ## Availability
 
-This track scales one routed hostname set across more than one **Client instance** of the same **Tunnel**.
+This track hardens routed hostname sets against avoidable downtime across **Client** and **Server** deployment shapes.
 
 ### Same-Tunnel Client pools
 
 **Outcome**
 
-- one **Tunnel** can be served by multiple concurrent Client instances instead of only one active connection
+- one **Tunnel** can be served by multiple concurrent Client instances so capacity and availability no longer hinge on one active connection
 
 **Planned work**
 
@@ -92,6 +92,30 @@ This track scales one routed hostname set across more than one **Client instance
 - keep one shared `client-identity` per Tunnel as the default pool model
 - define what happens when a replica presents the wrong identity or mismatched config
 - make replica failure modes easier for operators to diagnose
+
+### Multi-node Server deployments
+
+**Outcome**
+
+- more than one public **Server** node can participate in the same logical Runewarp deployment for failover and higher edge availability
+
+**Planned work**
+
+- define how multiple public **Server** nodes route traffic to the correct **Tunnel** without centralizing the data path
+- decide how configuration and connection state are shared or replicated across nodes
+- preserve the current routing authority model while adding public-edge redundancy
+
+### Zero-downtime Server rollouts
+
+**Outcome**
+
+- operators can replace or restart public **Server** nodes without avoidable downtime during planned changes
+
+**Planned work**
+
+- drain new Visitor traffic from a **Server** before shutdown while letting replacement capacity come online
+- give in-flight Visitor connections a bounded grace period to finish before forced close
+- hand new Tunnel and Visitor traffic to replacement **Server** nodes without promising in-flight connection migration in the first milestone
 
 ## Protocol expansion
 
@@ -199,7 +223,7 @@ This track improves day-2 operation, observability, and safer runtime change man
 
 ## Advanced networking
 
-This track handles harder privacy and multi-node deployment problems.
+This track handles harder privacy and trust-distribution problems.
 
 ### Encrypted ClientHello
 
@@ -213,18 +237,6 @@ This track handles harder privacy and multi-node deployment problems.
 - evaluate ECH for Client tunnel connections
 - decide how ECH interacts with the product's SNI-based routing model
 
-### Clustered multi-node mode
-
-**Outcome**
-
-- more than one public node can participate in the same logical Runewarp deployment
-
-**Planned work**
-
-- define how clustered nodes route traffic to the correct **Tunnel** without centralizing the data path
-- decide how configuration and connection state are shared or replicated
-- preserve the current routing authority model while adding distribution
-
 ### Zero-downtime trust rotation
 
 **Outcome**
@@ -236,6 +248,34 @@ This track handles harder privacy and multi-node deployment problems.
 - zero-downtime `client-identity` rotation
 - zero-downtime **Server CA** rotation
 - safer overlap and cutover mechanics than the current reconnect-based model
+
+## Visitor proxy
+
+This later track adds a visitor-side proxy mode (`runewarp proxy`) for TCP applications that need a simple way to reach existing terminating Services through Runewarp.
+
+### TCP visitor proxy
+
+**Outcome**
+
+- **Visitors** can run a Runewarp in proxy mode with minimal setup to reach TCP services through ordinary Runewarp ingress
+
+**Planned work**
+
+- add `runewarp proxy` mode to existing binary
+- start with TCP rather than bundling UDP into the first milestone
+- reuse ordinary Visitor TLS to normal **Terminate mode** Services instead of adding a proxy-specific routing mode
+- keep visitor setup minimal without locking the roadmap to a strict zero-config distribution story
+
+### UDP extension
+
+**Outcome**
+
+- Visitor proxy can later cover UDP workloads once the underlying public QUIC data path exists
+
+**Planned work**
+
+- build the UDP story on top of public QUIC passthrough rather than inventing a separate path first
+- revisit the visitor UX once the protocol prerequisites are in place
 
 ## Deliberate non-goals
 

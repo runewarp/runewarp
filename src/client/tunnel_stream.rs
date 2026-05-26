@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn routing_logs_include_backend_selection_and_warn_failures() -> io::Result<()> {
+    async fn routing_logs_include_backend_selection_at_debug_and_warn_failures() -> io::Result<()> {
         let debug_output = capture_logs(LogLevel::Debug, async {
             assert_forwarded_stream_without_spawning_handler(
                 vec![ClientServiceSettings {
@@ -370,6 +370,8 @@ mod tests {
 
         assert!(!debug_output.contains("ping"));
         assert!(!debug_output.contains("pong"));
+        assert!(debug_output.contains("DEBUG client route app.example.test -> passthrough to "));
+        assert!(!debug_output.contains(backend_placeholder().as_str()));
 
         let info_output = capture_logs(LogLevel::Info, async {
             assert_forwarded_stream_without_spawning_handler(

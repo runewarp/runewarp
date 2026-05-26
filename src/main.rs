@@ -93,7 +93,7 @@ async fn run_client_command(
     loop {
         ensure_client_identity_fresh(&settings.identity_directory)?;
         let phase = client_tunnel_phase(connected_once);
-        let client = retry_with_immediate_retry(
+        let (client, connected_dial_target) = retry_with_immediate_retry(
             settings.reconnect_interval,
             should_retry_client_connect_error,
             |attempt_kind| async move {
@@ -134,7 +134,7 @@ async fn run_client_command(
                             &dial_target.configured_server_addr,
                             dial_target.resolved_server_addr,
                         );
-                        Ok(client)
+                        Ok((client, dial_target))
                     }
                     Err(error) => {
                         runewarp::runtime_log::client_tunnel_connect_failed(
@@ -156,7 +156,11 @@ async fn run_client_command(
         connected_once = true;
 
         if let Err(error) = client.run().await {
-            runewarp::runtime_log::client_tunnel_disconnected(&error.to_string());
+            runewarp::runtime_log::client_tunnel_disconnected(
+                &connected_dial_target.configured_server_addr,
+                connected_dial_target.resolved_server_addr,
+                &error.to_string(),
+            );
             continue;
         }
 

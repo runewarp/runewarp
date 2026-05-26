@@ -620,11 +620,11 @@ mod tests {
         ClientStartupError, NativeRootsLoad, PreparedServer, ServerStartupError,
         acme_terminating_hostnames, build_root_store,
     };
+    use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
     use crate::{
         ClientIdentity, ClientPublicCertConfig, ClientServiceSettings, ClientSettings,
         ClientTlsMode, LogLevel, ServerCertificateSettings, ServerSettings, ServerTunnelSettings,
     };
-    use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
 
     #[test]
     fn configured_server_ca_file_still_loads_without_native_roots() {
@@ -973,7 +973,8 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("Address already in use") || message.contains("address already in use"),
+            message.contains("Address already in use")
+                || message.contains("address already in use"),
             "{message}"
         );
         Ok(())
@@ -1013,7 +1014,8 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains("Address already in use") || message.contains("address already in use"),
+            message.contains("Address already in use")
+                || message.contains("address already in use"),
             "{message}"
         );
         Ok(())
@@ -1043,7 +1045,10 @@ mod tests {
         let certificate = CertificateParams::new(vec!["tunnel.example.test".to_owned()])?
             .self_signed(&signing_key)?;
         fs::write(directory.join(SERVER_CERT_FILENAME), certificate.pem())?;
-        fs::write(directory.join(SERVER_KEY_FILENAME), signing_key.serialize_pem())?;
+        fs::write(
+            directory.join(SERVER_KEY_FILENAME),
+            signing_key.serialize_pem(),
+        )?;
         Ok(())
     }
 }

@@ -439,10 +439,9 @@ mod tests {
         assert!(info_output.contains(
             "WARN client route unavailable: public-hostname=api.example.test reason=no-matching-service"
         ));
-        assert!(
-            info_output
-                .contains("WARN client route unavailable: public-hostname=app.example.test backend-address=")
-        );
+        assert!(info_output.contains(
+            "WARN client route unavailable: public-hostname=app.example.test backend-address="
+        ));
         assert!(info_output.contains(
             "WARN client route unavailable: public-hostname=app.example.test reason=tls-config-missing"
         ));

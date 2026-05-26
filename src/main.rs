@@ -146,8 +146,12 @@ async fn run_client_command(
                     Err(error) => {
                         if error
                             .source()
-                            .and_then(|source| source.downcast_ref::<runewarp::ClientConnectError>())
-                            .is_some_and(runewarp::ClientConnectError::is_unauthorized_client_identity)
+                            .and_then(|source| {
+                                source.downcast_ref::<runewarp::ClientConnectError>()
+                            })
+                            .is_some_and(
+                                runewarp::ClientConnectError::is_unauthorized_client_identity,
+                            )
                         {
                             runewarp::runtime_log::client_tunnel_unauthorized(
                                 log_attempt_kind,
@@ -553,9 +557,7 @@ fn configured_server_addr(server_hostname: &str, server_port: u16) -> String {
 }
 
 fn is_unauthorized_client_connection_error(error: &quinn::ConnectionError) -> bool {
-    error
-        .to_string()
-        .contains("ApplicationVerificationFailure")
+    error.to_string().contains("ApplicationVerificationFailure")
 }
 
 async fn retry_with_immediate_retry<T, E, Attempt, AttemptFuture, Sleep, SleepFuture>(

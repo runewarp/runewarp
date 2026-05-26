@@ -191,10 +191,9 @@ pub fn server_tunnel_connection_terminated(
             EventLevel::Info,
             &server_tunnel_connection_closed_line(client_identity, remote_addr),
         ),
-        _ => emit(
-            EventLevel::Warn,
-            &server_tunnel_connection_dropped_line(client_identity, remote_addr, error),
-        ),
+        _ => {
+            emit_server_tunnel_connection_dropped(client_identity, remote_addr, &error.to_string())
+        }
     }
 }
 
@@ -229,7 +228,7 @@ pub fn client_tunnel_connect_failed(
     retry_interval: Duration,
     error: &str,
 ) {
-    emit(
+    emit_runtime_failure_with_debug_detail(
         EventLevel::Warn,
         &client_tunnel_connect_failed_line(
             phase,
@@ -239,6 +238,14 @@ pub fn client_tunnel_connect_failed(
             retry_interval,
             error,
         ),
+        client_tunnel_connect_failed_detail_line(
+            phase,
+            attempt_kind,
+            configured_server_addr,
+            resolved_server_addr,
+            error,
+        ),
+        error,
     );
 }
 
@@ -249,7 +256,7 @@ pub fn client_tunnel_resolution_failed(
     retry_interval: Duration,
     error: &str,
 ) {
-    emit(
+    emit_runtime_failure_with_debug_detail(
         EventLevel::Warn,
         &client_tunnel_resolution_failed_line(
             phase,
@@ -258,6 +265,13 @@ pub fn client_tunnel_resolution_failed(
             retry_interval,
             error,
         ),
+        client_tunnel_resolution_failed_detail_line(
+            phase,
+            attempt_kind,
+            configured_server_addr,
+            error,
+        ),
+        error,
     );
 }
 
@@ -277,11 +291,11 @@ pub fn client_tunnel_disconnected(
     resolved_server_addr: SocketAddr,
     error: &str,
 ) {
-    emit(
+    emit_runtime_failure_with_debug_detail(
         EventLevel::Warn,
-        &format!(
-            "client tunnel disconnected from {configured_server_addr} (resolved {resolved_server_addr}): {error}"
-        ),
+        &client_tunnel_disconnected_line(configured_server_addr, resolved_server_addr, error),
+        client_tunnel_disconnected_detail_line(configured_server_addr, resolved_server_addr, error),
+        error,
     );
 }
 
@@ -456,13 +470,37 @@ fn server_tunnel_connection_closed_line(
     )
 }
 
+fn emit_server_tunnel_connection_dropped(
+    client_identity: &ClientIdentity,
+    remote_addr: SocketAddr,
+    error: &str,
+) {
+    emit_runtime_failure_with_debug_detail(
+        EventLevel::Warn,
+        &server_tunnel_connection_dropped_line(client_identity, remote_addr, error),
+        server_tunnel_connection_dropped_detail_line(client_identity, remote_addr, error),
+        error,
+    );
+}
+
 fn server_tunnel_connection_dropped_line(
     client_identity: &ClientIdentity,
     remote_addr: SocketAddr,
-    error: &ConnectionError,
+    error: &str,
 ) -> String {
     format!(
-        "server tunnel connection dropped: client-identity={client_identity} remote-address={remote_addr}: {error}"
+        "server tunnel connection dropped: client-identity={client_identity} remote-address={remote_addr}: {}",
+        summarize_live_connection_error(error)
+    )
+}
+
+fn server_tunnel_connection_dropped_detail_line(
+    client_identity: &ClientIdentity,
+    remote_addr: SocketAddr,
+    error: &str,
+) -> String {
+    format!(
+        "server tunnel connection dropped detail: client-identity={client_identity} remote-address={remote_addr}: {error}"
     )
 }
 
@@ -500,22 +538,7 @@ fn client_tunnel_connect_failed_line(
     _retry_interval: Duration,
     error: &str,
 ) -> String {
-    let attempt_label = match (phase, attempt_kind) {
-        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::Initial) => {
-            "initial client tunnel connection failed".to_owned()
-        }
-        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::ImmediateRetry)
-        | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::ImmediateRetry) => {
-            "immediate client tunnel retry failed".to_owned()
-        }
-        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::IntervalRetry)
-        | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::IntervalRetry) => {
-            "client tunnel retry failed".to_owned()
-        }
-        (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::Initial) => {
-            "client tunnel reconnect failed".to_owned()
-        }
-    };
+    let attempt_label = client_tunnel_connect_attempt_label(phase, attempt_kind);
     format!(
         "{attempt_label} to {configured_server_addr} (resolved {resolved_server_addr}): {}",
         summarize_error(error)
@@ -529,22 +552,7 @@ fn client_tunnel_resolution_failed_line(
     _retry_interval: Duration,
     error: &str,
 ) -> String {
-    let attempt_label = match (phase, attempt_kind) {
-        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::Initial) => {
-            "initial client tunnel resolution failed".to_owned()
-        }
-        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::ImmediateRetry)
-        | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::ImmediateRetry) => {
-            "immediate client tunnel retry resolution failed".to_owned()
-        }
-        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::IntervalRetry)
-        | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::IntervalRetry) => {
-            "client tunnel retry resolution failed".to_owned()
-        }
-        (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::Initial) => {
-            "client tunnel reconnect resolution failed".to_owned()
-        }
-    };
+    let attempt_label = client_tunnel_resolution_attempt_label(phase, attempt_kind);
     format!(
         "{attempt_label} for {configured_server_addr}: {}",
         summarize_error(error)
@@ -561,6 +569,119 @@ fn client_tunnel_connected_line(
         ClientTunnelPhase::Reconnecting => "client tunnel reconnected",
     };
     format!("{action} to {configured_server_addr} (resolved {resolved_server_addr})")
+}
+
+fn client_tunnel_disconnected_line(
+    configured_server_addr: &str,
+    resolved_server_addr: SocketAddr,
+    error: &str,
+) -> String {
+    format!(
+        "client tunnel disconnected from {configured_server_addr} (resolved {resolved_server_addr}): {}",
+        summarize_live_connection_error(error)
+    )
+}
+
+fn client_tunnel_disconnected_detail_line(
+    configured_server_addr: &str,
+    resolved_server_addr: SocketAddr,
+    error: &str,
+) -> String {
+    format!(
+        "client tunnel disconnected detail from {configured_server_addr} (resolved {resolved_server_addr}): {error}"
+    )
+}
+
+fn emit_runtime_failure_with_debug_detail(
+    level: EventLevel,
+    summary_line: &str,
+    detail_line: String,
+    error: &str,
+) {
+    emit(level, summary_line);
+    if has_nested_error_detail(error) {
+        emit(EventLevel::Debug, &detail_line);
+    }
+}
+
+fn client_tunnel_connect_attempt_label(
+    phase: ClientTunnelPhase,
+    attempt_kind: ClientTunnelAttemptKind,
+) -> &'static str {
+    match (phase, attempt_kind) {
+        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::Initial) => {
+            "initial client tunnel connection failed"
+        }
+        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::ImmediateRetry)
+        | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::ImmediateRetry) => {
+            "immediate client tunnel retry failed"
+        }
+        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::IntervalRetry)
+        | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::IntervalRetry) => {
+            "client tunnel retry failed"
+        }
+        (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::Initial) => {
+            "client tunnel reconnect failed"
+        }
+    }
+}
+
+fn client_tunnel_resolution_attempt_label(
+    phase: ClientTunnelPhase,
+    attempt_kind: ClientTunnelAttemptKind,
+) -> &'static str {
+    match (phase, attempt_kind) {
+        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::Initial) => {
+            "initial client tunnel resolution failed"
+        }
+        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::ImmediateRetry)
+        | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::ImmediateRetry) => {
+            "immediate client tunnel retry resolution failed"
+        }
+        (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::IntervalRetry)
+        | (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::IntervalRetry) => {
+            "client tunnel retry resolution failed"
+        }
+        (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::Initial) => {
+            "client tunnel reconnect resolution failed"
+        }
+    }
+}
+
+fn client_tunnel_connect_failed_detail_line(
+    phase: ClientTunnelPhase,
+    attempt_kind: ClientTunnelAttemptKind,
+    configured_server_addr: &str,
+    resolved_server_addr: SocketAddr,
+    error: &str,
+) -> String {
+    format!(
+        "{} detail to {configured_server_addr} (resolved {resolved_server_addr}): {error}",
+        client_tunnel_connect_attempt_label(phase, attempt_kind)
+    )
+}
+
+fn client_tunnel_resolution_failed_detail_line(
+    phase: ClientTunnelPhase,
+    attempt_kind: ClientTunnelAttemptKind,
+    configured_server_addr: &str,
+    error: &str,
+) -> String {
+    format!(
+        "{} detail for {configured_server_addr}: {error}",
+        client_tunnel_resolution_attempt_label(phase, attempt_kind)
+    )
+}
+
+fn has_nested_error_detail(error: &str) -> bool {
+    summarize_error(error) != error
+}
+
+fn summarize_live_connection_error(error: &str) -> &str {
+    match error.rsplit_once(": ") {
+        Some((_, cause)) => cause,
+        None => error,
+    }
 }
 
 fn summarize_error(error: &str) -> &str {
@@ -587,10 +708,10 @@ mod tests {
         ClientRouteOutcome, ClientTunnelAttemptKind, ClientTunnelPhase, EventLevel, InstallOutcome,
         ServerRouteOutcome, build_subscriber, client_route, client_trust_store_warning,
         client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
-        client_tunnel_disconnected, client_tunnel_resolution_failed, emit, install,
-        installed_level, server_route, server_route_rejected_client_hello,
-        server_tunnel_connection_accepted, server_tunnel_connection_replaced,
-        server_tunnel_connection_terminated, warning,
+        client_tunnel_disconnected, client_tunnel_resolution_failed, emit,
+        emit_server_tunnel_connection_dropped, install, installed_level, server_route,
+        server_route_rejected_client_hello, server_tunnel_connection_accepted,
+        server_tunnel_connection_replaced, server_tunnel_connection_terminated, warning,
     };
     use crate::{ClientHelloError, ClientIdentity, LogLevel};
 
@@ -872,6 +993,97 @@ mod tests {
         assert!(!output.contains("after waiting 5s"));
         assert!(!output.contains("timed out"));
         assert!(!output.contains("failed to lookup address information"));
+    }
+
+    #[test]
+    fn debug_level_keeps_full_client_tunnel_failure_detail_on_separate_lines() {
+        let configured_server_addr = "tunnel.example.test:443";
+        let resolved_server_addr: SocketAddr = "203.0.113.10:443".parse().unwrap();
+        let output = capture(LogLevel::Debug, || {
+            client_tunnel_resolution_failed(
+                ClientTunnelPhase::Establishing,
+                ClientTunnelAttemptKind::Initial,
+                configured_server_addr,
+                Duration::from_secs(5),
+                "failed to resolve the Server hostname: failed to lookup address information: nodename nor servname provided, or not known",
+            );
+            client_tunnel_connect_failed(
+                ClientTunnelPhase::Establishing,
+                ClientTunnelAttemptKind::Initial,
+                configured_server_addr,
+                resolved_server_addr,
+                Duration::from_secs(5),
+                "client QUIC handshake failed: timed out",
+            );
+        });
+
+        assert!(output.contains(
+            "WARN initial client tunnel resolution failed for tunnel.example.test:443: failed to resolve the Server hostname"
+        ));
+        assert!(output.contains(
+            "DEBUG initial client tunnel resolution failed detail for tunnel.example.test:443: failed to resolve the Server hostname: failed to lookup address information: nodename nor servname provided, or not known"
+        ));
+        assert!(output.contains(
+            "WARN initial client tunnel connection failed to tunnel.example.test:443 (resolved 203.0.113.10:443): client QUIC handshake failed"
+        ));
+        assert!(output.contains(
+            "DEBUG initial client tunnel connection failed detail to tunnel.example.test:443 (resolved 203.0.113.10:443): client QUIC handshake failed: timed out"
+        ));
+    }
+
+    #[test]
+    fn live_tunnel_failure_logs_keep_short_causes_and_debug_detail() {
+        let configured_server_addr = "tunnel.example.test:443";
+        let resolved_server_addr: SocketAddr = "203.0.113.10:443".parse().unwrap();
+        let client_identity = ClientIdentity::from_str(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let remote_addr: SocketAddr = "203.0.113.11:443".parse().unwrap();
+
+        let info_output = capture(LogLevel::Info, || {
+            client_tunnel_disconnected(
+                configured_server_addr,
+                resolved_server_addr,
+                "closed by peer: transport error: timed out",
+            );
+            emit_server_tunnel_connection_dropped(
+                &client_identity,
+                remote_addr,
+                "aborted by peer: transport error: peer sent malformed frame",
+            );
+        });
+
+        assert!(info_output.contains(
+            "WARN client tunnel disconnected from tunnel.example.test:443 (resolved 203.0.113.10:443): timed out"
+        ));
+        assert!(info_output.contains(format!(
+            "WARN server tunnel connection dropped: client-identity={client_identity} remote-address={remote_addr}: peer sent malformed frame"
+        ).as_str()));
+        assert!(!info_output.contains("closed by peer: transport error: timed out"));
+        assert!(
+            !info_output.contains("aborted by peer: transport error: peer sent malformed frame")
+        );
+
+        let debug_output = capture(LogLevel::Debug, || {
+            client_tunnel_disconnected(
+                configured_server_addr,
+                resolved_server_addr,
+                "closed by peer: transport error: timed out",
+            );
+            emit_server_tunnel_connection_dropped(
+                &client_identity,
+                remote_addr,
+                "aborted by peer: transport error: peer sent malformed frame",
+            );
+        });
+
+        assert!(debug_output.contains(
+            "DEBUG client tunnel disconnected detail from tunnel.example.test:443 (resolved 203.0.113.10:443): closed by peer: transport error: timed out"
+        ));
+        assert!(debug_output.contains(format!(
+            "DEBUG server tunnel connection dropped detail: client-identity={client_identity} remote-address={remote_addr}: aborted by peer: transport error: peer sent malformed frame"
+        ).as_str()));
     }
 
     #[test]

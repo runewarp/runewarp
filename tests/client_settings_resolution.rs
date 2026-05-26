@@ -4,14 +4,13 @@ use std::time::Duration;
 
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientRuntimeArgs,
-    ClientSettingsResolutionDefaults, ClientSettingsResolutionError,
-    DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, LogLevel, SelectedClientConfig,
-    resolve_selected_client_settings,
+    ClientSettingsResolutionDefaults, ClientSettingsResolutionError, LogLevel,
+    SelectedClientConfig, resolve_selected_client_settings,
 };
 use tempfile::tempdir;
 
 #[test]
-fn cli_only_resolution_builds_a_catch_all_service_without_a_selected_config()
+fn cli_only_resolution_uses_a_one_second_runtime_reconnect_interval_by_default()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
     let identity_directory = tempdir.path().join("client-identity");
@@ -33,10 +32,7 @@ fn cli_only_resolution_builds_a_catch_all_service_without_a_selected_config()
     assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(settings.server_ca_file, None);
     assert_eq!(settings.identity_directory, identity_directory);
-    assert_eq!(
-        settings.reconnect_interval,
-        Duration::from_secs(DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS)
-    );
+    assert_eq!(settings.reconnect_interval, Duration::from_secs(1));
     assert_eq!(settings.services.len(), 1);
     assert_eq!(settings.services[0].public_hostnames, None);
     assert_eq!(settings.services[0].backend_address, "caddy.local:443");

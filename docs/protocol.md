@@ -53,8 +53,9 @@ Rules:
 
 - QUIC **0-RTT is disabled**
 - reconnect attempts re-resolve the hostname portion of `client.server-address` every time, including the first immediate retry
-- idle timeout should stay in the **5-10 minute** range
-- keepalive pings should be sent every **2-3 minutes** to survive common NATs and mobile carriers
+- tunnel handshakes time out after **10 seconds** on both the Client and Server sides
+- idle timeout is **60 seconds**
+- keepalive pings are sent every **20 seconds**
 
 ## Client-side Service selection
 
@@ -98,7 +99,7 @@ Client reconnect behavior is:
 2. if that fails, wait the runtime reconnect interval
 3. keep retrying on that runtime reconnect interval
 
-The current runtime reconnect interval is **5 seconds** after the first immediate retry. This cadence is runtime-owned rather than configurable.
+The current runtime reconnect interval is **1 second** after the first immediate retry. This cadence is runtime-owned rather than configurable.
 
 Unauthorized **Client identity** failures are treated differently: after the rejection, the Client skips the extra immediate retry and waits for the normal runtime reconnect interval before trying again.
 

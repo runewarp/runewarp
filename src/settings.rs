@@ -25,7 +25,7 @@ use crate::{
     SERVER_CA_FILENAME, XdgPathError, hostname::validate_public_hostname,
 };
 
-pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 5;
+pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]

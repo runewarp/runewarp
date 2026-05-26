@@ -12,6 +12,44 @@ fn no_args_prints_the_top_level_help() {
 }
 
 #[test]
+fn top_level_help_identifies_runewarp_in_the_product_line() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.starts_with("Runewarp: Private tunneling for TLS passthrough"));
+}
+
+#[test]
+fn help_subcommand_prints_the_top_level_help() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .arg("help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.starts_with("Runewarp: Private tunneling for TLS passthrough"));
+    assert!(stdout.contains("Usage: runewarp [COMMAND]"));
+}
+
+#[test]
+fn top_level_help_describes_the_main_entry_points() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("server  Run the Server runtime and server-side setup commands"));
+    assert!(stdout.contains("client  Run the Client runtime and client-side setup commands"));
+}
+
+#[test]
 fn unknown_command_is_rejected_with_cli_usage() {
     let assert = Command::cargo_bin("runewarp")
         .unwrap()

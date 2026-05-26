@@ -20,6 +20,51 @@ fn client_help_prints_usage_and_subcommands() {
 }
 
 #[test]
+fn client_help_shows_the_config_shorthand() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["client", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("-c, --config <PATH>"));
+}
+
+#[test]
+fn client_help_includes_examples_and_default_config_guidance() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["client", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Examples:"));
+    assert!(stdout.contains("runewarp client"));
+    assert!(
+        stdout
+            .contains("Commands use the default Runewarp config path unless -c, --config is set.")
+    );
+}
+
+#[test]
+fn client_help_subcommand_prints_client_help() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["client", "help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("Usage: runewarp client [OPTIONS] [COMMAND]"));
+    assert!(stdout.contains("Examples:"));
+}
+
+#[test]
 fn client_help_lists_runtime_only_routing_flags() -> Result<(), Box<dyn std::error::Error>> {
     let assert = Command::cargo_bin("runewarp")?
         .args(["client", "--help"])

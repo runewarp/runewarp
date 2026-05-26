@@ -1,11 +1,13 @@
 use std::fmt;
 use std::io;
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use quinn::ConnectionError;
 use tracing::Subscriber;
+use time::format_description::{self, OwnedFormatItem};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::time::UtcTime;
 use tracing_subscriber::fmt::writer::MakeWriter;
@@ -113,7 +115,8 @@ pub fn install(level: LogLevel) -> Result<InstallOutcome, InstallError> {
         return Ok(InstallOutcome::Updated);
     }
 
-    let (subscriber, reload_filter) = build_subscriber(level, io::stderr);
+    let use_ansi = io::stderr().is_terminal();
+    let (subscriber, reload_filter) = build_subscriber(level, io::stderr, use_ansi);
     tracing::subscriber::set_global_default(subscriber).map_err(InstallError::SetGlobalDefault)?;
 
     let logger = InstalledLogger {
@@ -315,7 +318,7 @@ pub(crate) fn installed_level() -> Option<LogLevel> {
         .map(|logger| *logger.level.lock().expect("runtime logger mutex poisoned"))
 }
 
-fn build_subscriber<W>(level: LogLevel, writer: W) -> (RuntimeSubscriber, ReloadFilter)
+fn build_subscriber<W>(level: LogLevel, writer: W, use_ansi: bool) -> (RuntimeSubscriber, ReloadFilter)
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
@@ -323,8 +326,8 @@ where
     let subscriber = tracing_subscriber::registry().with(filter_layer).with(
         tracing_fmt::layer()
             .with_writer(writer)
-            .with_timer(UtcTime::rfc_3339())
-            .with_ansi(false)
+            .with_timer(UtcTime::new(log_timestamp_format()))
+            .with_ansi(use_ansi)
             .with_target(false),
     );
 
@@ -335,6 +338,18 @@ where
     });
 
     (Box::new(subscriber), reload_filter)
+}
+
+fn log_timestamp_format() -> OwnedFormatItem {
+    static FORMAT: OnceLock<OwnedFormatItem> = OnceLock::new();
+    FORMAT
+        .get_or_init(|| {
+            format_description::parse_owned::<2>(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z",
+            )
+            .expect("runtime log timestamp format must stay valid")
+        })
+        .clone()
 }
 
 fn level_filter(level: LogLevel) -> LevelFilter {
@@ -753,8 +768,12 @@ mod tests {
     }
 
     fn capture(level: LogLevel, emit_logs: impl FnOnce()) -> String {
+        capture_with_ansi(level, false, emit_logs)
+    }
+
+    fn capture_with_ansi(level: LogLevel, ansi: bool, emit_logs: impl FnOnce()) -> String {
         let buffer = SharedBuffer::default();
-        let (subscriber, _) = build_subscriber(level, buffer.clone());
+        let (subscriber, _) = build_subscriber(level, buffer.clone(), ansi);
         tracing::subscriber::with_default(subscriber, emit_logs);
         buffer.read()
     }
@@ -854,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn formatter_includes_utc_rfc3339_timestamp_level_and_message() {
+    fn formatter_includes_fixed_width_utc_rfc3339_timestamp_level_and_message() {
         let output = capture(LogLevel::Warn, || {
             client_route(
                 "app.example.test",
@@ -869,11 +888,39 @@ mod tests {
 
         assert!(OffsetDateTime::parse(parts[0], &Rfc3339).is_ok());
         assert!(parts[0].ends_with('Z'));
+        let (_, time_and_zone) = parts[0]
+            .split_once('T')
+            .expect("timestamp should separate date and time");
+        let (time_part, _) = time_and_zone
+            .split_once('Z')
+            .expect("timestamp should end with Z");
+        let (_, fractional) = time_part
+            .split_once('.')
+            .expect("timestamp should include fractional seconds");
+        assert_eq!(fractional.len(), 6);
         assert_eq!(parts[1], "WARN");
         assert_eq!(
             parts[2..].join(" "),
             "client route app.example.test -> unavailable (no matching client service)"
         );
+    }
+
+    #[test]
+    fn formatter_disables_ansi_when_not_requested() {
+        let output = capture_with_ansi(LogLevel::Warn, false, || {
+            emit(EventLevel::Warn, "client route: public-hostname=app.example.test");
+        });
+
+        assert!(!output.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn formatter_can_enable_ansi_when_requested() {
+        let output = capture_with_ansi(LogLevel::Warn, true, || {
+            emit(EventLevel::Warn, "client route: public-hostname=app.example.test");
+        });
+
+        assert!(output.contains("\u{1b}["));
     }
 
     #[test]

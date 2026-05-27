@@ -533,10 +533,10 @@ fn resolve_client_public_cert_hostnames(
     if let Some(h) = hostname {
         return Ok(vec![h]);
     }
-    let Some(config_path) = config else {
+    let Some(config_path) = candidate_config_path(config) else {
         return Err(
-            "--hostname is required, or supply --config to derive targets from \
-             client.services[].public-hostnames (tls-mode = \"terminate\")"
+            "--hostname is required, or supply --config or a default client config to derive \
+             targets from client.services[].public-hostnames (tls-mode = \"terminate\")"
                 .into(),
         );
     };
@@ -563,20 +563,16 @@ fn resolve_client_public_cert_hostnames(
 fn resolve_client_public_cert_hostnames_from_config_required(
     config: Option<std::path::PathBuf>,
 ) -> Result<Vec<String>, Box<dyn Error>> {
-    let config_path = match config {
+    let config_path = match candidate_config_path(config) {
         Some(config_path) => config_path,
         None => {
             let default_path = default_config_path()?;
-            if default_path.exists() {
-                default_path
-            } else {
-                return Err(format!(
-                    "no selected config file for `client public-cert rotate-ca`; use -c, \
-                     --config or create the default config at {}",
-                    default_path.display()
-                )
-                .into());
-            }
+            return Err(format!(
+                "no selected config file for `client public-cert rotate-ca`; use -c, --config \
+                 or create the default config at {}",
+                default_path.display()
+            )
+            .into());
         }
     };
     let Some(hostnames) = resolve_terminating_hostnames_from_config(&config_path)? else {

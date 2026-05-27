@@ -5,7 +5,10 @@ use crate::config_preparation::client::{
     PreparedClientConfig, prepare_client_settings_from_cli, prepare_selected_client_config,
 };
 use crate::settings::validate_prepared_client_settings;
-use crate::{ClientSettings, SettingsError, XdgPathError, default_client_identity_material_dir};
+use crate::{
+    ClientSettings, SettingsError, XdgPathError, default_client_identity_material_dir,
+    default_client_public_cert_material_dir,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClientRuntimeArgs {
@@ -16,12 +19,14 @@ pub struct ClientRuntimeArgs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientSettingsResolutionDefaults {
     pub identity_directory: PathBuf,
+    pub public_cert_directory: PathBuf,
 }
 
 impl ClientSettingsResolutionDefaults {
     pub fn from_xdg() -> Result<Self, XdgPathError> {
         Ok(Self {
             identity_directory: default_client_identity_material_dir()?,
+            public_cert_directory: default_client_public_cert_material_dir()?,
         })
     }
 }
@@ -123,8 +128,13 @@ pub fn resolve_selected_client_settings(
     defaults: &ClientSettingsResolutionDefaults,
 ) -> Result<ClientSettings, ClientSettingsResolutionError> {
     let default_identity_directory = || Ok(defaults.identity_directory.clone());
-    let prepared =
-        prepare_selected_client_config(selected_config, runtime, &default_identity_directory)?;
+    let default_public_cert_directory = || Ok(defaults.public_cert_directory.clone());
+    let prepared = prepare_selected_client_config(
+        selected_config,
+        runtime,
+        &default_identity_directory,
+        &default_public_cert_directory,
+    )?;
     validate_resolved_client_settings(prepared)
 }
 

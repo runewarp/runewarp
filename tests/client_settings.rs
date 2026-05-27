@@ -1,6 +1,9 @@
 use std::fs;
 
-use runewarp::{ClientTlsMode, LogLevel, load_client_settings};
+use runewarp::{
+    ClientPublicCertConfig, ClientRuntimeArgs, ClientSettingsResolutionDefaults, ClientTlsMode,
+    LogLevel, SelectedClientConfig, load_client_settings, resolve_selected_client_settings,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -719,9 +722,11 @@ tls-mode = "terminate"
 // ── Slice 3: terminating service requires a Client public-cert config ─────────
 
 #[test]
-fn client_settings_reject_terminate_without_any_cert_config() {
+fn client_settings_use_the_default_public_cert_dir_for_terminate_mode_when_acme_is_absent() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
+    let default_public_cert_directory = tempdir.path().join("xdg-data/client/public-cert");
+    fs::create_dir_all(&default_public_cert_directory).unwrap();
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
@@ -737,13 +742,23 @@ tls-mode = "terminate"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let settings = resolve_selected_client_settings(
+        SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
+        &ClientRuntimeArgs::default(),
+        &ClientSettingsResolutionDefaults {
+            identity_directory: tempdir.path().join("client-identity"),
+            public_cert_directory: default_public_cert_directory.clone(),
+        },
+    )
+    .unwrap();
 
     assert!(
-        error.to_string().contains(
-            "client.public-cert-dir or [client.acme] is required when any service uses tls-mode = \"terminate\""
+        matches!(
+            settings.public_cert_config,
+            Some(ClientPublicCertConfig::Manual { ref directory }) if *directory == default_public_cert_directory
         ),
-        "unexpected error: {error}"
+        "unexpected public cert config: {:?}",
+        settings.public_cert_config
     );
 }
 

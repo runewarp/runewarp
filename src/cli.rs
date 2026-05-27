@@ -5,58 +5,43 @@ use clap::{Args, Parser, Subcommand};
 const TOP_LEVEL_EXAMPLES: &str = "\
 Examples:
   runewarp server
-  runewarp client
-
-Config defaults:
-  Commands use the default Runewarp config path unless -c, --config is set.";
+  runewarp client";
 
 const SERVER_EXAMPLES: &str = "\
 Examples:
   runewarp server
-  runewarp server cert init --hostname tunnel.example.com
-
-Config defaults:
-  Commands use the default Runewarp config path unless -c, --config is set.";
+  runewarp server cert init --hostname tunnel.example.com";
 
 const SERVER_CERT_EXAMPLES: &str = "\
 Examples:
   runewarp server cert init --hostname tunnel.example.com
-  runewarp server cert renew -c server.toml
-
-Config defaults:
-  Commands use the default Runewarp config path unless -c, --config is set.";
+  runewarp server cert renew";
 
 const CLIENT_EXAMPLES: &str = "\
 Examples:
   runewarp client
-  runewarp client --server-address tunnel.example.com --backend-address 127.0.0.1:443
-
-Config defaults:
-  Commands use the default Runewarp config path unless -c, --config is set.";
+  runewarp client --server-address tunnel.example.com --backend-address 127.0.0.1:443";
 
 const CLIENT_IDENTITY_EXAMPLES: &str = "\
 Examples:
   runewarp client identity init
-  runewarp client identity renew -c client.toml
-
-Config defaults:
-  Commands use the default Runewarp config path unless -c, --config is set.";
+  runewarp client identity show";
 
 const CLIENT_IDENTITY_LEAF_EXAMPLES: &str = "\
 Examples:
   runewarp client identity init --dir ./client-identity
-  runewarp client identity show
-
-Config defaults:
-  Commands use the default Runewarp config path unless -c, --config is set.";
+  runewarp client identity show";
 
 const CLIENT_PUBLIC_CERT_EXAMPLES: &str = "\
 Examples:
   runewarp client public-cert init --hostname app.example.com
-  runewarp client public-cert renew -c client.toml
+  runewarp client public-cert renew --hostname app.example.com";
 
-Config defaults:
-  Commands use the default Runewarp config path unless -c, --config is set.";
+const SERVER_HEADER: &str = "Runewarp Server";
+const SERVER_CERT_HEADER: &str = "Runewarp Server Certificates";
+const CLIENT_HEADER: &str = "Runewarp Client";
+const CLIENT_IDENTITY_HEADER: &str = "Runewarp Client Identity";
+const CLIENT_PUBLIC_CERT_HEADER: &str = "Runewarp Public Certificates";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -72,16 +57,17 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum TopLevelCommand {
-    /// Run the Server runtime and server-side setup commands.
+    /// Operate the Server runtime and setup commands.
     Server(ServerArgs),
-    /// Run the Client runtime and client-side setup commands.
+    /// Operate the Client runtime and setup commands.
     Client(ClientArgs),
 }
 
 #[derive(Debug, Args)]
 #[command(
-    about = "Run the Server runtime and server-side setup commands",
+    about = "Operate the Server runtime and setup commands",
     long_about = None,
+    before_help = SERVER_HEADER,
     after_help = SERVER_EXAMPLES
 )]
 pub struct ServerArgs {
@@ -94,14 +80,15 @@ pub struct ServerArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ServerSubcommand {
-    /// Manage manual Server certificate material.
+    /// Manage Server certificates.
     Cert(ServerCertArgs),
 }
 
 #[derive(Debug, Args)]
 #[command(
-    about = "Manage manual Server certificate material",
+    about = "Manage Server certificates",
     long_about = None,
+    before_help = SERVER_CERT_HEADER,
     subcommand_required = true,
     arg_required_else_help = true,
     after_help = SERVER_CERT_EXAMPLES
@@ -113,16 +100,16 @@ pub struct ServerCertArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ServerCertSubcommand {
-    /// Initialize the manual Server CA and issue the first Server certificate.
+    /// Initialize Server certificates.
     Init(ServerCertInitArgs),
-    /// Renew the current manual Server certificate from the existing Server CA.
+    /// Renew Server certificates.
     Renew(ServerCertDirArgs),
-    /// Rotate the Server CA and reissue the Server certificate.
+    /// Rotate the Server CA.
     RotateCa(ServerCertInitArgs),
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = SERVER_CERT_EXAMPLES)]
+#[command(before_help = SERVER_CERT_HEADER, after_help = SERVER_CERT_EXAMPLES)]
 pub struct ServerCertInitArgs {
     /// Write certificate material into this directory.
     #[arg(long = "dir", value_name = "DIR")]
@@ -133,7 +120,7 @@ pub struct ServerCertInitArgs {
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = SERVER_CERT_EXAMPLES)]
+#[command(before_help = SERVER_CERT_HEADER, after_help = SERVER_CERT_EXAMPLES)]
 pub struct ServerCertDirArgs {
     /// Read and write certificate material in this directory.
     #[arg(long = "dir", value_name = "DIR")]
@@ -142,8 +129,9 @@ pub struct ServerCertDirArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    about = "Run the Client runtime and client-side setup commands",
+    about = "Operate the Client runtime and setup commands",
     long_about = None,
+    before_help = CLIENT_HEADER,
     after_help = CLIENT_EXAMPLES
 )]
 pub struct ClientArgs {
@@ -162,16 +150,17 @@ pub struct ClientArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ClientSubcommand {
-    /// Manage Client identity material and fingerprints.
+    /// Manage Client identity.
     Identity(ClientIdentityArgs),
-    /// Manage manual Public hostname certificates for terminate mode.
+    /// Manage Public hostname certificates.
     PublicCert(ClientPublicCertArgs),
 }
 
 #[derive(Debug, Args)]
 #[command(
-    about = "Manage manual Public hostname certificates for terminate mode",
+    about = "Manage Public hostname certificates",
     long_about = None,
+    before_help = CLIENT_PUBLIC_CERT_HEADER,
     subcommand_required = true,
     arg_required_else_help = true,
     after_help = CLIENT_PUBLIC_CERT_EXAMPLES
@@ -183,24 +172,16 @@ pub struct ClientPublicCertArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ClientPublicCertSubcommand {
-    /// Create the shared Public hostname CA and a leaf certificate for one
-    /// hostname (--hostname) or for all config-derived terminating hostnames
-    /// when --hostname is omitted. Requires --config when --hostname is not
-    /// provided.
+    /// Initialize Public hostname certificates.
     Init(ClientPublicCertInitArgs),
-    /// Renew the leaf certificate for one hostname (--hostname) or all
-    /// config-derived terminating hostnames when --hostname is omitted.
-    /// Requires --config when --hostname is not provided.
+    /// Renew Public hostname certificates.
     Renew(ClientPublicCertRenewArgs),
-    /// Rotate the shared Public hostname CA and reissue every managed leaf
-    /// certificate. The managed hostname set is derived from
-    /// client.services[].public-hostnames for tls-mode = "terminate" entries
-    /// in the config file; --config is therefore required.
+    /// Rotate the Public hostname CA.
     RotateCa(ClientPublicCertDirArgs),
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = CLIENT_PUBLIC_CERT_EXAMPLES)]
+#[command(before_help = CLIENT_PUBLIC_CERT_HEADER, after_help = CLIENT_PUBLIC_CERT_EXAMPLES)]
 pub struct ClientPublicCertInitArgs {
     /// Write Public hostname certificate material into this directory.
     #[arg(long = "dir", value_name = "DIR")]
@@ -211,7 +192,7 @@ pub struct ClientPublicCertInitArgs {
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = CLIENT_PUBLIC_CERT_EXAMPLES)]
+#[command(before_help = CLIENT_PUBLIC_CERT_HEADER, after_help = CLIENT_PUBLIC_CERT_EXAMPLES)]
 pub struct ClientPublicCertRenewArgs {
     /// Read and write Public hostname certificate material in this directory.
     #[arg(long = "dir", value_name = "DIR")]
@@ -223,7 +204,7 @@ pub struct ClientPublicCertRenewArgs {
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = CLIENT_PUBLIC_CERT_EXAMPLES)]
+#[command(before_help = CLIENT_PUBLIC_CERT_HEADER, after_help = CLIENT_PUBLIC_CERT_EXAMPLES)]
 pub struct ClientPublicCertDirArgs {
     /// Read and write Public hostname certificate material in this directory.
     #[arg(long = "dir", value_name = "DIR")]
@@ -232,8 +213,9 @@ pub struct ClientPublicCertDirArgs {
 
 #[derive(Debug, Args)]
 #[command(
-    about = "Manage Client identity material and fingerprints",
+    about = "Manage Client identity",
     long_about = None,
+    before_help = CLIENT_IDENTITY_HEADER,
     subcommand_required = true,
     arg_required_else_help = true,
     after_help = CLIENT_IDENTITY_EXAMPLES
@@ -245,18 +227,18 @@ pub struct ClientIdentityArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ClientIdentitySubcommand {
-    /// Initialize Client identity material.
+    /// Initialize Client identity.
     Init(ClientIdentityDirArgs),
-    /// Renew the Client certificate without changing the Client identity.
+    /// Renew Client identity certificates.
     Renew(ClientIdentityDirArgs),
-    /// Rotate the Client keypair and issue a new Client identity.
+    /// Rotate Client identity.
     Rotate(ClientIdentityDirArgs),
-    /// Print the Client identity fingerprint for scripts.
+    /// Show the Client identity fingerprint.
     Show(ClientIdentityDirArgs),
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = CLIENT_IDENTITY_LEAF_EXAMPLES)]
+#[command(before_help = CLIENT_IDENTITY_HEADER, after_help = CLIENT_IDENTITY_LEAF_EXAMPLES)]
 pub struct ClientIdentityDirArgs {
     /// Read and write Client identity material in this directory.
     #[arg(long = "dir", value_name = "DIR")]

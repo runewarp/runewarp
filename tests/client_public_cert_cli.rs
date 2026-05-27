@@ -50,6 +50,24 @@ fn client_public_cert_init_writes_all_artifacts_to_the_requested_directory() {
 }
 
 #[test]
+fn client_public_cert_help_uses_concise_public_certificate_copy() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["client", "public-cert", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.starts_with("Runewarp Public Certificates"));
+    assert!(stdout.contains("Manage Public hostname certificates"));
+    assert!(stdout.contains("init       Initialize Public hostname certificates"));
+    assert!(stdout.contains("renew      Renew Public hostname certificates"));
+    assert!(stdout.contains("rotate-ca  Rotate the Public hostname CA"));
+    assert!(!stdout.contains("Config defaults:"));
+}
+
+#[test]
 fn client_public_cert_init_normalizes_hostname_in_subdirectory() {
     let tempdir = tempdir().unwrap();
 
@@ -290,10 +308,13 @@ fn client_public_cert_init_reports_paths_and_utc_timestamps()
 #[test]
 fn client_public_cert_init_requires_hostname_or_config() {
     let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
+    fs::create_dir_all(&xdg_config_home).unwrap();
 
     let assert = Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
         .args([
             "client",
             "public-cert",
@@ -330,6 +351,49 @@ fn client_public_cert_init_uses_the_xdg_default_directory_when_dir_is_omitted() 
             "--hostname",
             "app.example.test",
         ])
+        .assert()
+        .success();
+
+    assert_exists(
+        xdg_data_home
+            .join("runewarp/client/public-cert/public-ca.crt")
+            .as_path(),
+    );
+    assert_exists(
+        xdg_data_home
+            .join("runewarp/client/public-cert/app.example.test/public.crt")
+            .as_path(),
+    );
+}
+
+#[test]
+fn client_public_cert_init_without_hostname_uses_the_discovered_default_config_and_implicit_xdg_dir()
+ {
+    let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
+    let xdg_data_home = tempdir.path().join("xdg-data");
+    let xdg_runewarp_dir = xdg_config_home.join("runewarp");
+    fs::create_dir_all(&xdg_runewarp_dir).unwrap();
+    fs::write(
+        xdg_runewarp_dir.join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "127.0.0.1:3000"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_DATA_HOME", &xdg_data_home)
+        .args(["client", "public-cert", "init"])
         .assert()
         .success();
 
@@ -504,10 +568,13 @@ fn client_public_cert_renew_with_hostname_replaces_leaf_but_keeps_ca() {
 #[test]
 fn client_public_cert_renew_requires_hostname_or_config() {
     let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
+    fs::create_dir_all(&xdg_config_home).unwrap();
 
     let assert = Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
         .args(["client", "public-cert", "renew", "--dir", "public-cert"])
         .assert()
         .failure();
@@ -602,6 +669,63 @@ tls-mode = "terminate"
         .unwrap(),
         original_api_leaf,
         "renew should replace api leaf when driven by config"
+    );
+}
+
+#[test]
+fn client_public_cert_renew_without_hostname_uses_the_discovered_default_config() {
+    let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
+    let xdg_data_home = tempdir.path().join("xdg-data");
+    let xdg_runewarp_dir = xdg_config_home.join("runewarp");
+    fs::create_dir_all(&xdg_runewarp_dir).unwrap();
+    fs::write(
+        xdg_runewarp_dir.join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "127.0.0.1:3000"
+tls-mode = "terminate"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_DATA_HOME", &xdg_data_home)
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let original_leaf =
+        fs::read(xdg_data_home.join("runewarp/client/public-cert/app.example.test/public.crt"))
+            .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_DATA_HOME", &xdg_data_home)
+        .args(["client", "public-cert", "renew"])
+        .assert()
+        .success();
+
+    assert_ne!(
+        fs::read(xdg_data_home.join("runewarp/client/public-cert/app.example.test/public.crt"))
+            .unwrap(),
+        original_leaf,
+        "renew should replace the leaf when driven by the discovered default config"
     );
 }
 

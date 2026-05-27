@@ -292,6 +292,7 @@ identity-dir = "client-identity"
         },
         &ClientSettingsResolutionDefaults {
             identity_directory: tempdir.path().join("unused-default"),
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr).await?;

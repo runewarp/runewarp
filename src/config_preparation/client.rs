@@ -27,7 +27,7 @@ pub(crate) struct PreparedClientConfig {
     pub(crate) reconnect_interval: Duration,
     pub(crate) services: Vec<PreparedClientServiceConfig>,
     pub(crate) manual_public_cert_present: bool,
-    pub(crate) manual_public_cert_directory: Option<PathBuf>,
+    pub(crate) manual_public_cert_directory: Option<PreparedValue<PathBuf>>,
     pub(crate) acme_present: bool,
     pub(crate) acme: Option<PreparedClientAcmeConfig>,
     pub(crate) unknown_field_messages: Vec<String>,
@@ -54,6 +54,13 @@ pub(crate) struct PreparedClientServiceConfig {
     pub(crate) tls_mode: PreparedClientTlsMode,
 }
 
+struct ClientPreparationDefaults<'a> {
+    default_identity_directory: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_public_cert_directory: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_server_ca_path: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_client_acme_state_dir: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PreparedClientTlsMode {
     Passthrough,
@@ -67,7 +74,12 @@ pub(crate) fn prepare_client_settings_from_cli(
 ) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
     let selected_config = select_client_config_with_default(config, default_config_path)
         .map_err(ClientSettingsResolutionError::XdgPath)?;
-    prepare_selected_client_config(selected_config, &runtime, &default_identity_material_dir)
+    prepare_selected_client_config(
+        selected_config,
+        &runtime,
+        &default_identity_material_dir,
+        &default_public_cert_dir,
+    )
 }
 
 pub(crate) fn select_client_config(
@@ -104,6 +116,7 @@ pub(crate) fn prepare_optional_client_config_from_path(
         raw,
         unknown_field_messages,
         &default_identity_material_dir,
+        &default_public_cert_dir,
     )))
 }
 
@@ -111,6 +124,7 @@ pub(crate) fn prepare_selected_client_config(
     selected_config: SelectedClientConfig,
     runtime: &ClientRuntimeArgs,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_public_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
     match selected_config {
         SelectedClientConfig::None => prepare_cli_only_client_config(
@@ -118,9 +132,15 @@ pub(crate) fn prepare_selected_client_config(
             LogLevel::default(),
             runtime,
             default_identity_directory,
+            default_public_cert_directory,
         ),
         SelectedClientConfig::Explicit(path) | SelectedClientConfig::Discovered(path) => {
-            prepare_selected_config_client_config(path, runtime, default_identity_directory)
+            prepare_selected_config_client_config(
+                path,
+                runtime,
+                default_identity_directory,
+                default_public_cert_directory,
+            )
         }
     }
 }
@@ -129,6 +149,7 @@ fn prepare_selected_config_client_config(
     path: PathBuf,
     runtime: &ClientRuntimeArgs,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_public_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
     let section_value = load_optional_selected_section_value(&path, "client")
         .map_err(ClientSettingsResolutionError::Settings)?;
@@ -140,6 +161,7 @@ fn prepare_selected_config_client_config(
             log_level,
             runtime,
             default_identity_directory,
+            default_public_cert_directory,
         );
     };
 
@@ -173,6 +195,7 @@ fn prepare_selected_config_client_config(
         raw,
         messages,
         default_identity_directory,
+        default_public_cert_directory,
     ))
 }
 
@@ -181,6 +204,7 @@ fn prepare_cli_only_client_config(
     log_level: LogLevel,
     runtime: &ClientRuntimeArgs,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_public_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
     let mut messages = Vec::new();
     let missing_context = match selected_path {
@@ -222,6 +246,7 @@ fn prepare_cli_only_client_config(
         },
         Vec::new(),
         default_identity_directory,
+        default_public_cert_directory,
     ))
 }
 
@@ -231,15 +256,19 @@ pub(crate) fn prepare_raw_client_config(
     raw: RawClientConfig,
     unknown_field_messages: Vec<String>,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_public_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> PreparedClientConfig {
     prepare_raw_client_config_with_defaults(
         selected_path,
         log_level,
         raw,
         unknown_field_messages,
-        default_identity_directory,
-        &default_client_server_ca_path,
-        &default_client_acme_state_dir,
+        &ClientPreparationDefaults {
+            default_identity_directory,
+            default_public_cert_directory,
+            default_server_ca_path: &default_client_server_ca_path,
+            default_client_acme_state_dir: &default_client_acme_state_dir,
+        },
     )
 }
 
@@ -248,9 +277,7 @@ fn prepare_raw_client_config_with_defaults(
     log_level: LogLevel,
     raw: RawClientConfig,
     unknown_field_messages: Vec<String>,
-    default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
-    default_server_ca_path: &dyn Fn() -> Result<PathBuf, XdgPathError>,
-    default_client_acme_state_dir: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+    defaults: &ClientPreparationDefaults<'_>,
 ) -> PreparedClientConfig {
     let config_dir = selected_path
         .as_deref()
@@ -259,6 +286,10 @@ fn prepare_raw_client_config_with_defaults(
         .unwrap_or_else(|| PathBuf::from("."));
     let manual_public_cert_present = raw.public_cert_dir.is_some();
     let acme_present = raw.acme.is_some();
+    let has_terminating_service = raw
+        .services
+        .iter()
+        .any(|service| service.tls_mode.as_deref() == Some("terminate"));
 
     PreparedClientConfig {
         selected_path,
@@ -268,12 +299,12 @@ fn prepare_raw_client_config_with_defaults(
             raw.server_trust.as_deref(),
             raw.server_ca_file,
             &config_dir,
-            default_server_ca_path,
+            defaults.default_server_ca_path,
         ),
         identity_directory: resolve_path_with_default(
             raw.identity_dir,
             &config_dir,
-            default_identity_directory,
+            defaults.default_identity_directory,
         ),
         reconnect_interval: Duration::from_secs(DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS),
         services: raw
@@ -282,13 +313,21 @@ fn prepare_raw_client_config_with_defaults(
             .map(prepare_client_service)
             .collect(),
         manual_public_cert_present,
-        manual_public_cert_directory: raw
-            .public_cert_dir
-            .map(|directory| resolve_path(&config_dir, &directory)),
+        manual_public_cert_directory: match raw.public_cert_dir {
+            Some(directory) => Some(PreparedValue::Ready(resolve_path(&config_dir, &directory))),
+            None if !acme_present && has_terminating_service => {
+                Some(resolve_default_path(defaults.default_public_cert_directory))
+            }
+            None => None,
+        },
         acme_present,
         acme: if acme_present && !manual_public_cert_present {
             raw.acme.map(|acme| {
-                prepare_client_acme_config(acme, &config_dir, default_client_acme_state_dir)
+                prepare_client_acme_config(
+                    acme,
+                    &config_dir,
+                    defaults.default_client_acme_state_dir,
+                )
             })
         } else {
             None
@@ -384,6 +423,10 @@ fn default_identity_material_dir() -> Result<PathBuf, XdgPathError> {
     crate::default_client_identity_material_dir()
 }
 
+fn default_public_cert_dir() -> Result<PathBuf, XdgPathError> {
+    crate::default_client_public_cert_material_dir()
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -393,8 +436,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        PreparedClientTlsMode, PreparedClientTrust, PreparedDirectory, PreparedValue,
-        prepare_selected_client_config,
+        ClientPreparationDefaults, PreparedClientTlsMode, PreparedClientTrust, PreparedDirectory,
+        PreparedValue, prepare_selected_client_config,
     };
     use crate::settings::{LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig};
     use crate::{ClientRuntimeArgs, SelectedClientConfig};
@@ -429,6 +472,7 @@ mod tests {
                 backend_address: Some("backend.internal:443".to_owned()),
             },
             &|| Ok(identity_directory.clone()),
+            &|| Ok(tempdir.path().join("unused-public-cert")),
         )?;
 
         assert_eq!(prepared.selected_path, None);
@@ -480,6 +524,7 @@ hostname = "tunnel.example.test"
                 backend_address: Some("backend.internal:443".to_owned()),
             },
             &|| Ok(identity_directory.clone()),
+            &|| Ok(tempdir.path().join("unused-public-cert")),
         )?;
 
         assert_eq!(prepared.selected_path, Some(config_path));
@@ -503,6 +548,7 @@ hostname = "tunnel.example.test"
         let config_path = tempdir.path().join("config.toml");
         let identity_directory = tempdir.path().join("xdg-data/client/identity");
         let server_ca_path = tempdir.path().join("xdg-data/client/server-ca.crt");
+        let public_cert_directory = tempdir.path().join("xdg-data/client/public-cert");
         let acme_state_dir = tempdir.path().join("xdg-state/client/acme");
 
         let prepared = super::prepare_raw_client_config_with_defaults(
@@ -525,9 +571,12 @@ hostname = "tunnel.example.test"
                 }],
             },
             Vec::new(),
-            &|| Ok(identity_directory.clone()),
-            &|| Ok(server_ca_path.clone()),
-            &|| Ok(acme_state_dir.clone()),
+            &ClientPreparationDefaults {
+                default_identity_directory: &|| Ok(identity_directory.clone()),
+                default_public_cert_directory: &|| Ok(public_cert_directory.clone()),
+                default_server_ca_path: &|| Ok(server_ca_path.clone()),
+                default_client_acme_state_dir: &|| Ok(acme_state_dir.clone()),
+            },
         );
 
         assert_eq!(prepared.log_level, LogLevel::Info);
@@ -561,6 +610,7 @@ hostname = "tunnel.example.test"
         let config_path = tempdir.path().join("nested").join("config.toml");
         let default_identity_directory = tempdir.path().join("unused-identity");
         let default_server_ca_path = tempdir.path().join("unused-server-ca.crt");
+        let default_public_cert_directory = tempdir.path().join("unused-public-cert");
         let default_acme_state_dir = tempdir.path().join("unused-acme-state");
 
         let prepared = super::prepare_raw_client_config_with_defaults(
@@ -580,9 +630,12 @@ hostname = "tunnel.example.test"
                 }],
             },
             Vec::new(),
-            &|| Ok(default_identity_directory.clone()),
-            &|| Ok(default_server_ca_path.clone()),
-            &|| Ok(default_acme_state_dir.clone()),
+            &ClientPreparationDefaults {
+                default_identity_directory: &|| Ok(default_identity_directory.clone()),
+                default_public_cert_directory: &|| Ok(default_public_cert_directory.clone()),
+                default_server_ca_path: &|| Ok(default_server_ca_path.clone()),
+                default_client_acme_state_dir: &|| Ok(default_acme_state_dir.clone()),
+            },
         );
 
         assert_eq!(prepared.log_level, LogLevel::Off);
@@ -598,7 +651,9 @@ hostname = "tunnel.example.test"
         );
         assert_eq!(
             prepared.manual_public_cert_directory,
-            Some(tempdir.path().join("nested/public-cert"))
+            Some(PreparedValue::Ready(
+                tempdir.path().join("nested/public-cert")
+            ))
         );
         Ok(())
     }
@@ -625,6 +680,7 @@ log-level = "off"
                 backend_address: Some("backend.internal:443".to_owned()),
             },
             &|| Ok(identity_directory.clone()),
+            &|| Ok(tempdir.path().join("unused-public-cert")),
         )?;
 
         assert_eq!(

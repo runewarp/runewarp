@@ -33,7 +33,7 @@ fn client_help_shows_the_config_shorthand() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn client_help_includes_examples_and_default_config_guidance()
+fn client_help_includes_examples_without_a_config_defaults_footer()
 -> Result<(), Box<dyn std::error::Error>> {
     let assert = Command::cargo_bin("runewarp")?
         .args(["client", "--help"])
@@ -44,10 +44,20 @@ fn client_help_includes_examples_and_default_config_guidance()
 
     assert!(stdout.contains("Examples:"));
     assert!(stdout.contains("runewarp client"));
-    assert!(
-        stdout
-            .contains("Commands use the default Runewarp config path unless -c, --config is set.")
-    );
+    assert!(!stdout.contains("Config defaults:"));
+    Ok(())
+}
+
+#[test]
+fn client_help_keeps_a_runewarp_branded_header() -> Result<(), Box<dyn std::error::Error>> {
+    let assert = Command::cargo_bin("runewarp")?
+        .args(["client", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+
+    assert!(stdout.starts_with("Runewarp Client"));
     Ok(())
 }
 

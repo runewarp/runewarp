@@ -25,6 +25,18 @@ fn top_level_help_identifies_runewarp_in_the_product_line() -> Result<(), Box<dy
 }
 
 #[test]
+fn top_level_help_drops_the_config_defaults_footer() -> Result<(), Box<dyn std::error::Error>> {
+    let assert = Command::cargo_bin("runewarp")?
+        .arg("--help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+
+    assert!(!stdout.contains("Config defaults:"));
+    Ok(())
+}
+
+#[test]
 fn help_subcommand_prints_the_top_level_help() -> Result<(), Box<dyn std::error::Error>> {
     let assert = Command::cargo_bin("runewarp")?
         .arg("help")
@@ -45,8 +57,8 @@ fn top_level_help_describes_the_main_entry_points() -> Result<(), Box<dyn std::e
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
-    assert!(stdout.contains("server  Run the Server runtime and server-side setup commands"));
-    assert!(stdout.contains("client  Run the Client runtime and client-side setup commands"));
+    assert!(stdout.contains("server  Operate the Server runtime and setup commands"));
+    assert!(stdout.contains("client  Operate the Client runtime and setup commands"));
     Ok(())
 }
 

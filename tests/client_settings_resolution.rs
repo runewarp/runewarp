@@ -20,7 +20,7 @@ fn cli_only_resolution_uses_a_one_second_runtime_reconnect_interval_by_default()
         SelectedClientConfig::None,
         &ClientRuntimeArgs {
             server_address: Some("Tunnel.Example.Test.".to_owned()),
-            backend_address: Some("caddy.local:443".to_owned()),
+            backend_address: Some("localhost:8443".to_owned()),
         },
         &ClientSettingsResolutionDefaults {
             identity_directory: identity_directory.clone(),
@@ -36,7 +36,7 @@ fn cli_only_resolution_uses_a_one_second_runtime_reconnect_interval_by_default()
     assert_eq!(settings.reconnect_interval, Duration::from_secs(1));
     assert_eq!(settings.services.len(), 1);
     assert_eq!(settings.services[0].public_hostnames, None);
-    assert_eq!(settings.services[0].backend_address, "caddy.local:443");
+    assert_eq!(settings.services[0].backend_address, "localhost:8443");
     Ok(())
 }
 

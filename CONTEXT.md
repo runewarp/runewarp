@@ -171,8 +171,8 @@ _Avoid_: Settings loader, validation pass, startup defaults
 > **Dev:** "Is `tunnel.example.com:443` the **Server hostname**?"
 > **Domain expert:** "No. That is the **Server address**. `tunnel.example.com` is the **Server hostname** inside it."
 >
-> **Dev:** "Is the `caddy.local:443` target the **Service**?"
-> **Domain expert:** "No. The **Service** is the routing rule in client config. `caddy.local:443` is the **Local backend** it selects."
+> **Dev:** "Is the `localhost:8443` target the **Service**?"
+> **Domain expert:** "No. The **Service** is the routing rule in client config. `localhost:8443` is the **Local backend** it selects."
 >
 > **Dev:** "What changes when a **Service** switches its **TLS mode**?"
 > **Domain expert:** "Under **TLS passthrough** the **Client** forwards the TLS bytes unchanged and the **Local backend** terminates TLS. In **Terminate mode** the **Client** terminates TLS and the **Local backend** receives plaintext."

@@ -190,7 +190,7 @@ client-identity = "4f7b6f7a9b0f0d2b..."
 server-address = "tunnel.example.com"
 
 [[client.services]]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 ```
 
 That Client has a **Catch-all Service**: the Server stays explicit about **Public hostname authorization**, while the sole Client **Service** forwards every admitted hostname to one TLS-terminating **Local backend**.
@@ -221,7 +221,7 @@ Runewarp loads `--config` from `$XDG_CONFIG_HOME/runewarp/config.toml` when omit
 For the smallest Client startup, `runewarp client` can also run without a selected Client config when you provide both runtime routing flags:
 
 ```bash
-runewarp client --server-address tunnel.example.com --backend-address caddy.local:443
+runewarp client --server-address tunnel.example.com --backend-address localhost:8443
 ```
 
 That CLI-only shape creates one Client-side **Catch-all Service**, defaults `client.server-trust` to `system`, and still uses the usual omitted-key defaults for the Client identity directory, top-level `log-level` (`info`), and reconnect behavior.

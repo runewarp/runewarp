@@ -1304,7 +1304,7 @@ mod tests {
 
     #[test]
     fn accepts_host_port_local_backend_pairs() {
-        assert!(is_valid_backend_address("caddy.local:443"));
+        assert!(is_valid_backend_address("localhost:8443"));
         assert!(is_valid_backend_address("127.0.0.1:443"));
         assert!(!is_valid_backend_address("caddy.local"));
     }

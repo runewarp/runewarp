@@ -34,7 +34,7 @@ identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test.", "api.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -81,7 +81,7 @@ identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test.", "api.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -131,7 +131,7 @@ server-address = "Tunnel.Example.Test.:9443"
 identity-dir = "client-identity"
 
 [[client.services]]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -180,7 +180,7 @@ server-address = "Tunnel.Example.Test."
 identity-dir = "client-identity"
 
 [[client.services]]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#
             ),
         )
@@ -220,7 +220,7 @@ identity-dir = "client-identity"
 logs = false
 
 [[client.services]]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -259,7 +259,7 @@ server-address = "127.0.0.1:443"
 identity-dir = "client-identity"
 
 [[client.services]]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -300,7 +300,7 @@ server-address = "tunnel.example.test:65536"
 identity-dir = "client-identity"
 
 [[client.services]]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -407,7 +407,7 @@ server-ca-file = "server-ca.pem"
 identity-dir = "client-identity"
 
 [[client.services]]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -451,7 +451,7 @@ server-ca-file = "server-ca.pem"
 identity-dir = "client-identity"
 
 [[client.services]]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -492,7 +492,7 @@ identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test."]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -536,7 +536,7 @@ identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = []
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -578,7 +578,7 @@ identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test."]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 
 [[client.services]]
 public-hostnames = ["app.example.test", "*.bad.example.test"]
@@ -624,7 +624,7 @@ identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -647,7 +647,7 @@ identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 tls-mode = "passthrough"
 "#,
     )
@@ -671,7 +671,7 @@ identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 tls-mode = "proxy"
 "#,
     )
@@ -703,7 +703,7 @@ identity-dir = "client-identity"
 public-cert-dir = "certs"
 
 [[client.services]]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 tls-mode = "terminate"
 "#,
     )
@@ -736,7 +736,7 @@ identity-dir = "client-identity"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 tls-mode = "terminate"
 "#,
     )
@@ -779,7 +779,7 @@ public-cert-dir = "certs"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 tls-mode = "terminate"
 "#,
     )
@@ -812,7 +812,7 @@ public-cert-dir = "missing-certs"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 tls-mode = "terminate"
 "#,
     )
@@ -843,7 +843,7 @@ public-cert-dir = "certs"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -876,7 +876,7 @@ state-dir = "acme-state"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();
@@ -911,7 +911,7 @@ state-dir = "acme-state"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 tls-mode = "terminate"
 "#,
     )
@@ -947,7 +947,7 @@ state-dir = "acme-state"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 tls-mode = "terminate"
 "#,
     )
@@ -978,7 +978,7 @@ state-dir = "missing-acme-state"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 tls-mode = "terminate"
 "#,
     )
@@ -1016,7 +1016,7 @@ state-dir = "acme-state"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 "#,
     )
     .unwrap();

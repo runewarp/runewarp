@@ -158,7 +158,7 @@ identity-dir = "/etc/runewarp/client"
 
 [[client.services]]
 public-hostnames = ["app.example.com", "api.example.com"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 
 [[client.services]]
 public-hostnames = ["plex.example.com", "pihole.example.com"]
@@ -210,7 +210,7 @@ identity-dir = "/etc/runewarp/client"
 
 [[client.services]]
 public-hostnames = ["app.example.com", "api.example.com"]
-backend-address = "caddy.local:443"
+backend-address = "localhost:8443"
 
 [[client.services]]
 public-hostnames = ["plex.example.com", "pihole.example.com"]

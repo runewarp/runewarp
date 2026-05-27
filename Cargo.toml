@@ -2,7 +2,7 @@
 name = "runewarp"
 version = "0.1.0"
 edition = "2024"
-description = "Private tunneling for TLS passthrough"
+description = "Public ingress. Private by design."
 readme = "README.md"
 homepage = "https://runewarp.com"
 repository = "https://github.com/runewarp/runewarp"

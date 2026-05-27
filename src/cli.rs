@@ -51,7 +51,7 @@ const CLIENT_PUBLIC_CERT_HEADER: &str = "Runewarp Public Hostname Certificates";
 #[derive(Debug, Parser)]
 #[command(
     name = "runewarp",
-    about = "Runewarp: Private tunneling for TLS passthrough",
+    about = "Runewarp: Public ingress. Private by design.",
     long_about = None,
     after_help = TOP_LEVEL_EXAMPLES
 )]

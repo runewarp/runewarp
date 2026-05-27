@@ -9,13 +9,13 @@
   </p>
 </div>
 
-Runewarp is a self-hostable ingress tunneling tool for exposing local services without moving TLS termination to the edge. Clients connect out over QUIC, so you can publish services without putting your backend directly on the Internet or leaking your public IP.
+Runewarp is an ingress tunneling tool for exposing local services without moving TLS termination to the edge. Clients connect out over QUIC, so you can publish services without putting your backend directly on the Internet or leaking your public IP.
 
 ## Goals
 
 - **TLS passthrough ingress tunneling** — Server routes traffic by SNI without terminating or inspecting TLS
 - **Privacy-respecting by design** — Server never sees HTTP headers or application plaintext
-- **Traverse NAT and firewalls** — Client uses outbound QUIC connection, so no port forwarding or public IP required
+- **Traverse NAT and firewalls** — Client uses outbound QUIC, so no port forwarding or public IP is required
 - **Self-hostable and operator-controlled** — single Rust binary for both Client and Server
 - **Remain operationally simple** — TOML config, a handful of CLI commands, no runtime dependencies
 

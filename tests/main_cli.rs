@@ -5,7 +5,7 @@ fn no_args_prints_the_top_level_help() {
     let assert = Command::cargo_bin("runewarp").unwrap().assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
-    assert!(stdout.contains("Private tunneling for TLS passthrough"));
+    assert!(stdout.contains("Public ingress. Private by design."));
     assert!(stdout.contains("Usage:"));
     assert!(stdout.contains("server"));
     assert!(stdout.contains("client"));
@@ -20,7 +20,7 @@ fn top_level_help_identifies_runewarp_in_the_product_line() -> Result<(), Box<dy
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
-    assert!(stdout.starts_with("Runewarp: Private tunneling for TLS passthrough"));
+    assert!(stdout.starts_with("Runewarp: Public ingress. Private by design."));
     Ok(())
 }
 
@@ -44,7 +44,7 @@ fn help_subcommand_prints_the_top_level_help() -> Result<(), Box<dyn std::error:
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
-    assert!(stdout.starts_with("Runewarp: Private tunneling for TLS passthrough"));
+    assert!(stdout.starts_with("Runewarp: Public ingress. Private by design."));
     assert!(stdout.contains("Usage: runewarp [COMMAND]"));
     Ok(())
 }

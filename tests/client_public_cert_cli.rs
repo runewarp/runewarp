@@ -357,6 +357,7 @@ fn client_public_cert_init_without_hostname_surfaces_xdg_config_resolution_error
         .current_dir(tempdir.path())
         .env_remove("HOME")
         .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
         .args(["client", "public-cert", "init"])
         .assert()
         .failure();

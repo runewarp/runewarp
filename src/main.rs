@@ -438,8 +438,9 @@ fn run_client_public_cert_command(
 ) -> Result<(), Box<dyn Error>> {
     match command.command {
         cli::ClientPublicCertSubcommand::Init(args) => {
-            let directory = resolve_client_public_cert_dir(config.clone(), args.dir)?;
+            let directory_config = config.clone();
             let hostnames = resolve_client_public_cert_hostnames(config, args.hostname)?;
+            let directory = resolve_client_public_cert_dir(directory_config, args.dir)?;
             let mut initialized_hostnames = Vec::new();
             let mut existing_hostnames = Vec::new();
             for hostname in &hostnames {
@@ -492,8 +493,9 @@ fn run_client_public_cert_command(
             Ok(())
         }
         cli::ClientPublicCertSubcommand::Renew(args) => {
-            let directory = resolve_client_public_cert_dir(config.clone(), args.dir)?;
+            let directory_config = config.clone();
             let hostnames = resolve_client_public_cert_hostnames(config, args.hostname)?;
+            let directory = resolve_client_public_cert_dir(directory_config, args.dir)?;
             for hostname in &hostnames {
                 renew_manual_client_public_cert(&directory, hostname)?;
             }
@@ -502,8 +504,9 @@ fn run_client_public_cert_command(
             Ok(())
         }
         cli::ClientPublicCertSubcommand::RotateCa(args) => {
-            let directory = resolve_client_public_cert_dir(config.clone(), args.dir)?;
+            let directory_config = config.clone();
             let hostnames = resolve_client_public_cert_hostnames_from_config_required(config)?;
+            let directory = resolve_client_public_cert_dir(directory_config, args.dir)?;
             rotate_manual_client_public_cert_authority(&directory, &hostnames)?;
             println!(
                 "Public hostname CA rotated: {}",

@@ -76,6 +76,30 @@ pub enum ClientRouteOutcome<'a> {
     MissingTlsConfig,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AcmeRole<'a> {
+    Server { server_hostname: &'a str },
+    Client { public_hostname: &'a str },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AcmeEvent<'a> {
+    CachedCertificateReady {
+        remaining_validity: &'a str,
+        renewal_due: bool,
+    },
+    FirstIssuanceStarting,
+    CertificateIssued,
+    CertificateRenewed,
+    RecoverableFailure {
+        error: &'a str,
+    },
+    ManagerStopped,
+    NonStandardPublicBind {
+        bind_address: SocketAddr,
+    },
+}
+
 #[derive(Debug)]
 pub enum InstallError {
     SetGlobalDefault(tracing::dispatcher::SetGlobalDefaultError),
@@ -363,6 +387,11 @@ pub fn server_tunnel_connection_unauthorized(client_identity: &ClientIdentity) {
     );
 }
 
+pub fn acme(role: AcmeRole<'_>, event: AcmeEvent<'_>) {
+    let (level, message) = acme_event(role, event);
+    emit(level, &message);
+}
+
 #[cfg(test)]
 pub(crate) fn installed_level() -> Option<LogLevel> {
     LOGGER
@@ -592,6 +621,88 @@ fn client_route_event(
         ),
     };
     (level, line)
+}
+
+fn acme_event(role: AcmeRole<'_>, event: AcmeEvent<'_>) -> (EventLevel, String) {
+    let (event_name_prefix, hostname_field, hostname_value) = match role {
+        AcmeRole::Server { server_hostname } => (
+            "server acme",
+            "server-hostname",
+            Cow::Borrowed(server_hostname),
+        ),
+        AcmeRole::Client { public_hostname } => (
+            "client acme",
+            "public-hostname",
+            Cow::Borrowed(public_hostname),
+        ),
+    };
+    match event {
+        AcmeEvent::CachedCertificateReady {
+            remaining_validity,
+            renewal_due,
+        } => (
+            EventLevel::Info,
+            event_line(
+                &format!("{event_name_prefix} cached certificate ready"),
+                [
+                    (hostname_field, hostname_value),
+                    ("remaining-validity", Cow::Borrowed(remaining_validity)),
+                    (
+                        "renewal",
+                        Cow::Borrowed(if renewal_due { "due" } else { "not-due" }),
+                    ),
+                ],
+            ),
+        ),
+        AcmeEvent::FirstIssuanceStarting => (
+            EventLevel::Info,
+            event_line(
+                &format!("{event_name_prefix} first issuance starting"),
+                [
+                    (hostname_field, hostname_value),
+                    ("reason", Cow::Borrowed("no-ready-cached-certificate")),
+                ],
+            ),
+        ),
+        AcmeEvent::CertificateIssued => (
+            EventLevel::Info,
+            event_line(
+                &format!("{event_name_prefix} certificate issued"),
+                [(hostname_field, hostname_value)],
+            ),
+        ),
+        AcmeEvent::CertificateRenewed => (
+            EventLevel::Info,
+            event_line(
+                &format!("{event_name_prefix} certificate renewed"),
+                [(hostname_field, hostname_value)],
+            ),
+        ),
+        AcmeEvent::RecoverableFailure { error } => (
+            EventLevel::Warn,
+            event_line_with_summary(
+                &format!("{event_name_prefix} failed"),
+                [(hostname_field, hostname_value)],
+                error,
+            ),
+        ),
+        AcmeEvent::ManagerStopped => (
+            EventLevel::Error,
+            event_line_with_summary(
+                &format!("{event_name_prefix} stopped"),
+                [(hostname_field, hostname_value)],
+                "automatic certificate management stopped unexpectedly",
+            ),
+        ),
+        AcmeEvent::NonStandardPublicBind { bind_address } => (
+            EventLevel::Warn,
+            event_line_with_summary(
+                "server acme challenge reachability",
+                [("bind-address", Cow::Owned(bind_address.to_string()))],
+                "TLS-ALPN-01 still requires public TCP 443 reachability; non-443 internal binds can still work behind NAT or container port mapping",
+            ),
+        ),
+    }
 }
 
 fn warning_line(role: &str, message: &str) -> String {
@@ -932,16 +1043,16 @@ mod tests {
     use tracing_subscriber::fmt::writer::MakeWriter;
 
     use super::{
-        ClientRouteOutcome, ClientTunnelAttemptKind, ClientTunnelPhase, EventLevel, InstallOutcome,
-        ServerRouteOutcome, build_subscriber, client_ready, client_route,
-        client_trust_store_warning, client_tunnel_connect_failed, client_tunnel_connected,
-        client_tunnel_connecting, client_tunnel_disconnected, client_tunnel_resolution_failed,
-        client_tunnel_unauthorized, emit, emit_server_tunnel_connection_dropped, install,
-        installed_level, server_public_listener_ready, server_route,
-        server_route_rejected_client_hello, server_tunnel_connection_accepted,
-        server_tunnel_connection_failed, server_tunnel_connection_replaced,
-        server_tunnel_connection_terminated, server_tunnel_connection_unauthorized,
-        server_tunnel_listener_ready, warning,
+        AcmeEvent, AcmeRole, ClientRouteOutcome, ClientTunnelAttemptKind, ClientTunnelPhase,
+        EventLevel, InstallOutcome, ServerRouteOutcome, acme, build_subscriber, client_ready,
+        client_route, client_trust_store_warning, client_tunnel_connect_failed,
+        client_tunnel_connected, client_tunnel_connecting, client_tunnel_disconnected,
+        client_tunnel_resolution_failed, client_tunnel_unauthorized, emit,
+        emit_server_tunnel_connection_dropped, install, installed_level,
+        server_public_listener_ready, server_route, server_route_rejected_client_hello,
+        server_tunnel_connection_accepted, server_tunnel_connection_failed,
+        server_tunnel_connection_replaced, server_tunnel_connection_terminated,
+        server_tunnel_connection_unauthorized, server_tunnel_listener_ready, warning,
     };
     use crate::{ClientHelloError, ClientIdentity, LogLevel};
 
@@ -1234,6 +1345,65 @@ mod tests {
 
         assert!(output.contains("INFO server public listener ready: bind-address=127.0.0.1:443"));
         assert!(output.contains("INFO server tunnel listener ready: bind-address=127.0.0.1:443"));
+    }
+
+    #[test]
+    fn acme_lifecycle_logs_use_role_specific_wording_and_levels() {
+        let output = capture(LogLevel::Info, || {
+            acme(
+                AcmeRole::Server {
+                    server_hostname: "tunnel.example.test",
+                },
+                AcmeEvent::CachedCertificateReady {
+                    remaining_validity: "89d",
+                    renewal_due: false,
+                },
+            );
+            acme(
+                AcmeRole::Client {
+                    public_hostname: "app.example.test",
+                },
+                AcmeEvent::FirstIssuanceStarting,
+            );
+            acme(
+                AcmeRole::Client {
+                    public_hostname: "app.example.test",
+                },
+                AcmeEvent::RecoverableFailure {
+                    error: "order: authorization for app.example.test failed too many times",
+                },
+            );
+            acme(
+                AcmeRole::Server {
+                    server_hostname: "tunnel.example.test",
+                },
+                AcmeEvent::ManagerStopped,
+            );
+            acme(
+                AcmeRole::Server {
+                    server_hostname: "tunnel.example.test",
+                },
+                AcmeEvent::NonStandardPublicBind {
+                    bind_address: "127.0.0.1:8443".parse().unwrap(),
+                },
+            );
+        });
+
+        assert!(output.contains(
+            "INFO server acme cached certificate ready: server-hostname=tunnel.example.test remaining-validity=89d renewal=not-due"
+        ));
+        assert!(output.contains(
+            "INFO client acme first issuance starting: public-hostname=app.example.test reason=no-ready-cached-certificate"
+        ));
+        assert!(output.contains(
+            "WARN client acme failed: public-hostname=app.example.test: order: authorization for app.example.test failed too many times"
+        ));
+        assert!(output.contains(
+            "ERROR server acme stopped: server-hostname=tunnel.example.test: automatic certificate management stopped unexpectedly"
+        ));
+        assert!(output.contains(
+            "WARN server acme challenge reachability: bind-address=127.0.0.1:8443: TLS-ALPN-01 still requires public TCP 443 reachability; non-443 internal binds can still work behind NAT or container port mapping"
+        ));
     }
 
     #[test]

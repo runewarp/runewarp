@@ -88,7 +88,12 @@ pub enum AcmeEvent<'a> {
         remaining_validity: &'a str,
         renewal_due: bool,
     },
-    FirstIssuanceStarting,
+    FirstIssuanceStarting {
+        reason: &'a str,
+    },
+    RenewalStarting {
+        reason: &'a str,
+    },
     CertificateIssued,
     CertificateRenewed,
     RecoverableFailure {
@@ -654,13 +659,23 @@ fn acme_event(role: AcmeRole<'_>, event: AcmeEvent<'_>) -> (EventLevel, String) 
                 ],
             ),
         ),
-        AcmeEvent::FirstIssuanceStarting => (
+        AcmeEvent::FirstIssuanceStarting { reason } => (
             EventLevel::Info,
             event_line(
                 &format!("{event_name_prefix} first issuance starting"),
                 [
                     (hostname_field, hostname_value),
-                    ("reason", Cow::Borrowed("no-ready-cached-certificate")),
+                    ("reason", Cow::Borrowed(reason)),
+                ],
+            ),
+        ),
+        AcmeEvent::RenewalStarting { reason } => (
+            EventLevel::Info,
+            event_line(
+                &format!("{event_name_prefix} renewal starting"),
+                [
+                    (hostname_field, hostname_value),
+                    ("reason", Cow::Borrowed(reason)),
                 ],
             ),
         ),
@@ -1363,7 +1378,17 @@ mod tests {
                 AcmeRole::Client {
                     public_hostname: "app.example.test",
                 },
-                AcmeEvent::FirstIssuanceStarting,
+                AcmeEvent::FirstIssuanceStarting {
+                    reason: "no-ready-cached-certificate",
+                },
+            );
+            acme(
+                AcmeRole::Client {
+                    public_hostname: "api.example.test",
+                },
+                AcmeEvent::RenewalStarting {
+                    reason: "expired-cached-certificate",
+                },
             );
             acme(
                 AcmeRole::Client {
@@ -1394,6 +1419,9 @@ mod tests {
         ));
         assert!(output.contains(
             "INFO client acme first issuance starting: public-hostname=app.example.test reason=no-ready-cached-certificate"
+        ));
+        assert!(output.contains(
+            "INFO client acme renewal starting: public-hostname=api.example.test reason=expired-cached-certificate"
         ));
         assert!(output.contains(
             "WARN client acme failed: public-hostname=app.example.test: order: authorization for app.example.test failed too many times"

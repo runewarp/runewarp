@@ -713,7 +713,7 @@ mod tests {
             timeout(Duration::from_secs(1), tls_stream.shutdown())
                 .await
                 .map_err(|_| timeout_error("backend should close cleanly"))??;
-            Ok(())
+            Ok::<(), io::Error>(())
         });
 
         Ok((address, task))
@@ -1103,13 +1103,27 @@ mod tests {
         let backend_listener = TcpListener::bind(localhost(0)).await?;
         let backend_address = backend_listener.local_addr()?.to_string();
         let backend_task = tokio::spawn(async move {
-            match timeout(Duration::from_millis(200), backend_listener.accept()).await {
-                Ok(Ok(_)) => Err(io::Error::other(
-                    "ACME challenge traffic must not reach the backend",
-                )),
-                Ok(Err(error)) => Err(error),
-                Err(_) => Ok(()),
-            }
+            let (mut backend_stream, _) =
+                timeout(Duration::from_secs(1), backend_listener.accept())
+                    .await
+                    .map_err(|_| {
+                        timeout_error("backend should accept ordinary terminate traffic")
+                    })??;
+            let mut request = [0_u8; 4];
+            timeout(
+                Duration::from_secs(1),
+                backend_stream.read_exact(&mut request),
+            )
+            .await
+            .map_err(|_| timeout_error("backend should receive terminate request bytes"))??;
+            assert_eq!(&request, b"ping");
+            timeout(Duration::from_secs(1), backend_stream.write_all(b"pong"))
+                .await
+                .map_err(|_| timeout_error("backend should send terminate response bytes"))??;
+            timeout(Duration::from_secs(1), backend_stream.shutdown())
+                .await
+                .map_err(|_| timeout_error("backend should close cleanly"))??;
+            Ok::<(), io::Error>(())
         });
 
         let services = vec![ClientServiceSettings {
@@ -1136,13 +1150,26 @@ mod tests {
                 let client_connection = fixture.client_connection.clone();
 
                 let stream_handler_task = tokio::spawn(async move {
-                    let (send, recv) =
-                        timeout(Duration::from_secs(1), client_connection.accept_bi())
-                            .await
-                            .map_err(|_| timeout_error("handler should accept a tunnel stream"))?
-                            .map_err(io::Error::other)?;
-                    stream_handler.handle(send, recv).await
+                    for _ in 0..2 {
+                        let (send, recv) =
+                            timeout(Duration::from_secs(1), client_connection.accept_bi())
+                                .await
+                                .map_err(|_| {
+                                    timeout_error("handler should accept a tunnel stream")
+                                })?
+                                .map_err(io::Error::other)?;
+                        stream_handler.clone().handle(send, recv).await?;
+                    }
+                    Ok::<(), io::Error>(())
                 });
+
+                let response = request_plaintext_response_over_terminated_tunnel(
+                    server_connection.clone(),
+                    &public_cert,
+                    hostname,
+                )
+                .await?;
+                assert_eq!(response, *b"pong");
 
                 let (send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
                     .await
@@ -1174,7 +1201,18 @@ mod tests {
         )
         .await?;
 
-        assert!(!output.contains("client route terminate"));
+        assert!(output.contains(
+            "DEBUG client route terminate: public-hostname=app.example.test backend-address="
+        ));
+        assert_eq!(
+            output
+                .lines()
+                .filter(|line| {
+                    line.contains("client route terminate: public-hostname=app.example.test")
+                })
+                .count(),
+            1
+        );
         assert!(!output.contains("client route unavailable"));
         backend_task.abort();
         let _ = backend_task.await;

@@ -15,7 +15,7 @@ use crate::client_hello::read_client_hello;
 use crate::hostname::validate_public_hostname;
 use crate::proxy::proxy_tcp_over_quic;
 use crate::runtime_log;
-use crate::runtime_log::ServerRouteOutcome;
+use crate::runtime_log::{AcmeEvent, AcmeRole, ServerRouteOutcome};
 
 #[derive(Clone)]
 pub(crate) struct VisitorStreamHandler {
@@ -102,7 +102,12 @@ impl VisitorStreamHandler {
         buffered_bytes: Vec<u8>,
     ) -> io::Result<()> {
         if let Some(public_tls_config) = self.public_tls_config.clone() {
-            runtime_log::server_route(&server_hostname, ServerRouteOutcome::AcmeChallenge);
+            runtime_log::acme(
+                AcmeRole::Server {
+                    server_hostname: &server_hostname,
+                },
+                AcmeEvent::ChallengeHandled,
+            );
             let acceptor = TlsAcceptor::from(public_tls_config);
             if let Ok(mut tls_stream) = acceptor
                 .accept(PrefixedStream::new(buffered_bytes, visitor_stream))
@@ -203,9 +208,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::io::{self, Cursor};
     use std::net::{Ipv4Addr, SocketAddr};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use quinn::{Connection, Endpoint};
@@ -214,16 +220,104 @@ mod tests {
     use rustls::{ClientConnection, RootCertStore};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::Mutex as AsyncMutex;
     use tokio::task::JoinHandle;
     use tokio::time::{Duration, timeout};
     use tokio_rustls::TlsConnector;
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::fmt::writer::MakeWriter;
+    use tracing_subscriber::layer::SubscriberExt;
 
+    use crate::LogLevel;
     use crate::acme::ACME_TLS_ALPN;
     use crate::{
         CLIENT_HELLO_BUFFER_LIMIT, GeneratedClientIdentity, ServerTunnelSettings,
         generate_client_identity, make_client_quic_config_with_client_auth,
         make_server_quic_config_with_client_auth,
     };
+
+    static LOG_CAPTURE_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
+
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    struct BufferWriter(SharedBuffer);
+
+    impl SharedBuffer {
+        fn read(&self) -> String {
+            String::from_utf8(self.0.lock().expect("buffer mutex poisoned").clone())
+                .expect("runtime log output must be valid UTF-8")
+        }
+    }
+
+    impl Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .0
+                .lock()
+                .expect("buffer mutex poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for SharedBuffer {
+        type Writer = BufferWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            BufferWriter(self.clone())
+        }
+    }
+
+    async fn capture_logs_with_wait<Fut>(
+        level: LogLevel,
+        needle: &str,
+        action: Fut,
+    ) -> io::Result<String>
+    where
+        Fut: std::future::Future<Output = io::Result<()>>,
+    {
+        let _lock = LOG_CAPTURE_LOCK.lock().await;
+        let _ = crate::runtime_log::install(level);
+        let buffer = SharedBuffer::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(level_filter(level))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(buffer.clone())
+                    .with_ansi(false)
+                    .without_time()
+                    .with_target(false),
+            );
+        let _guard = tracing::subscriber::set_default(subscriber);
+        action.await?;
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if buffer.read().contains(needle) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| timeout_error("expected log line to be emitted within timeout"))?;
+        Ok(buffer.read())
+    }
+
+    fn level_filter(level: LogLevel) -> LevelFilter {
+        match level {
+            LogLevel::Off => LevelFilter::OFF,
+            LogLevel::Error => LevelFilter::ERROR,
+            LogLevel::Warn => LevelFilter::WARN,
+            LogLevel::Info => LevelFilter::INFO,
+            LogLevel::Debug => LevelFilter::DEBUG,
+            LogLevel::Trace => LevelFilter::TRACE,
+        }
+    }
 
     #[tokio::test]
     async fn forwards_authorized_public_hostname_through_active_tunnel_connection() -> io::Result<()>
@@ -307,6 +401,61 @@ mod tests {
         router_task
             .await
             .map_err(|error| join_error("router task failed", error))??;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_acme_challenge_logs_as_acme_handling_not_routing() -> io::Result<()> {
+        let output = capture_logs_with_wait(
+            LogLevel::Debug,
+            "DEBUG server acme challenge handled: server-hostname=tunnel.example.test",
+            async {
+                let registry = TunnelRegistry::single(vec!["app.example.test".to_owned()])?;
+                let (certificate, public_tls_config) =
+                    make_public_tls_config("tunnel.example.test")?;
+                let router = VisitorStreamHandler::new(
+                    "Tunnel.Example.Test.".to_owned(),
+                    registry,
+                    Some(public_tls_config),
+                )?;
+
+                let listener = TcpListener::bind(localhost(0)).await?;
+                let visitor_addr = listener.local_addr()?;
+                let router_task = spawn_router_task(listener, router);
+
+                let connector = TlsConnector::from(make_client_tls_config(
+                    &certificate,
+                    vec![ACME_TLS_ALPN.to_vec()],
+                )?);
+                let visitor_stream = TcpStream::connect(visitor_addr).await?;
+                let tls_stream = timeout(
+                    Duration::from_secs(1),
+                    connector.connect(
+                        ServerName::try_from("tunnel.example.test".to_owned())
+                            .map_err(io::Error::other)?,
+                        visitor_stream,
+                    ),
+                )
+                .await
+                .map_err(|_| timeout_error("ACME TLS handshake should complete"))?
+                .map_err(io::Error::other)?;
+
+                drop(tls_stream);
+                router_task
+                    .await
+                    .map_err(|error| join_error("router task failed", error))??;
+                Ok(())
+            },
+        )
+        .await?;
+
+        assert!(
+            output.contains(
+                "DEBUG server acme challenge handled: server-hostname=tunnel.example.test"
+            )
+        );
+        assert!(!output.contains("server route acme-challenge"));
+        assert!(!output.contains("public-hostname=tunnel.example.test"));
         Ok(())
     }
 

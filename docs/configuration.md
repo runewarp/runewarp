@@ -95,7 +95,7 @@ log-level = "debug"
 - output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message
 - omitted `log-level` defaults to `info`
 
-At `info` (default), Runewarp emits runtime readiness, tunnel connection lifecycle events, warnings, and errors. `runewarp server` logs separate readiness lines for the public listener and the tunnel listener. `runewarp client` logs tunnel connection attempts, then a connected line followed by a ready line after the first successful **Tunnel connection**. Initial startup failures such as bind, resolution, and connect failures are emitted as runtime `ERROR` lines; retry-path failures stay at `WARN`. `debug` adds per-connection routing diagnostics such as Server routing outcomes, Client passthrough vs terminate decisions, selected Client `backend-address` values, rejected ClientHello reasons, and separate detail lines for runtime tunnel failure causes that are shortened at `info`. `trace` is also accepted, but Runewarp does not currently emit any trace-only runtime events, so today it produces the same runtime output as `debug`.
+At `info` (default), Runewarp emits runtime readiness, tunnel connection lifecycle events, warnings, and errors. `runewarp server` logs separate readiness lines for the public listener and the tunnel listener. `runewarp client` logs tunnel connection attempts, then a connected line followed by a ready line after the first successful **Tunnel connection**. Initial startup failures such as bind, resolution, and connect failures are emitted as runtime `ERROR` lines; retry-path failures stay at `WARN`. **Server ACME** and **Client ACME** healthy lifecycle events also live at `info`: startup reports cached-certificate readiness per managed hostname, including remaining validity and renewal-due state, and empty-cache startup reports when first issuance is beginning. Recoverable ACME problems stay at `WARN`; an ACME manager that stops unexpectedly is logged at `ERROR`. `debug` adds per-connection routing diagnostics such as Server routing outcomes, Client passthrough vs terminate decisions, selected Client `backend-address` values, rejected ClientHello reasons, and separate detail lines for runtime tunnel failure causes that are shortened at `info`. `trace` is also accepted, but Runewarp does not currently emit any trace-only runtime events, so today it produces the same runtime output as `debug`.
 
 | Key | Required | Notes |
 | --- | --- | --- |
@@ -140,6 +140,8 @@ state-dir = "/var/lib/runewarp/acme"
 public-hostnames = ["app.example.com", "api.example.com"]
 client-identity = "4f7b6f7a9b0f0d2b..."
 ```
+
+When `[server.acme]` is enabled, Runewarp warns at startup if the configured `server.public-bind-address` is not on TCP 443. That warning is advisory rather than fatal because container and NAT deployments may still publish port 443 externally even when the internal bind port differs. The same public TCP 443 reachability requirement also applies to **Client ACME** because TLS-ALPN-01 challenge traffic for terminating **Public hostnames** still traverses the Server's public listener.
 
 ## Example: Client exact-match routing
 
@@ -245,6 +247,8 @@ tls-mode = "terminate"
 ```
 
 `tls-mode = "terminate"` requires explicit `public-hostnames` (Catch-all Services cannot terminate). `client.public-cert-dir` and `[client.acme]` are mutually exclusive and both require at least one Service using `tls-mode = "terminate"`.
+
+`[client.acme]` still depends on public TCP 443 reachability at the Server edge because `acme-tls/1` challenge traffic follows the same public ingress and Tunnel path as ordinary Visitor TLS for those **Public hostnames**.
 
 ## Example: Mixed terminate and passthrough services
 

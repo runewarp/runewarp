@@ -89,7 +89,7 @@ Choose one of the two supported Server-certificate paths:
 
 | Path | When to use it | What to do |
 | --- | --- | --- |
-| ACME (Let's Encrypt) | Publicly routable Server hostname and standard public trust | Configure `[server.acme]`; Runewarp keeps the ACME provider fixed to Let's Encrypt here, and omitting `state-dir` uses the default XDG state location |
+| ACME (Let's Encrypt) | Publicly routable Server hostname and standard public trust | Configure `[server.acme]`; Runewarp keeps the ACME provider fixed to Let's Encrypt here, omitting `state-dir` uses the default XDG state location, and TLS-ALPN-01 still requires public TCP 443 reachability even when the internal bind port differs |
 | Manual/private-CA | Private deployments or operator-managed trust | Create the material with `runewarp server cert init` and distribute `server-ca.crt` to Clients |
 
 Manual/private-CA initialization:
@@ -178,7 +178,7 @@ The managed hostname set comes from `public-hostnames` on `tls-mode = "terminate
 
 **ACME path:**
 
-Add `[client.acme]` to the Client config instead of `client.public-cert-dir`. The Client automatically provisions and renews certificates from Let's Encrypt for every **Public hostname** on a terminating Service. No pre-generated material is needed. The Client starts with a live ACME manager at startup without blocking on certificate readiness; a terminating hostname without a ready certificate fails closed at the TLS handshake until the certificate is issued. `acme-tls/1` challenge traffic for **Public hostnames** is routed through the Server to the Client using the same path as ordinary Visitor TLS.
+Add `[client.acme]` to the Client config instead of `client.public-cert-dir`. The Client automatically provisions and renews certificates from Let's Encrypt for every **Public hostname** on a terminating Service. No pre-generated material is needed. The Client starts with a live ACME manager at startup without blocking on certificate readiness; a terminating hostname without a ready certificate fails closed at the TLS handshake until the certificate is issued. `acme-tls/1` challenge traffic for **Public hostnames** is routed through the Server to the Client using the same path as ordinary Visitor TLS, so **Client ACME** depends on the same public TCP 443 reachability as **Server ACME** even when the Server binds a different internal port behind container or NAT mapping.
 
 ### 4. Write config
 
@@ -256,7 +256,7 @@ The routing flags belong only to the runtime `runewarp client` form. `runewarp c
 2. Make a TLS request to the Public hostname.
 3. Confirm the request succeeds and the expected application answers. Under **TLS passthrough** the backend's own certificate should appear; in **Terminate mode** the Client-presented **Public hostname certificate** should appear and the backend should receive plaintext.
 
-Runtime diagnostics are stderr-only. Each emitted line uses a UTC RFC3339 timestamp, level, and message.
+Runtime diagnostics are stderr-only. Each emitted line uses a UTC RFC3339 timestamp, level, and message. At the default `info` level, Runewarp now keeps healthy **Server ACME** and **Client ACME** lifecycle visible: startup reports whether a cached certificate is already ready, whether renewal is due, or whether first issuance is starting. Recoverable ACME problems stay at `WARN`, while unexpected ACME manager loss is logged at `ERROR`.
 
 At the default top-level `log-level = "info"`, Runewarp shows runtime readiness, tunnel connection lifecycle, warnings, and errors. `runewarp server` logs separate readiness lines for the public TCP listener and the tunnel UDP listener. `runewarp client` logs tunnel connection attempts, then a connected line followed by a ready line after the first successful **Tunnel connection**. Bind and startup failures are emitted as runtime `ERROR` lines on stderr rather than as plain text. Set `log-level = "debug"` to add routing diagnostics for successful route selection, Client passthrough vs terminate decisions, the selected Client `backend-address`, and separate detail lines for tunnel failure causes that are shortened at `info`.
 

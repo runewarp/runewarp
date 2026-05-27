@@ -10,10 +10,13 @@ use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use tokio::net::lookup_host;
 
-use crate::acme::{ManagedAcmeState, build_acme_state, build_client_acme_state, run_acme_state};
+use crate::acme::{
+    AcmeLifecycle, ManagedAcmeState, build_acme_state, build_client_acme_state, run_acme_state,
+};
 use crate::client_public_cert::{
     CLIENT_PUBLIC_CERT_FILENAME, CLIENT_PUBLIC_KEY_FILENAME, client_public_cert_leaf_dir,
 };
+use crate::runtime_log::{self, AcmeEvent, AcmeRole};
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, TlsMaterialError, load_certificate_chain,
     load_private_key,
@@ -30,6 +33,7 @@ pub struct PreparedServer {
     server: Server,
     trusted_client_identities: Vec<ClientIdentity>,
     acme_state: Option<ManagedAcmeState>,
+    acme_lifecycle: Option<AcmeLifecycle>,
 }
 
 impl PreparedServer {
@@ -44,7 +48,7 @@ impl PreparedServer {
             .iter()
             .map(|tunnel| tunnel.client_identity.clone())
             .collect::<Vec<_>>();
-        let (quic_server_config, acme_state) = match &settings.certificate {
+        let (quic_server_config, acme_state, acme_lifecycle) = match &settings.certificate {
             ServerCertificateSettings::Manual { directory } => {
                 let cert_chain = load_certificate_chain(&directory.join(SERVER_CERT_FILENAME))?;
                 let private_key = load_private_key(&directory.join(SERVER_KEY_FILENAME))?;
@@ -54,20 +58,32 @@ impl PreparedServer {
                     &trusted_client_identities,
                 )
                 .map_err(ServerStartupError::QuicConfig)?;
-                (quic_server_config, None)
+                (quic_server_config, None, None)
             }
             ServerCertificateSettings::Acme {
                 email,
                 state_directory,
                 ..
             } => {
+                if should_warn_server_acme_non_standard_public_port(settings, public_bind_addr) {
+                    runtime_log::acme(
+                        AcmeRole::Server {
+                            server_hostname: &settings.hostname,
+                        },
+                        AcmeEvent::NonStandardPublicBind {
+                            bind_address: public_bind_addr,
+                        },
+                    );
+                }
                 let acme_state = build_acme_state(&settings.hostname, email, state_directory);
+                let acme_lifecycle =
+                    AcmeLifecycle::server(&settings.hostname, state_directory).await;
                 let quic_server_config = make_server_quic_config_with_client_auth_resolver(
                     acme_state.resolver(),
                     &trusted_client_identities,
                 )
                 .map_err(ServerStartupError::QuicConfig)?;
-                (quic_server_config, Some(acme_state))
+                (quic_server_config, Some(acme_state), Some(acme_lifecycle))
             }
         };
         let server = Server::bind(ServerConfig {
@@ -87,6 +103,7 @@ impl PreparedServer {
             server,
             trusted_client_identities,
             acme_state,
+            acme_lifecycle,
         })
     }
 
@@ -104,12 +121,17 @@ impl PreparedServer {
 
     pub async fn run(self) -> io::Result<()> {
         let Self {
-            server, acme_state, ..
+            server,
+            acme_state,
+            acme_lifecycle,
+            ..
         } = self;
         if let Some(acme_state) = acme_state {
+            let acme_lifecycle =
+                acme_lifecycle.expect("server ACME state must include lifecycle reporter");
             tokio::select! {
                 server_result = server.run() => server_result,
-                acme_result = run_acme_state(acme_state, "server") => match acme_result {
+                acme_result = run_acme_state(acme_state, acme_lifecycle) => match acme_result {
                     Ok(never) => match never {},
                     Err(error) => Err(error),
                 },
@@ -124,6 +146,7 @@ pub struct PreparedClient {
     client: Client,
     native_root_error_count: usize,
     acme_state: Option<ManagedAcmeState>,
+    acme_lifecycle: Option<AcmeLifecycle>,
 }
 
 type TerminationTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
@@ -162,6 +185,18 @@ impl PreparedClient {
 
         let (hostname_tls_configs, acme_state) =
             load_termination_tls_configs(settings).map_err(ClientStartupError::InvalidSettings)?;
+        let acme_lifecycle = match (&settings.public_cert_config, acme_state.as_ref()) {
+            (
+                Some(ClientPublicCertConfig::Acme {
+                    state_directory, ..
+                }),
+                Some(_),
+            ) => {
+                let public_hostnames = acme_terminating_hostnames(&settings.services);
+                Some(AcmeLifecycle::client(&public_hostnames, state_directory).await)
+            }
+            _ => None,
+        };
 
         let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
         let cert_chain =
@@ -187,6 +222,7 @@ impl PreparedClient {
             client,
             native_root_error_count: loaded_roots.native_root_error_count,
             acme_state,
+            acme_lifecycle,
         })
     }
 
@@ -200,13 +236,28 @@ impl PreparedClient {
 
     pub async fn run(self) -> Result<(), quinn::ConnectionError> {
         let Self {
-            client, acme_state, ..
+            client,
+            acme_state,
+            acme_lifecycle,
+            ..
         } = self;
         if let Some(acme_state) = acme_state {
-            tokio::spawn(run_acme_state(acme_state, "client"));
+            let acme_lifecycle =
+                acme_lifecycle.expect("client ACME state must include lifecycle reporter");
+            tokio::spawn(async move {
+                let _ = run_acme_state(acme_state, acme_lifecycle).await;
+            });
         }
         client.run().await
     }
+}
+
+fn should_warn_server_acme_non_standard_public_port(
+    settings: &ServerSettings,
+    public_bind_addr: SocketAddr,
+) -> bool {
+    matches!(settings.certificate, ServerCertificateSettings::Acme { .. })
+        && public_bind_addr.port() != 443
 }
 
 #[derive(Debug)]
@@ -829,6 +880,41 @@ mod tests {
 
         assert!(state_directory.is_dir());
         Ok(())
+    }
+
+    #[test]
+    fn non_standard_server_acme_public_port_warning_only_applies_to_server_acme() {
+        let acme_settings = ServerSettings {
+            hostname: "tunnel.example.test".to_owned(),
+            log_level: LogLevel::Info,
+            certificate: ServerCertificateSettings::Acme {
+                email: "admin@example.test".to_owned(),
+                state_directory: PathBuf::from("/tmp/server-acme"),
+                state_directory_was_defaulted: false,
+            },
+            public_bind_address: "127.0.0.1:443".parse().unwrap(),
+            tunnel_connection_bind_address: "127.0.0.1:443".parse().unwrap(),
+            tunnels: Vec::new(),
+        };
+        let manual_settings = ServerSettings {
+            certificate: ServerCertificateSettings::Manual {
+                directory: PathBuf::from("/tmp/server-cert"),
+            },
+            ..acme_settings.clone()
+        };
+
+        assert!(super::should_warn_server_acme_non_standard_public_port(
+            &acme_settings,
+            "127.0.0.1:8443".parse().unwrap()
+        ));
+        assert!(!super::should_warn_server_acme_non_standard_public_port(
+            &acme_settings,
+            "127.0.0.1:443".parse().unwrap()
+        ));
+        assert!(!super::should_warn_server_acme_non_standard_public_port(
+            &manual_settings,
+            "127.0.0.1:8443".parse().unwrap()
+        ));
     }
 
     #[test]

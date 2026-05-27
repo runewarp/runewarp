@@ -100,6 +100,7 @@ Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode. The current ACME confi
 `[server.acme]` provisions the certificate for `server.hostname` only. When a Visitor connects to the Server hostname with ALPN `acme-tls/1`, the Server handles the challenge itself. All other application traffic addressed to the Server hostname is dropped.
 
 - when omitted, `server.acme.state-dir` defaults to the XDG state path and is created at startup
+- Runewarp warns when `server.public-bind-address` is not on TCP 443, but that warning stays advisory because the externally reachable public port may still be 443 through container or NAT mapping
 - any explicit `server.acme.state-dir` should be protected like secret-bearing material
 
 ### Client ACME
@@ -111,6 +112,7 @@ For Client ACME, `acme-tls/1` challenge connections for **Public hostnames** rea
 The Client starts with a live ACME manager at startup and does not block on certificate readiness. Terminating hostnames without a ready ACME certificate fail closed at the TLS handshake; there is no fallback to passthrough.
 
 - `client.acme.state-dir` defaults to the XDG client ACME state path and is created at startup when omitted
+- Client ACME depends on the same public TCP 443 reachability at the Server edge because TLS-ALPN-01 challenge traffic still enters through the Server's public listener before it reaches the Client
 - any explicit `client.acme.state-dir` should be protected like secret-bearing material
 
 ## Operational limits and trade-offs

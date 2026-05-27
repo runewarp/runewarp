@@ -70,6 +70,24 @@ fn server_cert_help_shows_the_config_flag() {
 }
 
 #[test]
+fn server_cert_help_uses_concise_server_certificate_copy() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["server", "cert", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.starts_with("Runewarp Server Certificates"));
+    assert!(stdout.contains("Manage Server certificates"));
+    assert!(stdout.contains("init       Initialize Server certificates"));
+    assert!(stdout.contains("renew      Renew Server certificates"));
+    assert!(stdout.contains("rotate-ca  Rotate the Server CA"));
+    assert!(!stdout.contains("Config defaults:"));
+}
+
+#[test]
 fn server_cert_init_uses_the_xdg_default_directory_when_dir_is_omitted() {
     let tempdir = tempdir().unwrap();
     let xdg_config_home = tempdir.path().join("xdg-config");

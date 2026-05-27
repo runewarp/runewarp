@@ -438,7 +438,7 @@ fn client_identity_init_reports_paths_and_utc_timestamps() -> Result<(), Box<dyn
 }
 
 #[test]
-fn client_identity_show_help_includes_examples_and_default_config_guidance()
+fn client_identity_show_help_keeps_runewarp_branding_and_examples()
 -> Result<(), Box<dyn std::error::Error>> {
     let assert = Command::cargo_bin("runewarp")?
         .args(["client", "identity", "show", "--help"])
@@ -447,12 +447,10 @@ fn client_identity_show_help_includes_examples_and_default_config_guidance()
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
 
+    assert!(stdout.starts_with("Runewarp Client Identity"));
     assert!(stdout.contains("Examples:"));
     assert!(stdout.contains("runewarp client identity show"));
-    assert!(
-        stdout
-            .contains("Commands use the default Runewarp config path unless -c, --config is set.")
-    );
+    assert!(!stdout.contains("Config defaults:"));
     Ok(())
 }
 

@@ -3,8 +3,8 @@ use std::fs;
 use std::time::Duration;
 
 use runewarp::{
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientRuntimeArgs,
-    ClientSettingsResolutionDefaults, ClientSettingsResolutionError, LogLevel,
+    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientPublicCertConfig,
+    ClientRuntimeArgs, ClientSettingsResolutionDefaults, ClientSettingsResolutionError, LogLevel,
     SelectedClientConfig, resolve_selected_client_settings,
 };
 use tempfile::tempdir;
@@ -24,6 +24,7 @@ fn cli_only_resolution_uses_a_one_second_runtime_reconnect_interval_by_default()
         },
         &ClientSettingsResolutionDefaults {
             identity_directory: identity_directory.clone(),
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;
 
@@ -52,7 +53,10 @@ fn cli_only_resolution_requires_backend_address_without_a_selected_config()
             server_address: Some("tunnel.example.test".to_owned()),
             backend_address: None,
         },
-        &ClientSettingsResolutionDefaults { identity_directory },
+        &ClientSettingsResolutionDefaults {
+            identity_directory,
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
+        },
     )
     .expect_err("expected backend-address validation error");
 
@@ -93,7 +97,10 @@ hostname = "tunnel.example.test"
             server_address: Some("tunnel.example.test:9443".to_owned()),
             backend_address: Some("backend.internal:443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults { identity_directory },
+        &ClientSettingsResolutionDefaults {
+            identity_directory,
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
+        },
     )?;
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
@@ -126,7 +133,10 @@ log-level = "off"
             server_address: Some("Tunnel.Example.Test.".to_owned()),
             backend_address: Some("backend.internal:443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults { identity_directory },
+        &ClientSettingsResolutionDefaults {
+            identity_directory,
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
+        },
     )?;
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
@@ -160,7 +170,10 @@ server-address = "127.0.0.1:443"
             server_address: Some("Tunnel.Example.Test.".to_owned()),
             backend_address: Some("backend.internal:443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults { identity_directory },
+        &ClientSettingsResolutionDefaults {
+            identity_directory,
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
+        },
     )?;
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
@@ -195,7 +208,10 @@ backend-address = "backend.internal:443"
             server_address: None,
             backend_address: Some("override.internal:8443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults { identity_directory },
+        &ClientSettingsResolutionDefaults {
+            identity_directory,
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
+        },
     )
     .expect_err("expected backend-address conflict");
 
@@ -233,7 +249,10 @@ public-hostnames = ["app.example.test"]
             server_address: None,
             backend_address: Some("override.internal:8443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults { identity_directory },
+        &ClientSettingsResolutionDefaults {
+            identity_directory,
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
+        },
     )
     .expect_err("expected malformed service validation");
 
@@ -260,7 +279,10 @@ fn cli_only_resolution_rejects_ip_literal_server_addresses() -> Result<(), Box<d
             server_address: Some("127.0.0.1:443".to_owned()),
             backend_address: Some("backend.internal:443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults { identity_directory },
+        &ClientSettingsResolutionDefaults {
+            identity_directory,
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
+        },
     )
     .expect_err("expected IP literal validation");
 
@@ -272,6 +294,43 @@ fn cli_only_resolution_rejects_ip_literal_server_addresses() -> Result<(), Box<d
             &"client.server-address is invalid: IP literals are not supported".to_owned()
         )
     );
+    Ok(())
+}
+
+#[test]
+fn selected_config_uses_the_injected_default_public_cert_dir_for_terminate_mode()
+-> Result<(), Box<dyn Error>> {
+    let tempdir = tempdir()?;
+    let identity_directory = tempdir.path().join("client-identity");
+    let public_cert_directory = tempdir.path().join("xdg-data/client/public-cert");
+    write_identity_material(&identity_directory)?;
+    fs::create_dir_all(&public_cert_directory)?;
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "backend.internal:443"
+tls-mode = "terminate"
+"#,
+    )?;
+
+    let settings = resolve_selected_client_settings(
+        SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
+        &ClientRuntimeArgs::default(),
+        &ClientSettingsResolutionDefaults {
+            identity_directory,
+            public_cert_directory: public_cert_directory.clone(),
+        },
+    )?;
+
+    assert!(matches!(
+        settings.public_cert_config,
+        Some(ClientPublicCertConfig::Manual { directory }) if directory == public_cert_directory
+    ));
     Ok(())
 }
 

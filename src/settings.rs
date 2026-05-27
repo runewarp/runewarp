@@ -606,7 +606,9 @@ pub(crate) fn validate_prepared_client_settings(
     }
     let manual_cert = if !acme_present {
         manual_public_cert_directory.and_then(|directory| {
-            validate_existing_directory_path("client.public-cert-dir", directory, &mut messages)
+            directory.into_option(&mut messages).and_then(|directory| {
+                validate_existing_directory_path("client.public-cert-dir", directory, &mut messages)
+            })
         })
     } else {
         None

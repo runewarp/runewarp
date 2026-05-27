@@ -6,7 +6,7 @@ This guide is the operator-facing path for installing Runewarp, preparing trust 
 
 | Path | Best for | Next step |
 | --- | --- | --- |
-| Released binary | Running Runewarp directly on your own hosts or service manager | Follow [Operate from the released binary](#operate-from-the-released-binary) |
+| CLI | Running Runewarp directly on your own hosts or service manager | Follow [Operate the CLI](#operate-the-cli) |
 | Docker example | Evaluating the shipped topology end to end before adapting it | Follow [Evaluate with the Docker example](#evaluate-with-the-docker-example) |
 
 ## Before you start
@@ -41,7 +41,7 @@ docker compose up -d
 
 Use [`examples/docker/README.md`](../examples/docker/README.md) for the full walkthrough, topology, and reset flow.
 
-## Operate from the released binary
+## Operate the CLI
 
 ### 1. Install Runewarp
 
@@ -49,39 +49,15 @@ Use [`examples/docker/README.md`](../examples/docker/README.md) for the full wal
 cargo install runewarp
 ```
 
-Runewarp is one binary with role-specific subcommands:
+Runewarp is one binary with role-specific subcommands. The main discovery commands are:
 
 ```bash
 runewarp --help
-runewarp help
 runewarp server --help
 runewarp client --help
 ```
 
-Current top-level help output:
-
-```text
-Runewarp: Private tunneling for TLS passthrough
-
-Usage: runewarp [COMMAND]
-
-Commands:
-  server  Run the Server runtime and server-side setup commands
-  client  Run the Client runtime and client-side setup commands
-  help    Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help  Print help
-
-Examples:
-  runewarp server
-  runewarp client
-
-Config defaults:
-  Commands use the default Runewarp config path unless -c, --config is set.
-```
-
-Help stays in standard Clap layout. Use `help` subcommands when that is more natural (`runewarp client help`, `runewarp server cert help`). Commands that select config also accept `-c` as the shorthand for `--config`.
+For narrower tasks, use the matching subcommand help such as `runewarp server cert --help` or `runewarp client public-cert --help`. Commands that select config also accept `-c` as the shorthand for `--config`.
 
 ### 2. Prepare the Server certificate path
 
@@ -125,13 +101,24 @@ If you prefer custom directories, pass `--dir` during setup and point the matchi
 
 For the manual/private-CA path, either copy the generated `server-ca.crt` to `$XDG_DATA_HOME/runewarp/client/server-ca.crt` (or `~/.local/share/runewarp/client/server-ca.crt`) on each Client or set `client.server-ca-file` to the deployed CA bundle path.
 
+### Certificate defaults at a glance
+
+| Material | Default location | Used by |
+| --- | --- | --- |
+| Server certificates | `$XDG_DATA_HOME/runewarp/server/cert/` or `~/.local/share/runewarp/server/cert/` | Manual Server certificate path and `runewarp server cert ...` when `--dir` and `server.cert-dir` are omitted |
+| Client identity | `$XDG_DATA_HOME/runewarp/client/identity/` or `~/.local/share/runewarp/client/identity/` | `runewarp client identity ...` and `runewarp client` when `client.identity-dir` is omitted |
+| Public hostname certificates | `$XDG_DATA_HOME/runewarp/client/public-cert/` or `~/.local/share/runewarp/client/public-cert/` | Manual terminate-mode path and `runewarp client public-cert ...` when `--dir`, `client.public-cert-dir`, and `[client.acme]` are absent |
+| Client Server CA bundle | `$XDG_DATA_HOME/runewarp/client/server-ca.crt` or `~/.local/share/runewarp/client/server-ca.crt` | `client.server-trust = "ca-file"` when `client.server-ca-file` is omitted |
+| Server ACME state | `$XDG_STATE_HOME/runewarp/server/acme/` or `~/.local/state/runewarp/server/acme/` | `[server.acme]` when `state-dir` is omitted |
+| Client ACME state | `$XDG_STATE_HOME/runewarp/client/acme/` or `~/.local/state/runewarp/client/acme/` | `[client.acme]` when `state-dir` is omitted |
+
 ### 3a. Prepare Public hostname certificate material (TLS termination only)
 
 If any Client Service uses `tls-mode = "terminate"`, choose one of the two supported certificate paths:
 
 | Path | When to use it | What to do |
 | --- | --- | --- |
-| Manual (`client.public-cert-dir`) | Private deployments or operator-managed trust; Visitors need a shared **Public hostname CA** | Create material with `runewarp client public-cert init`, set `client.public-cert-dir`, and distribute `public-ca.crt` to Visitors |
+| Manual (**Public hostname certificates**) | Private deployments or operator-managed trust; Visitors need a shared **Public hostname CA** | Create material with `runewarp client public-cert init`; omit `client.public-cert-dir` to use the default XDG path or set it only when you want a custom directory; distribute `public-ca.crt` to Visitors |
 | ACME (`[client.acme]`) | Publicly routable Public hostnames and standard public trust | Configure `[client.acme]` in Client config; no pre-generated material needed |
 
 **Manual path:**
@@ -140,12 +127,12 @@ If any Client Service uses `tls-mode = "terminate"`, choose one of the two suppo
 runewarp client public-cert init --hostname app.example.com
 
 # or derive every terminating hostname from config:
-runewarp client -c client.toml public-cert init
+runewarp client public-cert init
 ```
 
-Run once per terminating hostname, or omit `--hostname` and supply `--config` to derive the full terminating-hostname set from `client.services[].public-hostnames` where `tls-mode = "terminate"`. A second run with a new hostname reuses the existing **Public hostname CA** and adds only the new **Public hostname certificate**. Rerunning `init` for a hostname whose complete material already exists succeeds idempotently and reports that state on stdout instead of treating it as a failure. Share `public-ca.crt` with each Visitor as their trust anchor. The trust anchor stays stable until you explicitly run `rotate-ca`.
+Run once per terminating hostname, or omit `--hostname` to derive the full terminating-hostname set from the selected Client config. The selected config follows the same precedence as the rest of the CLI: an explicit `--config` path wins, otherwise Runewarp uses the discovered default config when it exists. A second run with a new hostname reuses the existing **Public hostname CA** and adds only the new **Public hostname certificate**. Rerunning `init` for a hostname whose complete material already exists succeeds idempotently and reports that state on stdout instead of treating it as a failure. Share `public-ca.crt` with each Visitor as their trust anchor. The trust anchor stays stable until you explicitly run `rotate-ca`.
 
-Set `client.public-cert-dir` in the Client config to the directory where the material was written. The `client public-cert` commands resolve their working directory from `--dir`, then `client.public-cert-dir`, then the XDG default when neither is set, but runtime validation does **not** make manual mode implicit from that default path: terminating Services still require explicit `client.public-cert-dir` in config unless you use `[client.acme]`.
+Set `client.public-cert-dir` in the Client config only when you want a custom directory. Otherwise, the manual path uses the default XDG Public hostname certificate directory automatically whenever a Service uses `tls-mode = "terminate"` and `[client.acme]` is absent.
 
 **Renewing Public hostname certificates (manual path):**
 
@@ -155,13 +142,13 @@ To renew a leaf certificate for a single hostname:
 runewarp client public-cert renew --hostname app.example.com
 ```
 
-To renew all terminating hostnames derived from config (requires `--config`):
+To renew all terminating hostnames derived from the selected config:
 
 ```bash
-runewarp client -c client.toml public-cert renew
+runewarp client public-cert renew
 ```
 
-For `init` and `renew`, the `--hostname` set comes from `public-hostnames` on `tls-mode = "terminate"` services in the config when `--hostname` is omitted. Omitting `--hostname` without a config file is an error.
+For `init` and `renew`, the `--hostname` set comes from `public-hostnames` on `tls-mode = "terminate"` services in the selected config when `--hostname` is omitted. If there is no explicit `--config` path and no discovered default config, the command fails instead of scanning on-disk certificate directories.
 
 **Rotating the Public hostname CA (manual path):**
 

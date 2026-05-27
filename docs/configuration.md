@@ -18,7 +18,7 @@ This document defines the Runewarp configuration model. Use [`docs/usage.md`](us
 - the Server uses **Public hostname authorization** to route only explicit **Public hostnames** into a **Tunnel**
 - the supported routing shapes are **Hostname mirroring** and a **Client with a Catch-all Service**
 - TLS passthrough is the default; Local backends terminate TLS in that mode
-- Client TLS termination is opt-in per Service via `tls-mode = "terminate"`; the termination certificate is managed at client level via `client.public-cert-dir` (manual) or `[client.acme]`
+- Client TLS termination is opt-in per Service via `tls-mode = "terminate"`; the termination certificate is managed at client level through the manual **Public hostname certificate** path (`client.public-cert-dir` or its XDG default) or through `[client.acme]`
 - one top-level `log-level` controls runtime diagnostics for either `runewarp server` or `runewarp client`
 - config keys should name the product concept rather than an encoding detail
 
@@ -34,27 +34,30 @@ Server Catch-all is intentionally not supported. Catch-all Services must use `tl
 ## CLI entry points
 
 ```text
-runewarp server -c config.toml
-runewarp server cert init --dir ./server-cert --hostname tunnel.example.com
-runewarp server cert renew --dir ./server-cert
-runewarp server cert rotate-ca --dir ./server-cert --hostname tunnel.example.com
+runewarp --help
+runewarp server --help
+runewarp client --help
+runewarp server
+runewarp server cert init --hostname tunnel.example.com
+runewarp server cert renew
+runewarp server cert rotate-ca --hostname tunnel.example.com
 
-runewarp client -c config.toml
+runewarp client
 runewarp client --server-address tunnel.example.com --backend-address 127.0.0.1:443
-runewarp client identity init --dir ./client-identity
-runewarp client identity renew --dir ./client-identity
-runewarp client identity rotate --dir ./client-identity
-runewarp client identity show --dir ./client-identity
-runewarp client public-cert init --dir ./public-cert --hostname app.example.com
-runewarp client -c config.toml public-cert init
-runewarp client public-cert renew --dir ./public-cert --hostname app.example.com
-runewarp client -c config.toml public-cert renew
+runewarp client identity init
+runewarp client identity renew
+runewarp client identity rotate
+runewarp client identity show
+runewarp client public-cert init --hostname app.example.com
+runewarp client public-cert init
+runewarp client public-cert renew --hostname app.example.com
+runewarp client public-cert renew
 runewarp client public-cert rotate-ca
 ```
 
 `--server-address` and `--backend-address` are runtime-only flags on `runewarp client`. They are not accepted by `runewarp client identity ...`.
 
-Material-management commands also accept `--config` and resolve their working directory with this precedence:
+Material-management commands also accept `--config` and `--dir` when you need non-default locations. Their working directory precedence is:
 
 1. explicit `--dir`
 2. the configured material directory from the selected config file
@@ -110,6 +113,7 @@ When the matching config key is omitted, Runewarp uses:
 | Runtime config | `$XDG_CONFIG_HOME/runewarp/config.toml` or `~/.config/runewarp/config.toml` |
 | Manual/private-CA Server material | `$XDG_DATA_HOME/runewarp/server/cert/` or `~/.local/share/runewarp/server/cert/` |
 | Client identity material | `$XDG_DATA_HOME/runewarp/client/identity/` or `~/.local/share/runewarp/client/identity/` |
+| Manual Public hostname certificates | `$XDG_DATA_HOME/runewarp/client/public-cert/` or `~/.local/share/runewarp/client/public-cert/` |
 | Client CA bundle for `server-trust = "ca-file"` | `$XDG_DATA_HOME/runewarp/client/server-ca.crt` or `~/.local/share/runewarp/client/server-ca.crt` |
 | Server ACME state | `$XDG_STATE_HOME/runewarp/server/acme/` or `~/.local/state/runewarp/server/acme/` |
 | Client ACME state | `$XDG_STATE_HOME/runewarp/client/acme/` or `~/.local/state/runewarp/client/acme/` |
@@ -221,7 +225,6 @@ The grouping of hostnames into **Tunnels** and **Services** may differ. One Tunn
 [client]
 server-address = "tunnel.example.com"
 identity-dir = "/etc/runewarp/client"
-public-cert-dir = "/etc/runewarp/client/public-cert"
 
 [[client.services]]
 public-hostnames = ["app.example.com"]
@@ -246,7 +249,7 @@ backend-address = "127.0.0.1:8080"
 tls-mode = "terminate"
 ```
 
-`tls-mode = "terminate"` requires explicit `public-hostnames` (Catch-all Services cannot terminate). `client.public-cert-dir` and `[client.acme]` are mutually exclusive and both require at least one Service using `tls-mode = "terminate"`.
+`tls-mode = "terminate"` requires explicit `public-hostnames` (Catch-all Services cannot terminate). `client.public-cert-dir` and `[client.acme]` are mutually exclusive. When `[client.acme]` is absent, the manual **Public hostname certificate** path defaults to the XDG public-cert directory even if `client.public-cert-dir` is omitted.
 
 `[client.acme]` still depends on public TCP 443 reachability at the Server edge because `acme-tls/1` challenge traffic follows the same public ingress and Tunnel path as ordinary Visitor TLS for those **Public hostnames**.
 
@@ -258,7 +261,6 @@ A single Client can host one Service that terminates TLS and another that passes
 [client]
 server-address = "tunnel.example.com"
 identity-dir = "/etc/runewarp/client"
-public-cert-dir = "/etc/runewarp/client/public-cert"
 
 # Service A: Client terminates TLS; backend receives plaintext
 [[client.services]]
@@ -303,7 +305,7 @@ Runtime logs distinguish the two paths. The stderr formatter prefixes each emitt
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`; otherwise system trust is used. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
 | `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG data path for Client identity material. |
-| `client.public-cert-dir` | when using manual TLS termination | Directory containing **Public hostname certificate** material for Client-side TLS termination. Mutually exclusive with `[client.acme]`. Required when any Service uses `tls-mode = "terminate"` and no `[client.acme]` is present; runtime validation does not implicitly enable manual mode from the XDG default path. |
+| `client.public-cert-dir` | no | Directory containing **Public hostname certificate** material for Client-side TLS termination. Mutually exclusive with `[client.acme]`. When any Service uses `tls-mode = "terminate"` and `[client.acme]` is absent, Runewarp uses this directory or, when omitted, the XDG default public-cert path. |
 | `client.acme.email` | with Client ACME | ACME contact address for **Public hostname certificates**. Required when `[client.acme]` is present. |
 | `client.acme.state-dir` | no | Writable path for durable ACME account and certificate state for the Client. When omitted, Runewarp uses and creates the XDG default client ACME state directory at startup. |
 | `client.services[].public-hostnames` | when exact-match local routing is desired | Exact **Public hostnames** this Service accepts locally. Omit only on the sole Catch-all Service. Required when `tls-mode = "terminate"`. |
@@ -345,7 +347,7 @@ When one or more Services use `tls-mode = "terminate"`, the Client needs a **Pub
 runewarp client public-cert init --hostname app.example.com
 
 # or derive all terminating hostnames from config:
-runewarp client --config client.toml public-cert init
+runewarp client public-cert init
 ```
 
 The directory layout is:
@@ -358,7 +360,7 @@ The directory layout is:
 To add a certificate for another hostname in the same directory:
 
 ```
-runewarp client public-cert init --dir ./public-cert --hostname api.example.com
+runewarp client public-cert init --hostname api.example.com
 ```
 
 `runewarp client public-cert init` keeps the shared **Public hostname CA** stable. Running it again with a new hostname reuses the existing CA and only writes new leaf material; rerunning it for a hostname whose complete material already exists succeeds idempotently and reports that state on stdout. The shared `public-ca.crt` therefore stays stable across additions and leaf renewals; only `rotate-ca` changes that trust anchor.
@@ -369,11 +371,11 @@ runewarp client public-cert init --dir ./public-cert --hostname api.example.com
 # Explicit hostname:
 runewarp client public-cert renew --hostname app.example.com
 
-# All terminating hostnames from config (--hostname omitted):
-runewarp client --config client.toml public-cert renew
+# All terminating hostnames from the selected config:
+runewarp client public-cert renew
 ```
 
-When `--hostname` is omitted the target set is derived from `public-hostnames` on `tls-mode = "terminate"` services in the config. Omitting both `--hostname` and `--config` is an error; Runewarp never infers targets from on-disk directories.
+When `--hostname` is omitted the target set is derived from `public-hostnames` on `tls-mode = "terminate"` services in the selected config. An explicit `--config` path wins; otherwise Runewarp uses the discovered default config when it exists. If no selected config exists, the command fails; Runewarp never infers targets from on-disk directories.
 
 **Rotating the Public hostname CA:**
 
@@ -386,7 +388,7 @@ runewarp client -c client.toml public-cert rotate-ca
 
 `rotate-ca` replaces the shared CA and reissues every managed leaf certificate. It derives the managed hostname set from the selected config file: an explicit `-c`, `--config` path wins, otherwise Runewarp uses the discovered default config when it exists. After rotation, distribute the new `public-ca.crt` to Visitors so they trust the new trust anchor.
 
-The `client public-cert` commands resolve their working directory from `--dir`, then `client.public-cert-dir`, then the XDG default data location when neither is set. Runtime validation is stricter: manual TLS termination is enabled only when `client.public-cert-dir` is set explicitly in config; Runewarp does not infer manual mode from the XDG default path.
+The `client public-cert` commands resolve their working directory from `--dir`, then `client.public-cert-dir`, then the XDG default data location when neither is set. Runtime validation follows the same policy: when any Service uses `tls-mode = "terminate"` and `[client.acme]` is absent, Runewarp treats that XDG directory as the manual default path.
 
 ### `client.server-trust`
 
@@ -423,10 +425,10 @@ Runewarp rejects config and startup inputs that violate any of these rules:
 
 - `client.services[].tls-mode` must be `"passthrough"` or `"terminate"`; defaults to `"passthrough"`
 - `client.services[].tls-mode = "terminate"` requires explicit `public-hostnames` on that Service; Catch-all Services cannot opt into termination
-- when any Service uses `tls-mode = "terminate"`, either `client.public-cert-dir` or `[client.acme]` must be present
+- when any Service uses `tls-mode = "terminate"` and `[client.acme]` is absent, Runewarp selects the manual Public hostname certificate path from `client.public-cert-dir` or from the default XDG public-cert directory
 - `client.public-cert-dir` and `[client.acme]` require at least one Service with `tls-mode = "terminate"`; the config is rejected when no terminating Service is present
 - `client.public-cert-dir` and `[client.acme]` are mutually exclusive
-- `client.public-cert-dir` must be an existing directory
+- the selected manual Public hostname certificate directory must be an existing directory
 - `client.acme.email` is required when `[client.acme]` is present
 - `client.acme.state-dir` must be an existing directory when specified; when omitted, the XDG default path is used and created automatically during startup after validation succeeds
 

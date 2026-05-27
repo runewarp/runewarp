@@ -11,7 +11,7 @@ use rustls::pki_types::CertificateDer;
 use tokio::net::lookup_host;
 
 use crate::acme::{
-    AcmeLifecycle, ManagedAcmeState, build_acme_state, build_client_acme_state, run_acme_state,
+    AcmeLifecycle, ManagedAcmeRuntime, build_acme_state, build_client_acme_state, run_acme_state,
 };
 use crate::client_public_cert::{
     CLIENT_PUBLIC_CERT_FILENAME, CLIENT_PUBLIC_KEY_FILENAME, client_public_cert_leaf_dir,
@@ -32,8 +32,7 @@ use crate::{
 pub struct PreparedServer {
     server: Server,
     trusted_client_identities: Vec<ClientIdentity>,
-    acme_state: Option<ManagedAcmeState>,
-    acme_lifecycle: Option<AcmeLifecycle>,
+    acme_runtime: Option<ManagedAcmeRuntime>,
 }
 
 impl PreparedServer {
@@ -48,7 +47,7 @@ impl PreparedServer {
             .iter()
             .map(|tunnel| tunnel.client_identity.clone())
             .collect::<Vec<_>>();
-        let (quic_server_config, acme_state, acme_lifecycle) = match &settings.certificate {
+        let (quic_server_config, acme_runtime) = match &settings.certificate {
             ServerCertificateSettings::Manual { directory } => {
                 let cert_chain = load_certificate_chain(&directory.join(SERVER_CERT_FILENAME))?;
                 let private_key = load_private_key(&directory.join(SERVER_KEY_FILENAME))?;
@@ -58,7 +57,7 @@ impl PreparedServer {
                     &trusted_client_identities,
                 )
                 .map_err(ServerStartupError::QuicConfig)?;
-                (quic_server_config, None, None)
+                (quic_server_config, None)
             }
             ServerCertificateSettings::Acme {
                 email,
@@ -83,7 +82,13 @@ impl PreparedServer {
                     &trusted_client_identities,
                 )
                 .map_err(ServerStartupError::QuicConfig)?;
-                (quic_server_config, Some(acme_state), Some(acme_lifecycle))
+                (
+                    quic_server_config,
+                    Some(ManagedAcmeRuntime {
+                        state: acme_state,
+                        lifecycle: acme_lifecycle,
+                    }),
+                )
             }
         };
         let server = Server::bind(ServerConfig {
@@ -91,9 +96,9 @@ impl PreparedServer {
             tunnel_connection_bind_addr,
             server_hostname: settings.hostname.clone(),
             configured_tunnels: settings.tunnels.clone(),
-            public_tls_config: acme_state
+            public_tls_config: acme_runtime
                 .as_ref()
-                .map(ManagedAcmeState::challenge_rustls_config),
+                .map(|acme| acme.state.challenge_rustls_config()),
             quic_server_config,
         })
         .await
@@ -102,8 +107,7 @@ impl PreparedServer {
         Ok(Self {
             server,
             trusted_client_identities,
-            acme_state,
-            acme_lifecycle,
+            acme_runtime,
         })
     }
 
@@ -122,16 +126,13 @@ impl PreparedServer {
     pub async fn run(self) -> io::Result<()> {
         let Self {
             server,
-            acme_state,
-            acme_lifecycle,
+            acme_runtime,
             ..
         } = self;
-        if let Some(acme_state) = acme_state {
-            let acme_lifecycle =
-                acme_lifecycle.expect("server ACME state must include lifecycle reporter");
+        if let Some(acme_runtime) = acme_runtime {
             tokio::select! {
                 server_result = server.run() => server_result,
-                acme_result = run_acme_state(acme_state, acme_lifecycle) => match acme_result {
+                acme_result = run_acme_state(acme_runtime.state, acme_runtime.lifecycle) => match acme_result {
                     Ok(never) => match never {},
                     Err(error) => Err(error),
                 },
@@ -145,12 +146,11 @@ impl PreparedServer {
 pub struct PreparedClient {
     client: Client,
     native_root_error_count: usize,
-    acme_state: Option<ManagedAcmeState>,
-    acme_lifecycle: Option<AcmeLifecycle>,
+    acme_runtimes: Vec<ManagedAcmeRuntime>,
 }
 
 type TerminationTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
-type LoadedTerminationTls = (TerminationTlsConfigs, Option<ManagedAcmeState>);
+type LoadedTerminationTls = (TerminationTlsConfigs, Vec<ManagedAcmeRuntime>);
 
 impl PreparedClient {
     pub async fn connect(
@@ -183,20 +183,9 @@ impl PreparedClient {
             .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
         prepare_default_client_acme_state_dir(settings)?;
 
-        let (hostname_tls_configs, acme_state) =
-            load_termination_tls_configs(settings).map_err(ClientStartupError::InvalidSettings)?;
-        let acme_lifecycle = match (&settings.public_cert_config, acme_state.as_ref()) {
-            (
-                Some(ClientPublicCertConfig::Acme {
-                    state_directory, ..
-                }),
-                Some(_),
-            ) => {
-                let public_hostnames = acme_terminating_hostnames(&settings.services);
-                Some(AcmeLifecycle::client(&public_hostnames, state_directory).await)
-            }
-            _ => None,
-        };
+        let (hostname_tls_configs, acme_runtimes) = load_termination_tls_configs(settings)
+            .await
+            .map_err(ClientStartupError::InvalidSettings)?;
 
         let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
         let cert_chain =
@@ -221,8 +210,7 @@ impl PreparedClient {
         Ok(Self {
             client,
             native_root_error_count: loaded_roots.native_root_error_count,
-            acme_state,
-            acme_lifecycle,
+            acme_runtimes,
         })
     }
 
@@ -237,15 +225,12 @@ impl PreparedClient {
     pub async fn run(self) -> Result<(), quinn::ConnectionError> {
         let Self {
             client,
-            acme_state,
-            acme_lifecycle,
+            acme_runtimes,
             ..
         } = self;
-        if let Some(acme_state) = acme_state {
-            let acme_lifecycle =
-                acme_lifecycle.expect("client ACME state must include lifecycle reporter");
+        for acme_runtime in acme_runtimes {
             tokio::spawn(async move {
-                let _ = run_acme_state(acme_state, acme_lifecycle).await;
+                let _ = run_acme_state(acme_runtime.state, acme_runtime.lifecycle).await;
             });
         }
         client.run().await
@@ -559,22 +544,20 @@ pub(crate) fn acme_terminating_hostnames(services: &[ClientServiceSettings]) -> 
 /// Loads and validates TLS server configs for every terminating hostname across all services.
 /// Returns a map from normalized hostname to the rustls::ServerConfig for that hostname,
 /// plus an optional ACME state that must be driven to keep certificates current.
-fn load_termination_tls_configs(settings: &ClientSettings) -> Result<LoadedTerminationTls, String> {
+async fn load_termination_tls_configs(
+    settings: &ClientSettings,
+) -> Result<LoadedTerminationTls, String> {
     match &settings.public_cert_config {
-        None => Ok((HashMap::new(), None)),
+        None => Ok((HashMap::new(), Vec::new())),
         Some(ClientPublicCertConfig::Manual { directory }) => {
             let configs = load_manual_termination_tls_configs(settings, directory)?;
-            Ok((configs, None))
+            Ok((configs, Vec::new()))
         }
         Some(ClientPublicCertConfig::Acme {
             email,
             state_directory,
             ..
-        }) => {
-            let (configs, acme_state) =
-                build_acme_termination_configs(settings, email, state_directory)?;
-            Ok((configs, Some(acme_state)))
-        }
+        }) => build_acme_termination_configs(settings, email, state_directory).await,
     }
 }
 
@@ -621,16 +604,14 @@ fn load_manual_termination_tls_configs(
     Ok(configs)
 }
 
-/// Builds per-hostname TLS configs backed by a shared ACME state.
-/// All terminating hostnames share one ACME account and one resolver; the resolver
-/// handles both regular TLS connections (once a cert is acquired) and TLS-ALPN-01
-/// challenge connections (while acquisition is in progress). Hostnames without a ready
-/// certificate fail closed at the TLS handshake layer.
-fn build_acme_termination_configs(
+/// Builds per-hostname TLS configs backed by independently managed ACME states.
+/// The shared state directory still allows the Let's Encrypt account cache to be reused,
+/// while each terminating hostname keeps its own certificate cache entry and lifecycle logs.
+async fn build_acme_termination_configs(
     settings: &ClientSettings,
     email: &str,
     state_directory: &std::path::Path,
-) -> Result<(TerminationTlsConfigs, ManagedAcmeState), String> {
+) -> Result<LoadedTerminationTls, String> {
     let hostnames = acme_terminating_hostnames(&settings.services);
     if hostnames.is_empty() {
         // Settings validation should prevent this, but guard defensively.
@@ -641,17 +622,20 @@ fn build_acme_termination_configs(
         );
     }
 
-    let acme_state = build_client_acme_state(&hostnames, email, state_directory);
-    // The resolver handles all managed hostnames: it presents the challenge cert when
-    // the ACME validator connects with acme-tls/1, and the domain cert for normal traffic.
-    // Connections that arrive before the cert is ready fail at TLS handshake (fail closed).
-    let tls_config: Arc<rustls::ServerConfig> = acme_state.challenge_rustls_config();
-
     let mut configs = HashMap::new();
+    let mut acme_runtimes = Vec::new();
     for hostname in hostnames {
-        configs.insert(hostname, tls_config.clone());
+        let hostname_set = vec![hostname.clone()];
+        let acme_state = build_client_acme_state(&hostname_set, email, state_directory);
+        let tls_config: Arc<rustls::ServerConfig> = acme_state.challenge_rustls_config();
+        let acme_lifecycle = AcmeLifecycle::client(&hostname, state_directory).await;
+        configs.insert(hostname.clone(), tls_config);
+        acme_runtimes.push(ManagedAcmeRuntime {
+            state: acme_state,
+            lifecycle: acme_lifecycle,
+        });
     }
-    Ok((configs, acme_state))
+    Ok((configs, acme_runtimes))
 }
 
 #[cfg(test)]
@@ -915,6 +899,39 @@ mod tests {
             &manual_settings,
             "127.0.0.1:8443".parse().unwrap()
         ));
+    }
+
+    #[tokio::test]
+    async fn client_acme_builds_one_runtime_per_terminating_hostname() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let settings = ClientSettings {
+            server_hostname: "tunnel.example.test".to_owned(),
+            server_port: 443,
+            log_level: LogLevel::Info,
+            server_ca_file: None,
+            identity_directory: tempdir.path().join("client-identity"),
+            reconnect_interval: Duration::from_secs(5),
+            services: vec![ClientServiceSettings {
+                public_hostnames: Some(vec![
+                    "app.example.test".to_owned(),
+                    "api.example.test".to_owned(),
+                ]),
+                backend_address: "127.0.0.1:8080".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+            }],
+            public_cert_config: Some(ClientPublicCertConfig::Acme {
+                email: "admin@example.test".to_owned(),
+                state_directory: tempdir.path().join("acme-state"),
+                state_directory_was_defaulted: false,
+            }),
+        };
+
+        let (configs, acme_runtimes) = super::load_termination_tls_configs(&settings)
+            .await
+            .expect("ACME termination configs should build");
+
+        assert_eq!(configs.len(), 2);
+        assert_eq!(acme_runtimes.len(), 2);
     }
 
     #[test]

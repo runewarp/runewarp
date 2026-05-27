@@ -29,8 +29,9 @@ pub(crate) fn build_acme_state(
         .state()
 }
 
-/// Builds an ACME state that manages certificates for all of the given hostnames.
-/// All hostnames share a single Let's Encrypt account and state directory.
+/// Builds an ACME state for the given hostname set.
+/// Runewarp reuses the same state directory so the Let's Encrypt account cache can
+/// still be shared across independently managed hostnames.
 pub(crate) fn build_client_acme_state(
     hostnames: &[String],
     email: &str,
@@ -44,14 +45,26 @@ pub(crate) fn build_client_acme_state(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NextDeployment {
+    FirstIssuance,
+    Renewal,
+}
+
+#[derive(Debug)]
+pub(crate) struct ManagedAcmeRuntime {
+    pub(crate) state: ManagedAcmeState,
+    pub(crate) lifecycle: AcmeLifecycle,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AcmeLifecycle {
     Server {
         server_hostname: String,
-        first_issuance_pending: bool,
+        next_deployment: NextDeployment,
     },
     Client {
-        public_hostnames: Vec<String>,
-        first_issuance_pending: bool,
+        public_hostname: String,
+        next_deployment: NextDeployment,
     },
 }
 
@@ -62,6 +75,7 @@ enum CachedCertificateInspection {
         renewal_due: bool,
     },
     Missing,
+    Expired,
     Unavailable(String),
 }
 
@@ -79,32 +93,24 @@ impl AcmeLifecycle {
         );
         Self::Server {
             server_hostname: server_hostname.to_owned(),
-            first_issuance_pending: !matches!(
-                inspection,
-                CachedCertificateInspection::Ready { .. }
-            ),
+            next_deployment: next_deployment_for_inspection(&inspection),
         }
     }
 
-    pub(crate) async fn client(public_hostnames: &[String], state_directory: &Path) -> Self {
+    pub(crate) async fn client(public_hostname: &str, state_directory: &Path) -> Self {
         let inspection = inspect_cached_certificate(
-            public_hostnames,
+            &[public_hostname.to_owned()],
             state_directory,
             OffsetDateTime::now_utc(),
         )
         .await;
         emit_startup_inspection(
-            public_hostnames
-                .iter()
-                .map(|public_hostname| AcmeRole::Client { public_hostname }),
+            std::iter::once(AcmeRole::Client { public_hostname }),
             &inspection,
         );
         Self::Client {
-            public_hostnames: public_hostnames.to_vec(),
-            first_issuance_pending: !matches!(
-                inspection,
-                CachedCertificateInspection::Ready { .. }
-            ),
+            public_hostname: public_hostname.to_owned(),
+            next_deployment: next_deployment_for_inspection(&inspection),
         }
     }
 
@@ -112,13 +118,14 @@ impl AcmeLifecycle {
         match event {
             EventOk::DeployedCachedCert | EventOk::CertCacheStore | EventOk::AccountCacheStore => {}
             EventOk::DeployedNewCert => {
-                let acme_event = if self.first_issuance_pending() {
+                let acme_event = if matches!(self.next_deployment(), NextDeployment::FirstIssuance)
+                {
                     AcmeEvent::CertificateIssued
                 } else {
                     AcmeEvent::CertificateRenewed
                 };
                 self.emit(acme_event);
-                self.set_first_issuance_pending(false);
+                self.set_next_deployment(NextDeployment::Renewal);
             }
         }
     }
@@ -143,44 +150,45 @@ impl AcmeLifecycle {
                 event,
             ),
             Self::Client {
-                public_hostnames, ..
-            } => {
-                for public_hostname in public_hostnames {
-                    runtime_log::acme(
-                        AcmeRole::Client {
-                            public_hostname: public_hostname.as_str(),
-                        },
-                        event,
-                    );
-                }
-            }
+                public_hostname, ..
+            } => runtime_log::acme(
+                AcmeRole::Client {
+                    public_hostname: public_hostname.as_str(),
+                },
+                event,
+            ),
         }
     }
 
-    fn first_issuance_pending(&self) -> bool {
+    fn next_deployment(&self) -> NextDeployment {
         match self {
             Self::Server {
-                first_issuance_pending,
-                ..
+                next_deployment, ..
             }
             | Self::Client {
-                first_issuance_pending,
-                ..
-            } => *first_issuance_pending,
+                next_deployment, ..
+            } => next_deployment.clone(),
         }
     }
 
-    fn set_first_issuance_pending(&mut self, pending: bool) {
+    fn set_next_deployment(&mut self, next: NextDeployment) {
         match self {
             Self::Server {
-                first_issuance_pending,
-                ..
+                next_deployment, ..
             }
             | Self::Client {
-                first_issuance_pending,
-                ..
-            } => *first_issuance_pending = pending,
+                next_deployment, ..
+            } => *next_deployment = next,
         }
+    }
+}
+
+fn next_deployment_for_inspection(inspection: &CachedCertificateInspection) -> NextDeployment {
+    match inspection {
+        CachedCertificateInspection::Missing => NextDeployment::FirstIssuance,
+        CachedCertificateInspection::Ready { .. }
+        | CachedCertificateInspection::Expired
+        | CachedCertificateInspection::Unavailable(_) => NextDeployment::Renewal,
     }
 }
 
@@ -191,9 +199,7 @@ pub(crate) async fn run_acme_state(
     loop {
         match state.next().await {
             Some(Ok(event)) => lifecycle.handle_ok(event),
-            Some(Err(error)) => {
-                lifecycle.handle_error(&error);
-            }
+            Some(Err(error)) => lifecycle.handle_error(&error),
             None => {
                 lifecycle.handle_manager_stopped();
                 return Err(io::Error::other(
@@ -226,7 +232,7 @@ fn inspect_cached_certificate_pem(pem: &[u8], now: OffsetDateTime) -> CachedCert
             remaining_validity,
             renewal_due,
         },
-        Ok(None) => CachedCertificateInspection::Missing,
+        Ok(None) => CachedCertificateInspection::Expired,
         Err(error) => CachedCertificateInspection::Unavailable(error),
     }
 }
@@ -297,13 +303,33 @@ fn emit_startup_inspection<'a>(
         }
         CachedCertificateInspection::Missing => {
             for role in roles {
-                runtime_log::acme(role, AcmeEvent::FirstIssuanceStarting);
+                runtime_log::acme(
+                    role,
+                    AcmeEvent::FirstIssuanceStarting {
+                        reason: "no-ready-cached-certificate",
+                    },
+                );
+            }
+        }
+        CachedCertificateInspection::Expired => {
+            for role in roles {
+                runtime_log::acme(
+                    role,
+                    AcmeEvent::RenewalStarting {
+                        reason: "expired-cached-certificate",
+                    },
+                );
             }
         }
         CachedCertificateInspection::Unavailable(error) => {
             for role in roles {
                 runtime_log::acme(role, AcmeEvent::RecoverableFailure { error });
-                runtime_log::acme(role, AcmeEvent::FirstIssuanceStarting);
+                runtime_log::acme(
+                    role,
+                    AcmeEvent::RenewalStarting {
+                        reason: "unreadable-cached-certificate",
+                    },
+                );
             }
         }
     }
@@ -311,77 +337,87 @@ fn emit_startup_inspection<'a>(
 
 #[cfg(test)]
 mod tests {
-    use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, date_time_ymd};
+    use rcgen::{
+        CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P256_SHA256,
+        date_time_ymd,
+    };
 
     use super::{
-        AcmeLifecycle, inspect_cached_certificate_pem, parse_cached_certificate_freshness,
+        AcmeLifecycle, CachedCertificateInspection, NextDeployment, inspect_cached_certificate_pem,
+        parse_cached_certificate_freshness,
     };
 
     fn build_cached_certificate_pem(
         not_before: time::OffsetDateTime,
         not_after: time::OffsetDateTime,
-    ) -> Vec<u8> {
-        let mut params = CertificateParams::new(vec!["app.example.test".to_owned()]).unwrap();
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut params = CertificateParams::new(vec!["app.example.test".to_owned()])?;
         let mut distinguished_name = DistinguishedName::new();
         distinguished_name.push(DnType::CommonName, "app.example.test");
         params.distinguished_name = distinguished_name;
         params.not_before = not_before;
         params.not_after = not_after;
-        let key_pair = KeyPair::generate().unwrap();
-        let cert = params.self_signed(&key_pair).unwrap();
-        format!("{}\n{}\n", key_pair.serialize_pem(), cert.pem()).into_bytes()
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+        let cert = params.self_signed(&key_pair)?;
+        Ok(format!("{}\n{}\n", key_pair.serialize_pem(), cert.pem()).into_bytes())
     }
 
     #[test]
-    fn cached_certificate_freshness_reports_ready_and_not_due_state() {
+    fn cached_certificate_freshness_reports_ready_and_not_due_state()
+    -> Result<(), Box<dyn std::error::Error>> {
         let pem =
-            build_cached_certificate_pem(date_time_ymd(2026, 1, 1), date_time_ymd(2026, 4, 1));
+            build_cached_certificate_pem(date_time_ymd(2026, 1, 1), date_time_ymd(2026, 4, 1))?;
         let now = date_time_ymd(2026, 1, 10);
 
         let inspection = inspect_cached_certificate_pem(&pem, now);
 
         assert!(matches!(
             inspection,
-            super::CachedCertificateInspection::Ready {
+            CachedCertificateInspection::Ready {
                 remaining_validity,
                 renewal_due: false,
             } if remaining_validity == "81d"
         ));
+        Ok(())
     }
 
     #[test]
-    fn cached_certificate_freshness_reports_renewal_due_state() {
+    fn cached_certificate_freshness_reports_renewal_due_state()
+    -> Result<(), Box<dyn std::error::Error>> {
         let pem =
-            build_cached_certificate_pem(date_time_ymd(2026, 1, 1), date_time_ymd(2026, 4, 1));
+            build_cached_certificate_pem(date_time_ymd(2026, 1, 1), date_time_ymd(2026, 4, 1))?;
         let now = date_time_ymd(2026, 3, 10);
 
         let inspection = inspect_cached_certificate_pem(&pem, now);
 
         assert!(matches!(
             inspection,
-            super::CachedCertificateInspection::Ready {
+            CachedCertificateInspection::Ready {
                 remaining_validity,
                 renewal_due: true,
             } if remaining_validity == "22d"
         ));
+        Ok(())
     }
 
     #[test]
-    fn cached_certificate_freshness_treats_expired_cache_as_not_ready() {
+    fn cached_certificate_freshness_treats_expired_cache_as_expired()
+    -> Result<(), Box<dyn std::error::Error>> {
         let pem =
-            build_cached_certificate_pem(date_time_ymd(2026, 1, 1), date_time_ymd(2026, 2, 1));
+            build_cached_certificate_pem(date_time_ymd(2026, 1, 1), date_time_ymd(2026, 2, 1))?;
         let now = date_time_ymd(2026, 2, 2);
 
         let inspection = inspect_cached_certificate_pem(&pem, now);
 
-        assert_eq!(inspection, super::CachedCertificateInspection::Missing);
+        assert_eq!(inspection, CachedCertificateInspection::Expired);
+        Ok(())
     }
 
     #[test]
     fn deployed_new_certificate_switches_from_first_issuance_to_renewal() {
         let mut lifecycle = AcmeLifecycle::Server {
             server_hostname: "tunnel.example.test".to_owned(),
-            first_issuance_pending: true,
+            next_deployment: NextDeployment::FirstIssuance,
         };
 
         lifecycle.handle_ok(rustls_acme::EventOk::DeployedNewCert);
@@ -390,14 +426,15 @@ mod tests {
             lifecycle,
             AcmeLifecycle::Server {
                 server_hostname: "tunnel.example.test".to_owned(),
-                first_issuance_pending: false,
+                next_deployment: NextDeployment::Renewal,
             }
         );
     }
 
     #[test]
-    fn cached_certificate_parser_rejects_missing_certificates() {
-        let key_pair = KeyPair::generate().unwrap();
+    fn cached_certificate_parser_rejects_missing_certificates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
         let error = parse_cached_certificate_freshness(
             key_pair.serialize_pem().as_bytes(),
             date_time_ymd(2026, 1, 1),
@@ -405,5 +442,6 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "cached cert parse: no certificate PEM found");
+        Ok(())
     }
 }

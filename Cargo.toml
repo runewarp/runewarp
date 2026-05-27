@@ -2,12 +2,12 @@
 name = "runewarp"
 version = "0.1.0"
 edition = "2024"
-description = "Public ingress. Private by design."
+description = "Runewarp is an ingress tunneling tool for exposing local services without moving TLS termination to the edge. Clients connect out over QUIC, so you can publish services without putting your backend directly on the Internet or leaking your public IP."
 readme = "README.md"
 homepage = "https://runewarp.com"
 repository = "https://github.com/runewarp/runewarp"
 license = "Apache-2.0"
-keywords = ["tunnel", "port-forwarding", "remote-access", "tls-passthrough", "nat-traversal"]
+keywords = ["ingress", "tunnel", "port-forwarding", "remote-access", "tls-passthrough", "nat-traversal"]
 categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]

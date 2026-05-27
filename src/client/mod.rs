@@ -15,6 +15,13 @@ use crate::{
     ClientServiceSettings, ClientTlsMode, HANDSHAKE_TIMEOUT, quic::with_handshake_timeout,
 };
 
+type HostnameTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
+type RouteModeServicesAndConfigs = (
+    Vec<ClientServiceSettings>,
+    HostnameTlsConfigs,
+    HostnameTlsConfigs,
+);
+
 pub(crate) use service::validate_services;
 pub use settings_resolution::{
     ClientRuntimeArgs, ClientSettingsResolutionDefaults, ClientSettingsResolutionError,
@@ -38,7 +45,8 @@ pub(crate) struct RoutedClientConfig {
     pub(crate) server_name: String,
     pub(crate) services: Vec<ClientServiceSettings>,
     pub(crate) quic_client_config: quinn::ClientConfig,
-    pub(crate) hostname_tls_configs: HashMap<String, Arc<rustls::ServerConfig>>,
+    pub(crate) hostname_tls_configs: HostnameTlsConfigs,
+    pub(crate) hostname_acme_challenge_tls_configs: HostnameTlsConfigs,
 }
 
 enum ClientRouteMode {
@@ -47,7 +55,8 @@ enum ClientRouteMode {
     },
     Routed {
         services: Vec<ClientServiceSettings>,
-        hostname_tls_configs: HashMap<String, Arc<rustls::ServerConfig>>,
+        hostname_tls_configs: HostnameTlsConfigs,
+        hostname_acme_challenge_tls_configs: HostnameTlsConfigs,
     },
 }
 
@@ -115,6 +124,7 @@ impl Client {
             ClientRouteMode::Routed {
                 services: config.services,
                 hostname_tls_configs: config.hostname_tls_configs,
+                hostname_acme_challenge_tls_configs: config.hostname_acme_challenge_tls_configs,
             },
         )
         .await
@@ -139,9 +149,13 @@ impl Client {
         )
         .await
         .map_err(ClientConnectError::Handshake)?;
-        let (services, hostname_tls_configs) = services_and_configs_for_route_mode(route_mode);
-        let tunnel_stream_handler =
-            TunnelConnectionStreamHandler::new(services, hostname_tls_configs);
+        let (services, hostname_tls_configs, hostname_acme_challenge_tls_configs) =
+            services_and_configs_for_route_mode(route_mode);
+        let tunnel_stream_handler = TunnelConnectionStreamHandler::new_with_acme_challenge_configs(
+            services,
+            hostname_tls_configs,
+            hostname_acme_challenge_tls_configs,
+        );
 
         Ok(Self {
             endpoint,
@@ -171,12 +185,7 @@ impl Client {
     }
 }
 
-fn services_and_configs_for_route_mode(
-    route_mode: ClientRouteMode,
-) -> (
-    Vec<ClientServiceSettings>,
-    HashMap<String, Arc<rustls::ServerConfig>>,
-) {
+fn services_and_configs_for_route_mode(route_mode: ClientRouteMode) -> RouteModeServicesAndConfigs {
     match route_mode {
         ClientRouteMode::CatchAll { backend_address } => (
             vec![ClientServiceSettings {
@@ -185,11 +194,17 @@ fn services_and_configs_for_route_mode(
                 tls_mode: ClientTlsMode::Passthrough,
             }],
             HashMap::new(),
+            HashMap::new(),
         ),
         ClientRouteMode::Routed {
             services,
             hostname_tls_configs,
-        } => (services, hostname_tls_configs),
+            hostname_acme_challenge_tls_configs,
+        } => (
+            services,
+            hostname_tls_configs,
+            hostname_acme_challenge_tls_configs,
+        ),
     }
 }
 

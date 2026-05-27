@@ -150,7 +150,12 @@ pub struct PreparedClient {
 }
 
 type TerminationTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
-type LoadedTerminationTls = (TerminationTlsConfigs, Vec<ManagedAcmeRuntime>);
+type TerminationAcmeChallengeTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
+type LoadedTerminationTls = (
+    TerminationTlsConfigs,
+    TerminationAcmeChallengeTlsConfigs,
+    Vec<ManagedAcmeRuntime>,
+);
 
 impl PreparedClient {
     pub async fn connect(
@@ -183,9 +188,10 @@ impl PreparedClient {
             .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
         prepare_default_client_acme_state_dir(settings)?;
 
-        let (hostname_tls_configs, acme_runtimes) = load_termination_tls_configs(settings)
-            .await
-            .map_err(ClientStartupError::InvalidSettings)?;
+        let (hostname_tls_configs, hostname_acme_challenge_tls_configs, acme_runtimes) =
+            load_termination_tls_configs(settings)
+                .await
+                .map_err(ClientStartupError::InvalidSettings)?;
 
         let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
         let cert_chain =
@@ -203,6 +209,7 @@ impl PreparedClient {
             services,
             quic_client_config,
             hostname_tls_configs,
+            hostname_acme_challenge_tls_configs,
         })
         .await
         .map_err(ClientStartupError::Connect)?;
@@ -548,10 +555,10 @@ async fn load_termination_tls_configs(
     settings: &ClientSettings,
 ) -> Result<LoadedTerminationTls, String> {
     match &settings.public_cert_config {
-        None => Ok((HashMap::new(), Vec::new())),
+        None => Ok((HashMap::new(), HashMap::new(), Vec::new())),
         Some(ClientPublicCertConfig::Manual { directory }) => {
             let configs = load_manual_termination_tls_configs(settings, directory)?;
-            Ok((configs, Vec::new()))
+            Ok((configs, HashMap::new(), Vec::new()))
         }
         Some(ClientPublicCertConfig::Acme {
             email,
@@ -623,19 +630,22 @@ async fn build_acme_termination_configs(
     }
 
     let mut configs = HashMap::new();
+    let mut challenge_configs = HashMap::new();
     let mut acme_runtimes = Vec::new();
     for hostname in hostnames {
         let hostname_set = vec![hostname.clone()];
         let acme_state = build_client_acme_state(&hostname_set, email, state_directory);
-        let tls_config: Arc<rustls::ServerConfig> = acme_state.challenge_rustls_config();
+        let tls_config: Arc<rustls::ServerConfig> = acme_state.default_rustls_config();
+        let challenge_tls_config: Arc<rustls::ServerConfig> = acme_state.challenge_rustls_config();
         let acme_lifecycle = AcmeLifecycle::client(&hostname, state_directory).await;
         configs.insert(hostname.clone(), tls_config);
+        challenge_configs.insert(hostname.clone(), challenge_tls_config);
         acme_runtimes.push(ManagedAcmeRuntime {
             state: acme_state,
             lifecycle: acme_lifecycle,
         });
     }
-    Ok((configs, acme_runtimes))
+    Ok((configs, challenge_configs, acme_runtimes))
 }
 
 #[cfg(test)]
@@ -926,11 +936,13 @@ mod tests {
             }),
         };
 
-        let (configs, acme_runtimes) = super::load_termination_tls_configs(&settings)
-            .await
-            .expect("ACME termination configs should build");
+        let (configs, challenge_configs, acme_runtimes) =
+            super::load_termination_tls_configs(&settings)
+                .await
+                .expect("ACME termination configs should build");
 
         assert_eq!(configs.len(), 2);
+        assert_eq!(challenge_configs.len(), 2);
         assert_eq!(acme_runtimes.len(), 2);
     }
 

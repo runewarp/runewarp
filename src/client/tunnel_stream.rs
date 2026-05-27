@@ -9,9 +9,10 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectiona
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
-use crate::client_hello::read_client_hello;
+use crate::acme::ACME_TLS_ALPN;
+use crate::client_hello::{ParsedClientHello, read_client_hello};
 use crate::runtime_log;
-use crate::runtime_log::ClientRouteOutcome;
+use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
 use crate::{
     ClientServiceSettings, ClientTlsMode, proxy::proxy_stream_error_code,
     proxy::proxy_tcp_over_quic,
@@ -21,16 +22,27 @@ use crate::{
 pub(crate) struct TunnelConnectionStreamHandler {
     services: Arc<[ClientServiceSettings]>,
     hostname_tls_configs: Arc<HashMap<String, Arc<rustls::ServerConfig>>>,
+    hostname_acme_challenge_tls_configs: Arc<HashMap<String, Arc<rustls::ServerConfig>>>,
 }
 
 impl TunnelConnectionStreamHandler {
+    #[cfg(test)]
     pub(crate) fn new(
         services: Vec<ClientServiceSettings>,
         hostname_tls_configs: HashMap<String, Arc<rustls::ServerConfig>>,
     ) -> Self {
+        Self::new_with_acme_challenge_configs(services, hostname_tls_configs, HashMap::new())
+    }
+
+    pub(crate) fn new_with_acme_challenge_configs(
+        services: Vec<ClientServiceSettings>,
+        hostname_tls_configs: HashMap<String, Arc<rustls::ServerConfig>>,
+        hostname_acme_challenge_tls_configs: HashMap<String, Arc<rustls::ServerConfig>>,
+    ) -> Self {
         Self {
             services: services.into(),
             hostname_tls_configs: Arc::new(hostname_tls_configs),
+            hostname_acme_challenge_tls_configs: Arc::new(hostname_acme_challenge_tls_configs),
         }
     }
 
@@ -43,7 +55,7 @@ impl TunnelConnectionStreamHandler {
                 return Err(io::Error::other(error));
             }
         };
-        let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
+        let public_hostname = parsed_client_hello.server_name().to_owned();
         let Some(service) = self.select_service(&public_hostname) else {
             runtime_log::client_route(
                 &public_hostname,
@@ -55,9 +67,11 @@ impl TunnelConnectionStreamHandler {
 
         if service.tls_mode == ClientTlsMode::Terminate {
             return self
-                .handle_terminate(send, recv, &public_hostname, buffered_bytes, service)
+                .handle_terminate(send, recv, parsed_client_hello, service)
                 .await;
         }
+
+        let (_, buffered_bytes) = parsed_client_hello.into_parts();
 
         let mut backend_stream = match TcpStream::connect(service.backend_address.as_str()).await {
             Ok(stream) => stream,
@@ -96,12 +110,31 @@ impl TunnelConnectionStreamHandler {
         &self,
         send: SendStream,
         recv: RecvStream,
-        public_hostname: &str,
-        buffered_bytes: Vec<u8>,
+        parsed_client_hello: ParsedClientHello,
         service: &ClientServiceSettings,
     ) -> io::Result<()> {
-        let Some(tls_config) = self.hostname_tls_configs.get(public_hostname) else {
-            runtime_log::client_route(public_hostname, ClientRouteOutcome::MissingTlsConfig);
+        let public_hostname = parsed_client_hello.server_name().to_owned();
+        if parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN)
+            && let Some(challenge_tls_config) = self
+                .hostname_acme_challenge_tls_configs
+                .get(public_hostname.as_str())
+        {
+            return self
+                .handle_acme_tls_alpn_challenge(
+                    send,
+                    recv,
+                    public_hostname.as_str(),
+                    parsed_client_hello.into_buffered_bytes(),
+                    challenge_tls_config,
+                )
+                .await;
+        }
+
+        let Some(tls_config) = self.hostname_tls_configs.get(public_hostname.as_str()) else {
+            runtime_log::client_route(
+                public_hostname.as_str(),
+                ClientRouteOutcome::MissingTlsConfig,
+            );
             let mut s = send;
             let mut r = recv;
             let _ = s.reset(proxy_stream_error_code());
@@ -114,7 +147,8 @@ impl TunnelConnectionStreamHandler {
         let acceptor = TlsAcceptor::from(tls_config.clone());
         // Replay the buffered ClientHello bytes back into the stream so TlsAcceptor can
         // complete the handshake from the beginning of the TLS record stream.
-        let quic_stream = ReplayedQuicBiStream::new(send, recv, buffered_bytes);
+        let quic_stream =
+            ReplayedQuicBiStream::new(send, recv, parsed_client_hello.into_buffered_bytes());
         let mut tls_stream = match acceptor.accept(quic_stream).await {
             Ok(stream) => stream,
             Err(error) => {
@@ -128,7 +162,7 @@ impl TunnelConnectionStreamHandler {
             Ok(stream) => stream,
             Err(error) => {
                 runtime_log::client_route(
-                    public_hostname,
+                    public_hostname.as_str(),
                     ClientRouteOutcome::BackendConnectFailed {
                         backend_address: service.backend_address.as_str(),
                     },
@@ -138,7 +172,7 @@ impl TunnelConnectionStreamHandler {
         };
 
         runtime_log::client_route(
-            public_hostname,
+            public_hostname.as_str(),
             ClientRouteOutcome::Terminated {
                 backend_address: service.backend_address.as_str(),
             },
@@ -147,6 +181,39 @@ impl TunnelConnectionStreamHandler {
         copy_bidirectional(&mut tls_stream, &mut backend_stream)
             .await
             .map(|_| ())
+    }
+
+    async fn handle_acme_tls_alpn_challenge(
+        &self,
+        send: SendStream,
+        recv: RecvStream,
+        public_hostname: &str,
+        buffered_bytes: Vec<u8>,
+        challenge_tls_config: &Arc<rustls::ServerConfig>,
+    ) -> io::Result<()> {
+        let acceptor = TlsAcceptor::from(challenge_tls_config.clone());
+        let quic_stream = ReplayedQuicBiStream::new(send, recv, buffered_bytes);
+        match acceptor.accept(quic_stream).await {
+            Ok(_) => {
+                runtime_log::acme(
+                    AcmeRole::Client { public_hostname },
+                    AcmeEvent::ChallengeHandled,
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let error = error.to_string();
+                runtime_log::acme(
+                    AcmeRole::Client { public_hostname },
+                    AcmeEvent::ChallengeFailed {
+                        error: error.as_str(),
+                    },
+                );
+                Err(io::Error::other(format!(
+                    "ACME TLS-ALPN-01 handshake failed for {public_hostname}: {error}"
+                )))
+            }
+        }
     }
 
     fn select_service(&self, public_hostname: &str) -> Option<&ClientServiceSettings> {
@@ -254,7 +321,7 @@ mod tests {
     use tracing_subscriber::fmt::writer::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
 
-    use super::TunnelConnectionStreamHandler;
+    use super::{ACME_TLS_ALPN, TunnelConnectionStreamHandler};
     use crate::{
         ClientServiceSettings, ClientTlsMode, LogLevel, make_client_quic_config,
         make_server_quic_config,
@@ -1013,6 +1080,104 @@ mod tests {
         stream_handler_task
             .await
             .map_err(|error| join_error("stream handler task failed", error))??;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acme_challenge_traffic_logs_distinctly_from_terminate_routing() -> io::Result<()> {
+        let hostname = "app.example.test";
+        let (public_cert, public_key) = make_self_signed_cert(hostname)?;
+        let default_tls_config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![public_cert.clone()], private_key_from_der(&public_key))
+                .map_err(io::Error::other)?,
+        );
+        let mut challenge_server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![public_cert.clone()], private_key_from_der(&public_key))
+            .map_err(io::Error::other)?;
+        challenge_server_config.alpn_protocols = vec![ACME_TLS_ALPN.to_vec()];
+        let challenge_tls_config = Arc::new(challenge_server_config);
+
+        let backend_listener = TcpListener::bind(localhost(0)).await?;
+        let backend_address = backend_listener.local_addr()?.to_string();
+        let backend_task = tokio::spawn(async move {
+            match timeout(Duration::from_millis(200), backend_listener.accept()).await {
+                Ok(Ok(_)) => Err(io::Error::other(
+                    "ACME challenge traffic must not reach the backend",
+                )),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Ok(()),
+            }
+        });
+
+        let services = vec![ClientServiceSettings {
+            public_hostnames: Some(vec![hostname.to_owned()]),
+            backend_address,
+            tls_mode: ClientTlsMode::Terminate,
+        }];
+        let mut tls_configs = HashMap::new();
+        tls_configs.insert(hostname.to_owned(), default_tls_config);
+        let mut challenge_tls_configs = HashMap::new();
+        challenge_tls_configs.insert(hostname.to_owned(), challenge_tls_config);
+        let stream_handler = TunnelConnectionStreamHandler::new_with_acme_challenge_configs(
+            services,
+            tls_configs,
+            challenge_tls_configs,
+        );
+
+        let output = capture_logs_with_wait(
+            LogLevel::Debug,
+            "DEBUG client acme challenge handled: public-hostname=app.example.test",
+            async {
+                let fixture = TunnelConnectionFixture::connect().await?;
+                let server_connection = fixture.server_connection.clone();
+                let client_connection = fixture.client_connection.clone();
+
+                let stream_handler_task = tokio::spawn(async move {
+                    let (send, recv) =
+                        timeout(Duration::from_secs(1), client_connection.accept_bi())
+                            .await
+                            .map_err(|_| timeout_error("handler should accept a tunnel stream"))?
+                            .map_err(io::Error::other)?;
+                    stream_handler.handle(send, recv).await
+                });
+
+                let (send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
+                    .await
+                    .map_err(|_| timeout_error("test should open a tunnel stream"))?
+                    .map_err(io::Error::other)?;
+                let mut client_tls_config = rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store_with(&public_cert)?)
+                    .with_no_client_auth();
+                client_tls_config.alpn_protocols = vec![ACME_TLS_ALPN.to_vec()];
+                let connector = TlsConnector::from(Arc::new(client_tls_config));
+                let server_name =
+                    ServerName::try_from(hostname.to_owned()).map_err(io::Error::other)?;
+                let mut tls_stream = timeout(
+                    Duration::from_secs(1),
+                    connector.connect(server_name, QuicBiStream::new(send, recv)),
+                )
+                .await
+                .map_err(|_| timeout_error("ACME challenge handshake should complete"))?
+                .map_err(io::Error::other)?;
+                timeout(Duration::from_secs(1), tls_stream.shutdown())
+                    .await
+                    .map_err(|_| timeout_error("ACME challenge client should close cleanly"))??;
+
+                stream_handler_task
+                    .await
+                    .map_err(|error| join_error("stream handler task failed", error))??;
+                Ok(())
+            },
+        )
+        .await?;
+
+        assert!(!output.contains("client route terminate"));
+        assert!(!output.contains("client route unavailable"));
+        backend_task.abort();
+        let _ = backend_task.await;
         Ok(())
     }
 

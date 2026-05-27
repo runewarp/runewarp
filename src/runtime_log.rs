@@ -96,6 +96,10 @@ pub enum AcmeEvent<'a> {
     },
     CertificateIssued,
     CertificateRenewed,
+    ChallengeHandled,
+    ChallengeFailed {
+        error: &'a str,
+    },
     RecoverableFailure {
         error: &'a str,
     },
@@ -691,6 +695,23 @@ fn acme_event(role: AcmeRole<'_>, event: AcmeEvent<'_>) -> (EventLevel, String) 
             event_line(
                 &format!("{event_name_prefix} certificate renewed"),
                 [(hostname_field, hostname_value)],
+            ),
+        ),
+        AcmeEvent::ChallengeHandled => (
+            EventLevel::Debug,
+            event_line(
+                &format!("{event_name_prefix} challenge handled"),
+                [(hostname_field, hostname_value)],
+            ),
+        ),
+        AcmeEvent::ChallengeFailed { error } => (
+            EventLevel::Warn,
+            event_line(
+                &format!("{event_name_prefix} challenge failed"),
+                [
+                    (hostname_field, hostname_value),
+                    ("error", Cow::Borrowed(error)),
+                ],
             ),
         ),
         AcmeEvent::RecoverableFailure { error } => (
@@ -1364,7 +1385,7 @@ mod tests {
 
     #[test]
     fn acme_lifecycle_logs_use_role_specific_wording_and_levels() {
-        let output = capture(LogLevel::Info, || {
+        let output = capture(LogLevel::Debug, || {
             acme(
                 AcmeRole::Server {
                     server_hostname: "tunnel.example.test",
@@ -1412,6 +1433,12 @@ mod tests {
                     bind_address: "127.0.0.1:8443".parse().unwrap(),
                 },
             );
+            acme(
+                AcmeRole::Client {
+                    public_hostname: "app.example.test",
+                },
+                AcmeEvent::ChallengeHandled,
+            );
         });
 
         assert!(output.contains(
@@ -1432,6 +1459,10 @@ mod tests {
         assert!(output.contains(
             "WARN server acme challenge reachability: bind-address=127.0.0.1:8443: TLS-ALPN-01 still requires public TCP 443 reachability; non-443 internal binds can still work behind NAT or container port mapping"
         ));
+        assert!(
+            output
+                .contains("DEBUG client acme challenge handled: public-hostname=app.example.test")
+        );
     }
 
     #[test]

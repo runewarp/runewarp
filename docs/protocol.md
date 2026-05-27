@@ -25,7 +25,7 @@ For each inbound TCP connection on the configured `server.public-bind-address`:
 9. If the selected Tunnel has no active **Tunnel connection**, drop the connection.
 10. Open a bidirectional stream on the selected Tunnel connection, forward the buffered ClientHello bytes, then continue streaming in both directions.
 
-The buffered ClientHello must never be logged or echoed back in diagnostics. With top-level `log-level = "debug"`, stderr diagnostics may log the normalized **Public hostname** using stable event plus key=value fields such as `public-hostname`, `backend-address`, and `reason`, plus separate full-detail lines for runtime tunnel failure causes whose operator-facing `warn` lines are shortened.
+The buffered ClientHello must never be logged or echoed back in diagnostics. With top-level `log-level = "debug"`, stderr diagnostics may log the normalized **Public hostname** using stable event plus key=value fields such as `public-hostname`, `backend-address`, and `reason`. On the Client side, `acme-tls/1` traffic for terminating **Public hostnames** is logged as distinct ACME challenge handling rather than ordinary terminate routing, and runtime tunnel failure causes keep separate full-detail lines whose operator-facing `warn` lines are shortened.
 
 ## Drop conditions
 

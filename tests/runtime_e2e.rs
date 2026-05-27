@@ -19,6 +19,9 @@ use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
+use rustls_acme::CertCache;
+use rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY;
+use rustls_acme::caches::DirCache;
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -1551,6 +1554,152 @@ client-identity = "{}"
 /// Let's Encrypt issues a certificate.  A Visitor connecting before any cert is
 /// acquired must receive a TLS error, not be silently dropped or accepted.
 #[tokio::test]
+async fn acme_terminating_client_serves_https_with_cached_certificate() {
+    let tempdir = tempdir().unwrap();
+
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+
+    let client_identity = generate_client_identity().unwrap();
+    std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
+        &client_identity.certificate_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
+        &client_identity.private_key_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_IDENTITY_FILENAME),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let acme_state_dir = tempdir.path().join("acme-state");
+    std::fs::create_dir(&acme_state_dir).unwrap();
+    let cached_public_cert =
+        generate_simple_self_signed(vec!["app.example.test".to_owned()]).unwrap();
+    let cached_public_pem = format!(
+        "{}\n{}",
+        cached_public_cert.signing_key.serialize_pem(),
+        cached_public_cert.cert.pem()
+    );
+    DirCache::new(acme_state_dir.clone())
+        .store_cert(
+            &["app.example.test".to_owned()],
+            LETS_ENCRYPT_PRODUCTION_DIRECTORY,
+            cached_public_pem.as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let backend_address = backend_listener.local_addr().unwrap();
+    let backend_task = tokio::spawn(async move {
+        let (mut backend_stream, _) = backend_listener.accept().await.unwrap();
+        let mut request = [0_u8; 4];
+        backend_stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"ping");
+        backend_stream.write_all(b"pong").await.unwrap();
+        backend_stream.shutdown().await.unwrap();
+    });
+
+    let server_settings = load_server_settings(&{
+        let path = tempdir.path().join("server.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+"#,
+                client_identity.client_identity
+            ),
+        )
+        .unwrap();
+        path
+    })
+    .unwrap();
+
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = ClientSettings {
+        server_hostname: "tunnel.example.test".to_owned(),
+        server_port: 443,
+        log_level: LogLevel::Off,
+        server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
+        identity_directory: tempdir.path().join("client-identity"),
+        reconnect_interval: std::time::Duration::from_secs(5),
+        services: vec![ClientServiceSettings {
+            public_hostnames: Some(vec!["app.example.test".to_owned()]),
+            backend_address: backend_address.to_string(),
+            tls_mode: ClientTlsMode::Terminate,
+        }],
+        public_cert_config: Some(ClientPublicCertConfig::Acme {
+            email: "test@example.test".to_owned(),
+            state_directory: acme_state_dir,
+            state_directory_was_defaulted: false,
+        }),
+    };
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    sleep(Duration::from_millis(50)).await;
+
+    let mut client_tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store_with(&cached_public_cert.cert.der().clone()))
+        .with_no_client_auth();
+    client_tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let connector = TlsConnector::from(Arc::new(client_tls_config));
+    let tcp_stream = TcpStream::connect(public_addr).await.unwrap();
+    let mut tls_stream = connector
+        .connect(
+            ServerName::try_from("app.example.test").unwrap(),
+            tcp_stream,
+        )
+        .await
+        .unwrap();
+    tls_stream.write_all(b"ping").await.unwrap();
+
+    let mut response = [0_u8; 4];
+    tls_stream.read_exact(&mut response).await.unwrap();
+    assert_eq!(&response, b"pong");
+
+    backend_task.await.unwrap();
+    server_task.abort();
+    client_task.abort();
+    let _ = server_task.await;
+    let _ = client_task.await;
+}
+
+#[tokio::test]
 async fn acme_terminating_client_fails_closed_before_cert_is_acquired() {
     let tempdir = tempdir().unwrap();
 
@@ -1659,6 +1808,154 @@ client-identity = "{}"
 
     server_task.abort();
     client_task.abort();
+    let _ = server_task.await;
+    let _ = client_task.await;
+}
+
+#[tokio::test]
+async fn acme_tls_alpn_challenge_for_public_hostname_does_not_reach_backend() {
+    let tempdir = tempdir().unwrap();
+
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+
+    let client_identity = generate_client_identity().unwrap();
+    std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
+        &client_identity.certificate_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
+        &client_identity.private_key_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_IDENTITY_FILENAME),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let acme_state_dir = tempdir.path().join("acme-state");
+    std::fs::create_dir(&acme_state_dir).unwrap();
+    let cached_public_cert =
+        generate_simple_self_signed(vec!["app.example.test".to_owned()]).unwrap();
+    let cached_public_pem = format!(
+        "{}\n{}",
+        cached_public_cert.signing_key.serialize_pem(),
+        cached_public_cert.cert.pem()
+    );
+    DirCache::new(acme_state_dir.clone())
+        .store_cert(
+            &["app.example.test".to_owned()],
+            LETS_ENCRYPT_PRODUCTION_DIRECTORY,
+            cached_public_pem.as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let backend_address = backend_listener.local_addr().unwrap();
+    let (backend_connected_tx, backend_connected_rx) = oneshot::channel();
+    let backend_task = tokio::spawn(async move {
+        let _guard = backend_connected_tx;
+        let (_backend_stream, _) = backend_listener.accept().await.unwrap();
+        let _ = _guard.send(());
+    });
+
+    let server_settings = load_server_settings(&{
+        let path = tempdir.path().join("server.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+"#,
+                client_identity.client_identity
+            ),
+        )
+        .unwrap();
+        path
+    })
+    .unwrap();
+
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = ClientSettings {
+        server_hostname: "tunnel.example.test".to_owned(),
+        server_port: 443,
+        log_level: LogLevel::Off,
+        server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
+        identity_directory: tempdir.path().join("client-identity"),
+        reconnect_interval: std::time::Duration::from_secs(5),
+        services: vec![ClientServiceSettings {
+            public_hostnames: Some(vec!["app.example.test".to_owned()]),
+            backend_address: backend_address.to_string(),
+            tls_mode: ClientTlsMode::Terminate,
+        }],
+        public_cert_config: Some(ClientPublicCertConfig::Acme {
+            email: "test@example.test".to_owned(),
+            state_directory: acme_state_dir,
+            state_directory_was_defaulted: false,
+        }),
+    };
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    sleep(Duration::from_millis(50)).await;
+
+    let mut challenge_client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store_with(&cached_public_cert.cert.der().clone()))
+        .with_no_client_auth();
+    challenge_client_config.alpn_protocols = vec![b"acme-tls/1".to_vec()];
+    let connector = TlsConnector::from(Arc::new(challenge_client_config));
+    let tcp_stream = TcpStream::connect(public_addr).await.unwrap();
+    let _ = timeout(
+        Duration::from_secs(1),
+        connector.connect(
+            ServerName::try_from("app.example.test").unwrap(),
+            tcp_stream,
+        ),
+    )
+    .await;
+
+    assert!(
+        timeout(Duration::from_millis(200), backend_connected_rx)
+            .await
+            .is_err(),
+        "ACME challenge traffic must not open a backend connection"
+    );
+
+    backend_task.abort();
+    server_task.abort();
+    client_task.abort();
+    let _ = backend_task.await;
     let _ = server_task.await;
     let _ = client_task.await;
 }

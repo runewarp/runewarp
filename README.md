@@ -36,9 +36,9 @@ Container image from [Docker Hub](https://hub.docker.com/r/runewarp/runewarp):
 docker pull runewarp/runewarp
 ```
 
-## Start here
+## Getting started
 
-1. Walkthrough of the Docker example with minimal config and XDG-backed defaults [`examples/docker/README.md`](examples/docker/README.md).
+1. Walkthrough of the Docker example with minimal config [`examples/docker/README.md`](examples/docker/README.md).
 2. Read [`docs/usage.md`](docs/usage.md) for the operator workflow.
 3. Read [`docs/configuration.md`](docs/configuration.md) for config keys and examples.
 
@@ -47,7 +47,7 @@ docker pull runewarp/runewarp
 | Document | Purpose |
 | --- | --- |
 | [`docs/usage.md`](docs/usage.md) | Guide for installation, setup, startup, verification, and troubleshooting |
-| [`docs/configuration.md`](docs/configuration.md) | Canonical configuration reference, defaults, and example configs |
+| [`docs/configuration.md`](docs/configuration.md) | Configuration reference, defaults, and example configs |
 | [`docs/architecture.md`](docs/architecture.md) | High-level design, routing model, trust boundaries, and topology diagrams |
 | [`docs/security.md`](docs/security.md) | Visibility model, trust model, and security limits |
 | [`docs/protocol.md`](docs/protocol.md) | Wire behavior and runtime invariants |
@@ -56,4 +56,4 @@ docker pull runewarp/runewarp
 
 ## License
 
-Apache 2.0. See [`LICENSE`](LICENSE).
+Licensed under Apache License, Version 2.0 ([`LICENSE`](LICENSE)).

@@ -59,12 +59,28 @@ fn client_public_cert_help_uses_concise_public_certificate_copy() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
-    assert!(stdout.starts_with("Runewarp Public Certificates"));
+    assert!(stdout.starts_with("Runewarp Public Hostname Certificates"));
     assert!(stdout.contains("Manage Public hostname certificates"));
     assert!(stdout.contains("init       Initialize Public hostname certificates"));
     assert!(stdout.contains("renew      Renew Public hostname certificates"));
     assert!(stdout.contains("rotate-ca  Rotate the Public hostname CA"));
     assert!(!stdout.contains("Config defaults:"));
+}
+
+#[test]
+fn client_public_cert_rotate_ca_help_uses_the_public_hostname_term_and_its_own_example() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args(["client", "public-cert", "rotate-ca", "--help"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.starts_with("Runewarp Public Hostname Certificates"));
+    assert!(stdout.contains("Rotate the Public hostname CA"));
+    assert!(stdout.contains("runewarp client public-cert rotate-ca"));
+    assert!(!stdout.contains("runewarp client public-cert init --hostname"));
 }
 
 #[test]
@@ -330,6 +346,24 @@ fn client_public_cert_init_requires_hostname_or_config() {
         stderr.contains("--hostname") || stderr.contains("config"),
         "expected error mentioning --hostname or config, got: {stderr}"
     );
+}
+
+#[test]
+fn client_public_cert_init_without_hostname_surfaces_xdg_config_resolution_errors() {
+    let tempdir = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .args(["client", "public-cert", "init"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("unable to resolve the XDG config base directory"));
+    assert!(!stderr.contains("--hostname is required"));
 }
 
 #[test]

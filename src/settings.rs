@@ -604,6 +604,7 @@ pub(crate) fn validate_prepared_client_settings(
     if manual_public_cert_present && acme_present {
         messages.push("[client.acme] and client.public-cert-dir are mutually exclusive".to_owned());
     }
+    let manual_cert_selected = manual_public_cert_directory.is_some() && !acme_present;
     let manual_cert = if !acme_present {
         manual_public_cert_directory.and_then(|directory| {
             directory.into_option(&mut messages).and_then(|directory| {
@@ -649,10 +650,7 @@ pub(crate) fn validate_prepared_client_settings(
     let has_terminating_service = validated_services
         .iter()
         .any(|s| s.parsed_tls_mode == Some(ClientTlsMode::Terminate));
-    if has_terminating_service
-        && public_cert_config.is_none()
-        && !(manual_public_cert_present && acme_present)
-    {
+    if has_terminating_service && public_cert_config.is_none() && !manual_cert_selected {
         messages.push(
             "client.public-cert-dir or [client.acme] is required when any service uses tls-mode = \"terminate\""
                 .to_owned(),

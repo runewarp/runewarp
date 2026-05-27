@@ -37,11 +37,16 @@ Examples:
   runewarp client public-cert init --hostname app.example.com
   runewarp client public-cert renew --hostname app.example.com";
 
+const CLIENT_PUBLIC_CERT_ROTATE_CA_EXAMPLES: &str = "\
+Examples:
+  runewarp client public-cert rotate-ca
+  runewarp client -c client.toml public-cert rotate-ca";
+
 const SERVER_HEADER: &str = "Runewarp Server";
 const SERVER_CERT_HEADER: &str = "Runewarp Server Certificates";
 const CLIENT_HEADER: &str = "Runewarp Client";
 const CLIENT_IDENTITY_HEADER: &str = "Runewarp Client Identity";
-const CLIENT_PUBLIC_CERT_HEADER: &str = "Runewarp Public Certificates";
+const CLIENT_PUBLIC_CERT_HEADER: &str = "Runewarp Public Hostname Certificates";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -204,7 +209,7 @@ pub struct ClientPublicCertRenewArgs {
 }
 
 #[derive(Debug, Args)]
-#[command(before_help = CLIENT_PUBLIC_CERT_HEADER, after_help = CLIENT_PUBLIC_CERT_EXAMPLES)]
+#[command(before_help = CLIENT_PUBLIC_CERT_HEADER, after_help = CLIENT_PUBLIC_CERT_ROTATE_CA_EXAMPLES)]
 pub struct ClientPublicCertDirArgs {
     /// Read and write Public hostname certificate material in this directory.
     #[arg(long = "dir", value_name = "DIR")]

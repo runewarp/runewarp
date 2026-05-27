@@ -23,7 +23,7 @@ use runewarp::{
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
     resolve_server_settings_from_cli, resolve_terminating_hostnames_from_config,
     rotate_client_identity, rotate_manual_client_public_cert_authority,
-    rotate_manual_server_certificate_authority,
+    rotate_manual_server_certificate_authority, select_client_config,
 };
 use rustls_pemfile::certs;
 use time::OffsetDateTime;
@@ -533,7 +533,7 @@ fn resolve_client_public_cert_hostnames(
     if let Some(h) = hostname {
         return Ok(vec![h]);
     }
-    let Some(config_path) = candidate_config_path(config) else {
+    let Some(config_path) = resolve_selected_client_config_path(config)? else {
         return Err(
             "--hostname is required, or supply --config or a default client config to derive \
              targets from client.services[].public-hostnames (tls-mode = \"terminate\")"
@@ -563,7 +563,7 @@ fn resolve_client_public_cert_hostnames(
 fn resolve_client_public_cert_hostnames_from_config_required(
     config: Option<std::path::PathBuf>,
 ) -> Result<Vec<String>, Box<dyn Error>> {
-    let config_path = match candidate_config_path(config) {
+    let config_path = match resolve_selected_client_config_path(config.clone())? {
         Some(config_path) => config_path,
         None => {
             let default_path = default_config_path()?;
@@ -591,6 +591,16 @@ fn resolve_client_public_cert_hostnames_from_config_required(
         .into());
     }
     Ok(hostnames)
+}
+
+fn resolve_selected_client_config_path(
+    config: Option<std::path::PathBuf>,
+) -> Result<Option<std::path::PathBuf>, Box<dyn Error>> {
+    match select_client_config(config)? {
+        runewarp::SelectedClientConfig::Explicit(path)
+        | runewarp::SelectedClientConfig::Discovered(path) => Ok(Some(path)),
+        runewarp::SelectedClientConfig::None => Ok(None),
+    }
 }
 
 fn resolve_client_public_cert_dir(

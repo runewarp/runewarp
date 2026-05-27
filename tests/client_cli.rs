@@ -446,3 +446,43 @@ tls-mode = "terminate"
     assert!(default_state_dir.is_dir());
     Ok(())
 }
+
+#[test]
+fn client_terminate_mode_surfaces_xdg_data_errors_without_claiming_public_cert_dir_is_required()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+
+    Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .assert()
+        .success();
+
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "127.0.0.1:443"
+tls-mode = "terminate"
+"#,
+    )?;
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .env_remove("HOME")
+        .env_remove("XDG_DATA_HOME")
+        .args(["client", "--config", "client.toml"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
+
+    assert!(stderr.contains("unable to resolve the XDG data base directory"));
+    assert!(!stderr.contains("client.public-cert-dir or [client.acme] is required"));
+    Ok(())
+}

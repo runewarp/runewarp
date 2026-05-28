@@ -121,17 +121,20 @@ This track hardens routed hostname sets against avoidable downtime across **Clie
 
 This track grows the data plane without changing the product boundary.
 
-### Public QUIC and HTTP/3 passthrough
+### Public QUIC passthrough
 
 **Outcome**
 
-- Runewarp can route QUIC-based application traffic on the public edge as well as TLS over TCP
+- Runewarp can route QUIC-based application traffic on the public edge as well as TLS over TCP, including HTTP/3-capable **Local backends** and visitors that already speak QUIC natively
 
 **Planned work**
 
 - decide how public QUIC passthrough coexists with Client Tunnel connections on `443/udp`
+- support HTTP/3 on top of the public QUIC data path without requiring `runewarp proxy` for QUIC-capable visitors
+- explicitly evaluate whether early Client-side QUIC termination belongs in this track or a later extension
 - preserve explicit Server-side authorization for the routed hostname set
 - keep customer traffic opaque to the public edge
+- keep DTLS and other UDP protocols exploratory until the routing and trust model is clear without a visitor-side proxy
 
 ### Wildcard Public hostnames
 
@@ -145,17 +148,17 @@ This track grows the data plane without changing the product boundary.
 - decide how wildcard precedence interacts with exact-match hostnames
 - preserve clear operator reasoning about authorization and overlap
 
-### Remote configuration channel
+### PROXY protocol delivery
 
 **Outcome**
 
-- operators can manage distributed runtime state without inventing a second control-plane product by accident
+- Local backends can opt into receiving original Visitor source metadata without changing the default data path
 
 **Planned work**
 
-- evaluate HTTP/3-based remote configuration over the existing QUIC transport
-- keep routing authority on the Server rather than moving to Client-side hostname registration
-- decide how remote configuration and static config coexist during rollout and recovery
+- add per-Service opt-in delivery for TCP backends in both `tls-mode = "passthrough"` and `tls-mode = "terminate"`
+- define how PROXY protocol framing reaches Local backends without widening the default trust boundary
+- keep source-metadata delivery explicit so backends only opt in when they are prepared to consume it
 
 ## Operations
 
@@ -170,8 +173,33 @@ This track improves day-2 operation, observability, and safer runtime change man
 **Planned work**
 
 - reload Server and Client config without widening routing authority
+- add file-watching triggers for both Server and Client on top of the same validated reload path
 - decide how in-flight connections behave when routing entries change
 - keep validation fail-closed when new config is invalid
+
+### CLI and config ergonomics
+
+**Outcome**
+
+- operators can discover, inspect, initialize, and edit the selected config path without guessing where Runewarp keeps state
+
+**Planned work**
+
+- add `runewarp config show` for the effective selected-role config, including the selected config path
+- add `runewarp config init` for minimal non-destructive config scaffolding at the default or explicit path
+- add `runewarp config edit` as a `$EDITOR` wrapper for the selected config path, with a clear `config init` hint when no config exists
+
+### Background runtime ergonomics
+
+**Outcome**
+
+- operators can run long-lived Server and Client processes cleanly under service managers and, when needed, from the CLI in the background without a fork-and-forget trap
+
+**Planned work**
+
+- document systemd units and operator workflows as the first-class service-manager path
+- keep foreground operation and service-manager execution as the simplest production story
+- define a small background-runtime lifecycle surface around `-d`, including status/stop semantics and explicit log-destination behavior
 
 ### Health-aware routing
 
@@ -221,6 +249,30 @@ This track improves day-2 operation, observability, and safer runtime change man
 - later per-hostname public port support
 - IPv6 support where it changes deployment assumptions or listener behavior
 
+### Backend connection reuse benchmarks
+
+**Outcome**
+
+- backend connection reuse is introduced only if measurement shows it improves latency without breaking the protocol boundary
+
+**Planned work**
+
+- benchmark the current one-stream-to-one-backend-connection model before adding pooling complexity
+- identify which backend protocol shapes, if any, could safely benefit from reuse
+- keep "no pooling" as an acceptable result if the measured gains are weak or correctness costs are high
+
+### Runtime timeout review
+
+**Outcome**
+
+- connection, handshake, idle, and retry timers follow explicit Runewarp-specific guidance instead of ad hoc defaults
+
+**Planned work**
+
+- review tunnel, backend, and shutdown-related timeouts against Runewarp's transport model
+- compare the resulting guidance with common reverse-proxy defaults such as Caddy without treating those defaults as the target
+- tighten or relax current timers only where the operational trade-offs are understood and documented
+
 ## Advanced networking
 
 This track handles harder privacy and trust-distribution problems.
@@ -249,9 +301,38 @@ This track handles harder privacy and trust-distribution problems.
 - zero-downtime **Server CA** rotation
 - safer overlap and cutover mechanics than the current reconnect-based model
 
+## Managed service and control plane
+
+This track explores the trust and management surfaces needed for a future managed Runewarp offering without redefining the current self-hosted baseline too early.
+
+### Managed Client authentication
+
+**Outcome**
+
+- a managed control plane can authorize Client instances with control-plane-issued trust material while the underlying durable Client identity model stays coherent
+
+**Planned work**
+
+- explore short-lived Client certificates issued by a control-plane CA that attest the existing durable `client-identity` key
+- define how a managed-service Server would trust that control-plane CA without changing the self-hosted baseline by accident
+- keep the roadmap exploratory on how that trust path coexists with static self-hosted trust configuration
+- scope the first design around managed-service deployments rather than making control-plane trust the default self-hosted path
+
+### Server configuration API
+
+**Outcome**
+
+- a future managed control plane can manage Server-side routing and trust state through an explicit management surface rather than by smuggling config through the data path
+
+**Planned work**
+
+- design a separate authenticated management API for Server configuration
+- keep Server-authoritative routing intact even when configuration is managed remotely
+- decide later how managed configuration relates to static config files during rollout, recovery, and mixed deployments
+
 ## Visitor proxy
 
-This later track adds a visitor-side proxy mode (`runewarp proxy`) for TCP applications that need a simple way to reach existing terminating Services through Runewarp.
+This later track adds a visitor-side proxy mode (`runewarp proxy`) for applications that still need a visitor-side wrapper after the native public data paths have expanded, starting with TCP access to existing terminating Services through Runewarp.
 
 ### TCP visitor proxy
 
@@ -275,6 +356,7 @@ This later track adds a visitor-side proxy mode (`runewarp proxy`) for TCP appli
 **Planned work**
 
 - build the UDP story on top of public QUIC passthrough rather than inventing a separate path first
+- keep `runewarp proxy` focused on protocols that still need a visitor-side wrapper after native public QUIC support exists
 - revisit the visitor UX once the protocol prerequisites are in place
 
 ## Deliberate non-goals

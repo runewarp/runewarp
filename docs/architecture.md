@@ -8,7 +8,7 @@ This document describes the committed Runewarp design: **TLS passthrough** on th
 | --- | --- |
 | Public traffic | TLS passthrough by default; the public edge does not terminate customer TLS |
 | Routing authority | The **Server** selects the **Tunnel** from explicit Server-configured **Public hostnames** |
-| **Client behavior** | The **Client** selects a **Service** locally and either forwards TLS bytes to a TLS-terminating **Local backend** (**TLS passthrough**) or terminates TLS itself before proxying plaintext to the **Local backend** (**Terminate mode**) |
+| **Client instance behavior** | The **Client instance** selects a **Service** locally and either forwards TLS bytes to a TLS-terminating **Local backend** (**TLS passthrough**) or terminates TLS itself before proxying plaintext to the **Local backend** (**Terminate mode**) |
 | Tunnel transport | One long-lived QUIC/TLS **Tunnel connection** per **Client instance** |
 | Trust model | Server certificate validation plus pinned **Client identity** authentication |
 
@@ -26,7 +26,7 @@ This document describes the committed Runewarp design: **TLS passthrough** on th
 Runewarp keeps configuration handling behind one internal **Config preparation** seam:
 
 - **Config preparation** selects the active config input, applies CLI overlays where allowed, fills XDG and hardcoded defaults, and resolves config-relative paths into concrete paths
-- validation consumes those prepared **Server** and **Client** config shapes and focuses on invariants, mutual exclusion, trust rules, and routing rules
+- validation consumes those prepared **Server** and **Client instance** config shapes and focuses on invariants, mutual exclusion, trust rules, and routing rules
 - startup preparation owns side effects such as creating omitted ACME state directories after validation has succeeded
 
 This split keeps the operator-visible behavior unchanged while giving config precedence and defaulting one obvious home.
@@ -108,12 +108,12 @@ The Client validates the Server certificate either through system trust or throu
 - a newer authenticated connection replaces the older one only inside that same **Tunnel**
 - multiple Client instances across different Tunnels are supported
 - same-Tunnel load-balanced pools are not part of the current runtime shape
-- orderly local shutdown is runtime-owned: the **Server** stops accepting new Visitor and **Tunnel** traffic before closing active **Tunnel connections**, and the **Client** stops reconnect work before closing its active **Tunnel connection**
+- orderly local shutdown is runtime-owned: the **Server** stops accepting new Visitor traffic and new **Tunnel connections** before closing active **Tunnel connections**, and the **Client instance** stops reconnect work before closing its active **Tunnel connection**
 - graceful shutdown waits only a short fixed grace period after sending the QUIC close; it does not drain Visitor traffic or proxied streams
 
 ## Product boundaries
 
 - TLS passthrough is the default and the lowest-privilege mode
-- customer TLS may be terminated on the **Local backend** (passthrough, default) or on the **Client** (terminate, opt-in)
+- customer TLS may be terminated on the **Local backend** (passthrough, default) or on the **Client instance** (terminate, opt-in)
 - plain HTTP backends require `tls-mode = "terminate"` on the matching Service
 - edge TLS termination managed by the Server for customer traffic is out of scope

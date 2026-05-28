@@ -35,6 +35,30 @@ pub struct Server {
     visitor_stream_handler: VisitorStreamHandler,
 }
 
+enum NextServerEvent<VisitorAccept, TunnelAccept> {
+    Shutdown,
+    Visitor(VisitorAccept),
+    Tunnel(TunnelAccept),
+}
+
+async fn next_server_event<Shutdown, VisitorAccept, TunnelAccept>(
+    shutdown: Shutdown,
+    public_accept: VisitorAccept,
+    tunnel_accept: TunnelAccept,
+) -> NextServerEvent<VisitorAccept::Output, TunnelAccept::Output>
+where
+    Shutdown: Future<Output = ()>,
+    VisitorAccept: Future,
+    TunnelAccept: Future,
+{
+    tokio::select! {
+        biased;
+        _ = shutdown => NextServerEvent::Shutdown,
+        accept_result = public_accept => NextServerEvent::Visitor(accept_result),
+        incoming = tunnel_accept => NextServerEvent::Tunnel(incoming),
+    }
+}
+
 impl Server {
     pub async fn bind(config: ServerConfig) -> io::Result<Self> {
         if config.configured_tunnels.is_empty() {
@@ -160,16 +184,22 @@ impl Server {
             visitor_stream_handler,
         } = self;
         loop {
-            tokio::select! {
-                _ = shutdown.wait() => break,
-                accept_result = public_listener.accept() => {
+            match next_server_event(
+                shutdown.wait(),
+                public_listener.accept(),
+                tunnel_endpoint.accept(),
+            )
+            .await
+            {
+                NextServerEvent::Shutdown => break,
+                NextServerEvent::Visitor(accept_result) => {
                     let (visitor_stream, _) = accept_result?;
                     let visitor_stream_handler = visitor_stream_handler.clone();
                     tokio::spawn(async move {
                         let _ = visitor_stream_handler.handle(visitor_stream).await;
                     });
                 }
-                incoming = tunnel_endpoint.accept() => {
+                NextServerEvent::Tunnel(incoming) => {
                     let Some(incoming) = incoming else {
                         return Ok(());
                     };
@@ -187,11 +217,9 @@ impl Server {
                                 return;
                             }
                         };
-                        match with_handshake_timeout(
-                            connecting,
-                            HANDSHAKE_TIMEOUT,
-                            || quinn::ConnectionError::TimedOut,
-                        )
+                        match with_handshake_timeout(connecting, HANDSHAKE_TIMEOUT, || {
+                            quinn::ConnectionError::TimedOut
+                        })
                         .await
                         {
                             Ok(connection) => tunnel_registry.register(connection).await,
@@ -213,5 +241,19 @@ impl Server {
         let _ = tunnel_registry.close_all(b"graceful shutdown").await;
         tokio::time::sleep(shutdown.grace_period()).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::ready;
+
+    use super::{NextServerEvent, next_server_event};
+
+    #[tokio::test]
+    async fn shutdown_wins_when_accepts_are_also_ready() {
+        let event = next_server_event(ready(()), ready("visitor"), ready("tunnel")).await;
+
+        assert!(matches!(event, NextServerEvent::Shutdown));
     }
 }

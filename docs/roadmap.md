@@ -113,8 +113,8 @@ This track hardens routed hostname sets against avoidable downtime across **Clie
 
 **Planned work**
 
-- drain new Visitor traffic from a **Server** before shutdown while letting replacement capacity come online
-- give in-flight Visitor connections a bounded grace period to finish before forced close
+- drain new Visitor traffic and client-side proxied streams during orderly shutdown while letting replacement capacity come online
+- give in-flight Visitor connections and proxied streams a bounded grace period to finish before forced close
 - hand new Tunnel and Visitor traffic to replacement **Server** nodes without promising in-flight connection migration in the first milestone
 
 ## Protocol expansion

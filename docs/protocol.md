@@ -94,13 +94,13 @@ When a QUIC connection drops, all streams on that connection are lost. They are 
 For orderly local shutdown that the runtime controls:
 
 - the **Server** stops accepting new Visitor TCP traffic and new **Tunnel connections** before it closes active **Tunnel connections**
-- the **Client** stops new dial and retry work before it closes its active **Tunnel connection**
+- the **Client instance** stops new dial and retry work before it closes its active **Tunnel connection**
 - graceful shutdown sends the normal QUIC connection close and then waits a short fixed runtime-owned grace period before exit
 - active Visitor traffic and proxied streams are not drained; they may terminate when the **Tunnel connection** closes
 
 ## Retry behavior
 
-Client reconnect behavior is:
+Client instance reconnect behavior is:
 
 1. retry immediately once after disconnect
 2. if that fails, wait the runtime reconnect interval
@@ -108,9 +108,9 @@ Client reconnect behavior is:
 
 The current runtime reconnect interval is **1 second** after the first immediate retry. This cadence is runtime-owned rather than configurable.
 
-Unauthorized **Client identity** failures are treated differently: after the rejection, the Client skips the extra immediate retry and waits for the normal runtime reconnect interval before trying again.
+Unauthorized **Client identity** failures are treated differently: after the rejection, the **Client instance** skips the extra immediate retry and waits for the normal runtime reconnect interval before trying again.
 
-When the remote **Server** exits gracefully, the **Client** still treats the closed **Tunnel connection** as an ordinary disconnect and keeps the same reconnect model above. There is no shutdown-specific reconnect branch.
+When the remote **Server** exits gracefully, the **Client instance** still treats the closed **Tunnel connection** as an ordinary disconnect and keeps the same reconnect model above. There is no shutdown-specific reconnect branch.
 
 If a new authenticated connection replaces an older connection for the same **Tunnel**, the older connection closes and any streams on it are lost.
 

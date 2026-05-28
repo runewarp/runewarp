@@ -6,20 +6,21 @@ use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientRuntimeArgs,
-    ClientSettingsResolutionError, GracefulShutdown, PreparedClient, PreparedServer,
-    ServerSettingsResolutionError, SettingsError, XdgPathError,
-    default_client_identity_material_dir, default_client_public_cert_material_dir,
-    default_config_path, default_server_cert_material_dir, generate_client_identity,
-    initialize_manual_client_public_cert, initialize_manual_server_certificate,
-    inspect_manual_server_certificate, read_client_identity, renew_client_identity_certificate,
-    renew_manual_client_public_cert, renew_manual_server_certificate,
-    resolve_client_identity_material_dir_from_config,
+    ClientSettingsResolutionError, PreparedClient, PreparedServer, ServerSettingsResolutionError,
+    SettingsError, XdgPathError, default_client_identity_material_dir,
+    default_client_public_cert_material_dir, default_config_path, default_server_cert_material_dir,
+    generate_client_identity, initialize_manual_client_public_cert,
+    initialize_manual_server_certificate, inspect_manual_server_certificate, read_client_identity,
+    renew_client_identity_certificate, renew_manual_client_public_cert,
+    renew_manual_server_certificate, resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config, resolve_client_settings_from_cli,
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
     resolve_server_settings_from_cli, resolve_terminating_hostnames_from_config,
@@ -29,6 +30,7 @@ use runewarp::{
 use rustls_pemfile::certs;
 use time::OffsetDateTime;
 use tokio::net::lookup_host;
+use tokio::sync::Notify;
 use x509_parser::parse_x509_certificate;
 
 mod cli;
@@ -70,6 +72,52 @@ enum RetryDisposition {
 struct ClientTunnelDialTarget {
     configured_server_addr: String,
     resolved_server_addr: SocketAddr,
+}
+
+#[derive(Clone, Debug)]
+struct GracefulShutdown {
+    started: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl GracefulShutdown {
+    fn new(_grace_period: Duration) -> Self {
+        Self {
+            started: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    fn begin(&self) -> bool {
+        let began = self
+            .started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if began {
+            self.notify.notify_waiters();
+        }
+        began
+    }
+
+    fn is_started(&self) -> bool {
+        self.started.load(Ordering::SeqCst)
+    }
+
+    async fn wait(&self) {
+        if self.is_started() {
+            return;
+        }
+        loop {
+            let notified = self.notify.notified();
+            if self.is_started() {
+                return;
+            }
+            notified.await;
+            if self.is_started() {
+                return;
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -219,7 +267,15 @@ async fn run_client_command(
         };
         connected_once = true;
 
-        if let Err(error) = client.run_with_shutdown(shutdown).await {
+        if let Err(error) = client
+            .run_until_shutdown({
+                let shutdown = shutdown.clone();
+                async move {
+                    shutdown.wait().await;
+                }
+            })
+            .await
+        {
             if is_unauthorized_client_connection_error(&error) {
                 runewarp::runtime_log::client_tunnel_unauthorized(
                     client_tunnel_unauthorized_attempt_kind(connected_once),
@@ -278,18 +334,12 @@ async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Erro
     };
     runewarp::runtime_log::server_public_listener_ready(server.public_addr()?);
     runewarp::runtime_log::server_tunnel_listener_ready(server.tunnel_addr()?);
-    let shutdown = GracefulShutdown::new(Duration::from_millis(100));
-    let runtime = server.run_with_shutdown(&shutdown);
-    tokio::pin!(runtime);
-    let server_result = tokio::select! {
-        result = &mut runtime => result,
-        signal_result = wait_for_orderly_shutdown_signal() => {
-            signal_result?;
+    let server_result = server
+        .run_until_shutdown(async {
+            let _ = wait_for_orderly_shutdown_signal().await;
             runewarp::runtime_log::server_graceful_shutdown_started();
-            shutdown.begin();
-            runtime.await
-        }
-    };
+        })
+        .await;
     if let Err(error) = server_result {
         return Err(logged_runtime_failure(Box::new(error)));
     }
@@ -1230,12 +1280,13 @@ mod tests {
 
     use runewarp::{
         CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_IDENTITY_FILENAME,
-        CLIENT_KEY_FILENAME, ClientIdentity, GracefulShutdown,
+        CLIENT_KEY_FILENAME, ClientIdentity,
     };
 
     use super::{
-        RetryAttemptKind, RetryDisposition, client_tunnel_unauthorized_attempt_kind,
-        ensure_client_identity_fresh, retry_with_immediate_retry,
+        GracefulShutdown, RetryAttemptKind, RetryDisposition,
+        client_tunnel_unauthorized_attempt_kind, ensure_client_identity_fresh,
+        retry_with_immediate_retry,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

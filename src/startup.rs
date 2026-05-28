@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -23,10 +24,10 @@ use crate::tls_material::{
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConnectError, ClientIdentity,
-    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, GracefulShutdown,
-    QuicConfigError, Server, ServerCertificateSettings, ServerConfig, ServerSettings,
-    client::validate_services, make_client_quic_config_with_client_auth,
-    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
+    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, QuicConfigError,
+    Server, ServerCertificateSettings, ServerConfig, ServerSettings, client::validate_services,
+    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth_resolver, shutdown::GracefulShutdown,
 };
 
 pub struct PreparedServer {
@@ -142,7 +143,20 @@ impl PreparedServer {
         }
     }
 
-    pub async fn run_with_shutdown(self, shutdown: &GracefulShutdown) -> io::Result<()> {
+    pub async fn run_until_shutdown<Shutdown>(self, shutdown_signal: Shutdown) -> io::Result<()>
+    where
+        Shutdown: Future<Output = ()> + Send + 'static,
+    {
+        let shutdown = GracefulShutdown::new(std::time::Duration::from_millis(100));
+        let shutdown_trigger = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_signal.await;
+            shutdown_trigger.begin();
+        });
+        self.run_with_shutdown(&shutdown).await
+    }
+
+    async fn run_with_shutdown(self, shutdown: &GracefulShutdown) -> io::Result<()> {
         let Self {
             server,
             acme_runtime,
@@ -262,7 +276,23 @@ impl PreparedClient {
         client.run().await
     }
 
-    pub async fn run_with_shutdown(
+    pub async fn run_until_shutdown<Shutdown>(
+        self,
+        shutdown_signal: Shutdown,
+    ) -> Result<(), quinn::ConnectionError>
+    where
+        Shutdown: Future<Output = ()> + Send + 'static,
+    {
+        let shutdown = GracefulShutdown::new(std::time::Duration::from_millis(100));
+        let shutdown_trigger = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_signal.await;
+            shutdown_trigger.begin();
+        });
+        self.run_with_shutdown(&shutdown).await
+    }
+
+    async fn run_with_shutdown(
         self,
         shutdown: &GracefulShutdown,
     ) -> Result<(), quinn::ConnectionError> {

@@ -4,6 +4,7 @@ mod tunnel_stream;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,8 +13,8 @@ use quinn::{Connection, Endpoint};
 
 use self::tunnel_stream::TunnelConnectionStreamHandler;
 use crate::{
-    ClientServiceSettings, ClientTlsMode, GracefulShutdown, HANDSHAKE_TIMEOUT,
-    quic::with_handshake_timeout,
+    ClientServiceSettings, ClientTlsMode, HANDSHAKE_TIMEOUT, quic::with_handshake_timeout,
+    shutdown::GracefulShutdown,
 };
 
 type HostnameTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
@@ -184,7 +185,23 @@ impl Client {
         }
     }
 
-    pub async fn run_with_shutdown(
+    pub async fn run_until_shutdown<Shutdown>(
+        self,
+        shutdown_signal: Shutdown,
+    ) -> Result<(), quinn::ConnectionError>
+    where
+        Shutdown: Future<Output = ()> + Send + 'static,
+    {
+        let shutdown = GracefulShutdown::new(std::time::Duration::from_millis(100));
+        let shutdown_trigger = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_signal.await;
+            shutdown_trigger.begin();
+        });
+        self.run_with_shutdown(&shutdown).await
+    }
+
+    pub(crate) async fn run_with_shutdown(
         self,
         shutdown: &GracefulShutdown,
     ) -> Result<(), quinn::ConnectionError> {

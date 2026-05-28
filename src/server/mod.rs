@@ -9,9 +9,11 @@ use std::sync::Arc;
 use quinn::Endpoint;
 use tokio::net::TcpListener;
 
+use std::future::Future;
+
 use crate::{
-    GracefulShutdown, HANDSHAKE_TIMEOUT, ServerTunnelSettings, quic::with_handshake_timeout,
-    runtime_log,
+    HANDSHAKE_TIMEOUT, ServerTunnelSettings, quic::with_handshake_timeout, runtime_log,
+    shutdown::GracefulShutdown,
 };
 
 use self::tunnel_registry::TunnelRegistry;
@@ -137,7 +139,20 @@ impl Server {
         }
     }
 
-    pub async fn run_with_shutdown(self, shutdown: &GracefulShutdown) -> io::Result<()> {
+    pub async fn run_until_shutdown<Shutdown>(self, shutdown_signal: Shutdown) -> io::Result<()>
+    where
+        Shutdown: Future<Output = ()> + Send + 'static,
+    {
+        let shutdown = GracefulShutdown::new(std::time::Duration::from_millis(100));
+        let shutdown_trigger = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_signal.await;
+            shutdown_trigger.begin();
+        });
+        self.run_with_shutdown(&shutdown).await
+    }
+
+    pub(crate) async fn run_with_shutdown(self, shutdown: &GracefulShutdown) -> io::Result<()> {
         let Self {
             public_listener,
             tunnel_endpoint,
@@ -190,6 +205,7 @@ impl Server {
             }
         }
 
+        tunnel_registry.stop_accepting();
         drop(public_listener);
         drop(tunnel_endpoint);
         let closed_connections = tunnel_registry.close_all(b"graceful shutdown").await;

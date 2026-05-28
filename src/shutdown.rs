@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 #[derive(Clone, Debug)]
-pub struct GracefulShutdown {
+pub(crate) struct GracefulShutdown {
     inner: Arc<GracefulShutdownInner>,
 }
 
@@ -17,7 +17,7 @@ struct GracefulShutdownInner {
 }
 
 impl GracefulShutdown {
-    pub fn new(grace_period: Duration) -> Self {
+    pub(crate) fn new(grace_period: Duration) -> Self {
         Self {
             inner: Arc::new(GracefulShutdownInner {
                 started: AtomicBool::new(false),
@@ -27,7 +27,7 @@ impl GracefulShutdown {
         }
     }
 
-    pub fn begin(&self) -> bool {
+    pub(crate) fn begin(&self) -> bool {
         let began = self
             .inner
             .started
@@ -39,15 +39,15 @@ impl GracefulShutdown {
         began
     }
 
-    pub fn is_started(&self) -> bool {
+    pub(crate) fn is_started(&self) -> bool {
         self.inner.started.load(Ordering::SeqCst)
     }
 
-    pub fn grace_period(&self) -> Duration {
+    pub(crate) fn grace_period(&self) -> Duration {
         self.inner.grace_period
     }
 
-    pub async fn wait(&self) {
+    pub(crate) async fn wait(&self) {
         if self.is_started() {
             return;
         }

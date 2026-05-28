@@ -96,7 +96,7 @@ For orderly local shutdown that the runtime controls:
 - the **Server** stops accepting new Visitor TCP traffic and new **Tunnel connections** before it closes active **Tunnel connections**
 - the **Client** stops new dial and retry work before it closes its active **Tunnel connection**
 - graceful shutdown sends the normal QUIC connection close and then waits a short fixed runtime-owned grace period before exit
-- active Visitor traffic and proxied streams are not drained in this milestone; they may terminate when the **Tunnel connection** closes
+- active Visitor traffic and proxied streams are not drained; they may terminate when the **Tunnel connection** closes
 
 ## Retry behavior
 

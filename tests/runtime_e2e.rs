@@ -7,8 +7,8 @@ use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
     ClientPublicCertConfig, ClientRuntimeArgs, ClientServiceSettings, ClientSettings,
-    ClientSettingsResolutionDefaults, ClientTlsMode, GeneratedClientIdentity, GracefulShutdown,
-    LogLevel, PreparedClient, PreparedServer, SelectedClientConfig, Server, ServerConfig,
+    ClientSettingsResolutionDefaults, ClientTlsMode, GeneratedClientIdentity, LogLevel,
+    PreparedClient, PreparedServer, SelectedClientConfig, Server, ServerConfig,
     ServerTunnelSettings, generate_client_identity, initialize_manual_server_certificate,
     load_client_settings, load_server_settings, make_client_quic_config,
     make_client_quic_config_with_client_auth, make_server_quic_config,
@@ -999,10 +999,15 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
     })
     .await
     .unwrap();
-    let shutdown = GracefulShutdown::new(Duration::from_millis(25));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let client_task = tokio::spawn({
-        let shutdown = shutdown.clone();
-        async move { client.run_with_shutdown(&shutdown).await }
+        async move {
+            client
+                .run_until_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        }
     });
 
     let response = wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
@@ -1010,7 +1015,7 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
         .unwrap();
     assert_eq!(response, *b"pong");
 
-    shutdown.begin();
+    shutdown_tx.send(()).unwrap();
     timeout(Duration::from_secs(1), client_task)
         .await
         .expect("client should finish graceful shutdown")
@@ -1055,10 +1060,15 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
     .unwrap();
     let public_addr = server.public_addr().unwrap();
     let tunnel_addr = server.tunnel_addr().unwrap();
-    let shutdown = GracefulShutdown::new(Duration::from_millis(25));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let server_task = tokio::spawn({
-        let shutdown = shutdown.clone();
-        async move { server.run_with_shutdown(&shutdown).await }
+        async move {
+            server
+                .run_until_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        }
     });
 
     let client_config = ClientConfig {
@@ -1076,7 +1086,7 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
         .unwrap();
     assert_eq!(response, *b"pong");
 
-    shutdown.begin();
+    shutdown_tx.send(()).unwrap();
     timeout(Duration::from_secs(1), server_task)
         .await
         .expect("server should finish graceful shutdown")

@@ -13,6 +13,7 @@ mod server;
 mod server_address;
 mod server_cert;
 mod settings;
+mod shutdown;
 mod startup;
 mod tls_material;
 mod trust;

@@ -28,6 +28,7 @@ use runewarp::{
 use rustls_pemfile::certs;
 use time::OffsetDateTime;
 use tokio::net::lookup_host;
+use tokio::sync::watch;
 use x509_parser::parse_x509_certificate;
 
 mod cli;
@@ -122,13 +123,18 @@ async fn run(args: impl Iterator<Item = String>) -> Result<(), RunError> {
 async fn run_client_command(
     settings: &runewarp::ClientSettings,
     local_bind_addr: SocketAddr,
+    shutdown: &watch::Receiver<bool>,
 ) -> Result<(), Box<dyn Error>> {
     let mut connected_once = false;
     loop {
+        if shutdown_requested(shutdown) {
+            return Ok(());
+        }
         ensure_client_identity_fresh(&settings.identity_directory)?;
         let phase = client_tunnel_phase(connected_once);
-        let (client, connected_dial_target) = retry_with_immediate_retry(
+        let Some((client, connected_dial_target)) = retry_with_immediate_retry(
             settings.reconnect_interval,
+            shutdown,
             retry_disposition_for_client_connect_error,
             |attempt_kind| async move {
                 let log_attempt_kind = client_tunnel_attempt_kind(attempt_kind);
@@ -207,23 +213,44 @@ async fn run_client_command(
             |delay| tokio::time::sleep(delay),
         )
         .await
-        .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
+        .map_err(|error| -> Box<dyn Error> { Box::new(error) })?
+        else {
+            return Ok(());
+        };
         connected_once = true;
 
-        if let Err(error) = client.run().await {
+        if let Err(error) = client
+            .run_until_shutdown({
+                let shutdown = shutdown.clone();
+                async move {
+                    wait_for_shutdown(shutdown).await;
+                }
+            })
+            .await
+        {
             if is_unauthorized_client_connection_error(&error) {
                 runewarp::runtime_log::client_tunnel_unauthorized(
                     client_tunnel_unauthorized_attempt_kind(connected_once),
                     &connected_dial_target.configured_server_addr,
                     &error.to_string(),
                 );
-                tokio::time::sleep(settings.reconnect_interval).await;
+                tokio::select! {
+                    _ = wait_for_shutdown(shutdown.clone()) => return Ok(()),
+                    _ = tokio::time::sleep(settings.reconnect_interval) => {}
+                }
             } else {
-                runewarp::runtime_log::client_tunnel_disconnected(
-                    &connected_dial_target.configured_server_addr,
-                    connected_dial_target.resolved_server_addr,
-                    &error.to_string(),
-                );
+                if is_clean_client_tunnel_close(&error) {
+                    runewarp::runtime_log::client_tunnel_closed(
+                        &connected_dial_target.configured_server_addr,
+                        connected_dial_target.resolved_server_addr,
+                    );
+                } else {
+                    runewarp::runtime_log::client_tunnel_disconnected(
+                        &connected_dial_target.configured_server_addr,
+                        connected_dial_target.resolved_server_addr,
+                        &error.to_string(),
+                    );
+                }
             }
             continue;
         }
@@ -266,7 +293,13 @@ async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Erro
     };
     runewarp::runtime_log::server_public_listener_ready(server.public_addr()?);
     runewarp::runtime_log::server_tunnel_listener_ready(server.tunnel_addr()?);
-    if let Err(error) = server.run().await {
+    let server_result = server
+        .run_until_shutdown(async {
+            let _ = wait_for_orderly_shutdown_signal().await;
+            runewarp::runtime_log::server_graceful_shutdown_started();
+        })
+        .await;
+    if let Err(error) = server_result {
         return Err(logged_runtime_failure(Box::new(error)));
     }
     Ok(())
@@ -376,9 +409,19 @@ async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box
     let settings = resolve_client_settings_from_cli(config.clone(), runtime)
         .map_err(wrap_client_settings_resolution_error)?;
     runewarp::runtime_log::install(settings.log_level)?;
-    run_client_command(&settings, wildcard(0))
-        .await
-        .map_err(logged_runtime_failure)
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let runtime = run_client_command(&settings, wildcard(0), &shutdown_rx);
+    tokio::pin!(runtime);
+    let client_result = tokio::select! {
+        result = &mut runtime => result,
+        signal_result = wait_for_orderly_shutdown_signal() => {
+            signal_result?;
+            runewarp::runtime_log::client_graceful_shutdown_started();
+            let _ = shutdown_tx.send(true);
+            runtime.await
+        }
+    };
+    client_result.map_err(logged_runtime_failure)
 }
 
 fn client_identity_forbidden_runtime_flags(
@@ -698,12 +741,60 @@ fn is_unauthorized_client_connection_error(error: &quinn::ConnectionError) -> bo
     error.to_string().contains("ApplicationVerificationFailure")
 }
 
+fn is_clean_client_tunnel_close(error: &quinn::ConnectionError) -> bool {
+    matches!(
+        error,
+        quinn::ConnectionError::ApplicationClosed(_) | quinn::ConnectionError::ConnectionClosed(_)
+    )
+}
+
+fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow()
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow() {
+            return;
+        }
+    }
+}
+
+async fn wait_for_orderly_shutdown_signal() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate =
+            signal(SignalKind::terminate()).map_err(|error| io::Error::other(error.to_string()))?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.map_err(|error| io::Error::other(error.to_string()))?;
+            }
+            _ = terminate.recv() => {}
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(())
+    }
+}
+
 async fn retry_with_immediate_retry<T, E, Attempt, AttemptFuture, Sleep, SleepFuture>(
     retry_interval: Duration,
+    shutdown: &watch::Receiver<bool>,
     retry_disposition: impl Fn(&E) -> RetryDisposition,
     mut attempt: Attempt,
     mut sleep: Sleep,
-) -> Result<T, E>
+) -> Result<Option<T>, E>
 where
     Attempt: FnMut(RetryAttemptKind) -> AttemptFuture,
     AttemptFuture: Future<Output = Result<T, E>>,
@@ -713,11 +804,21 @@ where
     let mut used_immediate_retry = false;
     let mut attempt_kind = RetryAttemptKind::Initial;
     loop {
-        match attempt(attempt_kind).await {
-            Ok(result) => return Ok(result),
+        if shutdown_requested(shutdown) {
+            return Ok(None);
+        }
+        let attempt_result = tokio::select! {
+            _ = wait_for_shutdown(shutdown.clone()) => return Ok(None),
+            result = attempt(attempt_kind) => result,
+        };
+        match attempt_result {
+            Ok(result) => return Ok(Some(result)),
             Err(error) => match retry_disposition(&error) {
                 RetryDisposition::Immediate if used_immediate_retry => {
-                    sleep(retry_interval).await;
+                    tokio::select! {
+                        _ = wait_for_shutdown(shutdown.clone()) => return Ok(None),
+                        _ = sleep(retry_interval) => {}
+                    }
                     attempt_kind = RetryAttemptKind::IntervalRetry;
                 }
                 RetryDisposition::Immediate => {
@@ -726,7 +827,10 @@ where
                 }
                 RetryDisposition::Interval => {
                     used_immediate_retry = true;
-                    sleep(retry_interval).await;
+                    tokio::select! {
+                        _ = wait_for_shutdown(shutdown.clone()) => return Ok(None),
+                        _ = sleep(retry_interval) => {}
+                    }
                     attempt_kind = RetryAttemptKind::IntervalRetry;
                 }
                 RetryDisposition::Stop => return Err(error),
@@ -1151,9 +1255,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use quinn::{ApplicationClose, ConnectionClose, TransportErrorCode, VarInt};
     use rcgen::{CertificateParams, KeyPair, PublicKeyData};
     use tempfile::tempdir;
     use time::{Duration as TimeDuration, OffsetDateTime};
+    use tokio::sync::watch;
 
     use runewarp::{
         CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_IDENTITY_FILENAME,
@@ -1178,9 +1284,11 @@ mod tests {
         let retry_attempts = Arc::new(Mutex::new(Vec::new()));
         let sleeps = Arc::new(Mutex::new(Vec::new()));
         let retry_interval = Duration::from_secs(5);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let result = retry_with_immediate_retry(
+        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
             retry_interval,
+            &shutdown_rx,
             |error: &TestError| match error {
                 TestError::ImmediateRetry => RetryDisposition::Immediate,
                 TestError::IntervalRetry => RetryDisposition::Interval,
@@ -1193,8 +1301,13 @@ mod tests {
                     let attempts = attempts.clone();
                     let retry_attempts = retry_attempts.clone();
                     async move {
-                        retry_attempts.lock().unwrap().push(attempt_kind);
-                        let mut attempts = attempts.lock().unwrap();
+                        retry_attempts
+                            .lock()
+                            .expect("retry attempts mutex should not be poisoned")
+                            .push(attempt_kind);
+                        let mut attempts = attempts
+                            .lock()
+                            .expect("attempt count mutex should not be poisoned");
                         *attempts += 1;
                         match *attempts {
                             1 | 2 => Err(TestError::ImmediateRetry),
@@ -1209,31 +1322,43 @@ mod tests {
                 move |delay| {
                     let sleeps = sleeps.clone();
                     async move {
-                        sleeps.lock().unwrap().push(delay);
+                        sleeps
+                            .lock()
+                            .expect("sleep tracking mutex should not be poisoned")
+                            .push(delay);
                     }
                 }
             },
         )
         .await;
 
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Ok(Some(())));
         assert_eq!(
-            *retry_attempts.lock().unwrap(),
+            *retry_attempts
+                .lock()
+                .expect("retry attempts mutex should not be poisoned"),
             vec![
                 RetryAttemptKind::Initial,
                 RetryAttemptKind::ImmediateRetry,
                 RetryAttemptKind::IntervalRetry,
             ]
         );
-        assert_eq!(*sleeps.lock().unwrap(), vec![retry_interval]);
+        assert_eq!(
+            *sleeps
+                .lock()
+                .expect("sleep tracking mutex should not be poisoned"),
+            vec![retry_interval]
+        );
     }
 
     #[tokio::test]
     async fn permanent_errors_do_not_retry() {
         let sleeps = Arc::new(Mutex::new(Vec::new()));
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let result = retry_with_immediate_retry(
+        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
             Duration::from_secs(5),
+            &shutdown_rx,
             |error: &TestError| match error {
                 TestError::ImmediateRetry => RetryDisposition::Immediate,
                 TestError::IntervalRetry => RetryDisposition::Interval,
@@ -1245,7 +1370,10 @@ mod tests {
                 move |delay| {
                     let sleeps = sleeps.clone();
                     async move {
-                        sleeps.lock().unwrap().push(delay);
+                        sleeps
+                            .lock()
+                            .expect("sleep tracking mutex should not be poisoned")
+                            .push(delay);
                     }
                 }
             },
@@ -1253,7 +1381,12 @@ mod tests {
         .await;
 
         assert_eq!(result, Err(TestError::Permanent));
-        assert!(sleeps.lock().unwrap().is_empty());
+        assert!(
+            sleeps
+                .lock()
+                .expect("sleep tracking mutex should not be poisoned")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1261,9 +1394,11 @@ mod tests {
         let retry_attempts = Arc::new(Mutex::new(Vec::new()));
         let sleeps = Arc::new(Mutex::new(Vec::new()));
         let retry_interval = Duration::from_secs(5);
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let result = retry_with_immediate_retry(
+        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
             retry_interval,
+            &shutdown_rx,
             |error: &TestError| match error {
                 TestError::ImmediateRetry => RetryDisposition::Immediate,
                 TestError::IntervalRetry => RetryDisposition::Interval,
@@ -1274,8 +1409,16 @@ mod tests {
                 move |attempt_kind| {
                     let retry_attempts = retry_attempts.clone();
                     async move {
-                        retry_attempts.lock().unwrap().push(attempt_kind);
-                        if retry_attempts.lock().unwrap().len() == 1 {
+                        retry_attempts
+                            .lock()
+                            .expect("retry attempts mutex should not be poisoned")
+                            .push(attempt_kind);
+                        if retry_attempts
+                            .lock()
+                            .expect("retry attempts mutex should not be poisoned")
+                            .len()
+                            == 1
+                        {
                             Err(TestError::IntervalRetry)
                         } else {
                             Ok(())
@@ -1288,19 +1431,124 @@ mod tests {
                 move |delay| {
                     let sleeps = sleeps.clone();
                     async move {
-                        sleeps.lock().unwrap().push(delay);
+                        sleeps
+                            .lock()
+                            .expect("sleep tracking mutex should not be poisoned")
+                            .push(delay);
                     }
                 }
             },
         )
         .await;
 
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Ok(Some(())));
         assert_eq!(
-            *retry_attempts.lock().unwrap(),
+            *retry_attempts
+                .lock()
+                .expect("retry attempts mutex should not be poisoned"),
             vec![RetryAttemptKind::Initial, RetryAttemptKind::IntervalRetry]
         );
-        assert_eq!(*sleeps.lock().unwrap(), vec![retry_interval]);
+        assert_eq!(
+            *sleeps
+                .lock()
+                .expect("sleep tracking mutex should not be poisoned"),
+            vec![retry_interval]
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_before_an_immediate_retry_attempt() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let retry_attempts = Arc::new(Mutex::new(Vec::new()));
+
+        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
+            Duration::from_secs(5),
+            &shutdown_rx,
+            |_: &TestError| RetryDisposition::Immediate,
+            {
+                let retry_attempts = retry_attempts.clone();
+                let shutdown_tx = shutdown_tx.clone();
+                move |attempt_kind| {
+                    let retry_attempts = retry_attempts.clone();
+                    let shutdown_tx = shutdown_tx.clone();
+                    async move {
+                        retry_attempts
+                            .lock()
+                            .expect("retry attempts mutex should not be poisoned")
+                            .push(attempt_kind);
+                        let _ = shutdown_tx.send(true);
+                        Err(TestError::ImmediateRetry)
+                    }
+                }
+            },
+            |_delay| async {},
+        )
+        .await;
+
+        assert_eq!(result, Ok(None));
+        assert_eq!(
+            *retry_attempts
+                .lock()
+                .expect("retry attempts mutex should not be poisoned"),
+            vec![RetryAttemptKind::Initial]
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_while_waiting_for_an_interval_retry() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let retry_attempts = Arc::new(Mutex::new(Vec::new()));
+        let sleeps = Arc::new(Mutex::new(Vec::new()));
+
+        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
+            Duration::from_secs(5),
+            &shutdown_rx,
+            |_: &TestError| RetryDisposition::Interval,
+            {
+                let retry_attempts = retry_attempts.clone();
+                move |attempt_kind| {
+                    let retry_attempts = retry_attempts.clone();
+                    async move {
+                        retry_attempts
+                            .lock()
+                            .expect("retry attempts mutex should not be poisoned")
+                            .push(attempt_kind);
+                        Err(TestError::IntervalRetry)
+                    }
+                }
+            },
+            {
+                let sleeps = sleeps.clone();
+                let shutdown_tx = shutdown_tx.clone();
+                move |delay| {
+                    let sleeps = sleeps.clone();
+                    let shutdown_tx = shutdown_tx.clone();
+                    async move {
+                        sleeps
+                            .lock()
+                            .expect("sleep tracking mutex should not be poisoned")
+                            .push(delay);
+                        let _ = shutdown_tx.send(true);
+                        tokio::task::yield_now().await;
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result, Ok(None));
+        assert_eq!(
+            *retry_attempts
+                .lock()
+                .expect("retry attempts mutex should not be poisoned"),
+            vec![RetryAttemptKind::Initial]
+        );
+        assert_eq!(
+            *sleeps
+                .lock()
+                .expect("sleep tracking mutex should not be poisoned"),
+            vec![Duration::from_secs(5)]
+        );
     }
 
     #[test]
@@ -1316,71 +1564,104 @@ mod tests {
     }
 
     #[test]
+    fn remote_graceful_tunnel_closes_are_classified_as_clean() {
+        assert!(super::is_clean_client_tunnel_close(
+            &quinn::ConnectionError::ApplicationClosed(ApplicationClose {
+                error_code: VarInt::from_u32(0),
+                reason: b"graceful shutdown".to_vec().into(),
+            })
+        ));
+        assert!(super::is_clean_client_tunnel_close(
+            &quinn::ConnectionError::ConnectionClosed(ConnectionClose {
+                error_code: TransportErrorCode::NO_ERROR,
+                frame_type: None,
+                reason: b"graceful shutdown".to_vec().into(),
+            })
+        ));
+        assert!(!super::is_clean_client_tunnel_close(
+            &quinn::ConnectionError::TimedOut
+        ));
+    }
+
+    #[test]
     fn ensure_client_identity_fresh_renews_due_certificates_before_connecting() {
-        let tempdir = tempdir().unwrap();
+        let tempdir = tempdir().expect("tempdir should be created");
         write_client_identity_with_not_before(
             tempdir.path(),
             OffsetDateTime::now_utc() - TimeDuration::days(61),
         );
 
-        let original_private_key = fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap();
-        let original_certificate = fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap();
-        let original_identity =
-            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap();
+        let original_private_key = fs::read(tempdir.path().join(CLIENT_KEY_FILENAME))
+            .expect("client key should be readable");
+        let original_certificate = fs::read(tempdir.path().join(CLIENT_CERT_FILENAME))
+            .expect("client certificate should be readable");
+        let original_identity = fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME))
+            .expect("client identity should be readable");
 
-        ensure_client_identity_fresh(tempdir.path()).unwrap();
+        ensure_client_identity_fresh(tempdir.path()).expect("due certificate should be renewed");
 
         assert_eq!(
-            fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap(),
+            fs::read(tempdir.path().join(CLIENT_KEY_FILENAME))
+                .expect("client key should remain readable"),
             original_private_key
         );
         assert_ne!(
-            fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap(),
+            fs::read(tempdir.path().join(CLIENT_CERT_FILENAME))
+                .expect("renewed client certificate should be readable"),
             original_certificate
         );
         assert_eq!(
-            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap(),
+            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME))
+                .expect("client identity should remain readable"),
             original_identity
         );
     }
 
     #[test]
     fn ensure_client_identity_fresh_leaves_not_yet_due_certificates_untouched() {
-        let tempdir = tempdir().unwrap();
+        let tempdir = tempdir().expect("tempdir should be created");
         write_client_identity_with_not_before(
             tempdir.path(),
             OffsetDateTime::now_utc() - TimeDuration::days(60) + TimeDuration::minutes(1),
         );
 
-        let original_private_key = fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap();
-        let original_certificate = fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap();
-        let original_identity =
-            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap();
+        let original_private_key = fs::read(tempdir.path().join(CLIENT_KEY_FILENAME))
+            .expect("client key should be readable");
+        let original_certificate = fs::read(tempdir.path().join(CLIENT_CERT_FILENAME))
+            .expect("client certificate should be readable");
+        let original_identity = fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME))
+            .expect("client identity should be readable");
 
-        ensure_client_identity_fresh(tempdir.path()).unwrap();
+        ensure_client_identity_fresh(tempdir.path())
+            .expect("not-yet-due certificate should remain untouched");
 
         assert_eq!(
-            fs::read(tempdir.path().join(CLIENT_KEY_FILENAME)).unwrap(),
+            fs::read(tempdir.path().join(CLIENT_KEY_FILENAME))
+                .expect("client key should remain readable"),
             original_private_key
         );
         assert_eq!(
-            fs::read(tempdir.path().join(CLIENT_CERT_FILENAME)).unwrap(),
+            fs::read(tempdir.path().join(CLIENT_CERT_FILENAME))
+                .expect("client certificate should remain readable"),
             original_certificate
         );
         assert_eq!(
-            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME)).unwrap(),
+            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME))
+                .expect("client identity should remain readable"),
             original_identity
         );
     }
 
     fn write_client_identity_with_not_before(directory: &Path, not_before: OffsetDateTime) {
-        let signing_key = KeyPair::generate().unwrap();
-        let mut certificate_params =
-            CertificateParams::new(vec!["runewarp-client".to_owned()]).unwrap();
+        let signing_key = KeyPair::generate().expect("test signing key should generate");
+        let mut certificate_params = CertificateParams::new(vec!["runewarp-client".to_owned()])
+            .expect("test certificate params should build");
         certificate_params.not_before = not_before;
         certificate_params.not_after =
             not_before + TimeDuration::days(CLIENT_CERT_LIFETIME_DAYS as i64);
-        let certificate = certificate_params.self_signed(&signing_key).unwrap();
+        let certificate = certificate_params
+            .self_signed(&signing_key)
+            .expect("test certificate should self-sign");
         let client_identity =
             ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
 
@@ -1388,12 +1669,13 @@ mod tests {
             directory.join(CLIENT_KEY_FILENAME),
             signing_key.serialize_pem(),
         )
-        .unwrap();
-        fs::write(directory.join(CLIENT_CERT_FILENAME), certificate.pem()).unwrap();
+        .expect("test key should be written");
+        fs::write(directory.join(CLIENT_CERT_FILENAME), certificate.pem())
+            .expect("test certificate should be written");
         fs::write(
             directory.join(CLIENT_IDENTITY_FILENAME),
             client_identity.to_string(),
         )
-        .unwrap();
+        .expect("test client identity should be written");
     }
 }

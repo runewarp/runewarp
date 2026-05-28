@@ -347,6 +347,13 @@ pub fn client_tunnel_disconnected(
     );
 }
 
+pub fn client_tunnel_closed(configured_server_addr: &str, resolved_server_addr: SocketAddr) {
+    emit(
+        EventLevel::Info,
+        &client_tunnel_closed_line(configured_server_addr, resolved_server_addr),
+    );
+}
+
 pub fn client_tunnel_unauthorized(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
@@ -386,6 +393,37 @@ pub fn server_tunnel_listener_ready(bind_address: SocketAddr) {
             "server tunnel listener ready",
             [("bind-address", Cow::Owned(bind_address.to_string()))],
         ),
+    );
+}
+
+pub fn server_graceful_shutdown_started() {
+    emit(EventLevel::Info, "server graceful shutdown started");
+}
+
+pub fn server_graceful_shutdown_closing_tunnel_connections(active_connections: usize) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "server graceful shutdown closing tunnel connections",
+            [(
+                "active-tunnel-connections",
+                Cow::Owned(active_connections.to_string()),
+            )],
+        ),
+    );
+}
+
+pub fn client_graceful_shutdown_started() {
+    emit(
+        EventLevel::Info,
+        "client instance graceful shutdown started",
+    );
+}
+
+pub fn client_graceful_shutdown_closing_tunnel_connection() {
+    emit(
+        EventLevel::Info,
+        "client instance graceful shutdown closing tunnel connection",
     );
 }
 
@@ -919,6 +957,17 @@ fn client_tunnel_disconnected_line(
     )
 }
 
+fn client_tunnel_closed_line(
+    configured_server_addr: &str,
+    resolved_server_addr: SocketAddr,
+) -> String {
+    let _ = resolved_server_addr;
+    event_line(
+        "client tunnel connection closed",
+        [("server-address", Cow::Borrowed(configured_server_addr))],
+    )
+}
+
 fn client_ready_line(configured_server_addr: &str) -> String {
     event_line(
         "client ready",
@@ -1080,11 +1129,13 @@ mod tests {
 
     use super::{
         AcmeEvent, AcmeRole, ClientRouteOutcome, ClientTunnelAttemptKind, ClientTunnelPhase,
-        EventLevel, InstallOutcome, ServerRouteOutcome, acme, build_subscriber, client_ready,
-        client_route, client_trust_store_warning, client_tunnel_connect_failed,
-        client_tunnel_connected, client_tunnel_connecting, client_tunnel_disconnected,
-        client_tunnel_resolution_failed, client_tunnel_unauthorized, emit,
-        emit_server_tunnel_connection_dropped, install, installed_level,
+        EventLevel, InstallOutcome, ServerRouteOutcome, acme, build_subscriber,
+        client_graceful_shutdown_closing_tunnel_connection, client_graceful_shutdown_started,
+        client_ready, client_route, client_trust_store_warning, client_tunnel_closed,
+        client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
+        client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_unauthorized,
+        emit, emit_server_tunnel_connection_dropped, install, installed_level,
+        server_graceful_shutdown_closing_tunnel_connections, server_graceful_shutdown_started,
         server_public_listener_ready, server_route, server_route_rejected_client_hello,
         server_tunnel_connection_accepted, server_tunnel_connection_failed,
         server_tunnel_connection_replaced, server_tunnel_connection_terminated,
@@ -1337,6 +1388,7 @@ mod tests {
                 resolved_server_addr,
             );
             client_ready(configured_server_addr);
+            client_tunnel_closed(configured_server_addr, resolved_server_addr);
             client_tunnel_disconnected(
                 configured_server_addr,
                 resolved_server_addr,
@@ -1359,10 +1411,16 @@ mod tests {
         ));
         assert!(output.contains("INFO client ready: server-address=tunnel.example.test:443"));
         assert!(output.contains(
+            "INFO client tunnel connection closed: server-address=tunnel.example.test:443"
+        ));
+        assert!(output.contains(
             "WARN client tunnel connection dropped: server-address=tunnel.example.test:443: connection reset by peer"
         ));
         assert!(!output.contains(
             "INFO client tunnel connection connected: server-address=tunnel.example.test:443 resolved-address="
+        ));
+        assert!(!output.contains(
+            "INFO client tunnel connection closed: server-address=tunnel.example.test:443 resolved-address="
         ));
         assert!(!output.contains(
             "WARN client tunnel connection dropped: server-address=tunnel.example.test:443 resolved-address="
@@ -1381,6 +1439,25 @@ mod tests {
 
         assert!(output.contains("INFO server public listener ready: bind-address=127.0.0.1:443"));
         assert!(output.contains("INFO server tunnel listener ready: bind-address=127.0.0.1:443"));
+    }
+
+    #[test]
+    fn graceful_shutdown_logs_render_explicit_runtime_lines() {
+        let output = capture(LogLevel::Info, || {
+            server_graceful_shutdown_started();
+            server_graceful_shutdown_closing_tunnel_connections(2);
+            client_graceful_shutdown_started();
+            client_graceful_shutdown_closing_tunnel_connection();
+        });
+
+        assert!(output.contains("INFO server graceful shutdown started"));
+        assert!(output.contains(
+            "INFO server graceful shutdown closing tunnel connections: active-tunnel-connections=2"
+        ));
+        assert!(output.contains("INFO client instance graceful shutdown started"));
+        assert!(
+            output.contains("INFO client instance graceful shutdown closing tunnel connection")
+        );
     }
 
     #[test]

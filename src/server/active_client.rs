@@ -86,6 +86,14 @@ impl ActiveClientSlot {
             }
         });
     }
+
+    pub(crate) async fn close_active_connection(&self, reason: &'static [u8]) -> bool {
+        let Some(connection) = self.current_connection().await else {
+            return false;
+        };
+        connection.close(0_u32.into(), reason);
+        true
+    }
 }
 
 fn incoming_generation_supersedes(
@@ -200,6 +208,41 @@ mod tests {
         .await;
 
         assert!(output.contains(&expected_replacement_log));
+        assert!(output.contains(&expected_closed_log));
+        assert!(slot.current_connection().await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closes_the_active_tunnel_connection_and_clears_the_slot() -> io::Result<()> {
+        let client_identity = generate_test_client_identity()?;
+        let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        let slot = ActiveClientSlot::new();
+        let remote_addr = fixture.server_connection.remote_address();
+        let expected_closed_log = format!(
+            "server tunnel connection closed: client-identity={} remote-address={remote_addr}",
+            client_identity.client_identity
+        );
+        let slot_for_registration = slot.clone();
+        let client_identity_for_registration = client_identity.client_identity.clone();
+        let expected_closed_log_for_wait = expected_closed_log.clone();
+
+        let output = capture_logs(|buffer| async move {
+            slot_for_registration
+                .register(
+                    fixture.server_connection.clone(),
+                    client_identity_for_registration,
+                )
+                .await;
+            assert!(
+                slot_for_registration
+                    .close_active_connection(b"graceful shutdown")
+                    .await
+            );
+            wait_for_log(&buffer, expected_closed_log_for_wait.as_str()).await;
+        })
+        .await;
+
         assert!(output.contains(&expected_closed_log));
         assert!(slot.current_connection().await.is_none());
         Ok(())

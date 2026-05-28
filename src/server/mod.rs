@@ -9,7 +9,12 @@ use std::sync::Arc;
 use quinn::Endpoint;
 use tokio::net::TcpListener;
 
-use crate::{HANDSHAKE_TIMEOUT, ServerTunnelSettings, quic::with_handshake_timeout, runtime_log};
+use std::future::Future;
+
+use crate::{
+    HANDSHAKE_TIMEOUT, ServerTunnelSettings, quic::with_handshake_timeout, runtime_log,
+    shutdown::GracefulShutdown,
+};
 
 use self::tunnel_registry::TunnelRegistry;
 use self::visitor_stream::VisitorStreamHandler;
@@ -28,6 +33,30 @@ pub struct Server {
     tunnel_endpoint: Endpoint,
     tunnel_registry: TunnelRegistry,
     visitor_stream_handler: VisitorStreamHandler,
+}
+
+enum NextServerEvent<VisitorAccept, TunnelAccept> {
+    Shutdown,
+    Visitor(VisitorAccept),
+    Tunnel(TunnelAccept),
+}
+
+async fn next_server_event<Shutdown, VisitorAccept, TunnelAccept>(
+    shutdown: Shutdown,
+    public_accept: VisitorAccept,
+    tunnel_accept: TunnelAccept,
+) -> NextServerEvent<VisitorAccept::Output, TunnelAccept::Output>
+where
+    Shutdown: Future<Output = ()>,
+    VisitorAccept: Future,
+    TunnelAccept: Future,
+{
+    tokio::select! {
+        biased;
+        _ = shutdown => NextServerEvent::Shutdown,
+        accept_result = public_accept => NextServerEvent::Visitor(accept_result),
+        incoming = tunnel_accept => NextServerEvent::Tunnel(incoming),
+    }
 }
 
 impl Server {
@@ -132,5 +161,99 @@ impl Server {
                 }
             }
         }
+    }
+
+    pub async fn run_until_shutdown<Shutdown>(self, shutdown_signal: Shutdown) -> io::Result<()>
+    where
+        Shutdown: Future<Output = ()> + Send + 'static,
+    {
+        let shutdown = GracefulShutdown::new(std::time::Duration::from_millis(100));
+        let shutdown_trigger = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_signal.await;
+            shutdown_trigger.begin();
+        });
+        self.run_with_shutdown(&shutdown).await
+    }
+
+    pub(crate) async fn run_with_shutdown(self, shutdown: &GracefulShutdown) -> io::Result<()> {
+        let Self {
+            public_listener,
+            tunnel_endpoint,
+            tunnel_registry,
+            visitor_stream_handler,
+        } = self;
+        loop {
+            match next_server_event(
+                shutdown.wait(),
+                public_listener.accept(),
+                tunnel_endpoint.accept(),
+            )
+            .await
+            {
+                NextServerEvent::Shutdown => break,
+                NextServerEvent::Visitor(accept_result) => {
+                    let (visitor_stream, _) = accept_result?;
+                    let visitor_stream_handler = visitor_stream_handler.clone();
+                    tokio::spawn(async move {
+                        let _ = visitor_stream_handler.handle(visitor_stream).await;
+                    });
+                }
+                NextServerEvent::Tunnel(incoming) => {
+                    let Some(incoming) = incoming else {
+                        return Ok(());
+                    };
+
+                    let tunnel_registry = tunnel_registry.clone();
+                    tokio::spawn(async move {
+                        let remote_addr = incoming.remote_address();
+                        let connecting = match incoming.accept() {
+                            Ok(connecting) => connecting,
+                            Err(error) => {
+                                runtime_log::server_tunnel_connection_failed(
+                                    remote_addr,
+                                    &error.to_string(),
+                                );
+                                return;
+                            }
+                        };
+                        match with_handshake_timeout(connecting, HANDSHAKE_TIMEOUT, || {
+                            quinn::ConnectionError::TimedOut
+                        })
+                        .await
+                        {
+                            Ok(connection) => tunnel_registry.register(connection).await,
+                            Err(error) => runtime_log::server_tunnel_connection_failed(
+                                remote_addr,
+                                &error.to_string(),
+                            ),
+                        }
+                    });
+                }
+            }
+        }
+
+        tunnel_registry.stop_accepting();
+        drop(public_listener);
+        drop(tunnel_endpoint);
+        let active_connections = tunnel_registry.active_connection_count().await;
+        runtime_log::server_graceful_shutdown_closing_tunnel_connections(active_connections);
+        let _ = tunnel_registry.close_all(b"graceful shutdown").await;
+        tokio::time::sleep(shutdown.grace_period()).await;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::ready;
+
+    use super::{NextServerEvent, next_server_event};
+
+    #[tokio::test]
+    async fn shutdown_wins_when_accepts_are_also_ready() {
+        let event = next_server_event(ready(()), ready("visitor"), ready("tunnel")).await;
+
+        assert!(matches!(event, NextServerEvent::Shutdown));
     }
 }

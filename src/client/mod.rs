@@ -4,6 +4,7 @@ mod tunnel_stream;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use quinn::{Connection, Endpoint};
 use self::tunnel_stream::TunnelConnectionStreamHandler;
 use crate::{
     ClientServiceSettings, ClientTlsMode, HANDSHAKE_TIMEOUT, quic::with_handshake_timeout,
+    shutdown::GracefulShutdown,
 };
 
 type HostnameTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
@@ -177,9 +179,50 @@ impl Client {
                         let _ = tunnel_stream_handler.handle(send, recv).await;
                     });
                 }
-                Err(quinn::ConnectionError::ApplicationClosed { .. })
-                | Err(quinn::ConnectionError::LocallyClosed) => return Ok(()),
+                Err(quinn::ConnectionError::LocallyClosed) => return Ok(()),
                 Err(error) => return Err(error),
+            }
+        }
+    }
+
+    pub async fn run_until_shutdown<Shutdown>(
+        self,
+        shutdown_signal: Shutdown,
+    ) -> Result<(), quinn::ConnectionError>
+    where
+        Shutdown: Future<Output = ()> + Send + 'static,
+    {
+        let shutdown = GracefulShutdown::new(std::time::Duration::from_millis(100));
+        let shutdown_trigger = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown_signal.await;
+            shutdown_trigger.begin();
+        });
+        self.run_with_shutdown(&shutdown).await
+    }
+
+    pub(crate) async fn run_with_shutdown(
+        self,
+        shutdown: &GracefulShutdown,
+    ) -> Result<(), quinn::ConnectionError> {
+        loop {
+            tokio::select! {
+                _ = shutdown.wait() => {
+                    crate::runtime_log::client_graceful_shutdown_closing_tunnel_connection();
+                    self.connection.close(0_u32.into(), b"graceful shutdown");
+                    tokio::time::sleep(shutdown.grace_period()).await;
+                    return Ok(());
+                }
+                accept_result = self.connection.accept_bi() => match accept_result {
+                    Ok((send, recv)) => {
+                        let tunnel_stream_handler = self.tunnel_stream_handler.clone();
+                        tokio::spawn(async move {
+                            let _ = tunnel_stream_handler.handle(send, recv).await;
+                        });
+                    }
+                    Err(quinn::ConnectionError::LocallyClosed) => return Ok(()),
+                    Err(error) => return Err(error),
+                }
             }
         }
     }

@@ -760,7 +760,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_hostnames() {
 #[tokio::test]
 async fn server_bind_rejects_duplicate_configured_tunnel_client_identities() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
-    let shared_client = generate_client_identity().unwrap();
+    let shared_client = generate_client_identity().expect("shared client identity should generate");
 
     let error = match Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
@@ -836,7 +836,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
     .await;
 
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
-    let shared_client = generate_client_identity().unwrap();
+    let shared_client = generate_client_identity().expect("shared client identity should generate");
     let server = Server::bind(ServerConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
@@ -850,9 +850,13 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         ),
     })
     .await
-    .unwrap();
-    let public_addr = server.public_addr().unwrap();
-    let tunnel_addr = server.tunnel_addr().unwrap();
+    .expect("server should bind");
+    let public_addr = server
+        .public_addr()
+        .expect("public listener should have an address");
+    let tunnel_addr = server
+        .tunnel_addr()
+        .expect("tunnel listener should have an address");
     let server_task = tokio::spawn(server.run());
 
     let client_one = Client::connect(ClientConfig {
@@ -863,14 +867,14 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
     })
     .await
-    .unwrap();
+    .expect("client should connect");
     let client_one_task = tokio::spawn(client_one.run());
 
     sleep(Duration::from_millis(50)).await;
 
     let first_response = request_tls_response(public_addr, &backend_cert, "app.example.test")
         .await
-        .unwrap();
+        .expect("public TLS request should succeed");
     assert_eq!(first_response, *b"one!");
 
     let client_two = Client::connect(ClientConfig {
@@ -926,6 +930,69 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
         ),
     })
     .await
+    .expect("server should bind");
+    let public_addr = server
+        .public_addr()
+        .expect("public listener should have an address");
+    let tunnel_addr = server
+        .tunnel_addr()
+        .expect("tunnel listener should have an address");
+    let server_task = tokio::spawn(server.run());
+
+    let client = Client::connect(ClientConfig {
+        local_bind_addr: localhost(0),
+        server_addr: tunnel_addr,
+        server_name: "tunnel.example.test".to_owned(),
+        backend_address: backend.0.to_string(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+    })
+    .await
+    .expect("client should connect");
+    let client_task = tokio::spawn(client.run());
+
+    let response = wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
+        .await
+        .expect("public TLS request should succeed");
+    assert_eq!(response, *b"pong");
+
+    client_task.abort();
+    let _ = client_task.await;
+
+    wait_for_tls_failure(public_addr, &backend_cert, "app.example.test")
+        .await
+        .unwrap();
+
+    backend.1.abort();
+    server_task.abort();
+    let _ = backend.1.await;
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let backend = spawn_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"pong",
+    )
+    .await;
+    let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let shared_client = generate_client_identity().unwrap();
+
+    let server = Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        public_tls_config: None,
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&shared_client],
+        ),
+    })
+    .await
     .unwrap();
     let public_addr = server.public_addr().unwrap();
     let tunnel_addr = server.tunnel_addr().unwrap();
@@ -940,24 +1007,132 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
     })
     .await
     .unwrap();
-    let client_task = tokio::spawn(client.run());
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let client_task = tokio::spawn({
+        async move {
+            client
+                .run_until_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        }
+    });
 
     let response = wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
         .await
         .unwrap();
     assert_eq!(response, *b"pong");
 
-    client_task.abort();
-    let _ = client_task.await;
+    shutdown_tx
+        .send(())
+        .expect("client shutdown signal should be delivered");
+    timeout(Duration::from_secs(1), client_task)
+        .await
+        .expect("client should finish graceful shutdown")
+        .expect("client task should join cleanly")
+        .expect("client shutdown path should return success");
 
     wait_for_tls_failure(public_addr, &backend_cert, "app.example.test")
         .await
-        .unwrap();
+        .expect("public TLS should fail once the client exits gracefully");
 
     backend.1.abort();
     server_task.abort();
     let _ = backend.1.await;
     let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_close() {
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let backend = spawn_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"pong",
+    )
+    .await;
+    let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let shared_client = generate_client_identity().expect("shared client identity should generate");
+
+    let server = Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        public_tls_config: None,
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&shared_client],
+        ),
+    })
+    .await
+    .expect("server should bind");
+    let public_addr = server
+        .public_addr()
+        .expect("public listener should have an address");
+    let tunnel_addr = server
+        .tunnel_addr()
+        .expect("tunnel listener should have an address");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let server_task = tokio::spawn({
+        async move {
+            server
+                .run_until_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        }
+    });
+
+    let client_config = ClientConfig {
+        local_bind_addr: localhost(0),
+        server_addr: tunnel_addr,
+        server_name: "tunnel.example.test".to_owned(),
+        backend_address: backend.0.to_string(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+    };
+    let client = Client::connect(client_config.clone())
+        .await
+        .expect("client should connect");
+    let client_task = tokio::spawn(client.run());
+
+    let response = wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
+        .await
+        .expect("public TLS request should succeed");
+    assert_eq!(response, *b"pong");
+
+    shutdown_tx
+        .send(())
+        .expect("server shutdown signal should be delivered");
+    timeout(Duration::from_secs(1), server_task)
+        .await
+        .expect("server should finish graceful shutdown")
+        .expect("server task should join cleanly")
+        .expect("server shutdown path should return success");
+
+    let client_error = timeout(Duration::from_secs(1), client_task)
+        .await
+        .expect("client should observe the remote graceful close")
+        .expect("client task should join cleanly")
+        .expect_err("remote graceful close should still surface as a disconnect");
+    assert!(matches!(
+        client_error,
+        quinn::ConnectionError::ApplicationClosed(_) | quinn::ConnectionError::ConnectionClosed(_)
+    ));
+
+    wait_for_tcp_connect_failure(public_addr)
+        .await
+        .expect("server should stop accepting new public TCP connections");
+    let reconnect_result =
+        timeout(Duration::from_millis(250), Client::connect(client_config)).await;
+    assert!(
+        !matches!(reconnect_result, Ok(Ok(_))),
+        "server shutdown should not admit a new tunnel connection"
+    );
+
+    backend.1.abort();
+    let _ = backend.1.await;
 }
 
 #[tokio::test]
@@ -2207,6 +2382,19 @@ async fn wait_for_tls_failure(
                 .await
                 .is_err()
             {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+async fn wait_for_tcp_connect_failure(public_addr: SocketAddr) -> io::Result<()> {
+    timeout(Duration::from_secs(1), async move {
+        loop {
+            if TcpStream::connect(public_addr).await.is_err() {
                 return Ok(());
             }
             sleep(Duration::from_millis(10)).await;

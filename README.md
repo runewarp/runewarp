@@ -42,6 +42,23 @@ docker pull runewarp/runewarp
 2. Read [`docs/usage.md`](docs/usage.md) for the operator workflow.
 3. Read [`docs/configuration.md`](docs/configuration.md) for config keys and examples.
 
+## Architecture
+
+```mermaid
+flowchart TD
+    V[Visitor]
+    S["Server<br/>reads SNI and selects Tunnel"]
+    C["Client instance"]
+    B["Local backend<br/>terminates TLS"]
+
+    V -->|"TLS for a Public hostname"| S
+    C -->|"dials QUIC/TLS Tunnel connection"| S
+    S -->|"forward encrypted stream"| C
+    C -->|"select Service and proxy"| B
+```
+
+Visitors connect to the public **Server** over TLS, and the **Client instance** maintains the long-lived QUIC/TLS **Tunnel connection** back to it. After SNI-based **Tunnel** selection, the **Server** forwards the encrypted stream to the **Client instance**, which proxies it to the **Local backend**; a **Service** can also opt into **Terminate mode**. See [`docs/architecture.md`](docs/architecture.md) for the detailed transport view.
+
 ## Comparison
 
 How Runewarp compares to other tunnel tools:

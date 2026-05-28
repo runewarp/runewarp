@@ -44,23 +44,35 @@ docker pull runewarp/runewarp
 
 ## Comparison
 
-Runewarp is inspired by [rathole](https://github.com/rathole-org/rathole), but it makes a narrower set of trade-offs around trust boundaries and public ingress. The notes below compare current shipped behavior, not roadmap items.
-
-### vs [rathole](https://github.com/rathole-org/rathole)
-
-[rathole](https://github.com/rathole-org/rathole) is a general reverse proxy for NAT traversal with service-wise tokens and broader protocol and transport options today, including UDP forwarding and multiple TCP-based transport choices. Runewarp is narrower: one long-lived QUIC/TLS **Tunnel connection** per **Client instance**, mTLS plus pinned **Client identity** on that tunnel, **Server-authoritative routing** by explicit **Public hostnames**, and no separate control channel. If you want a compact, flexible port-forwarding tool, rathole is broader today; if you specifically want SNI-routed TLS ingress with the public **Server** kept out of customer plaintext by default, Runewarp is the stricter fit.
-
-### vs [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/)
-
-[Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/) uses the open-source `cloudflared` connector to keep multiple outbound connections into Cloudflare's managed edge, where CDN, WAF, Access, DDoS protection, and other edge features can be applied. Runewarp keeps the public edge self-hosted and intentionally narrower: the **Server** routes TLS by SNI and never terminates customer TLS, while optional termination can happen only on the **Client** near the **Local backend**. Cloudflare is stronger when you want a managed edge with platform features already built in; Runewarp is for operators who want to keep the ingress boundary and routing authority on infrastructure they run themselves.
-
-### vs [Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel)
-
-[Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel) also keeps its relay out of plaintext: traffic reaches a Funnel relay and then a TCP proxy into your device, while TLS terminates on the Tailscale node that serves the local app. The main difference is deployment model. Funnel is part of a tailnet product, depends on the Tailscale daemon and `*.ts.net` names, and is easiest when you already live inside that ecosystem. Runewarp instead gives you a self-hosted public **Server**, explicit Server-side hostname ownership, and the option to keep customer TLS termination on the **Local backend** by default. Funnel is simpler inside a Tailscale setup; Runewarp is better when you want an operator-run public ingress layer without adopting a tailnet model.
+How Runewarp compares to other tunnel tools:
 
 ### vs [ngrok](https://ngrok.com/)
 
-[ngrok](https://ngrok.com/) is a managed cloud gateway with strong developer ergonomics, traffic policy, and broader edge features. Its HTTP-focused product is designed around the ngrok edge handling routing, policy, and authentication, while secure tunnels connect back to local services. Runewarp is much narrower: self-hosted public ingress, TLS-only public traffic, SNI-based routing, and no HTTP-layer inspection on the **Server**. ngrok is stronger when you want polished managed workflows or edge-side traffic handling; Runewarp is for operators who want a simpler, self-hosted TLS passthrough boundary, with **Terminate mode** available on the **Client** when a plaintext backend is needed.
+A managed cloud gateway focused on developer workflows, edge routing, and traffic policy.
+
+- **Runewarp keeps the Server out of HTTP handling:** no edge traffic policy, header inspection, or request transformation on the public **Server**.
+- **ngrok fits edge-side workflows:** managed policy, routing, and developer ergonomics are part of the platform.
+
+### vs [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/)
+
+A managed connector into Cloudflare's edge, with routing and platform features built around that edge.
+
+- **Runewarp keeps ingress fully operator-run:** open source on both the **Client** and **Server**, self-hosted public ingress, and explicit Server-side routing by **Public hostname**.
+- **Cloudflare fits managed-edge workflows:** CDN, WAF, Access, DDoS protection, and other platform features come with the service.
+
+### vs [Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel)
+
+A tailnet-based way to publish a local service publicly without exposing the device IP.
+
+- **Runewarp fits a public ingress model:** explicit Server-side hostname ownership and no dependency on a tailnet, the Tailscale daemon, or `*.ts.net` names.
+- **Funnel fits Tailscale users:** the relay stays out of plaintext and the workflow is convenient when you already use that ecosystem.
+
+### vs [rathole](https://github.com/rathole-org/rathole)
+
+A simple, open-source client/server tunneling tool whose config model and simple client/server architecture helped inspire Runewarp.
+
+- **Runewarp keeps routing explicit:** one QUIC/TLS **Tunnel connection** per **Client instance**, **Server-authoritative routing** by **Public hostname**, and no separate control channel.
+- **rathole fits more forwarding cases today:** service tokens, UDP forwarding, and more transport options.
 
 ## Documentation
 

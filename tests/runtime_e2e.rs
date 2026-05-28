@@ -7,8 +7,8 @@ use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
     ClientPublicCertConfig, ClientRuntimeArgs, ClientServiceSettings, ClientSettings,
-    ClientSettingsResolutionDefaults, ClientTlsMode, GeneratedClientIdentity, LogLevel,
-    PreparedClient, PreparedServer, SelectedClientConfig, Server, ServerConfig,
+    ClientSettingsResolutionDefaults, ClientTlsMode, GeneratedClientIdentity, GracefulShutdown,
+    LogLevel, PreparedClient, PreparedServer, SelectedClientConfig, Server, ServerConfig,
     ServerTunnelSettings, generate_client_identity, initialize_manual_server_certificate,
     load_client_settings, load_server_settings, make_client_quic_config,
     make_client_quic_config_with_client_auth, make_server_quic_config,
@@ -958,6 +958,151 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
     server_task.abort();
     let _ = backend.1.await;
     let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let backend = spawn_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"pong",
+    )
+    .await;
+    let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let shared_client = generate_client_identity().unwrap();
+
+    let server = Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        public_tls_config: None,
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&shared_client],
+        ),
+    })
+    .await
+    .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client = Client::connect(ClientConfig {
+        local_bind_addr: localhost(0),
+        server_addr: tunnel_addr,
+        server_name: "tunnel.example.test".to_owned(),
+        backend_address: backend.0.to_string(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+    })
+    .await
+    .unwrap();
+    let shutdown = GracefulShutdown::new(Duration::from_millis(25));
+    let client_task = tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move { client.run_with_shutdown(&shutdown).await }
+    });
+
+    let response = wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(response, *b"pong");
+
+    shutdown.begin();
+    timeout(Duration::from_secs(1), client_task)
+        .await
+        .expect("client should finish graceful shutdown")
+        .unwrap()
+        .unwrap();
+
+    wait_for_tls_failure(public_addr, &backend_cert, "app.example.test")
+        .await
+        .unwrap();
+
+    backend.1.abort();
+    server_task.abort();
+    let _ = backend.1.await;
+    let _ = server_task.await;
+}
+
+#[tokio::test]
+async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_close() {
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let backend = spawn_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"pong",
+    )
+    .await;
+    let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let shared_client = generate_client_identity().unwrap();
+
+    let server = Server::bind(ServerConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        server_hostname: "tunnel.example.test".to_owned(),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        public_tls_config: None,
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&shared_client],
+        ),
+    })
+    .await
+    .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let shutdown = GracefulShutdown::new(Duration::from_millis(25));
+    let server_task = tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move { server.run_with_shutdown(&shutdown).await }
+    });
+
+    let client_config = ClientConfig {
+        local_bind_addr: localhost(0),
+        server_addr: tunnel_addr,
+        server_name: "tunnel.example.test".to_owned(),
+        backend_address: backend.0.to_string(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+    };
+    let client = Client::connect(client_config.clone()).await.unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    let response = wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(response, *b"pong");
+
+    shutdown.begin();
+    timeout(Duration::from_secs(1), server_task)
+        .await
+        .expect("server should finish graceful shutdown")
+        .unwrap()
+        .unwrap();
+
+    let client_error = timeout(Duration::from_secs(1), client_task)
+        .await
+        .expect("client should observe the remote graceful close")
+        .unwrap()
+        .expect_err("remote graceful close should still surface as a disconnect");
+    assert!(matches!(
+        client_error,
+        quinn::ConnectionError::ApplicationClosed(_) | quinn::ConnectionError::ConnectionClosed(_)
+    ));
+
+    wait_for_tcp_connect_failure(public_addr).await.unwrap();
+    let reconnect_result =
+        timeout(Duration::from_millis(250), Client::connect(client_config)).await;
+    assert!(
+        !matches!(reconnect_result, Ok(Ok(_))),
+        "server shutdown should not admit a new tunnel connection"
+    );
+
+    backend.1.abort();
+    let _ = backend.1.await;
 }
 
 #[tokio::test]
@@ -2207,6 +2352,19 @@ async fn wait_for_tls_failure(
                 .await
                 .is_err()
             {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+async fn wait_for_tcp_connect_failure(public_addr: SocketAddr) -> io::Result<()> {
+    timeout(Duration::from_secs(1), async move {
+        loop {
+            if TcpStream::connect(public_addr).await.is_err() {
                 return Ok(());
             }
             sleep(Duration::from_millis(10)).await;

@@ -13,6 +13,7 @@ mod server;
 mod server_address;
 mod server_cert;
 mod settings;
+mod shutdown;
 mod startup;
 mod tls_material;
 mod trust;
@@ -65,4 +66,5 @@ pub use settings::{
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
     resolve_server_settings_from_cli, resolve_terminating_hostnames_from_config,
 };
+pub use shutdown::GracefulShutdown;
 pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};

@@ -24,7 +24,7 @@ Runewarp is a private tunneling system. In the default **passthrough** mode it i
 
 ## Diagnostics visibility
 
-Runtime diagnostics follow the same visibility boundary: stderr logs may include the normalized **Public hostname**, routing outcome, connection timing, transport errors, Client tunnel connection **Server address** plus resolved socket address on connection-attempt lines, rejected or authenticated **Client identity** values on tunnel-auth warnings, Client-side `backend-address` values in routing diagnostics, `server acme challenge handled` lines keyed by `server-hostname` for `acme-tls/1` traffic addressed to the **Server hostname**, and distinct Client ACME challenge-handling lines for `acme-tls/1` traffic on terminating **Public hostnames**, but never the buffered ClientHello bytes, HTTP headers, bodies, or decrypted application plaintext.
+Runtime diagnostics follow the same visibility boundary: stderr logs may include the normalized **Public hostname**, routing outcome, connection timing, transport errors, Client tunnel connection **Server address** plus resolved socket address on connection-attempt lines, rejected or authenticated **Client identity** values on tunnel-auth warnings, Client-side `backend-address` values in routing diagnostics, explicit graceful-shutdown lifecycle lines for entering shutdown and closing active **Tunnel connections**, `server acme challenge handled` lines keyed by `server-hostname` for `acme-tls/1` traffic addressed to the **Server hostname**, and distinct Client ACME challenge-handling lines for `acme-tls/1` traffic on terminating **Public hostnames**, but never the buffered ClientHello bytes, HTTP headers, bodies, or decrypted application plaintext.
 
 ## Public traffic invariants
 

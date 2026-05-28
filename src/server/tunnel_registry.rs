@@ -141,6 +141,16 @@ impl TunnelRegistry {
             .await;
     }
 
+    pub(crate) async fn close_all(&self, reason: &'static [u8]) -> usize {
+        let mut closed = 0;
+        for slot in self.tunnel_slots.iter() {
+            if slot.close_active_connection(reason).await {
+                closed += 1;
+            }
+        }
+        closed
+    }
+
     fn tunnel_registration_context(
         &self,
         connection: &Connection,

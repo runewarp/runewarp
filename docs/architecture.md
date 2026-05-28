@@ -108,6 +108,8 @@ The Client validates the Server certificate either through system trust or throu
 - a newer authenticated connection replaces the older one only inside that same **Tunnel**
 - multiple Client instances across different Tunnels are supported
 - same-Tunnel load-balanced pools are not part of the current runtime shape
+- orderly local shutdown is runtime-owned: the **Server** stops accepting new Visitor and **Tunnel** traffic before closing active **Tunnel connections**, and the **Client** stops reconnect work before closing its active **Tunnel connection**
+- graceful shutdown waits only a short fixed grace period after sending the QUIC close; it does not drain Visitor traffic or proxied streams
 
 ## Product boundaries
 

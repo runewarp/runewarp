@@ -23,10 +23,10 @@ use crate::tls_material::{
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConnectError, ClientIdentity,
-    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, QuicConfigError,
-    Server, ServerCertificateSettings, ServerConfig, ServerSettings, client::validate_services,
-    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
-    make_server_quic_config_with_client_auth_resolver,
+    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, GracefulShutdown,
+    QuicConfigError, Server, ServerCertificateSettings, ServerConfig, ServerSettings,
+    client::validate_services, make_client_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
 };
 
 pub struct PreparedServer {
@@ -141,6 +141,25 @@ impl PreparedServer {
             server.run().await
         }
     }
+
+    pub async fn run_with_shutdown(self, shutdown: &GracefulShutdown) -> io::Result<()> {
+        let Self {
+            server,
+            acme_runtime,
+            ..
+        } = self;
+        if let Some(acme_runtime) = acme_runtime {
+            tokio::select! {
+                server_result = server.run_with_shutdown(shutdown) => server_result,
+                acme_result = run_acme_state(acme_runtime.state, acme_runtime.lifecycle) => match acme_result {
+                    Ok(never) => match never {},
+                    Err(error) => Err(error),
+                },
+            }
+        } else {
+            server.run_with_shutdown(shutdown).await
+        }
+    }
 }
 
 pub struct PreparedClient {
@@ -241,6 +260,23 @@ impl PreparedClient {
             });
         }
         client.run().await
+    }
+
+    pub async fn run_with_shutdown(
+        self,
+        shutdown: &GracefulShutdown,
+    ) -> Result<(), quinn::ConnectionError> {
+        let Self {
+            client,
+            acme_runtimes,
+            ..
+        } = self;
+        for acme_runtime in acme_runtimes {
+            tokio::spawn(async move {
+                let _ = run_acme_state(acme_runtime.state, acme_runtime.lifecycle).await;
+            });
+        }
+        client.run_with_shutdown(shutdown).await
     }
 }
 

@@ -12,13 +12,14 @@ use clap::{CommandFactory, Parser};
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientRuntimeArgs,
-    ClientSettingsResolutionError, PreparedClient, PreparedServer, ServerSettingsResolutionError,
-    SettingsError, XdgPathError, default_client_identity_material_dir,
-    default_client_public_cert_material_dir, default_config_path, default_server_cert_material_dir,
-    generate_client_identity, initialize_manual_client_public_cert,
-    initialize_manual_server_certificate, inspect_manual_server_certificate, read_client_identity,
-    renew_client_identity_certificate, renew_manual_client_public_cert,
-    renew_manual_server_certificate, resolve_client_identity_material_dir_from_config,
+    ClientSettingsResolutionError, GracefulShutdown, PreparedClient, PreparedServer,
+    ServerSettingsResolutionError, SettingsError, XdgPathError,
+    default_client_identity_material_dir, default_client_public_cert_material_dir,
+    default_config_path, default_server_cert_material_dir, generate_client_identity,
+    initialize_manual_client_public_cert, initialize_manual_server_certificate,
+    inspect_manual_server_certificate, read_client_identity, renew_client_identity_certificate,
+    renew_manual_client_public_cert, renew_manual_server_certificate,
+    resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config, resolve_client_settings_from_cli,
     resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
     resolve_server_settings_from_cli, resolve_terminating_hostnames_from_config,
@@ -122,13 +123,18 @@ async fn run(args: impl Iterator<Item = String>) -> Result<(), RunError> {
 async fn run_client_command(
     settings: &runewarp::ClientSettings,
     local_bind_addr: SocketAddr,
+    shutdown: &GracefulShutdown,
 ) -> Result<(), Box<dyn Error>> {
     let mut connected_once = false;
     loop {
+        if shutdown.is_started() {
+            return Ok(());
+        }
         ensure_client_identity_fresh(&settings.identity_directory)?;
         let phase = client_tunnel_phase(connected_once);
-        let (client, connected_dial_target) = retry_with_immediate_retry(
+        let Some((client, connected_dial_target)) = retry_with_immediate_retry(
             settings.reconnect_interval,
+            shutdown,
             retry_disposition_for_client_connect_error,
             |attempt_kind| async move {
                 let log_attempt_kind = client_tunnel_attempt_kind(attempt_kind);
@@ -207,17 +213,23 @@ async fn run_client_command(
             |delay| tokio::time::sleep(delay),
         )
         .await
-        .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
+        .map_err(|error| -> Box<dyn Error> { Box::new(error) })?
+        else {
+            return Ok(());
+        };
         connected_once = true;
 
-        if let Err(error) = client.run().await {
+        if let Err(error) = client.run_with_shutdown(shutdown).await {
             if is_unauthorized_client_connection_error(&error) {
                 runewarp::runtime_log::client_tunnel_unauthorized(
                     client_tunnel_unauthorized_attempt_kind(connected_once),
                     &connected_dial_target.configured_server_addr,
                     &error.to_string(),
                 );
-                tokio::time::sleep(settings.reconnect_interval).await;
+                tokio::select! {
+                    _ = shutdown.wait() => return Ok(()),
+                    _ = tokio::time::sleep(settings.reconnect_interval) => {}
+                }
             } else {
                 runewarp::runtime_log::client_tunnel_disconnected(
                     &connected_dial_target.configured_server_addr,
@@ -266,7 +278,19 @@ async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Erro
     };
     runewarp::runtime_log::server_public_listener_ready(server.public_addr()?);
     runewarp::runtime_log::server_tunnel_listener_ready(server.tunnel_addr()?);
-    if let Err(error) = server.run().await {
+    let shutdown = GracefulShutdown::new(Duration::from_millis(100));
+    let runtime = server.run_with_shutdown(&shutdown);
+    tokio::pin!(runtime);
+    let server_result = tokio::select! {
+        result = &mut runtime => result,
+        signal_result = wait_for_orderly_shutdown_signal() => {
+            signal_result?;
+            runewarp::runtime_log::server_graceful_shutdown_started();
+            shutdown.begin();
+            runtime.await
+        }
+    };
+    if let Err(error) = server_result {
         return Err(logged_runtime_failure(Box::new(error)));
     }
     Ok(())
@@ -376,9 +400,19 @@ async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box
     let settings = resolve_client_settings_from_cli(config.clone(), runtime)
         .map_err(wrap_client_settings_resolution_error)?;
     runewarp::runtime_log::install(settings.log_level)?;
-    run_client_command(&settings, wildcard(0))
-        .await
-        .map_err(logged_runtime_failure)
+    let shutdown = GracefulShutdown::new(Duration::from_millis(100));
+    let runtime = run_client_command(&settings, wildcard(0), &shutdown);
+    tokio::pin!(runtime);
+    let client_result = tokio::select! {
+        result = &mut runtime => result,
+        signal_result = wait_for_orderly_shutdown_signal() => {
+            signal_result?;
+            runewarp::runtime_log::client_graceful_shutdown_started();
+            shutdown.begin();
+            runtime.await
+        }
+    };
+    client_result.map_err(logged_runtime_failure)
 }
 
 fn client_identity_forbidden_runtime_flags(
@@ -698,12 +732,38 @@ fn is_unauthorized_client_connection_error(error: &quinn::ConnectionError) -> bo
     error.to_string().contains("ApplicationVerificationFailure")
 }
 
+async fn wait_for_orderly_shutdown_signal() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate =
+            signal(SignalKind::terminate()).map_err(|error| io::Error::other(error.to_string()))?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.map_err(|error| io::Error::other(error.to_string()))?;
+            }
+            _ = terminate.recv() => {}
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(())
+    }
+}
+
 async fn retry_with_immediate_retry<T, E, Attempt, AttemptFuture, Sleep, SleepFuture>(
     retry_interval: Duration,
+    shutdown: &GracefulShutdown,
     retry_disposition: impl Fn(&E) -> RetryDisposition,
     mut attempt: Attempt,
     mut sleep: Sleep,
-) -> Result<T, E>
+) -> Result<Option<T>, E>
 where
     Attempt: FnMut(RetryAttemptKind) -> AttemptFuture,
     AttemptFuture: Future<Output = Result<T, E>>,
@@ -713,11 +773,21 @@ where
     let mut used_immediate_retry = false;
     let mut attempt_kind = RetryAttemptKind::Initial;
     loop {
-        match attempt(attempt_kind).await {
-            Ok(result) => return Ok(result),
+        if shutdown.is_started() {
+            return Ok(None);
+        }
+        let attempt_result = tokio::select! {
+            _ = shutdown.wait() => return Ok(None),
+            result = attempt(attempt_kind) => result,
+        };
+        match attempt_result {
+            Ok(result) => return Ok(Some(result)),
             Err(error) => match retry_disposition(&error) {
                 RetryDisposition::Immediate if used_immediate_retry => {
-                    sleep(retry_interval).await;
+                    tokio::select! {
+                        _ = shutdown.wait() => return Ok(None),
+                        _ = sleep(retry_interval) => {}
+                    }
                     attempt_kind = RetryAttemptKind::IntervalRetry;
                 }
                 RetryDisposition::Immediate => {
@@ -726,7 +796,10 @@ where
                 }
                 RetryDisposition::Interval => {
                     used_immediate_retry = true;
-                    sleep(retry_interval).await;
+                    tokio::select! {
+                        _ = shutdown.wait() => return Ok(None),
+                        _ = sleep(retry_interval) => {}
+                    }
                     attempt_kind = RetryAttemptKind::IntervalRetry;
                 }
                 RetryDisposition::Stop => return Err(error),
@@ -1157,7 +1230,7 @@ mod tests {
 
     use runewarp::{
         CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_IDENTITY_FILENAME,
-        CLIENT_KEY_FILENAME, ClientIdentity,
+        CLIENT_KEY_FILENAME, ClientIdentity, GracefulShutdown,
     };
 
     use super::{
@@ -1178,9 +1251,11 @@ mod tests {
         let retry_attempts = Arc::new(Mutex::new(Vec::new()));
         let sleeps = Arc::new(Mutex::new(Vec::new()));
         let retry_interval = Duration::from_secs(5);
+        let shutdown = GracefulShutdown::new(Duration::from_millis(25));
 
-        let result = retry_with_immediate_retry(
+        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
             retry_interval,
+            &shutdown,
             |error: &TestError| match error {
                 TestError::ImmediateRetry => RetryDisposition::Immediate,
                 TestError::IntervalRetry => RetryDisposition::Interval,
@@ -1216,7 +1291,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Ok(Some(())));
         assert_eq!(
             *retry_attempts.lock().unwrap(),
             vec![
@@ -1231,9 +1306,11 @@ mod tests {
     #[tokio::test]
     async fn permanent_errors_do_not_retry() {
         let sleeps = Arc::new(Mutex::new(Vec::new()));
+        let shutdown = GracefulShutdown::new(Duration::from_millis(25));
 
-        let result = retry_with_immediate_retry(
+        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
             Duration::from_secs(5),
+            &shutdown,
             |error: &TestError| match error {
                 TestError::ImmediateRetry => RetryDisposition::Immediate,
                 TestError::IntervalRetry => RetryDisposition::Interval,
@@ -1261,9 +1338,11 @@ mod tests {
         let retry_attempts = Arc::new(Mutex::new(Vec::new()));
         let sleeps = Arc::new(Mutex::new(Vec::new()));
         let retry_interval = Duration::from_secs(5);
+        let shutdown = GracefulShutdown::new(Duration::from_millis(25));
 
-        let result = retry_with_immediate_retry(
+        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
             retry_interval,
+            &shutdown,
             |error: &TestError| match error {
                 TestError::ImmediateRetry => RetryDisposition::Immediate,
                 TestError::IntervalRetry => RetryDisposition::Interval,
@@ -1295,12 +1374,89 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result, Ok(()));
+        assert_eq!(result, Ok(Some(())));
         assert_eq!(
             *retry_attempts.lock().unwrap(),
             vec![RetryAttemptKind::Initial, RetryAttemptKind::IntervalRetry]
         );
         assert_eq!(*sleeps.lock().unwrap(), vec![retry_interval]);
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_before_an_immediate_retry_attempt() {
+        let shutdown = GracefulShutdown::new(Duration::from_millis(25));
+        let retry_attempts = Arc::new(Mutex::new(Vec::new()));
+
+        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
+            Duration::from_secs(5),
+            &shutdown,
+            |_: &TestError| RetryDisposition::Immediate,
+            {
+                let retry_attempts = retry_attempts.clone();
+                let shutdown = shutdown.clone();
+                move |attempt_kind| {
+                    let retry_attempts = retry_attempts.clone();
+                    let shutdown = shutdown.clone();
+                    async move {
+                        retry_attempts.lock().unwrap().push(attempt_kind);
+                        shutdown.begin();
+                        Err(TestError::ImmediateRetry)
+                    }
+                }
+            },
+            |_delay| async {},
+        )
+        .await;
+
+        assert_eq!(result, Ok(None));
+        assert_eq!(
+            *retry_attempts.lock().unwrap(),
+            vec![RetryAttemptKind::Initial]
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_while_waiting_for_an_interval_retry() {
+        let shutdown = GracefulShutdown::new(Duration::from_millis(25));
+        let retry_attempts = Arc::new(Mutex::new(Vec::new()));
+        let sleeps = Arc::new(Mutex::new(Vec::new()));
+
+        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
+            Duration::from_secs(5),
+            &shutdown,
+            |_: &TestError| RetryDisposition::Interval,
+            {
+                let retry_attempts = retry_attempts.clone();
+                move |attempt_kind| {
+                    let retry_attempts = retry_attempts.clone();
+                    async move {
+                        retry_attempts.lock().unwrap().push(attempt_kind);
+                        Err(TestError::IntervalRetry)
+                    }
+                }
+            },
+            {
+                let sleeps = sleeps.clone();
+                let shutdown = shutdown.clone();
+                move |delay| {
+                    let sleeps = sleeps.clone();
+                    let shutdown = shutdown.clone();
+                    async move {
+                        sleeps.lock().unwrap().push(delay);
+                        shutdown.begin();
+                        tokio::task::yield_now().await;
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result, Ok(None));
+        assert_eq!(
+            *retry_attempts.lock().unwrap(),
+            vec![RetryAttemptKind::Initial]
+        );
+        assert_eq!(*sleeps.lock().unwrap(), vec![Duration::from_secs(5)]);
     }
 
     #[test]

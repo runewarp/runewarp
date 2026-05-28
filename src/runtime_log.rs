@@ -389,6 +389,34 @@ pub fn server_tunnel_listener_ready(bind_address: SocketAddr) {
     );
 }
 
+pub fn server_graceful_shutdown_started() {
+    emit(EventLevel::Info, "server graceful shutdown started");
+}
+
+pub fn server_graceful_shutdown_closing_tunnel_connections(active_connections: usize) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "server graceful shutdown closing tunnel connections",
+            [(
+                "active-tunnel-connections",
+                Cow::Owned(active_connections.to_string()),
+            )],
+        ),
+    );
+}
+
+pub fn client_graceful_shutdown_started() {
+    emit(EventLevel::Info, "client graceful shutdown started");
+}
+
+pub fn client_graceful_shutdown_closing_tunnel_connection() {
+    emit(
+        EventLevel::Info,
+        "client graceful shutdown closing tunnel connection",
+    );
+}
+
 pub fn server_tunnel_connection_unauthorized(client_identity: &ClientIdentity) {
     emit(
         EventLevel::Warn,
@@ -1080,11 +1108,13 @@ mod tests {
 
     use super::{
         AcmeEvent, AcmeRole, ClientRouteOutcome, ClientTunnelAttemptKind, ClientTunnelPhase,
-        EventLevel, InstallOutcome, ServerRouteOutcome, acme, build_subscriber, client_ready,
-        client_route, client_trust_store_warning, client_tunnel_connect_failed,
+        EventLevel, InstallOutcome, ServerRouteOutcome, acme, build_subscriber,
+        client_graceful_shutdown_closing_tunnel_connection, client_graceful_shutdown_started,
+        client_ready, client_route, client_trust_store_warning, client_tunnel_connect_failed,
         client_tunnel_connected, client_tunnel_connecting, client_tunnel_disconnected,
         client_tunnel_resolution_failed, client_tunnel_unauthorized, emit,
         emit_server_tunnel_connection_dropped, install, installed_level,
+        server_graceful_shutdown_closing_tunnel_connections, server_graceful_shutdown_started,
         server_public_listener_ready, server_route, server_route_rejected_client_hello,
         server_tunnel_connection_accepted, server_tunnel_connection_failed,
         server_tunnel_connection_replaced, server_tunnel_connection_terminated,
@@ -1381,6 +1411,23 @@ mod tests {
 
         assert!(output.contains("INFO server public listener ready: bind-address=127.0.0.1:443"));
         assert!(output.contains("INFO server tunnel listener ready: bind-address=127.0.0.1:443"));
+    }
+
+    #[test]
+    fn graceful_shutdown_logs_render_explicit_runtime_lines() {
+        let output = capture(LogLevel::Info, || {
+            server_graceful_shutdown_started();
+            server_graceful_shutdown_closing_tunnel_connections(2);
+            client_graceful_shutdown_started();
+            client_graceful_shutdown_closing_tunnel_connection();
+        });
+
+        assert!(output.contains("INFO server graceful shutdown started"));
+        assert!(output.contains(
+            "INFO server graceful shutdown closing tunnel connections: active-tunnel-connections=2"
+        ));
+        assert!(output.contains("INFO client graceful shutdown started"));
+        assert!(output.contains("INFO client graceful shutdown closing tunnel connection"));
     }
 
     #[test]

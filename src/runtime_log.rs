@@ -414,7 +414,10 @@ pub fn server_graceful_shutdown_closing_tunnel_connections(active_connections: u
 }
 
 pub fn client_graceful_shutdown_started() {
-    emit(EventLevel::Info, "client instance graceful shutdown started");
+    emit(
+        EventLevel::Info,
+        "client instance graceful shutdown started",
+    );
 }
 
 pub fn client_graceful_shutdown_closing_tunnel_connection() {
@@ -1452,7 +1455,9 @@ mod tests {
             "INFO server graceful shutdown closing tunnel connections: active-tunnel-connections=2"
         ));
         assert!(output.contains("INFO client instance graceful shutdown started"));
-        assert!(output.contains("INFO client instance graceful shutdown closing tunnel connection"));
+        assert!(
+            output.contains("INFO client instance graceful shutdown closing tunnel connection")
+        );
     }
 
     #[test]

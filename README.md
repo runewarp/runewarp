@@ -38,7 +38,7 @@ docker pull runewarp/runewarp
 
 ## Getting started
 
-1. Walkthrough of the Docker example with minimal config [`examples/docker/README.md`](examples/docker/README.md).
+1. Read and run the Docker example [`examples/docker/README.md`](examples/docker/README.md).
 2. Read [`docs/usage.md`](docs/usage.md) for the operator workflow.
 3. Read [`docs/configuration.md`](docs/configuration.md) for config keys and examples.
 

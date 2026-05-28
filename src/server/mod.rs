@@ -208,8 +208,9 @@ impl Server {
         tunnel_registry.stop_accepting();
         drop(public_listener);
         drop(tunnel_endpoint);
-        let closed_connections = tunnel_registry.close_all(b"graceful shutdown").await;
-        runtime_log::server_graceful_shutdown_closing_tunnel_connections(closed_connections);
+        let active_connections = tunnel_registry.active_connection_count().await;
+        runtime_log::server_graceful_shutdown_closing_tunnel_connections(active_connections);
+        let _ = tunnel_registry.close_all(b"graceful shutdown").await;
         tokio::time::sleep(shutdown.grace_period()).await;
         Ok(())
     }

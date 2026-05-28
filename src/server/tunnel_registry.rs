@@ -159,6 +159,16 @@ impl TunnelRegistry {
         closed
     }
 
+    pub(crate) async fn active_connection_count(&self) -> usize {
+        let mut active = 0;
+        for slot in self.tunnel_slots.iter() {
+            if slot.current_connection().await.is_some() {
+                active += 1;
+            }
+        }
+        active
+    }
+
     pub(crate) fn stop_accepting(&self) {
         self.accepting.store(false, Ordering::SeqCst);
     }

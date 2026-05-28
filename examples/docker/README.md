@@ -12,10 +12,16 @@ This example is the fastest way to see Runewarp working end to end. It demonstra
 ## Topology
 
 ```mermaid
-flowchart LR
-    V[Local test client] -->|"https://app.example.test:8443<br/>https://api.example.test:8443"| S[Runewarp Server]
-    S -->|"QUIC/TLS tunnel"| C[Runewarp Client]
-    C -->|"Catch-all Service"| B[Caddy]
+flowchart TD
+    V["Local test client"]
+    S["Runewarp Server<br/>(Server)"]
+    C["Runewarp Client<br/>(Client instance)"]
+    B["Caddy<br/>(Local backend, terminates TLS)"]
+
+    V -->|"https://app.example.test:8443<br/>https://api.example.test:8443"| S
+    C -->|"dials QUIC/TLS Tunnel connection"| S
+    S -->|"forward Visitor traffic on selected stream"| C
+    C -->|"Catch-all Service"| B
 ```
 
 The example uses:

@@ -42,6 +42,38 @@ docker pull runewarp/runewarp
 2. Read [`docs/usage.md`](docs/usage.md) for the operator workflow.
 3. Read [`docs/configuration.md`](docs/configuration.md) for config keys and examples.
 
+## Comparison
+
+How Runewarp compares to other tunnel tools:
+
+### vs [ngrok](https://ngrok.com/)
+
+A managed cloud gateway focused on developer workflows, edge routing, and traffic policy.
+
+- **Runewarp keeps the Server out of HTTP handling:** no edge traffic policy, header inspection, or request transformation on the public **Server**.
+- **ngrok fits edge-side workflows:** managed policy, routing, and developer ergonomics are part of the platform.
+
+### vs [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/)
+
+A managed connector into Cloudflare's edge, with routing and platform features built around that edge.
+
+- **Runewarp keeps ingress fully operator-run:** open source on both the **Client** and **Server**, self-hosted public ingress, and explicit Server-side routing by **Public hostname**.
+- **Cloudflare fits managed-edge workflows:** CDN, WAF, Access, DDoS protection, and other platform features come with the service.
+
+### vs [Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel)
+
+A tailnet-based way to publish a local service publicly without exposing the device IP.
+
+- **Runewarp fits a public ingress model:** explicit Server-side hostname ownership and no dependency on a tailnet, the Tailscale daemon, or `*.ts.net` names.
+- **Funnel fits Tailscale users:** the relay stays out of plaintext and the workflow is convenient when you already use that ecosystem.
+
+### vs [rathole](https://github.com/rathole-org/rathole)
+
+A simple, open-source client/server tunneling tool whose config model and simple client/server architecture helped inspire Runewarp.
+
+- **Runewarp keeps routing explicit:** one QUIC/TLS **Tunnel connection** per **Client instance**, **Server-authoritative routing** by **Public hostname**, and no separate control channel.
+- **rathole fits more forwarding cases today:** service tokens, UDP forwarding, and more transport options.
+
 ## Documentation
 
 | Document | Purpose |

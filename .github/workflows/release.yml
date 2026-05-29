@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Stable release tag to rehearse, in vX.Y.Z form
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  checks: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve release tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          WORKFLOW_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_tag="$WORKFLOW_TAG"
+          else
+            release_tag="$PUSH_TAG"
+          fi
+
+          [[ -n "$release_tag" ]] || {
+            printf 'error: release tag input is required\n' >&2
+            exit 1
+          }
+
+          printf 'RELEASE_TAG=%s\n' "$release_tag" >> "$GITHUB_ENV"
+
+      - name: Validate rehearsal release gate
+        if: github.event_name == 'workflow_dispatch'
+        run: ./scripts/validate-release-gates.sh rehearsal --tag "$RELEASE_TAG"
+
+      - name: Validate signed release tag
+        if: github.event_name == 'push'
+        run: ./scripts/validate-release-gates.sh tag --tag "$RELEASE_TAG" --allowed-signers-file "$PWD/.github/release-allowed-signers"
+
+      - name: Verify prior green CI
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          repository = os.environ["REPOSITORY"]
+          commit_sha = os.environ["COMMIT_SHA"]
+          token = os.environ["GITHUB_TOKEN"]
+
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{repository}/commits/{commit_sha}/check-runs?check_name=CI&filter=latest",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+
+          try:
+              with urllib.request.urlopen(request) as response:
+                  payload = json.load(response)
+          except urllib.error.HTTPError as error:
+              print(
+                  f"error: failed to query GitHub check runs for commit {commit_sha}: "
+                  f"HTTP {error.code} {error.reason}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          except urllib.error.URLError as error:
+              print(
+                  f"error: failed to reach GitHub while checking CI for commit {commit_sha}: "
+                  f"{error.reason}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          matches = [
+              check_run
+              for check_run in payload.get("check_runs", [])
+              if check_run.get("name") == "CI"
+          ]
+
+          if not matches:
+              print(
+                  f"error: commit {commit_sha} does not have an aggregate CI check run",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          if not any(check_run.get("conclusion") == "success" for check_run in matches):
+              print(
+                  f"error: aggregate CI check for commit {commit_sha} is not successful",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
+
+      - name: Render release notes preview
+        run: ./scripts/render-release-notes.sh --version "${RELEASE_TAG#v}" > /tmp/release-notes.md
+
+      - name: Summarize release gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            mode="rehearsal"
+            publish_note="No publish steps run in rehearsal mode."
+          else
+            mode="tag gate"
+            publish_note="Distribution channel publication is wired by later release issues."
+          fi
+
+          {
+            printf '## Release workflow\n\n'
+            printf '- Mode: %s\n' "$mode"
+            printf -- "- Release tag: \`%s\`\n" "$RELEASE_TAG"
+            printf -- "- Source ref: \`%s\`\n" "${GITHUB_REF}"
+            printf '- Publish status: %s\n' "$publish_note"
+          } >> "$GITHUB_STEP_SUMMARY"

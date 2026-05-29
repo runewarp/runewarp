@@ -55,6 +55,7 @@ fn init_git_repo(repo_root: &Path, tag: &str) {
     run(&["init", "-q"]);
     run(&["config", "user.name", "Runewarp Tests"]);
     run(&["config", "user.email", "tests@example.com"]);
+    run(&["config", "commit.gpgsign", "false"]);
     run(&["add", "Cargo.toml", "CHANGELOG.md"]);
     run(&["commit", "-qm", "test release metadata"]);
     run(&["tag", "-a", tag, "-m", tag]);

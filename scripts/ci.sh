@@ -12,6 +12,12 @@ main() {
   section "Validating release metadata"
   ./scripts/validate-release-metadata.sh ci
 
+  section "Checking source install surface"
+  ./scripts/validate-install-surfaces.sh cargo-install --bin-name runewarp --probe-arg --help --expected-text "Usage: runewarp"
+
+  section "Checking package readiness"
+  ./scripts/validate-install-surfaces.sh package-readiness
+
   section "Checking Rust formatting"
   cargo fmt --check
 
@@ -27,8 +33,11 @@ main() {
   section "Running Docker smoke test"
   ./examples/docker/smoke.sh
 
+  section "Checking Docker image surface"
+  ./scripts/validate-install-surfaces.sh docker-image --probe-arg --help --expected-text "Usage: runewarp" --image-tag runewarp:ci
+
   success "CI contract passed"
-  note "Release metadata, Rust checks, docs, and Docker smoke test all succeeded"
+  note "Release metadata, install surfaces, Rust checks, docs, and Docker validation all succeeded"
 }
 
 main "$@"

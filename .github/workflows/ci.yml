@@ -45,6 +45,65 @@ jobs:
       - name: Validate release metadata
         run: ./scripts/validate-release-metadata.sh ci
 
+  install-surface-linux:
+    name: Install surface (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Install Rust toolchain
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable
+          rustup default stable
+
+      - name: Validate Linux cargo install surface
+        run: |
+          ./scripts/validate-install-surfaces.sh cargo-install \
+            --bin-name runewarp \
+            --probe-arg --help \
+            --expected-text "Usage: runewarp"
+
+  install-surface-macos:
+    name: Install surface (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Install Rust toolchain
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable
+          rustup default stable
+
+      - name: Validate macOS cargo install surface
+        run: |
+          ./scripts/validate-install-surfaces.sh cargo-install \
+            --bin-name runewarp \
+            --probe-arg --help \
+            --expected-text "Usage: runewarp"
+
+  package-readiness:
+    name: Package readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Install Rust toolchain
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable
+          rustup default stable
+
+      - name: Validate package readiness
+        run: ./scripts/validate-install-surfaces.sh package-readiness
+
   rust-contract:
     name: Rust contract
     runs-on: ubuntu-latest
@@ -65,7 +124,7 @@ jobs:
             target/
           key: ${{ runner.os }}-rust-contract-${{ env.CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-contract-trusted-main-
+            ${{ runner.os }}-rust-contract-${{ env.CACHE_SCOPE }}-
 
       - name: Install Rust toolchain
         run: |
@@ -85,13 +144,20 @@ jobs:
       - name: Build documentation
         run: cargo doc --no-deps
 
-  docker-smoke:
-    name: Docker smoke
+  docker-contract:
+    name: Docker contract
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Validate Docker image surface
+        run: |
+          ./scripts/validate-install-surfaces.sh docker-image \
+            --probe-arg --help \
+            --expected-text "Usage: runewarp" \
+            --image-tag runewarp:ci
 
       - name: Run Docker smoke test
         run: ./examples/docker/smoke.sh
@@ -104,21 +170,30 @@ jobs:
     needs:
       - workflow-lint
       - release-metadata
+      - install-surface-linux
+      - install-surface-macos
+      - package-readiness
       - rust-contract
-      - docker-smoke
+      - docker-contract
     steps:
       - name: Enforce aggregate success
         env:
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
           RELEASE_METADATA_RESULT: ${{ needs.release-metadata.result }}
+          INSTALL_SURFACE_LINUX_RESULT: ${{ needs.install-surface-linux.result }}
+          INSTALL_SURFACE_MACOS_RESULT: ${{ needs.install-surface-macos.result }}
+          PACKAGE_READINESS_RESULT: ${{ needs.package-readiness.result }}
           RUST_CONTRACT_RESULT: ${{ needs.rust-contract.result }}
-          DOCKER_SMOKE_RESULT: ${{ needs.docker-smoke.result }}
+          DOCKER_CONTRACT_RESULT: ${{ needs.docker-contract.result }}
         run: |
           for check in \
             "workflow-lint:$WORKFLOW_LINT_RESULT" \
             "release-metadata:$RELEASE_METADATA_RESULT" \
+            "install-surface-linux:$INSTALL_SURFACE_LINUX_RESULT" \
+            "install-surface-macos:$INSTALL_SURFACE_MACOS_RESULT" \
+            "package-readiness:$PACKAGE_READINESS_RESULT" \
             "rust-contract:$RUST_CONTRACT_RESULT" \
-            "docker-smoke:$DOCKER_SMOKE_RESULT"; do
+            "docker-contract:$DOCKER_CONTRACT_RESULT"; do
             name="${check%%:*}"
             result="${check#*:}"
             if [[ "$result" != "success" ]]; then

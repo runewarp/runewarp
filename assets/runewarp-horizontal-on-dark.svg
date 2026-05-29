@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 264 80" fill="none">
+<path d="M8 16C24 16 28 36 40 36C52 36 56 16 72 16" stroke="#378ADD" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M8 27C24 27 28 38 40 38C52 38 56 27 72 27" stroke="#378ADD" stroke-width="2" stroke-linecap="round"/>
+  <line x1="8" y1="40" x2="72" y2="40" stroke="#378ADD" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M8 53C24 53 28 42 40 42C52 42 56 53 72 53" stroke="#378ADD" stroke-width="2" stroke-linecap="round"/>
+  <path d="M8 64C24 64 28 44 40 44C52 44 56 64 72 64" stroke="#378ADD" stroke-width="1.5" stroke-linecap="round"/>
+  <circle cx="40" cy="40" r="4" fill="#378ADD"/>
+  <text x="96" y="40" font-family="Georgia" font-style="italic" font-size="30" fill="#D8D5CF" dominant-baseline="central">Runewarp</text>
+</svg>

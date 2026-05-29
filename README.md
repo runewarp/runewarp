@@ -1,6 +1,9 @@
 <div align="center">
   <h1>
-    Runewarp
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/runewarp-horizontal-on-dark.svg">
+      <img src="assets/runewarp-horizontal-on-light.svg" alt="Runewarp" width="320">
+    </picture>
   </h1>
   <p>
     <strong>

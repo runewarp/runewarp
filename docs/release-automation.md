@@ -1,6 +1,6 @@
 # Release automation
 
-This document describes the current repository automation for release preparation and publication. It covers the CI contract that backs Runewarp's supported install surfaces and the release workflow that controls signed release tags, dry-run rehearsals, and real release-channel publication.
+This document describes the current repository automation for release preparation and publication. It covers the CI contract that backs Runewarp's supported install surfaces and the release workflow that controls signed release tags, dry-run rehearsals, and real release-channel publication. For the maintainer-facing operating sequence and recovery guidance, see [`release-guide.md`](release-guide.md).
 
 ## CI contract
 

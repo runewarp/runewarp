@@ -45,6 +45,10 @@ docker pull runewarp/runewarp
 2. Read [`docs/usage.md`](docs/usage.md) for the operator workflow.
 3. Read [`docs/configuration.md`](docs/configuration.md) for config keys and examples.
 
+## Compatibility
+
+Runewarp `0.1.x` is a public pre-1.0 release line. Patch releases aim to stay low-risk, but minor releases may include breaking CLI or configuration changes.
+
 ## Architecture
 
 ```mermaid

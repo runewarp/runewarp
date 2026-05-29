@@ -5,7 +5,7 @@ This example is the fastest way to see Runewarp working end to end. It demonstra
 ## What this example proves
 
 - the Server routes only explicit **Public hostnames**
-- the Client use one sole **Catch-all Service**
+- the Client uses one sole **Catch-all Service**
 - public TLS stays opaque to Runewarp and is terminated by the backend
 - the manual/private-CA Server path and Client identity provisioning work in a containerized environment
 
@@ -60,6 +60,8 @@ cd examples/docker
 - generates manual/private-CA Server material under `generated/server/source-data/runewarp/server/cert`
 - generates Client identity material under `generated/client/source-data/runewarp/client/identity`
 - renders XDG-style runtime config and data trees under `generated/server`, `generated/client`, and `generated/caddy`, so the containers use default config discovery plus default material and trust paths inside the example
+
+The Compose file uses that locally built `runewarp/runewarp:local` image for both the Server and Client; it does not pull a published image from Docker Hub.
 
 Use `./prepare.sh --reset` when you want to discard generated state and rebuild it cleanly.
 

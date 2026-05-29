@@ -2,6 +2,8 @@
 
 This document defines the Runewarp configuration model. Use [`docs/usage.md`](usage.md) for the operator workflow. Use this document for the key reference, defaults, validation rules, and the small set of canonical config shapes.
 
+Runewarp `0.1.x` is a public pre-1.0 release line. Minor releases may include breaking CLI or configuration changes, so use the config reference that matches the version you deploy.
+
 ## Ownership and routing model
 
 | Config area | Owns |

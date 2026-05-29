@@ -1,67 +1,32 @@
 # Configuration
 
-This document defines the Runewarp configuration model. Use [`docs/usage.md`](usage.md) for the operator workflow and this document for exact keys, validation rules, and example config shapes.
+This document defines the Runewarp configuration model. Use [`docs/usage.md`](usage.md) for the operator workflow. Use this document for the key reference, defaults, validation rules, and the small set of canonical config shapes.
 
-## Configuration ownership
+## Ownership and routing model
 
 | Config area | Owns |
 | --- | --- |
 | `[server]` | Public routing, Server identity, and the Server certificate path |
 | `[[server.tunnels]]` | Explicit **Public hostname** authorization and the pinned **Client identity** for one **Tunnel** |
-| `[client]` | Tunnel dialing, Server trust, Client identity material, and optional TLS termination certificate config |
+| `[client]` | Tunnel dialing, Server trust, Client identity material, and optional terminate-mode certificate management |
 | `[[client.services]]` | Local routing from one or more **Public hostnames** to one **Local backend**, with per-Service TLS mode |
 
-## Configuration principles
+Runewarp keeps routing split cleanly:
 
-- Server config owns public routing
+- Server config owns **Public hostname authorization**
 - Client config owns local **Service** selection
-- the Server uses **Public hostname authorization** to route only explicit **Public hostnames** into a **Tunnel**
 - the supported routing shapes are **Hostname mirroring** and a **Client with a Catch-all Service**
-- TLS passthrough is the default; Local backends terminate TLS in that mode
-- Client TLS termination is opt-in per Service via `tls-mode = "terminate"`; the termination certificate is managed at client level through the manual **Public hostname certificate** path (`client.public-cert-dir` or its XDG default) or through `[client.acme]`
-- one top-level `log-level` controls runtime diagnostics for either `runewarp server` or `runewarp client`
-- config keys should name the product concept rather than an encoding detail
+- Server Catch-all is not supported
+- Catch-all Services must use `tls-mode = "passthrough"`
 
-## Supported routing shapes
+## Canonical routing shapes
 
-| Shape | Server | Client |
-| --- | --- | --- |
-| **Hostname mirroring** | Every Tunnel lists explicit `public-hostnames` | Every Service lists explicit `public-hostnames` |
-| **Client with a Catch-all Service** | Every Tunnel lists explicit `public-hostnames` | The sole Service omits `public-hostnames` |
+| Shape | Server | Client | When to use it |
+| --- | --- | --- | --- |
+| **Hostname mirroring** | Every Tunnel lists explicit `public-hostnames` | Every Service lists explicit `public-hostnames` | You want explicit local routing per hostname set |
+| **Client with a Catch-all Service** | Every Tunnel lists explicit `public-hostnames` | The sole Service omits `public-hostnames` | One Client backend should receive every admitted hostname |
 
-Server Catch-all is intentionally not supported. Catch-all Services must use `tls-mode = "passthrough"` (the default); they cannot opt into TLS termination.
-
-## CLI entry points
-
-```text
-runewarp --help
-runewarp server --help
-runewarp client --help
-runewarp server
-runewarp server cert init --hostname tunnel.example.com
-runewarp server cert renew
-runewarp server cert rotate-ca --hostname tunnel.example.com
-
-runewarp client
-runewarp client --server-address tunnel.example.com --backend-address 127.0.0.1:443
-runewarp client identity init
-runewarp client identity renew
-runewarp client identity rotate
-runewarp client identity show
-runewarp client public-cert init --hostname app.example.com
-runewarp client public-cert init
-runewarp client public-cert renew --hostname app.example.com
-runewarp client public-cert renew
-runewarp client public-cert rotate-ca
-```
-
-`--server-address` and `--backend-address` are runtime-only flags on `runewarp client`. They are not accepted by `runewarp client identity ...`.
-
-Material-management commands also accept `--config` and `--dir` when you need non-default locations. Their working directory precedence is:
-
-1. explicit `--dir`
-2. the configured material directory from the selected config file
-3. the XDG default for that command
+One Tunnel can still cover multiple Services, and one Service can still cover multiple **Public hostnames**. The grouping does not need to line up one-to-one across both sides.
 
 ## Runtime config discovery
 
@@ -83,27 +48,6 @@ When a selected config file is involved:
 - any configured Service blocks `--backend-address`, even when that Service block is malformed
 - a selected file with no `[client]` section may still start the Client when both runtime flags are present
 
-Pure CLI-only Client startup keeps using the normal omitted-key defaults for `client.server-trust`, `client.identity-dir`, top-level `log-level`, and the runtime reconnect cadence.
-
-## Runtime logging
-
-Runewarp uses one top-level `log-level` key for runtime diagnostics:
-
-```toml
-log-level = "debug"
-```
-
-- place it at the top level of the config file, alongside `[server]` or `[client]`, not inside those tables
-- supported values are `off`, `error`, `warn`, `info`, `debug`, and `trace`
-- output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message
-- omitted `log-level` defaults to `info`
-
-At `info` (default), Runewarp emits runtime readiness, tunnel connection lifecycle events, warnings, and errors. `runewarp server` logs separate readiness lines for the public listener and the tunnel listener. `runewarp client` logs tunnel connection attempts, then a connected line followed by a ready line after the first successful **Tunnel connection**. Initial startup failures such as bind, resolution, and connect failures are emitted as runtime `ERROR` lines; retry-path failures stay at `WARN`. **Server ACME** and **Client ACME** healthy lifecycle events also live at `info`: startup reports cached-certificate readiness per managed hostname, including remaining validity and renewal-due state, and empty-cache startup reports when first issuance is beginning. Recoverable ACME problems stay at `WARN`; an ACME manager that stops unexpectedly is logged at `ERROR`. `debug` adds per-connection routing diagnostics such as Server routing outcomes, Client passthrough vs terminate decisions, selected Client `backend-address` values, rejected ClientHello reasons, `server acme challenge handled` lines for `acme-tls/1` traffic addressed to the **Server hostname**, distinct Client ACME challenge-handling lines for `acme-tls/1` traffic on terminating **Public hostnames**, and separate detail lines for runtime tunnel failure causes that are shortened at `info`. `trace` is also accepted, but Runewarp does not currently emit any trace-only runtime events, so today it produces the same runtime output as `debug`.
-
-| Key | Required | Notes |
-| --- | --- | --- |
-| `log-level` | no | Top-level runtime stderr log level for the selected role. Supported values: `off`, `error`, `warn`, `info`, `debug`, `trace`. Uses UTC RFC3339 timestamps. Defaults to `info`. `trace` is accepted, but no trace-only runtime events are emitted today, so it currently behaves the same as `debug`. |
-
 ## Default locations
 
 When the matching config key is omitted, Runewarp uses:
@@ -118,88 +62,22 @@ When the matching config key is omitted, Runewarp uses:
 | Server ACME state | `$XDG_STATE_HOME/runewarp/server/acme/` or `~/.local/state/runewarp/server/acme/` |
 | Client ACME state | `$XDG_STATE_HOME/runewarp/client/acme/` or `~/.local/state/runewarp/client/acme/` |
 
-## Example: Server with manual/private-CA certificates
+## Canonical examples
+
+### Minimal Server
 
 ```toml
 [server]
 hostname = "tunnel.example.com"
-cert-dir = "/etc/runewarp/server"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.com", "api.example.com"]
 client-identity = "4f7b6f7a9b0f0d2b..."
 ```
 
-## Example: Server with ACME
+Add `[server.acme]` for the ACME path, or `server.cert-dir` for the manual/private-CA path.
 
-```toml
-[server]
-hostname = "tunnel.example.com"
-
-[server.acme]
-email = "admin@example.com"
-state-dir = "/var/lib/runewarp/acme"
-
-[[server.tunnels]]
-public-hostnames = ["app.example.com", "api.example.com"]
-client-identity = "4f7b6f7a9b0f0d2b..."
-```
-
-When `[server.acme]` is enabled, Runewarp warns at startup if the configured `server.public-bind-address` is not on TCP 443. That warning is advisory rather than fatal because container and NAT deployments may still publish port 443 externally even when the internal bind port differs. The same public TCP 443 reachability requirement also applies to **Client ACME** because TLS-ALPN-01 challenge traffic for terminating **Public hostnames** still traverses the Server's public listener.
-
-## Example: Client exact-match routing
-
-```toml
-[client]
-server-address = "tunnel.example.com"
-server-trust = "ca-file"
-server-ca-file = "/etc/runewarp/server-ca.crt"
-identity-dir = "/etc/runewarp/client"
-
-[[client.services]]
-public-hostnames = ["app.example.com", "api.example.com"]
-backend-address = "localhost:8443"
-
-[[client.services]]
-public-hostnames = ["plex.example.com", "pihole.example.com"]
-backend-address = "nginx.local:443"
-```
-
-## Example: Client Catch-all routing
-
-```toml
-[client]
-server-address = "tunnel.example.com"
-server-trust = "ca-file"
-server-ca-file = "/etc/runewarp/server-ca.crt"
-identity-dir = "/etc/runewarp/client"
-
-[[client.services]]
-backend-address = "127.0.0.1:443"
-```
-
-The Client Catch-all shape is valid only when there is exactly one Service.
-
-## Example: Multiple Tunnels on the Server
-
-```toml
-[server]
-hostname = "tunnel.example.com"
-
-[server.acme]
-email = "admin@example.com"
-state-dir = "/var/lib/runewarp/acme"
-
-[[server.tunnels]]
-public-hostnames = ["app.example.com", "api.example.com"]
-client-identity = "4f7b6f7a9b0f0d2b..."
-
-[[server.tunnels]]
-public-hostnames = ["plex.example.com", "pihole.example.com"]
-client-identity = "2a6cc0f0a14b4b21..."
-```
-
-## Example: Multiple Services on the Client
+### Client with exact-match routing
 
 ```toml
 [client]
@@ -217,9 +95,22 @@ public-hostnames = ["plex.example.com", "pihole.example.com"]
 backend-address = "caddy.local:8443"
 ```
 
-The grouping of hostnames into **Tunnels** and **Services** may differ. One Tunnel can serve multiple Services, and one Service can own multiple **Public hostnames** when they share one **Local backend**.
+### Client with a Catch-all Service
 
-## Example: Client TLS termination with manual certificate
+```toml
+[client]
+server-address = "tunnel.example.com"
+server-trust = "ca-file"
+server-ca-file = "/etc/runewarp/server-ca.crt"
+identity-dir = "/etc/runewarp/client"
+
+[[client.services]]
+backend-address = "127.0.0.1:443"
+```
+
+This shape is valid only when there is exactly one Service.
+
+### Client terminate mode
 
 ```toml
 [client]
@@ -232,91 +123,51 @@ backend-address = "127.0.0.1:8080"
 tls-mode = "terminate"
 ```
 
-## Example: Client TLS termination with ACME
+Add `[client.acme]` for ACME-managed certificates, or `client.public-cert-dir` for the manual **Public hostname certificate** path. Catch-all Services cannot terminate TLS.
 
-```toml
-[client]
-server-address = "tunnel.example.com"
-identity-dir = "/etc/runewarp/client"
+## Key reference
 
-[client.acme]
-email = "admin@example.com"
-state-dir = "/var/lib/runewarp/client/acme"
+### Top-level
 
-[[client.services]]
-public-hostnames = ["app.example.com"]
-backend-address = "127.0.0.1:8080"
-tls-mode = "terminate"
-```
+| Key | Required | Notes |
+| --- | --- | --- |
+| `log-level` | no | Top-level runtime stderr log level for the selected role. Supported values: `off`, `error`, `warn`, `info`, `debug`, `trace`. Defaults to `info`. `trace` is accepted, but no trace-only runtime events are emitted today, so it currently behaves the same as `debug`. |
 
-`tls-mode = "terminate"` requires explicit `public-hostnames` (Catch-all Services cannot terminate). `client.public-cert-dir` and `[client.acme]` are mutually exclusive. When `[client.acme]` is absent, the manual **Public hostname certificate** path defaults to the XDG public-cert directory even if `client.public-cert-dir` is omitted.
+At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warnings, and errors. `debug` adds routing diagnostics and ACME challenge-handling detail. Output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message.
 
-`[client.acme]` still depends on public TCP 443 reachability at the Server edge because `acme-tls/1` challenge traffic follows the same public ingress and Tunnel path as ordinary Visitor TLS for those **Public hostnames**.
-
-## Example: Mixed terminate and passthrough services
-
-A single Client can host one Service that terminates TLS and another that passes TLS through unchanged to the local backend:
-
-```toml
-[client]
-server-address = "tunnel.example.com"
-identity-dir = "/etc/runewarp/client"
-
-# Service A: Client terminates TLS; backend receives plaintext
-[[client.services]]
-public-hostnames = ["app.example.com"]
-backend-address = "127.0.0.1:8080"
-tls-mode = "terminate"
-
-# Service B: Client passes raw TLS bytes through; backend terminates TLS
-[[client.services]]
-public-hostnames = ["api.example.com"]
-backend-address = "127.0.0.1:9443"
-tls-mode = "passthrough"
-```
-
-Certificate material in `public-cert-dir` is only required for the terminating hostnames (`app.example.com` above). The **TLS passthrough** Service (`api.example.com`) requires no certificate material on the Client side — the **Local backend** is responsible for its own TLS certificate.
-
-Runtime logs distinguish the two paths. The stderr formatter prefixes each emitted message with a UTC RFC3339 timestamp and the selected level:
-
-```text
-2025-01-01T00:00:00Z DEBUG client route app.example.com -> terminated TLS and forwarded to 127.0.0.1:8080
-2025-01-01T00:00:00Z DEBUG client route api.example.com -> passthrough to 127.0.0.1:9443
-```
-
-## Server reference
+### Server
 
 | Key | Required | Notes |
 | --- | --- | --- |
 | `server.hostname` | yes | **Server hostname** for the Runewarp edge itself. Used for TLS validation and ACME. |
-| `server.cert-dir` | no | Directory containing the deployed Server leaf material for the manual/private-CA path. Defaults to the XDG data path for manual/private-CA Server material when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
+| `server.cert-dir` | no | Directory containing manual/private-CA Server material. Defaults to the XDG Server material path when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
 | `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
 | `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** **Tunnel connections**. Defaults to `0.0.0.0:443`. |
 | `server.acme.email` | with ACME | Let's Encrypt ACME contact address. TLS-ALPN-01 only. |
-| `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp resolves the XDG default path during config preparation and creates that directory during startup after validation succeeds. |
+| `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp uses the XDG default state path and creates it during startup after validation succeeds. |
 | `server.tunnels[].public-hostnames` | yes | One or more exact **Public hostnames** routed through this Tunnel. |
 | `server.tunnels[].client-identity` | yes | Lowercase hex SHA-256 fingerprint of the Client public key's SubjectPublicKeyInfo. |
 
-## Client reference
+### Client
 
 | Key | Required | Notes |
 | --- | --- | --- |
 | `client.server-address` | runtime or config | **Server address** the Client dials for its **Tunnel connection**, written as `hostname[:port]`. The host part must be a hostname, not a raw IP literal. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, `--server-address` may supply or replace this value before validation. |
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
-| `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`; otherwise system trust is used. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
-| `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG data path for Client identity material. |
-| `client.public-cert-dir` | no | Directory containing **Public hostname certificate** material for Client-side TLS termination. Mutually exclusive with `[client.acme]`. When any Service uses `tls-mode = "terminate"` and `[client.acme]` is absent, Runewarp uses this directory or, when omitted, the XDG default public-cert path. |
+| `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
+| `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG Client identity path. |
+| `client.public-cert-dir` | no | Directory containing manual **Public hostname certificate** material for terminate mode. Mutually exclusive with `[client.acme]`. When any Service uses `tls-mode = "terminate"` and `[client.acme]` is absent, Runewarp uses this directory or, when omitted, the XDG default public-cert path. |
 | `client.acme.email` | with Client ACME | ACME contact address for **Public hostname certificates**. Required when `[client.acme]` is present. |
-| `client.acme.state-dir` | no | Writable path for durable ACME account and certificate state for the Client. When omitted, Runewarp uses and creates the XDG default client ACME state directory at startup. |
+| `client.acme.state-dir` | no | Writable path for durable Client ACME state. When omitted, Runewarp uses the XDG default state path and creates it during startup after validation succeeds. |
 | `client.services[].public-hostnames` | when exact-match local routing is desired | Exact **Public hostnames** this Service accepts locally. Omit only on the sole Catch-all Service. Required when `tls-mode = "terminate"`. |
-| `client.services[].backend-address` | yes, per Service block | TCP endpoint for the forwarded traffic. When `tls-mode = "passthrough"` (default), the **Local backend** must terminate TLS. When `tls-mode = "terminate"`, the **Client** terminates TLS and connects to the **Local backend** in plaintext. `runewarp client --backend-address` may synthesize the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks at all. |
+| `client.services[].backend-address` | yes, per Service block | TCP endpoint for the forwarded traffic. Under `passthrough` the **Local backend** terminates TLS. Under `terminate` the Client terminates TLS and connects to the backend in plaintext. `runewarp client --backend-address` may synthesize the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks at all. |
 | `client.services[].tls-mode` | no | `passthrough` or `terminate`. Defaults to `passthrough`. Catch-all Services must use `passthrough`. |
 
-## Trust and material directories
+## Material and trust notes
 
-### `server.cert-dir`
+### Server certificate material
 
-The manual/private-CA directory layout is:
+`server.cert-dir` holds:
 
 - `server.crt`
 - `server.key`
@@ -325,11 +176,11 @@ The manual/private-CA directory layout is:
 
 `runewarp server cert renew` reissues `server.crt` from the existing **Server CA**. `runewarp server cert rotate-ca` changes the trust anchor itself and requires Clients to trust a new CA.
 
-When omitted and `[server.acme]` is absent, `server.cert-dir` defaults to the XDG data location for Server certificate material.
+When `[server.acme]` is enabled, Runewarp warns at startup if `server.public-bind-address` is not on TCP 443. That warning is advisory rather than fatal because container and NAT deployments may still publish port 443 externally even when the internal bind port differs.
 
-### `client.identity-dir`
+### Client identity material
 
-The Client identity directory layout is:
+`client.identity-dir` holds:
 
 - `client.crt`
 - `client.key`
@@ -337,73 +188,31 @@ The Client identity directory layout is:
 
 `runewarp client identity renew` reissues `client.crt` with the same key, so the `client-identity` stays stable. `runewarp client identity rotate` changes the key and therefore changes the `client-identity`.
 
-When omitted, `client.identity-dir` defaults to the XDG data location for Client identity material.
+### Terminate-mode certificate material
 
-### `client.public-cert-dir`
+When one or more Services use `tls-mode = "terminate"`, the Client needs either manual **Public hostname certificate** material or `[client.acme]`.
 
-When one or more Services use `tls-mode = "terminate"`, the Client needs a **Public hostname CA** and per-hostname leaf certificates. Bootstrap these with:
+`client.public-cert-dir` holds:
 
-```
-runewarp client public-cert init --hostname app.example.com
+- `public-ca.crt`
+- `state/public-ca.key`
+- `{hostname}/public.crt`
+- `{hostname}/public.key`
 
-# or derive all terminating hostnames from config:
-runewarp client public-cert init
-```
+`runewarp client public-cert init` keeps the shared **Public hostname CA** stable. `renew` reissues leaves under the same CA. `rotate-ca` replaces the CA and requires Visitors to trust the new `public-ca.crt`.
 
-The directory layout is:
+`[client.acme]` still depends on public TCP 443 reachability at the Server edge because `acme-tls/1` traffic for terminating **Public hostnames** follows the same public ingress and Tunnel path as ordinary Visitor TLS.
 
-- `public-ca.crt` — **Public hostname CA** certificate (share this with Visitors as their trust anchor)
-- `state/public-ca.key` — CA private key (keep private)
-- `{hostname}/public.crt` — **Public hostname certificate** for the named hostname
-- `{hostname}/public.key` — Leaf key for the named hostname
-
-To add a certificate for another hostname in the same directory:
-
-```
-runewarp client public-cert init --hostname api.example.com
-```
-
-`runewarp client public-cert init` keeps the shared **Public hostname CA** stable. Running it again with a new hostname reuses the existing CA and only writes new leaf material; rerunning it for a hostname whose complete material already exists succeeds idempotently and reports that state on stdout. The shared `public-ca.crt` therefore stays stable across additions and leaf renewals; only `rotate-ca` changes that trust anchor.
-
-**Renewing a Public hostname certificate:**
-
-```bash
-# Explicit hostname:
-runewarp client public-cert renew --hostname app.example.com
-
-# All terminating hostnames from the selected config:
-runewarp client public-cert renew
-```
-
-When `--hostname` is omitted the target set is derived from `public-hostnames` on `tls-mode = "terminate"` services in the selected config. An explicit `--config` path wins; otherwise Runewarp uses the discovered default config when it exists. If no selected config exists, the command fails; Runewarp never infers targets from on-disk directories.
-
-**Rotating the Public hostname CA:**
-
-```bash
-runewarp client public-cert rotate-ca
-
-# or select a specific config file explicitly:
-runewarp client -c client.toml public-cert rotate-ca
-```
-
-`rotate-ca` replaces the shared CA and reissues every managed leaf certificate. It derives the managed hostname set from the selected config file: an explicit `-c`, `--config` path wins, otherwise Runewarp uses the discovered default config when it exists. After rotation, distribute the new `public-ca.crt` to Visitors so they trust the new trust anchor.
-
-The `client public-cert` commands resolve their working directory from `--dir`, then `client.public-cert-dir`, then the XDG default data location when neither is set. Runtime validation follows the same policy: when any Service uses `tls-mode = "terminate"` and `[client.acme]` is absent, Runewarp treats that XDG directory as the manual default path.
-
-### `client.server-trust`
+### Client Server trust
 
 Runewarp supports two Client trust modes:
 
 - `system` uses the system trust store
 - `ca-file` uses only the configured CA bundle and does not combine it with system roots
 
-When `client.server-trust = "ca-file"` and `client.server-ca-file` is omitted, Runewarp uses the default XDG CA bundle path.
-
 ## Validation rules
 
 ### General boot-time validation
-
-Runewarp rejects config and startup inputs that violate any of these rules:
 
 - `runewarp server` requires a `[server]` section
 - `runewarp client` requires either a selected `[client]` section or both runtime routing flags when no selected Client config exists or the selected file has no `[client]` section
@@ -434,8 +243,6 @@ Runewarp rejects config and startup inputs that violate any of these rules:
 
 ### Hostname rules
 
-Runewarp enforces these rules independently on each side:
-
 - `server.tunnels[].public-hostnames` is always required
 - `client.services[].public-hostnames` may be omitted only when there is exactly one Service
 - `public-hostnames = []` is an error on either side
@@ -446,16 +253,9 @@ Runewarp enforces these rules independently on each side:
 - any exact hostname overlap across Service entries after normalization is an error
 - `server.hostname` itself must not be reused as a routed **Public hostname**
 
-### Cross-side hostname coverage
+## Cross-side hostname coverage
 
 Runewarp does not validate cross-side hostname coverage at runtime:
 
 - under **Hostname mirroring**, repeating the explicit hostname set on both sides is an operator responsibility
-- when the **Client** uses a **Catch-all Service**, the Server carries the explicit hostname set while the Client intentionally does not
-
-## Operational notes
-
-- `backend-address` is opened only when traffic arrives
-- **Local backends** must terminate TLS when `tls-mode = "passthrough"` (default)
-- `client.server-trust = "ca-file"` is exclusive; the Client does not also use system roots for that Tunnel connection
-- binding to `443` on Linux typically requires either elevated privileges or `CAP_NET_BIND_SERVICE`
+- when the Client uses a **Catch-all Service**, the Server carries the explicit hostname set while the Client intentionally does not

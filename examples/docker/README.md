@@ -13,15 +13,24 @@ This example is the fastest way to see Runewarp working end to end. It demonstra
 
 ```mermaid
 flowchart TD
-    V["Local test client"]
-    S["Runewarp Server<br/>(Server)"]
-    C["Runewarp Client<br/>(Client instance)"]
-    B["Caddy<br/>(Local backend, terminates TLS)"]
+    V["Local Visitor"]
+    C["Client instance"]
+    B["Caddy (Local backend)<br/>terminates TLS"]
 
-    V -->|"https://app.example.test:8443<br/>https://api.example.test:8443"| S
-    C -->|"dials QUIC/TLS Tunnel connection"| S
-    S -->|"forward Visitor traffic on selected stream"| C
-    C -->|"Catch-all Service"| B
+    subgraph S["Server"]
+        direction TB
+        P["Public listener<br/>localhost:8443 -> TCP 443 / Visitor TLS"]
+        R["SNI router<br/>select Tunnel by Public hostname"]
+        U["Tunnel listener<br/>UDP 443 / QUIC/TLS"]
+
+        P -->|"read ClientHello + SNI"| R
+        R -->|"open stream on active Tunnel"| U
+    end
+
+    V -->|"https://app.example.test:8443<br/>https://api.example.test:8443"| P
+    C -->|"dials QUIC/TLS Tunnel connection<br/>to tunnel.example.test:443"| U
+    U -->|"deliver encrypted stream<br/>for app.example.test or api.example.test"| C
+    C -->|"Catch-all Service -> caddy:443"| B
 ```
 
 The example uses:

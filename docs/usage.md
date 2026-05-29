@@ -144,7 +144,17 @@ server-trust = "ca-file"
 
 For exact-match Client routing, multiple Services or Tunnels, terminate-mode config, defaults, and full key definitions, use [`docs/configuration.md`](configuration.md).
 
-### 6. Start the runtime
+### 6. Prepare DNS and deployment
+
+Run the **Server** on a machine with a public IP so **Visitors** and **Client instances** can reach it.
+
+- create an A record for the **Server hostname** that points to that machine's public IP
+- use each **Public hostname** as a CNAME to the **Server hostname** as the standard DNS pattern
+- if you deploy the Server behind NAT or port mapping, make sure public TCP 443 still reaches the Server for Visitor TLS and ACME traffic
+
+Pointing a **Public hostname** directly at the same public IP can also work, but CNAME-to-Server-hostname keeps the public routing shape clearer in most deployments.
+
+### 7. Start the runtime
 
 ```bash
 runewarp server -c /etc/runewarp/server.toml
@@ -153,7 +163,7 @@ runewarp client -c /etc/runewarp/client.toml
 
 If you omit `--config`, Runewarp looks for `$XDG_CONFIG_HOME/runewarp/config.toml`, then `~/.config/runewarp/config.toml` when `XDG_CONFIG_HOME` is unset. Use [`docs/configuration.md`](configuration.md) for the full config discovery and runtime override rules.
 
-### 7. Verify traffic
+### 8. Verify traffic
 
 1. Point each **Public hostname** at the Server.
 2. Make a TLS request to the Public hostname.

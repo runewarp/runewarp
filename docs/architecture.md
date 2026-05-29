@@ -34,9 +34,10 @@ This split keeps the operator-visible behavior unchanged while giving config pre
 ## End-to-end flow
 
 ```mermaid
-flowchart TD
+flowchart LR
     V[Visitor]
-    C["Client instance"]
+    C1["Client instance A"]
+    C2["Client instance B"]
     B["Local backend<br/>terminates TLS"]
 
     subgraph S["Server"]
@@ -50,9 +51,10 @@ flowchart TD
     end
 
     V -->|"Visitor TLS for a Public hostname"| P
-    C -->|"dials QUIC/TLS Tunnel connection"| U
-    U -->|"deliver encrypted stream"| C
-    C -->|"select Service and proxy"| B
+    C1 -->|"dials QUIC/TLS Tunnel connection"| U
+    C2 -->|"dials QUIC/TLS Tunnel connection"| U
+    U -->|"deliver encrypted stream"| C2
+    C2 -->|"select Service and proxy"| B
 ```
 
 In **passthrough** mode (default), the forwarded byte stream begins with the Visitor's original ClientHello and stays encrypted until the Local backend terminates TLS. In **terminate** mode, the Client terminates TLS using its own certificate material and proxies plaintext TCP to the Local backend.

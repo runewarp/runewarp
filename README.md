@@ -45,19 +45,30 @@ docker pull runewarp/runewarp
 ## Architecture
 
 ```mermaid
-flowchart TD
+flowchart LR
     V[Visitor]
-    S["Server<br/>reads SNI and selects Tunnel"]
-    C["Client instance"]
+    C1["Client instance A"]
+    C2["Client instance B"]
     B["Local backend<br/>terminates TLS"]
 
-    V -->|"TLS for a Public hostname"| S
-    C -->|"dials QUIC/TLS Tunnel connection"| S
-    S -->|"forward encrypted stream"| C
-    C -->|"select Service and proxy"| B
+    subgraph S["Server"]
+        direction TB
+        P["Public listener<br/>TCP 443 / Visitor TLS"]
+        R["SNI router<br/>select Tunnel by Public hostname"]
+        U["Tunnel listener<br/>UDP 443 / QUIC/TLS"]
+
+        P -->|"read ClientHello + SNI"| R
+        R -->|"open stream on active Tunnel"| U
+    end
+
+    V -->|"Visitor TLS for a Public hostname"| P
+    C1 -->|"dials QUIC/TLS Tunnel connection"| U
+    C2 -->|"dials QUIC/TLS Tunnel connection"| U
+    U -->|"deliver encrypted stream"| C2
+    C2 -->|"select Service and proxy"| B
 ```
 
-Visitors connect to the public **Server** over TLS, and the **Client instance** maintains the long-lived QUIC/TLS **Tunnel connection** back to it. After SNI-based **Tunnel** selection, the **Server** forwards the encrypted stream to the **Client instance**, which proxies it to the **Local backend**; a **Service** can also opt into **Terminate mode**. See [`docs/architecture.md`](docs/architecture.md) for the detailed transport view.
+Visitors connect to the public **Server** over TLS, and each **Client instance** maintains its own long-lived QUIC/TLS **Tunnel connection** back to it. After SNI-based **Tunnel** selection, the **Server** forwards the encrypted stream to the selected **Client instance**, which proxies it to the **Local backend**; a **Service** can also opt into **Terminate mode**. See [`docs/architecture.md`](docs/architecture.md) for the detailed transport view.
 
 ## Comparison
 

@@ -45,10 +45,9 @@ docker pull runewarp/runewarp
 ## Architecture
 
 ```mermaid
-flowchart LR
+flowchart TD
     V[Visitor]
-    C1["Client instance A"]
-    C2["Client instance B"]
+    C["Client instance"]
     B["Local backend<br/>terminates TLS"]
 
     subgraph S["Server"]
@@ -62,10 +61,9 @@ flowchart LR
     end
 
     V -->|"Visitor TLS for a Public hostname"| P
-    C1 -->|"dials QUIC/TLS Tunnel connection"| U
-    C2 -->|"dials QUIC/TLS Tunnel connection"| U
-    U -->|"deliver encrypted stream"| C2
-    C2 -->|"select Service and proxy"| B
+    C -->|"dials QUIC/TLS Tunnel connection"| U
+    U -->|"deliver encrypted stream"| C
+    C -->|"select Service and proxy"| B
 ```
 
 Visitors connect to the public **Server** over TLS, and each **Client instance** maintains its own long-lived QUIC/TLS **Tunnel connection** back to it. After SNI-based **Tunnel** selection, the **Server** forwards the encrypted stream to the selected **Client instance**, which proxies it to the **Local backend**; a **Service** can also opt into **Terminate mode**. See [`docs/architecture.md`](docs/architecture.md) for the detailed transport view.

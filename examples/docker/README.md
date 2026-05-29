@@ -12,10 +12,10 @@ This example is the fastest way to see Runewarp working end to end. It demonstra
 ## Topology
 
 ```mermaid
-flowchart LR
-    V["Local test client"]
+flowchart TD
+    V["Local Visitor"]
     C["Client instance"]
-    B["Caddy<br/>Local backend<br/>terminates TLS"]
+    B["Caddy (Local backend)<br/>terminates TLS"]
 
     subgraph S["Server"]
         direction TB

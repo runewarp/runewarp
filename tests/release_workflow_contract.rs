@@ -11,6 +11,16 @@ fn release_workflow() -> String {
     .unwrap()
 }
 
+fn ci_workflow() -> String {
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".github")
+            .join("workflows")
+            .join("ci.yml"),
+    )
+    .unwrap()
+}
+
 #[test]
 fn release_workflow_checks_docker_version_tag_immutability_before_push() {
     let workflow = release_workflow();
@@ -32,4 +42,28 @@ fn release_workflow_uses_create_only_github_release_flow() {
     assert!(workflow.contains("gh release create"));
     assert!(!workflow.contains("gh release edit"));
     assert!(!workflow.contains("gh release view"));
+}
+
+#[test]
+fn pinned_workflow_actions_include_inline_version_comments() {
+    for (workflow_name, workflow) in [
+        ("ci.yml", ci_workflow()),
+        ("release.yml", release_workflow()),
+    ] {
+        for line in workflow.lines().filter(|line| line.contains("uses: ")) {
+            if line.contains('@') {
+                assert!(
+                    line.contains(" # "),
+                    "{workflow_name} pinned action should include an inline version comment: {line}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn release_workflow_uses_safe_printf_for_hyphen_prefixed_summary_lines() {
+    let workflow = release_workflow();
+
+    assert!(workflow.contains("printf -- '- Mode: %s\\n'"));
 }

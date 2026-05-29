@@ -22,23 +22,24 @@ These checks are unconditional across pull requests and `main` pushes and roll u
 The `Release` workflow has two entry paths:
 
 - pushing a stable `vX.Y.Z` tag for the real release gate
-- `workflow_dispatch` with a `release_tag` input for non-publishing rehearsal on the selected ref
+- `workflow_dispatch` with a `release_tag` input for non-publishing rehearsal on a checked-out commit that must already be reachable from `origin/main`
 
 ### Signed tag gate
 
 For tag pushes, the workflow:
 
 1. validates release metadata against the checked-out repository state
-2. verifies the SSH-signed tag against `.github/release-allowed-signers`
-3. verifies that the tagged commit already has a successful aggregate `CI` check run
-4. renders the changelog-driven release notes preview
-5. verifies that the bare release image tag `X.Y.Z` does not already exist on Docker Hub, so a rerun cannot mutate a published version
-6. publishes the multi-arch Docker Hub image set for the release version plus the stable aliases `X.Y`, `X`, and `latest`
-7. signs the released Docker manifest list keylessly with Sigstore and publishes build provenance through the Docker release job
-8. verifies the public Docker Hub install surface by pulling the version tag and checking `runewarp --version`
-9. publishes the crate to crates.io
-10. verifies the public crates.io install surface by installing the released version from crates.io with retries for registry propagation
-11. creates the GitHub Release only after the Docker and crates.io release jobs succeed; reruns for the same version fail forward instead of mutating the existing release record
+2. verifies that the tagged commit is already reachable from `origin/main`, so release tags cannot publish branch-only commits
+3. verifies the SSH-signed tag against `.github/release-allowed-signers`
+4. verifies that the tagged commit already has a successful aggregate `CI` check run
+5. renders the changelog-driven release notes preview
+6. verifies that the bare release image tag `X.Y.Z` does not already exist on Docker Hub, so a rerun cannot mutate a published version
+7. publishes the multi-arch Docker Hub image set for the release version plus the stable aliases `X.Y`, `X`, and `latest`
+8. signs the released Docker manifest list keylessly with Sigstore and publishes build provenance through the Docker release job
+9. verifies the public Docker Hub install surface by pulling the version tag and checking `runewarp --version`
+10. publishes the crate to crates.io
+11. verifies the public crates.io install surface by installing the released version from crates.io with retries for registry propagation
+12. creates the GitHub Release only after the Docker and crates.io release jobs succeed; reruns for the same version fail forward instead of mutating the existing release record
 
 Protected release tags are enforced as a GitHub-side prerequisite through repository rules or rulesets rather than re-checked at workflow runtime.
 
@@ -46,7 +47,7 @@ Protected release tags are enforced as a GitHub-side prerequisite through reposi
 
 For manual rehearsal, the workflow:
 
-1. uses the selected ref from the dispatch target
+1. uses the dispatch target only when its checked-out commit is already reachable from `origin/main`; branch-only commits fail the gate
 2. requires a stable `release_tag` input that matches `Cargo.toml`
 3. validates release metadata and release-notes rendering
 4. skips signed-tag and protected-tag enforcement because rehearsal happens before the irreversible tag is created
@@ -73,9 +74,9 @@ Real publish jobs run in the GitHub `release` environment. The current workflow 
 | `DOCKER_USERNAME` | Docker Hub login username |
 | `DOCKER_TOKEN` | Docker Hub access token |
 
-For dress rehearsals, `workflow_dispatch` runs only the gate job and does not consume release secrets.
+For dress rehearsals, `workflow_dispatch` runs only the gate job and does not consume release secrets, but it still rejects candidates outside `origin/main`.
 
-Before the first real tag release, the `release` environment should allow both the `main` branch for rehearsal dispatches and stable `v*` tags for real publish runs.
+Before the first real tag release, the `release` environment should allow rehearsal dispatches and stable `v*` tags, while the repo-owned gate keeps both entry paths constrained to commits already reachable from `origin/main`.
 
 ## Docker release contract
 

@@ -8,17 +8,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    timeout-minutes: 30
     env:
       OUTPUT_DIR: target/docker-images
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
 
       - name: Compute artifact identity
         run: |
@@ -35,7 +36,7 @@ jobs:
         run: ./scripts/docker-image.sh linux/arm64 "$OUTPUT_DIR"
 
       - name: Upload OCI image artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ${{ env.RUNEWARP_ARTIFACT_PREFIX }}-oci-images
           path: ${{ env.OUTPUT_DIR }}/*.oci.tar

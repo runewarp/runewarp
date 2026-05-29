@@ -124,7 +124,7 @@ jobs:
             target/
           key: ${{ runner.os }}-rust-contract-${{ env.CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-contract-trusted-main-
+            ${{ runner.os }}-rust-contract-${{ env.CACHE_SCOPE }}-
 
       - name: Install Rust toolchain
         run: |

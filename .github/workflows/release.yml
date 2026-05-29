@@ -69,6 +69,7 @@ jobs:
           import json
           import os
           import sys
+          import urllib.error
           import urllib.request
 
           repository = os.environ["REPOSITORY"]
@@ -76,7 +77,7 @@ jobs:
           token = os.environ["GITHUB_TOKEN"]
 
           request = urllib.request.Request(
-              f"https://api.github.com/repos/{repository}/commits/{commit_sha}/check-runs",
+              f"https://api.github.com/repos/{repository}/commits/{commit_sha}/check-runs?check_name=CI&filter=latest",
               headers={
                   "Accept": "application/vnd.github+json",
                   "Authorization": f"Bearer {token}",
@@ -84,8 +85,23 @@ jobs:
               },
           )
 
-          with urllib.request.urlopen(request) as response:
-              payload = json.load(response)
+          try:
+              with urllib.request.urlopen(request) as response:
+                  payload = json.load(response)
+          except urllib.error.HTTPError as error:
+              print(
+                  f"error: failed to query GitHub check runs for commit {commit_sha}: "
+                  f"HTTP {error.code} {error.reason}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          except urllib.error.URLError as error:
+              print(
+                  f"error: failed to reach GitHub while checking CI for commit {commit_sha}: "
+                  f"{error.reason}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
 
           matches = [
               check_run
@@ -126,7 +142,7 @@ jobs:
           {
             printf '## Release workflow\n\n'
             printf '- Mode: %s\n' "$mode"
-            printf '- Release tag: `%s`\n' "$RELEASE_TAG"
-            printf '- Source ref: `%s`\n' "${GITHUB_REF}"
+            printf -- "- Release tag: \`%s\`\n" "$RELEASE_TAG"
+            printf -- "- Source ref: \`%s\`\n" "${GITHUB_REF}"
             printf '- Publish status: %s\n' "$publish_note"
           } >> "$GITHUB_STEP_SUMMARY"

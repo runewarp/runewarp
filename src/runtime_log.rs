@@ -1,12 +1,10 @@
+use quinn::ConnectionError;
 use std::borrow::Cow;
 use std::fmt;
 use std::io;
 use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
-
-use quinn::ConnectionError;
 use time::format_description::{self, OwnedFormatItem};
 use tracing::Subscriber;
 use tracing_subscriber::filter::LevelFilter;
@@ -40,8 +38,7 @@ pub enum EventLevel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientTunnelAttemptKind {
     Initial,
-    ImmediateRetry,
-    IntervalRetry,
+    Retry,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -250,7 +247,6 @@ pub fn client_tunnel_connecting(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
-    retry_interval: Duration,
 ) {
     emit(
         EventLevel::Info,
@@ -259,7 +255,6 @@ pub fn client_tunnel_connecting(
             attempt_kind,
             configured_server_addr,
             resolved_server_addr,
-            retry_interval,
         ),
     );
 }
@@ -269,7 +264,7 @@ pub fn client_tunnel_connect_failed(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
-    retry_interval: Duration,
+    next_retry_delay_secs: u64,
     error: &str,
 ) {
     emit_runtime_failure_with_debug_detail(
@@ -279,7 +274,7 @@ pub fn client_tunnel_connect_failed(
             attempt_kind,
             configured_server_addr,
             resolved_server_addr,
-            retry_interval,
+            next_retry_delay_secs,
             error,
         ),
         client_tunnel_connect_failed_detail_line(
@@ -297,7 +292,7 @@ pub fn client_tunnel_resolution_failed(
     phase: ClientTunnelPhase,
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
-    retry_interval: Duration,
+    next_retry_delay_secs: u64,
     error: &str,
 ) {
     emit_runtime_failure_with_debug_detail(
@@ -306,7 +301,7 @@ pub fn client_tunnel_resolution_failed(
             phase,
             attempt_kind,
             configured_server_addr,
-            retry_interval,
+            next_retry_delay_secs,
             error,
         ),
         client_tunnel_resolution_failed_detail_line(
@@ -337,32 +332,56 @@ pub fn client_ready(configured_server_addr: &str) {
 pub fn client_tunnel_disconnected(
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
+    next_retry_delay_secs: u64,
     error: &str,
 ) {
     emit_runtime_failure_with_debug_detail(
         EventLevel::Warn,
-        &client_tunnel_disconnected_line(configured_server_addr, resolved_server_addr, error),
+        &client_tunnel_disconnected_line(
+            configured_server_addr,
+            resolved_server_addr,
+            next_retry_delay_secs,
+            error,
+        ),
         client_tunnel_disconnected_detail_line(configured_server_addr, resolved_server_addr, error),
         error,
     );
 }
 
-pub fn client_tunnel_closed(configured_server_addr: &str, resolved_server_addr: SocketAddr) {
+pub fn client_tunnel_closed(
+    configured_server_addr: &str,
+    resolved_server_addr: SocketAddr,
+    next_retry_delay_secs: u64,
+) {
     emit(
         EventLevel::Info,
-        &client_tunnel_closed_line(configured_server_addr, resolved_server_addr),
+        &client_tunnel_closed_line(
+            configured_server_addr,
+            resolved_server_addr,
+            next_retry_delay_secs,
+        ),
     );
 }
 
 pub fn client_tunnel_unauthorized(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
+    next_retry_delay_secs: u64,
     error: &str,
 ) {
     emit_runtime_failure_with_debug_detail(
         EventLevel::Warn,
-        &client_tunnel_unauthorized_line(attempt_kind, configured_server_addr),
-        client_tunnel_unauthorized_detail_line(attempt_kind, configured_server_addr, error),
+        &client_tunnel_unauthorized_line(
+            attempt_kind,
+            configured_server_addr,
+            next_retry_delay_secs,
+        ),
+        client_tunnel_unauthorized_detail_line(
+            attempt_kind,
+            configured_server_addr,
+            next_retry_delay_secs,
+            error,
+        ),
         error,
     );
 }
@@ -864,7 +883,6 @@ fn client_tunnel_connecting_line(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
-    _retry_interval: Duration,
 ) -> String {
     let event = match (phase, attempt_kind) {
         (ClientTunnelPhase::Establishing, ClientTunnelAttemptKind::Initial) => {
@@ -873,9 +891,7 @@ fn client_tunnel_connecting_line(
         (ClientTunnelPhase::Reconnecting, ClientTunnelAttemptKind::Initial) => {
             "client tunnel connection reconnecting"
         }
-        (_, ClientTunnelAttemptKind::ImmediateRetry | ClientTunnelAttemptKind::IntervalRetry) => {
-            "client tunnel connection retrying"
-        }
+        (_, ClientTunnelAttemptKind::Retry) => "client tunnel connection retrying",
     };
     let retry = client_tunnel_retry_field(attempt_kind);
     event_line(
@@ -897,7 +913,7 @@ fn client_tunnel_connect_failed_line(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
-    _retry_interval: Duration,
+    next_retry_delay_secs: u64,
     error: &str,
 ) -> String {
     event_line_with_summary(
@@ -910,7 +926,8 @@ fn client_tunnel_connect_failed_line(
             ),
         ]
         .into_iter()
-        .chain(client_tunnel_attempt_field(attempt_kind)),
+        .chain(client_tunnel_attempt_field(attempt_kind))
+        .chain(next_retry_delay_field(next_retry_delay_secs)),
         summarize_error(error),
     )
 }
@@ -919,14 +936,15 @@ fn client_tunnel_resolution_failed_line(
     _phase: ClientTunnelPhase,
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
-    _retry_interval: Duration,
+    next_retry_delay_secs: u64,
     error: &str,
 ) -> String {
     event_line_with_summary(
         "client tunnel resolution failed",
         [("server-address", Cow::Borrowed(configured_server_addr))]
             .into_iter()
-            .chain(client_tunnel_attempt_field(attempt_kind)),
+            .chain(client_tunnel_attempt_field(attempt_kind))
+            .chain(next_retry_delay_field(next_retry_delay_secs)),
         summarize_error(error),
     )
 }
@@ -947,12 +965,15 @@ fn client_tunnel_connected_line(
 fn client_tunnel_disconnected_line(
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
+    next_retry_delay_secs: u64,
     error: &str,
 ) -> String {
     let _ = resolved_server_addr;
     event_line_with_summary(
         "client tunnel connection dropped",
-        [("server-address", Cow::Borrowed(configured_server_addr))],
+        [("server-address", Cow::Borrowed(configured_server_addr))]
+            .into_iter()
+            .chain(next_retry_delay_field(next_retry_delay_secs)),
         summarize_live_connection_error(error),
     )
 }
@@ -960,11 +981,14 @@ fn client_tunnel_disconnected_line(
 fn client_tunnel_closed_line(
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
+    next_retry_delay_secs: u64,
 ) -> String {
     let _ = resolved_server_addr;
     event_line(
         "client tunnel connection closed",
-        [("server-address", Cow::Borrowed(configured_server_addr))],
+        [("server-address", Cow::Borrowed(configured_server_addr))]
+            .into_iter()
+            .chain(next_retry_delay_field(next_retry_delay_secs)),
     )
 }
 
@@ -991,25 +1015,29 @@ fn client_tunnel_disconnected_detail_line(
 fn client_tunnel_unauthorized_line(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
+    next_retry_delay_secs: u64,
 ) -> String {
     event_line(
         "client tunnel connection unauthorized",
         [("server-address", Cow::Borrowed(configured_server_addr))]
             .into_iter()
-            .chain(client_tunnel_attempt_field(attempt_kind)),
+            .chain(client_tunnel_attempt_field(attempt_kind))
+            .chain(next_retry_delay_field(next_retry_delay_secs)),
     )
 }
 
 fn client_tunnel_unauthorized_detail_line(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
+    next_retry_delay_secs: u64,
     error: &str,
 ) -> String {
     event_line_with_summary(
         "client tunnel connection unauthorized detail",
         [("server-address", Cow::Borrowed(configured_server_addr))]
             .into_iter()
-            .chain(client_tunnel_attempt_field(attempt_kind)),
+            .chain(client_tunnel_attempt_field(attempt_kind))
+            .chain(next_retry_delay_field(next_retry_delay_secs)),
         error,
     )
 }
@@ -1068,8 +1096,7 @@ fn client_tunnel_retry_field(
 ) -> Option<(&'static str, Cow<'static, str>)> {
     match attempt_kind {
         ClientTunnelAttemptKind::Initial => None,
-        ClientTunnelAttemptKind::ImmediateRetry => Some(("retry", Cow::Borrowed("immediate"))),
-        ClientTunnelAttemptKind::IntervalRetry => Some(("retry", Cow::Borrowed("interval"))),
+        ClientTunnelAttemptKind::Retry => Some(("retry", Cow::Borrowed("retry"))),
     }
 }
 
@@ -1091,9 +1118,15 @@ fn client_tunnel_attempt_field(
 ) -> Option<(&'static str, Cow<'static, str>)> {
     match attempt_kind {
         ClientTunnelAttemptKind::Initial => Some(("retry", Cow::Borrowed("initial"))),
-        ClientTunnelAttemptKind::ImmediateRetry => Some(("retry", Cow::Borrowed("immediate"))),
-        ClientTunnelAttemptKind::IntervalRetry => Some(("retry", Cow::Borrowed("interval"))),
+        ClientTunnelAttemptKind::Retry => Some(("retry", Cow::Borrowed("retry"))),
     }
+}
+
+fn next_retry_delay_field(next_retry_delay_secs: u64) -> Option<(&'static str, Cow<'static, str>)> {
+    Some((
+        "next-retry-delay",
+        Cow::Owned(format!("{next_retry_delay_secs}s")),
+    ))
 }
 
 fn has_nested_error_detail(error: &str) -> bool {
@@ -1120,7 +1153,6 @@ mod tests {
     use std::net::SocketAddr;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
     use quinn::ConnectionError;
     use time::OffsetDateTime;
@@ -1365,22 +1397,20 @@ mod tests {
                 ClientTunnelAttemptKind::Initial,
                 configured_server_addr,
                 resolved_server_addr,
-                Duration::from_secs(5),
             );
             client_tunnel_connect_failed(
                 ClientTunnelPhase::Establishing,
                 ClientTunnelAttemptKind::Initial,
                 configured_server_addr,
                 resolved_server_addr,
-                Duration::from_secs(5),
+                5,
                 "DNS timeout",
             );
             client_tunnel_connecting(
                 ClientTunnelPhase::Reconnecting,
-                ClientTunnelAttemptKind::IntervalRetry,
+                ClientTunnelAttemptKind::Retry,
                 configured_server_addr,
                 resolved_server_addr,
-                Duration::from_secs(5),
             );
             client_tunnel_connected(
                 ClientTunnelPhase::Reconnecting,
@@ -1388,10 +1418,11 @@ mod tests {
                 resolved_server_addr,
             );
             client_ready(configured_server_addr);
-            client_tunnel_closed(configured_server_addr, resolved_server_addr);
+            client_tunnel_closed(configured_server_addr, resolved_server_addr, 5);
             client_tunnel_disconnected(
                 configured_server_addr,
                 resolved_server_addr,
+                5,
                 "connection reset by peer",
             );
             client_trust_store_warning(2);
@@ -1401,20 +1432,20 @@ mod tests {
             "INFO client tunnel connection connecting: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443"
         ));
         assert!(output.contains(
-            "ERROR client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: DNS timeout"
+            "ERROR client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial next-retry-delay=5s: DNS timeout"
         ));
         assert!(output.contains(
-            "INFO client tunnel connection retrying: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=interval"
+            "INFO client tunnel connection retrying: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=retry"
         ));
         assert!(output.contains(
             "INFO client tunnel connection connected: server-address=tunnel.example.test:443"
         ));
         assert!(output.contains("INFO client ready: server-address=tunnel.example.test:443"));
         assert!(output.contains(
-            "INFO client tunnel connection closed: server-address=tunnel.example.test:443"
+            "INFO client tunnel connection closed: server-address=tunnel.example.test:443 next-retry-delay=5s"
         ));
         assert!(output.contains(
-            "WARN client tunnel connection dropped: server-address=tunnel.example.test:443: connection reset by peer"
+            "WARN client tunnel connection dropped: server-address=tunnel.example.test:443 next-retry-delay=5s: connection reset by peer"
         ));
         assert!(!output.contains(
             "INFO client tunnel connection connected: server-address=tunnel.example.test:443 resolved-address="
@@ -1551,7 +1582,7 @@ mod tests {
                 ClientTunnelPhase::Establishing,
                 ClientTunnelAttemptKind::Initial,
                 configured_server_addr,
-                Duration::from_secs(5),
+                5,
                 "failed to resolve the Server hostname: failed to lookup address information: nodename nor servname provided, or not known",
             );
             client_tunnel_connect_failed(
@@ -1559,26 +1590,26 @@ mod tests {
                 ClientTunnelAttemptKind::Initial,
                 configured_server_addr,
                 resolved_server_addr,
-                Duration::from_secs(5),
+                5,
                 "client QUIC handshake failed: timed out",
             );
             client_tunnel_resolution_failed(
                 ClientTunnelPhase::Reconnecting,
-                ClientTunnelAttemptKind::IntervalRetry,
+                ClientTunnelAttemptKind::Retry,
                 configured_server_addr,
-                Duration::from_secs(5),
+                5,
                 "failed to resolve the Server hostname: temporary failure in name resolution",
             );
         });
 
         assert!(output.contains(
-            "ERROR client tunnel resolution failed: server-address=tunnel.example.test:443 retry=initial: failed to resolve the Server hostname"
+            "ERROR client tunnel resolution failed: server-address=tunnel.example.test:443 retry=initial next-retry-delay=5s: failed to resolve the Server hostname"
         ));
         assert!(output.contains(
-            "ERROR client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: client QUIC handshake failed"
+            "ERROR client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial next-retry-delay=5s: client QUIC handshake failed"
         ));
         assert!(output.contains(
-            "WARN client tunnel resolution failed: server-address=tunnel.example.test:443 retry=interval: failed to resolve the Server hostname"
+            "WARN client tunnel resolution failed: server-address=tunnel.example.test:443 retry=retry next-retry-delay=5s: failed to resolve the Server hostname"
         ));
         assert!(!output.contains("after waiting 5s"));
         assert!(!output.contains("timed out"));
@@ -1594,7 +1625,7 @@ mod tests {
                 ClientTunnelPhase::Establishing,
                 ClientTunnelAttemptKind::Initial,
                 configured_server_addr,
-                Duration::from_secs(5),
+                5,
                 "failed to resolve the Server hostname: failed to lookup address information: nodename nor servname provided, or not known",
             );
             client_tunnel_connect_failed(
@@ -1602,19 +1633,19 @@ mod tests {
                 ClientTunnelAttemptKind::Initial,
                 configured_server_addr,
                 resolved_server_addr,
-                Duration::from_secs(5),
+                5,
                 "client QUIC handshake failed: timed out",
             );
         });
 
         assert!(output.contains(
-            "ERROR client tunnel resolution failed: server-address=tunnel.example.test:443 retry=initial: failed to resolve the Server hostname"
+            "ERROR client tunnel resolution failed: server-address=tunnel.example.test:443 retry=initial next-retry-delay=5s: failed to resolve the Server hostname"
         ));
         assert!(output.contains(
             "DEBUG client tunnel resolution failed detail: server-address=tunnel.example.test:443 retry=initial: failed to resolve the Server hostname: failed to lookup address information: nodename nor servname provided, or not known"
         ));
         assert!(output.contains(
-            "ERROR client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: client QUIC handshake failed"
+            "ERROR client tunnel connection failed: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial next-retry-delay=5s: client QUIC handshake failed"
         ));
         assert!(output.contains(
             "DEBUG client tunnel connection failed detail: server-address=tunnel.example.test:443 resolved-address=203.0.113.10:443 retry=initial: client QUIC handshake failed: timed out"
@@ -1635,6 +1666,7 @@ mod tests {
             client_tunnel_disconnected(
                 configured_server_addr,
                 resolved_server_addr,
+                5,
                 "closed by peer: transport error: timed out",
             );
             emit_server_tunnel_connection_dropped(
@@ -1645,7 +1677,7 @@ mod tests {
         });
 
         assert!(info_output.contains(
-            "WARN client tunnel connection dropped: server-address=tunnel.example.test:443: timed out"
+            "WARN client tunnel connection dropped: server-address=tunnel.example.test:443 next-retry-delay=5s: timed out"
         ));
         assert!(info_output.contains(format!(
             "WARN server tunnel connection dropped: client-identity={client_identity} remote-address={remote_addr}: peer sent malformed frame"
@@ -1659,6 +1691,7 @@ mod tests {
             client_tunnel_disconnected(
                 configured_server_addr,
                 resolved_server_addr,
+                5,
                 "closed by peer: transport error: timed out",
             );
             emit_server_tunnel_connection_dropped(
@@ -1725,13 +1758,14 @@ mod tests {
             client_tunnel_unauthorized(
                 ClientTunnelAttemptKind::Initial,
                 configured_server_addr,
+                1,
                 "client QUIC handshake failed: peer doesn't support any known protocol",
             );
             server_tunnel_connection_unauthorized(&client_identity);
         });
 
         assert!(info_output.contains(
-            "WARN client tunnel connection unauthorized: server-address=tunnel.example.test:443 retry=initial"
+            "WARN client tunnel connection unauthorized: server-address=tunnel.example.test:443 retry=initial next-retry-delay=1s"
         ));
         assert!(
             info_output.contains(
@@ -1747,12 +1781,13 @@ mod tests {
             client_tunnel_unauthorized(
                 ClientTunnelAttemptKind::Initial,
                 configured_server_addr,
+                1,
                 "client QUIC handshake failed: invalid peer certificate: ApplicationVerificationFailure",
             );
         });
 
         assert!(debug_output.contains(
-            "DEBUG client tunnel connection unauthorized detail: server-address=tunnel.example.test:443 retry=initial: client QUIC handshake failed: invalid peer certificate: ApplicationVerificationFailure"
+            "DEBUG client tunnel connection unauthorized detail: server-address=tunnel.example.test:443 retry=initial next-retry-delay=1s: client QUIC handshake failed: invalid peer certificate: ApplicationVerificationFailure"
         ));
     }
 }

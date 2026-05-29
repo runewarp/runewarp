@@ -716,16 +716,14 @@ async fn build_acme_termination_configs(
 
 #[cfg(test)]
 mod tests {
+    use rcgen::{CertificateParams, KeyPair, generate_simple_self_signed};
+    use rustls::pki_types::CertificateDer;
     use std::fs;
     use std::io;
     use std::path::Path;
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::sync::atomic::AtomicBool;
-    use std::time::Duration;
-
-    use rcgen::{CertificateParams, KeyPair, generate_simple_self_signed};
-    use rustls::pki_types::CertificateDer;
 
     use super::{
         ClientStartupError, NativeRootsLoad, PreparedServer, ServerStartupError,
@@ -986,7 +984,6 @@ mod tests {
             log_level: LogLevel::Info,
             server_ca_file: None,
             identity_directory: tempdir.path().join("client-identity"),
-            reconnect_interval: Duration::from_secs(5),
             services: vec![ClientServiceSettings {
                 public_hostnames: Some(vec![
                     "app.example.test".to_owned(),
@@ -1023,7 +1020,6 @@ mod tests {
             log_level: LogLevel::Info,
             server_ca_file: None,
             identity_directory: tempdir.path().join("client-identity"),
-            reconnect_interval: Duration::from_secs(5),
             services: vec![ClientServiceSettings {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "127.0.0.1:443".to_owned(),
@@ -1091,7 +1087,6 @@ mod tests {
             log_level: LogLevel::Info,
             server_ca_file: None,
             identity_directory: tempdir.path().join("client-identity"),
-            reconnect_interval: Duration::from_secs(5),
             services: vec![ClientServiceSettings {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "127.0.0.1:443".to_owned(),

@@ -52,7 +52,7 @@ Each **Client instance** establishes one long-lived QUIC connection to `client.s
 Rules:
 
 - QUIC **0-RTT is disabled**
-- reconnect attempts re-resolve the hostname portion of `client.server-address` every time, including the first immediate retry
+- reconnect attempts re-resolve the hostname portion of `client.server-address` every time, including the first jittered retry window
 - tunnel handshakes time out after **10 seconds** on both the Client and Server sides
 - idle timeout is **60 seconds**
 - keepalive pings are sent every **20 seconds**
@@ -102,13 +102,16 @@ For orderly local shutdown that the runtime controls:
 
 Client instance reconnect behavior is:
 
-1. retry immediately once after disconnect
-2. if that fails, wait the runtime reconnect interval
-3. keep retrying on that runtime reconnect interval
+1. after any failed or closed **Tunnel connection**, pick the next runtime-owned retry window from this exact sequence: `1, 2, 3, 5, 8, 12, 18, 27, 41, 60`
+2. apply full jitter over `0..window` for that retry and sleep for the chosen delay
+3. keep using the same sequence, capped at `60` seconds, until an authenticated **Tunnel connection** succeeds
+4. reset back to the first `1` second window after every successful authenticated **Tunnel connection**
 
-The current runtime reconnect interval is **1 second** after the first immediate retry. This cadence is runtime-owned rather than configurable.
+This reconnect policy is runtime-owned rather than configurable. There is no reconnect tuning knob in the config or CLI-only startup path.
 
-Unauthorized **Client identity** failures are treated differently: after the rejection, the **Client instance** skips the extra immediate retry and waits for the normal runtime reconnect interval before trying again.
+Unauthorized **Client identity** failures use the same reconnect policy as every other reconnect failure. There is no dedicated immediate-retry exception for that case.
+
+Failure and reconnect logs report the chosen next retry delay as `next-retry-delay=<Ns>`. The runtime rounds that displayed value to whole seconds and never shows `0s`, even when jitter selects a sub-second delay.
 
 When the remote **Server** exits gracefully, the **Client instance** still treats the closed **Tunnel connection** as an ordinary disconnect and keeps the same reconnect model above. There is no shutdown-specific reconnect branch.
 

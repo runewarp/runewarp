@@ -3,7 +3,6 @@ use std::fmt;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -24,8 +23,6 @@ use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
     SERVER_CA_FILENAME, XdgPathError, hostname::validate_public_hostname,
 };
-
-pub const DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -80,7 +77,6 @@ pub struct ClientSettings {
     pub log_level: LogLevel,
     pub server_ca_file: Option<PathBuf>,
     pub identity_directory: PathBuf,
-    pub reconnect_interval: Duration,
     pub services: Vec<ClientServiceSettings>,
     pub public_cert_config: Option<ClientPublicCertConfig>,
 }
@@ -533,7 +529,6 @@ pub(crate) fn validate_prepared_client_settings(
         log_level,
         trust,
         identity_directory,
-        reconnect_interval,
         services,
         manual_public_cert_present,
         manual_public_cert_directory,
@@ -682,7 +677,6 @@ pub(crate) fn validate_prepared_client_settings(
             log_level,
             server_ca_file,
             identity_directory: identity_directory.expect("validated client.identity-dir"),
-            reconnect_interval,
             services,
             public_cert_config,
         })

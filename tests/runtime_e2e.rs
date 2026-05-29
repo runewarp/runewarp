@@ -1664,7 +1664,6 @@ client-identity = "{}"
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: std::time::Duration::from_secs(5),
         services: vec![ClientServiceSettings {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: "localhost:80".to_owned(),
@@ -1829,7 +1828,6 @@ client-identity = "{}"
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: std::time::Duration::from_secs(5),
         services: vec![ClientServiceSettings {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: backend_address.to_string(),
@@ -1949,7 +1947,6 @@ client-identity = "{}"
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: std::time::Duration::from_secs(5),
         services: vec![ClientServiceSettings {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: "localhost:80".to_owned(),
@@ -2086,7 +2083,6 @@ client-identity = "{}"
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: std::time::Duration::from_secs(5),
         services: vec![ClientServiceSettings {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: backend_address.to_string(),

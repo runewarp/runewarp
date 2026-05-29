@@ -1,7 +1,3 @@
-use std::fs;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
-
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, LogLevel,
@@ -10,6 +6,8 @@ use runewarp::{
     make_server_quic_config_with_client_auth,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use std::fs;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -221,7 +219,6 @@ async fn prepared_client_rejects_settings_without_services() {
         log_level: LogLevel::Info,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().to_path_buf(),
-        reconnect_interval: Duration::from_secs(5),
         services: Vec::new(),
         public_cert_config: None,
     };
@@ -280,7 +277,6 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
         log_level: LogLevel::Info,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: Duration::from_secs(5),
         services: vec![
             ClientServiceSettings {
                 public_hostnames: None,
@@ -340,7 +336,6 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
         log_level: LogLevel::Info,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: Duration::from_secs(5),
         services: vec![
             ClientServiceSettings {
                 public_hostnames: Some(vec!["App.Example.Test.".to_owned()]),
@@ -397,7 +392,6 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
         log_level: LogLevel::Off,
         server_ca_file: None,
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: Duration::from_secs(5),
         services: vec![ClientServiceSettings {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: "localhost:443".to_owned(),
@@ -475,7 +469,6 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-ca-not-needed.pem")),
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: Duration::from_secs(5),
         services: vec![ClientServiceSettings {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: "localhost:443".to_owned(),
@@ -582,7 +575,6 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
         log_level: LogLevel::Off,
         server_ca_file: None,
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: Duration::from_secs(5),
         services: vec![
             ClientServiceSettings {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
@@ -681,7 +673,6 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: Duration::from_secs(5),
         services: vec![ClientServiceSettings {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: "localhost:80".to_owned(),
@@ -776,7 +767,6 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
-        reconnect_interval: Duration::from_secs(5),
         services: vec![
             ClientServiceSettings {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),

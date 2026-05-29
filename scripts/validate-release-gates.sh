@@ -15,6 +15,21 @@ is_stable_version() {
   [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
+require_commit_reachable_from_main() {
+  local repo_root="$1"
+  local candidate_ref="$2"
+  local main_ref="refs/remotes/origin/main"
+
+  require_command git
+
+  git -C "$repo_root" rev-parse --verify "${candidate_ref}^{commit}" >/dev/null 2>&1 ||
+    die "candidate ref $candidate_ref does not exist in $repo_root"
+  git -C "$repo_root" rev-parse --verify "${main_ref}^{commit}" >/dev/null 2>&1 ||
+    die "main ref $main_ref does not exist in $repo_root"
+  git -C "$repo_root" merge-base --is-ancestor "$candidate_ref" "$main_ref" ||
+    die "candidate ref $candidate_ref must be reachable from $main_ref"
+}
+
 validate_rehearsal_mode() {
   local repo_root="$1"
   local release_tag="$2"
@@ -26,6 +41,7 @@ validate_rehearsal_mode() {
   expected_tag="v$cargo_version"
   [[ "$release_tag" == "$expected_tag" ]] || die "rehearsal tag $release_tag must match Cargo version $cargo_version as $expected_tag"
 
+  require_commit_reachable_from_main "$repo_root" HEAD
   "$tool_root/scripts/validate-release-metadata.sh" ci --repo-root "$repo_root"
   "$tool_root/scripts/render-release-notes.sh" --repo-root "$repo_root" --version "$cargo_version" >/dev/null
 
@@ -44,6 +60,7 @@ validate_tag_mode() {
   require_command git
 
   "$tool_root/scripts/validate-release-metadata.sh" release --repo-root "$repo_root" --tag "$release_tag"
+  require_commit_reachable_from_main "$repo_root" "$release_tag"
 
   section "Verifying signed release tag"
   note "Tag: $release_tag"

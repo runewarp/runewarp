@@ -32,7 +32,7 @@ jobs:
       docker_tags: ${{ steps.release-metadata.outputs.docker_tags }}
     steps:
       - name: Check out the repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -172,12 +172,12 @@ jobs:
 
           {
             printf '## Release workflow\n\n'
-            printf '- Mode: %s\n' "$mode"
+            printf -- '- Mode: %s\n' "$mode"
             printf -- "- Release tag: \`%s\`\n" "$RELEASE_TAG"
             printf -- "- Release version: \`%s\`\n" "$RELEASE_VERSION"
             printf -- "- Source ref: \`%s\`\n" "${GITHUB_REF}"
             printf -- "- Docker tags: \`%s\`, \`%s\`, \`%s\`, \`latest\`\n" "$RELEASE_VERSION" "${RELEASE_VERSION%.*}" "${RELEASE_VERSION%%.*}"
-            printf '- Publish status: %s\n' "$publish_note"
+            printf -- '- Publish status: %s\n' "$publish_note"
           } >> "$GITHUB_STEP_SUMMARY"
 
   docker-release:
@@ -193,18 +193,18 @@ jobs:
       id-token: write
     steps:
       - name: Check out the repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
@@ -216,7 +216,7 @@ jobs:
 
       - name: Build and push multi-arch release image
         id: build-image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ./Dockerfile
@@ -226,7 +226,7 @@ jobs:
           tags: ${{ needs.gate.outputs.docker_tags }}
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
       - name: Sign released image
         env:
@@ -255,7 +255,7 @@ jobs:
       contents: read
     steps:
       - name: Check out the repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
@@ -295,7 +295,7 @@ jobs:
       contents: write
     steps:
       - name: Check out the repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 

@@ -61,7 +61,7 @@ fn jitter_delay<R: RngCore>(window: Duration, rng: &mut R) -> Duration {
 }
 
 fn display_delay_secs(delay: Duration) -> u64 {
-    let rounded = (delay.as_nanos() + 500_000_000) / 1_000_000_000;
+    let rounded = delay.as_nanos().div_ceil(1_000_000_000);
     u64::try_from(rounded.max(1)).expect("display delay fits in u64")
 }
 
@@ -147,6 +147,18 @@ mod tests {
         assert_eq!(second_retry.window.as_secs(), 2);
         assert_eq!(second_retry.delay.as_millis(), 1_500);
         assert_eq!(second_retry.display_delay_secs, 2);
+    }
+
+    #[test]
+    fn display_delay_rounds_up_so_logs_do_not_understate_the_wait() {
+        let mut policy = ReconnectPolicy::new_with_rng(TestRng::new(vec![0, 1_100_000_000]));
+
+        let _ = policy.next_retry();
+        let retry = policy.next_retry();
+
+        assert_eq!(retry.window.as_secs(), 2);
+        assert_eq!(retry.delay.as_millis(), 1_100);
+        assert_eq!(retry.display_delay_secs, 2);
     }
 
     #[test]

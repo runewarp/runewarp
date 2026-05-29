@@ -36,6 +36,18 @@ fn release_workflow_checks_docker_version_tag_immutability_before_push() {
 }
 
 #[test]
+fn release_workflow_publishes_crate_before_docker_release() {
+    let workflow = release_workflow();
+
+    assert!(
+        workflow.contains(
+            "docker-release:\n    name: Publish Docker Hub release\n    if: github.event_name == 'push'\n    needs:\n      - gate\n      - crate-release"
+        ),
+        "docker release should depend on the completed crates.io release"
+    );
+}
+
+#[test]
 fn release_workflow_uses_create_only_github_release_flow() {
     let workflow = release_workflow();
 

@@ -10,7 +10,7 @@ Runewarp treats a stable release as one deliberate sequence:
 2. Merge that PR to `main` and wait for the aggregate `CI` check to finish green on the release commit.
 3. Optionally run a **Release rehearsal** through `workflow_dispatch` to prove the candidate release metadata and gates without publishing.
 4. Create and push an SSH-signed `vX.Y.Z` **Release tag** on that green `main` commit.
-5. Let the `Release` workflow publish Docker Hub and crates.io, then finalize the GitHub Release.
+5. Let the `Release` workflow publish crates.io first, then Docker Hub, then finalize the GitHub Release.
 6. Move `main` forward in a follow-up change to the next minor `-dev` version and reopen `CHANGELOG.md` with `Unreleased`.
 
 Normal release work flows through the release-prep PR. Direct pushes to `main` remain an escape hatch for repository recovery, not a second release path.
@@ -72,7 +72,7 @@ Once the candidate is green, cut the real stable release:
 1. Check out the exact green `main` commit you want to publish.
 2. Create an SSH-signed tag in `vX.Y.Z` form on that commit.
 3. Push the tag.
-4. Watch the `Release` workflow until all publish jobs finish.
+4. Watch the `Release` workflow until the crates.io publish completes, the Docker publish follows, and all publish jobs finish.
 5. Confirm the public surfaces now agree on the released version:
    - Docker Hub has the released `X.Y.Z`, `X.Y`, `X`, and `latest` tags.
    - crates.io serves the released `runewarp` version.

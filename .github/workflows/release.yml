@@ -167,7 +167,7 @@ jobs:
             publish_note="Rehearsal skips Docker Hub pushes, Sigstore signing, crates.io publication, and GitHub Release creation."
           else
             mode="tag gate"
-            publish_note="Real release runs publish Docker Hub and crates.io, then finalize the GitHub Release after both channels validate."
+            publish_note="Real release runs crates.io publication first, then Docker Hub publication, then finalizes the GitHub Release."
           fi
 
           {
@@ -185,6 +185,7 @@ jobs:
     if: github.event_name == 'push'
     needs:
       - gate
+      - crate-release
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: release

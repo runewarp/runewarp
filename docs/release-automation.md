@@ -33,13 +33,13 @@ For tag pushes, the workflow:
 3. verifies the SSH-signed tag against `.github/release-allowed-signers`
 4. verifies that the tagged commit already has a successful aggregate `CI` check run
 5. renders the changelog-driven release notes preview
-6. verifies that the bare release image tag `X.Y.Z` does not already exist on Docker Hub, so a rerun cannot mutate a published version
-7. publishes the multi-arch Docker Hub image set for the release version plus the stable aliases `X.Y`, `X`, and `latest`
-8. signs the released Docker manifest list keylessly with Sigstore and publishes build provenance through the Docker release job
-9. verifies the public Docker Hub install surface by pulling the version tag and checking `runewarp --version`
-10. publishes the crate to crates.io
-11. verifies the public crates.io install surface by installing the released version from crates.io with retries for registry propagation
-12. creates the GitHub Release only after the Docker and crates.io release jobs succeed; reruns for the same version fail forward instead of mutating the existing release record
+6. publishes the crate to crates.io
+7. verifies the public crates.io install surface by installing the released version from crates.io with retries for registry propagation
+8. verifies that the bare release image tag `X.Y.Z` does not already exist on Docker Hub, so a rerun cannot mutate a published version
+9. publishes the multi-arch Docker Hub image set for the release version plus the stable aliases `X.Y`, `X`, and `latest`
+10. signs the released Docker manifest list keylessly with Sigstore and publishes build provenance through the Docker release job
+11. verifies the public Docker Hub install surface by pulling the version tag and checking `runewarp --version`
+12. creates the GitHub Release only after the crates.io and Docker release jobs succeed; reruns for the same version fail forward instead of mutating the existing release record
 
 Protected release tags are enforced as a GitHub-side prerequisite through repository rules or rulesets rather than re-checked at workflow runtime.
 

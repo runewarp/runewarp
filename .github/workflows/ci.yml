@@ -6,26 +6,66 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  ci:
+  workflow-lint:
+    name: Workflow lint
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 10
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Install actionlint
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.8/actionlint_1.7.8_linux_amd64.tar.gz
+          echo 'be92c2652ab7b6d08425428797ceabeb16e31a781c07bc388456b4e592f3e36a  actionlint.tar.gz' | sha256sum --check
+          tar -xzf actionlint.tar.gz actionlint
+          install -m 0755 actionlint "$HOME/.local/bin/actionlint"
+          printf '%s\n' "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Lint workflows
+        run: actionlint -color
+
+  release-metadata:
+    name: Release metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Validate release metadata
+        run: ./scripts/validate-release-metadata.sh ci
+
+  rust-contract:
+    name: Rust contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('trusted-{0}', github.ref_name) }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
       - name: Restore Rust build cache
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-stable-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-contract-${{ env.CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-stable-
+            ${{ runner.os }}-rust-contract-trusted-main-
 
       - name: Install Rust toolchain
         run: |
@@ -33,5 +73,56 @@ jobs:
           rustup toolchain install stable --component clippy,rustfmt
           rustup default stable
 
-      - name: Run CI contract
-        run: ./scripts/ci.sh
+      - name: Check Rust formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --quiet
+
+      - name: Build documentation
+        run: cargo doc --no-deps
+
+  docker-smoke:
+    name: Docker smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Run Docker smoke test
+        run: ./examples/docker/smoke.sh
+
+  ci:
+    name: CI
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - workflow-lint
+      - release-metadata
+      - rust-contract
+      - docker-smoke
+    steps:
+      - name: Enforce aggregate success
+        env:
+          WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
+          RELEASE_METADATA_RESULT: ${{ needs.release-metadata.result }}
+          RUST_CONTRACT_RESULT: ${{ needs.rust-contract.result }}
+          DOCKER_SMOKE_RESULT: ${{ needs.docker-smoke.result }}
+        run: |
+          for check in \
+            "workflow-lint:$WORKFLOW_LINT_RESULT" \
+            "release-metadata:$RELEASE_METADATA_RESULT" \
+            "rust-contract:$RUST_CONTRACT_RESULT" \
+            "docker-smoke:$DOCKER_SMOKE_RESULT"; do
+            name="${check%%:*}"
+            result="${check#*:}"
+            if [[ "$result" != "success" ]]; then
+              printf 'error: required job %s finished with %s\n' "$name" "$result" >&2
+              exit 1
+            fi
+          done

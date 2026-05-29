@@ -8,6 +8,9 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 
 main() {
   cd "$repo_root"
+ 
+  section "Validating release metadata"
+  ./scripts/validate-release-metadata.sh ci
 
   section "Checking Rust formatting"
   cargo fmt --check
@@ -25,7 +28,7 @@ main() {
   ./examples/docker/smoke.sh
 
   success "CI contract passed"
-  note "Rust checks, docs, and Docker smoke test all succeeded"
+  note "Release metadata, Rust checks, docs, and Docker smoke test all succeeded"
 }
 
 main "$@"

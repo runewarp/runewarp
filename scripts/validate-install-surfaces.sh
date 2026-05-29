@@ -9,7 +9,7 @@ __runewarp_install_surface_cleanup_dir=""
 . "$tool_root/scripts/lib.sh"
 
 usage() {
-  usage_error "$(basename "$0") <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]"
+  usage_error "$(basename "$0") <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]"
 }
 
 validate_cargo_install() {
@@ -258,6 +258,54 @@ validate_docker_registry_image() {
   success "docker registry image surface is valid"
 }
 
+docker_hub_tag_url_from_image_ref() {
+  local image_ref="$1"
+  local repository_with_tag repository_path namespace repository tag remainder
+
+  [[ "$image_ref" == *:* ]] || die "docker-registry-tag-absent mode requires --image-ref with an explicit tag"
+
+  tag="${image_ref##*:}"
+  repository_with_tag="${image_ref%:*}"
+  repository_path="${repository_with_tag#docker.io/}"
+  namespace="${repository_path%%/*}"
+  remainder="${repository_path#*/}"
+  repository="${remainder%%/*}"
+
+  [[ -n "$namespace" && -n "$repository" && "$repository_path" != "$repository_with_tag" && "$remainder" == "$repository" ]] || {
+    die "docker-registry-tag-absent mode requires --image-ref in docker.io/<namespace>/<repository>:<tag> form"
+  }
+
+  printf 'https://hub.docker.com/v2/namespaces/%s/repositories/%s/tags/%s\n' "$namespace" "$repository" "$tag"
+}
+
+validate_docker_registry_tag_absent() {
+  local image_ref="$1"
+  local tag_lookup_url http_status
+
+  [[ -n "$image_ref" ]] || die "docker-registry-tag-absent mode requires --image-ref"
+
+  require_command curl
+
+  section "Checking Docker tag immutability"
+  note "Image ref: $image_ref"
+
+  tag_lookup_url="$(docker_hub_tag_url_from_image_ref "$image_ref")"
+  http_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$tag_lookup_url")" ||
+    die "failed to query Docker Hub tag metadata for $image_ref"
+
+  case "$http_status" in
+    404)
+      success "docker version tag is available for first publication"
+      ;;
+    200)
+      die "docker registry tag already exists for $image_ref; cut a new patch version instead of republishing"
+      ;;
+    *)
+      die "unexpected Docker Hub tag lookup status for $image_ref: $http_status"
+      ;;
+  esac
+}
+
 main() {
   local mode="${1:-}"
   local bin_name=""
@@ -346,6 +394,9 @@ main() {
       ;;
     docker-registry-image)
       validate_docker_registry_image "$image_ref" "$expected_version" "$expected_text" "$probe_arg" "$retry_attempts" "$retry_delay_seconds"
+      ;;
+    docker-registry-tag-absent)
+      validate_docker_registry_tag_absent "$image_ref"
       ;;
     *)
       usage

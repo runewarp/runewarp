@@ -32,12 +32,13 @@ For tag pushes, the workflow:
 2. verifies the SSH-signed tag against `.github/release-allowed-signers`
 3. verifies that the tagged commit already has a successful aggregate `CI` check run
 4. renders the changelog-driven release notes preview
-5. publishes the multi-arch Docker Hub image set for the release version plus the stable aliases `X.Y`, `X`, and `latest`
-6. signs the released Docker manifest list keylessly with Sigstore and publishes build provenance through the Docker release job
-7. verifies the public Docker Hub install surface by pulling the version tag and checking `runewarp --version`
-8. publishes the crate to crates.io
-9. verifies the public crates.io install surface by installing the released version from crates.io with retries for registry propagation
-10. creates or updates the GitHub Release only after the Docker and crates.io release jobs succeed
+5. verifies that the bare release image tag `X.Y.Z` does not already exist on Docker Hub, so a rerun cannot mutate a published version
+6. publishes the multi-arch Docker Hub image set for the release version plus the stable aliases `X.Y`, `X`, and `latest`
+7. signs the released Docker manifest list keylessly with Sigstore and publishes build provenance through the Docker release job
+8. verifies the public Docker Hub install surface by pulling the version tag and checking `runewarp --version`
+9. publishes the crate to crates.io
+10. verifies the public crates.io install surface by installing the released version from crates.io with retries for registry propagation
+11. creates the GitHub Release only after the Docker and crates.io release jobs succeed; reruns for the same version fail forward instead of mutating the existing release record
 
 Protected release tags are enforced as a GitHub-side prerequisite through repository rules or rulesets rather than re-checked at workflow runtime.
 
@@ -58,6 +59,7 @@ The workflow keeps GitHub-specific orchestration in YAML and keeps install-surfa
 
 - `scripts/validate-release-gates.sh` owns rehearsal/tag gate validation
 - `scripts/render-release-notes.sh` owns changelog-driven release-body rendering
+- `scripts/validate-install-surfaces.sh docker-registry-tag-absent` owns the Docker Hub preflight check that keeps the bare release tag immutable
 - `scripts/validate-install-surfaces.sh registry-install` owns post-publish crates.io verification, including retrying until the registry surface is visible
 - `scripts/validate-install-surfaces.sh docker-registry-image` owns post-publish Docker Hub verification, including retrying until the released image is pullable
 
@@ -79,6 +81,7 @@ Before the first real tag release, the `release` environment should allow both t
 
 - release images are built for `linux/amd64` and `linux/arm64`
 - published tags are `X.Y.Z`, `X.Y`, `X`, and `latest`
+- the bare release tag `X.Y.Z` must not exist before publish; if it already exists, the workflow fails and recovery happens with a new patch version
 - `latest` only moves on stable releases
 - the released manifest list is signed keylessly with Sigstore
 - provenance is published as part of the Docker release job

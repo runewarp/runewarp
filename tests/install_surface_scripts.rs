@@ -220,6 +220,69 @@ fn docker_registry_image_mode_retries_until_the_image_is_available() {
 }
 
 #[test]
+fn docker_registry_tag_absent_mode_allows_a_new_version_tag() {
+    let temp_dir = TempDir::new().unwrap();
+    write_minimal_binary_crate(temp_dir.path(), "0.3.1");
+
+    let fake_bin_dir = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir).unwrap();
+    let commands_file = temp_dir.path().join("curl-commands.txt");
+    write_executable(
+        &fake_bin_dir.join("curl"),
+        &format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" > \"{}\"\nprintf '404'\n",
+            commands_file.display()
+        ),
+    );
+
+    let output = run_validator_with_path(
+        temp_dir.path(),
+        &[
+            "docker-registry-tag-absent",
+            "--image-ref",
+            "docker.io/runewarp/runewarp:0.1.0",
+        ],
+        Some(&fake_bin_dir),
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read_to_string(commands_file).unwrap(),
+        "--silent --show-error --output /dev/null --write-out %{http_code} https://hub.docker.com/v2/namespaces/runewarp/repositories/runewarp/tags/0.1.0\n"
+    );
+}
+
+#[test]
+fn docker_registry_tag_absent_mode_rejects_an_existing_version_tag() {
+    let temp_dir = TempDir::new().unwrap();
+    write_minimal_binary_crate(temp_dir.path(), "0.3.1");
+
+    let fake_bin_dir = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin_dir).unwrap();
+    write_executable(
+        &fake_bin_dir.join("curl"),
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf '200'\n",
+    );
+
+    let output = run_validator_with_path(
+        temp_dir.path(),
+        &[
+            "docker-registry-tag-absent",
+            "--image-ref",
+            "docker.io/runewarp/runewarp:0.1.0",
+        ],
+        Some(&fake_bin_dir),
+    );
+
+    assert!(!output.status.success(), "{output:?}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("docker registry tag already exists for docker.io/runewarp/runewarp:0.1.0")
+    );
+}
+
+#[test]
 fn package_readiness_mode_accepts_a_publishable_crate() {
     let temp_dir = TempDir::new().unwrap();
     write_minimal_binary_crate(temp_dir.path(), "0.3.1");

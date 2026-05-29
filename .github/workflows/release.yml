@@ -24,6 +24,12 @@ jobs:
     name: Release gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      release_tag: ${{ steps.release-metadata.outputs.release_tag }}
+      release_version: ${{ steps.release-metadata.outputs.release_version }}
+      image_repository: ${{ steps.release-metadata.outputs.image_repository }}
+      primary_image_ref: ${{ steps.release-metadata.outputs.primary_image_ref }}
+      docker_tags: ${{ steps.release-metadata.outputs.docker_tags }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -31,7 +37,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Resolve release tag
+      - name: Resolve release metadata
+        id: release-metadata
         env:
           EVENT_NAME: ${{ github.event_name }}
           PUSH_TAG: ${{ github.ref_name }}
@@ -48,7 +55,31 @@ jobs:
             exit 1
           }
 
-          printf 'RELEASE_TAG=%s\n' "$release_tag" >> "$GITHUB_ENV"
+          release_version="${release_tag#v}"
+          image_repository="docker.io/runewarp/runewarp"
+          primary_image_ref="${image_repository}:${release_version}"
+          minor_series="${release_version%.*}"
+          major_series="${release_version%%.*}"
+
+          {
+            printf 'RELEASE_TAG=%s\n' "$release_tag"
+            printf 'RELEASE_VERSION=%s\n' "$release_version"
+            printf 'IMAGE_REPOSITORY=%s\n' "$image_repository"
+            printf 'PRIMARY_IMAGE_REF=%s\n' "$primary_image_ref"
+          } >> "$GITHUB_ENV"
+
+          {
+            printf 'release_tag=%s\n' "$release_tag"
+            printf 'release_version=%s\n' "$release_version"
+            printf 'image_repository=%s\n' "$image_repository"
+            printf 'primary_image_ref=%s\n' "$primary_image_ref"
+            printf 'docker_tags<<EOF\n'
+            printf '%s:%s\n' "$image_repository" "$release_version"
+            printf '%s:%s\n' "$image_repository" "$minor_series"
+            printf '%s:%s\n' "$image_repository" "$major_series"
+            printf '%s:latest\n' "$image_repository"
+            printf 'EOF\n'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Validate rehearsal release gate
         if: github.event_name == 'workflow_dispatch'
@@ -133,16 +164,154 @@ jobs:
         run: |
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             mode="rehearsal"
-            publish_note="No publish steps run in rehearsal mode."
+            publish_note="Rehearsal skips Docker Hub pushes, Sigstore signing, crates.io publication, and GitHub Release creation."
           else
             mode="tag gate"
-            publish_note="Distribution channel publication is wired by later release issues."
+            publish_note="Real release runs publish Docker Hub and crates.io, then finalize the GitHub Release after both channels validate."
           fi
 
           {
             printf '## Release workflow\n\n'
             printf '- Mode: %s\n' "$mode"
             printf -- "- Release tag: \`%s\`\n" "$RELEASE_TAG"
+            printf -- "- Release version: \`%s\`\n" "$RELEASE_VERSION"
             printf -- "- Source ref: \`%s\`\n" "${GITHUB_REF}"
+            printf -- "- Docker tags: \`%s\`, \`%s\`, \`%s\`, \`latest\`\n" "$RELEASE_VERSION" "${RELEASE_VERSION%.*}" "${RELEASE_VERSION%%.*}"
             printf '- Publish status: %s\n' "$publish_note"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  docker-release:
+    name: Publish Docker Hub release
+    if: github.event_name == 'push'
+    needs:
+      - gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Enforce Docker version tag immutability
+        run: |
+          ./scripts/validate-install-surfaces.sh docker-registry-tag-absent \
+            --image-ref "${{ needs.gate.outputs.primary_image_ref }}"
+
+      - name: Build and push multi-arch release image
+        id: build-image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          tags: ${{ needs.gate.outputs.docker_tags }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: Sign released image
+        env:
+          IMAGE_REPOSITORY: ${{ needs.gate.outputs.image_repository }}
+          IMAGE_DIGEST: ${{ steps.build-image.outputs.digest }}
+        run: |
+          cosign sign --yes "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+
+      - name: Verify published Docker image
+        run: |
+          ./scripts/validate-install-surfaces.sh docker-registry-image \
+            --image-ref "${{ needs.gate.outputs.primary_image_ref }}" \
+            --expected-version "${{ needs.gate.outputs.release_version }}" \
+            --retry-attempts 10 \
+            --retry-delay-seconds 15
+
+  crate-release:
+    name: Publish crates.io release
+    if: github.event_name == 'push'
+    needs:
+      - gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable
+          rustup default stable
+
+      - name: Publish crate to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+          CARGO_HTTP_MULTIPLEXING: "false"
+          CARGO_NET_RETRY: "5"
+        run: cargo publish --locked --manifest-path Cargo.toml
+
+      - name: Verify published crate install surface
+        run: |
+          ./scripts/validate-install-surfaces.sh registry-install \
+            --crate-name runewarp \
+            --bin-name runewarp \
+            --expected-version "${{ needs.gate.outputs.release_version }}" \
+            --retry-attempts 10 \
+            --retry-delay-seconds 30
+
+  github-release:
+    name: Finalize GitHub release
+    if: github.event_name == 'push'
+    needs:
+      - gate
+      - docker-release
+      - crate-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+
+      - name: Render release notes
+        run: ./scripts/render-release-notes.sh --version "${{ needs.gate.outputs.release_version }}" > /tmp/release-notes.md
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --repo "$REPOSITORY" \
+            --verify-tag \
+            --latest \
+            --title "Runewarp $RELEASE_VERSION" \
+            --notes-file /tmp/release-notes.md

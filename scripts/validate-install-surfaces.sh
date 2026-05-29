@@ -9,7 +9,7 @@ __runewarp_install_surface_cleanup_dir=""
 . "$tool_root/scripts/lib.sh"
 
 usage() {
-  usage_error "$(basename "$0") <cargo-install|package-readiness|docker-image> [--repo-root PATH] [--bin-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME]"
+  usage_error "$(basename "$0") <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]"
 }
 
 validate_cargo_install() {
@@ -76,6 +76,9 @@ validate_package_readiness() {
   section "Checking package readiness"
   note "Repository root: $repo_root"
 
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+  CARGO_HTTP_MULTIPLEXING=false \
+  CARGO_NET_RETRY=5 \
   cargo publish \
     --dry-run \
     --allow-dirty \
@@ -84,6 +87,78 @@ validate_package_readiness() {
     >/dev/null
 
   success "package readiness is valid"
+}
+
+validate_registry_install() {
+  local crate_name="$1"
+  local bin_name="$2"
+  local expected_version="$3"
+  local expected_text="$4"
+  local probe_arg="$5"
+  local retry_attempts="$6"
+  local retry_delay_seconds="$7"
+  local install_root output attempt
+
+  [[ -n "$crate_name" ]] || die "registry-install mode requires --crate-name"
+  [[ -n "$bin_name" ]] || die "registry-install mode requires --bin-name"
+  [[ -n "$expected_version" ]] || die "registry-install mode requires --expected-version"
+  if [[ -z "$expected_version" && -z "$expected_text" ]]; then
+    die "registry-install mode requires --expected-version or --expected-text"
+  fi
+  [[ "$retry_attempts" =~ ^[0-9]+$ ]] || die "--retry-attempts must be a non-negative integer"
+  [[ "$retry_delay_seconds" =~ ^[0-9]+$ ]] || die "--retry-delay-seconds must be a non-negative integer"
+  if [[ -z "$probe_arg" ]]; then
+    if [[ -n "$expected_version" ]]; then
+      probe_arg="--version"
+    else
+      probe_arg="--help"
+    fi
+  fi
+
+  require_command cargo
+  install_root="$(mktemp -d)"
+  __runewarp_install_surface_cleanup_dir="$install_root"
+  trap 'if [[ -n "$__runewarp_install_surface_cleanup_dir" ]]; then rm -rf "$__runewarp_install_surface_cleanup_dir"; fi' RETURN
+
+  section "Installing crate from crates.io"
+  note "Crate: $crate_name"
+  note "Binary: $bin_name"
+  note "Retry attempts: $retry_attempts"
+
+  attempt=1
+  while (( attempt <= retry_attempts )); do
+    if CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+      CARGO_HTTP_MULTIPLEXING=false \
+      CARGO_NET_RETRY=5 \
+      cargo install \
+        --locked \
+        --version "$expected_version" \
+        --root "$install_root" \
+        "$crate_name" \
+        >/dev/null; then
+      break
+    fi
+
+    if (( attempt == retry_attempts )); then
+      die "crate registry install did not succeed after $retry_attempts attempts"
+    fi
+
+    warn "crate registry install attempt $attempt failed; retrying after ${retry_delay_seconds}s"
+    sleep "$retry_delay_seconds"
+    attempt=$((attempt + 1))
+  done
+
+  section "Checking installed registry binary"
+  output="$("$install_root/bin/$bin_name" "$probe_arg")"
+  if [[ -n "$expected_version" ]]; then
+    validate_version_output "registry-installed binary" "$output" "$expected_version"
+  else
+    validate_version_output "registry-installed binary" "$output" "$expected_text"
+  fi
+
+  success "crates.io install surface is valid"
+  __runewarp_install_surface_cleanup_dir=""
+  rm -rf "$install_root"
 }
 
 validate_docker_image() {
@@ -129,13 +204,119 @@ validate_docker_image() {
   success "docker image surface is valid"
 }
 
+validate_docker_registry_image() {
+  local image_ref="$1"
+  local expected_version="$2"
+  local expected_text="$3"
+  local probe_arg="$4"
+  local retry_attempts="$5"
+  local retry_delay_seconds="$6"
+  local output attempt
+
+  [[ -n "$image_ref" ]] || die "docker-registry-image mode requires --image-ref"
+  if [[ -z "$expected_version" && -z "$expected_text" ]]; then
+    die "docker-registry-image mode requires --expected-version or --expected-text"
+  fi
+  [[ "$retry_attempts" =~ ^[0-9]+$ ]] || die "--retry-attempts must be a non-negative integer"
+  [[ "$retry_delay_seconds" =~ ^[0-9]+$ ]] || die "--retry-delay-seconds must be a non-negative integer"
+  if [[ -z "$probe_arg" ]]; then
+    if [[ -n "$expected_version" ]]; then
+      probe_arg="--version"
+    else
+      probe_arg="--help"
+    fi
+  fi
+
+  require_command docker
+
+  section "Pulling Docker image"
+  note "Image ref: $image_ref"
+  note "Retry attempts: $retry_attempts"
+  attempt=1
+  while (( attempt <= retry_attempts )); do
+    if docker pull "$image_ref" >/dev/null; then
+      break
+    fi
+
+    if (( attempt == retry_attempts )); then
+      die "docker registry image did not become available after $retry_attempts attempts"
+    fi
+
+    warn "docker pull attempt $attempt failed; retrying after ${retry_delay_seconds}s"
+    sleep "$retry_delay_seconds"
+    attempt=$((attempt + 1))
+  done
+
+  section "Checking released Docker image startup"
+  output="$(docker run --rm "$image_ref" "$probe_arg")"
+  if [[ -n "$expected_version" ]]; then
+    validate_version_output "released docker image" "$output" "$expected_version"
+  else
+    validate_version_output "released docker image" "$output" "$expected_text"
+  fi
+
+  success "docker registry image surface is valid"
+}
+
+docker_hub_tag_url_from_image_ref() {
+  local image_ref="$1"
+  local repository_with_tag repository_path namespace repository tag remainder
+
+  [[ "$image_ref" == *:* ]] || die "docker-registry-tag-absent mode requires --image-ref with an explicit tag"
+
+  tag="${image_ref##*:}"
+  repository_with_tag="${image_ref%:*}"
+  repository_path="${repository_with_tag#docker.io/}"
+  namespace="${repository_path%%/*}"
+  remainder="${repository_path#*/}"
+  repository="${remainder%%/*}"
+
+  [[ -n "$namespace" && -n "$repository" && "$repository_path" != "$repository_with_tag" && "$remainder" == "$repository" ]] || {
+    die "docker-registry-tag-absent mode requires --image-ref in docker.io/<namespace>/<repository>:<tag> form"
+  }
+
+  printf 'https://hub.docker.com/v2/namespaces/%s/repositories/%s/tags/%s\n' "$namespace" "$repository" "$tag"
+}
+
+validate_docker_registry_tag_absent() {
+  local image_ref="$1"
+  local tag_lookup_url http_status
+
+  [[ -n "$image_ref" ]] || die "docker-registry-tag-absent mode requires --image-ref"
+
+  require_command curl
+
+  section "Checking Docker tag immutability"
+  note "Image ref: $image_ref"
+
+  tag_lookup_url="$(docker_hub_tag_url_from_image_ref "$image_ref")"
+  http_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "$tag_lookup_url")" ||
+    die "failed to query Docker Hub tag metadata for $image_ref"
+
+  case "$http_status" in
+    404)
+      success "docker version tag is available for first publication"
+      ;;
+    200)
+      die "docker registry tag already exists for $image_ref; cut a new patch version instead of republishing"
+      ;;
+    *)
+      die "unexpected Docker Hub tag lookup status for $image_ref: $http_status"
+      ;;
+  esac
+}
+
 main() {
   local mode="${1:-}"
   local bin_name=""
+  local crate_name=""
   local expected_version=""
   local expected_text=""
   local probe_arg=""
   local image_tag=""
+  local image_ref=""
+  local retry_attempts="10"
+  local retry_delay_seconds="30"
 
   [[ -n "$mode" ]] || usage
   shift
@@ -150,6 +331,11 @@ main() {
       --bin-name)
         [[ $# -ge 2 ]] || usage
         bin_name="$2"
+        shift 2
+        ;;
+      --crate-name)
+        [[ $# -ge 2 ]] || usage
+        crate_name="$2"
         shift 2
         ;;
       --expected-version)
@@ -172,6 +358,21 @@ main() {
         image_tag="$2"
         shift 2
         ;;
+      --image-ref)
+        [[ $# -ge 2 ]] || usage
+        image_ref="$2"
+        shift 2
+        ;;
+      --retry-attempts)
+        [[ $# -ge 2 ]] || usage
+        retry_attempts="$2"
+        shift 2
+        ;;
+      --retry-delay-seconds)
+        [[ $# -ge 2 ]] || usage
+        retry_delay_seconds="$2"
+        shift 2
+        ;;
       *)
         usage
         ;;
@@ -185,8 +386,17 @@ main() {
     package-readiness)
       validate_package_readiness "$repo_root"
       ;;
+    registry-install)
+      validate_registry_install "$crate_name" "$bin_name" "$expected_version" "$expected_text" "$probe_arg" "$retry_attempts" "$retry_delay_seconds"
+      ;;
     docker-image)
       validate_docker_image "$repo_root" "$expected_version" "$expected_text" "$probe_arg" "$image_tag"
+      ;;
+    docker-registry-image)
+      validate_docker_registry_image "$image_ref" "$expected_version" "$expected_text" "$probe_arg" "$retry_attempts" "$retry_delay_seconds"
+      ;;
+    docker-registry-tag-absent)
+      validate_docker_registry_tag_absent "$image_ref"
       ;;
     *)
       usage

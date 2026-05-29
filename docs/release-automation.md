@@ -1,6 +1,6 @@
 # Release automation
 
-This document describes the current repository automation for release preparation. It covers the CI contract that backs Runewarp's supported install surfaces and the release-gate workflow that controls signed release tags and dry-run rehearsals.
+This document describes the current repository automation for release preparation and publication. It covers the CI contract that backs Runewarp's supported install surfaces and the release workflow that controls signed release tags, dry-run rehearsals, and real release-channel publication.
 
 ## CI contract
 
@@ -32,6 +32,13 @@ For tag pushes, the workflow:
 2. verifies the SSH-signed tag against `.github/release-allowed-signers`
 3. verifies that the tagged commit already has a successful aggregate `CI` check run
 4. renders the changelog-driven release notes preview
+5. verifies that the bare release image tag `X.Y.Z` does not already exist on Docker Hub, so a rerun cannot mutate a published version
+6. publishes the multi-arch Docker Hub image set for the release version plus the stable aliases `X.Y`, `X`, and `latest`
+7. signs the released Docker manifest list keylessly with Sigstore and publishes build provenance through the Docker release job
+8. verifies the public Docker Hub install surface by pulling the version tag and checking `runewarp --version`
+9. publishes the crate to crates.io
+10. verifies the public crates.io install surface by installing the released version from crates.io with retries for registry propagation
+11. creates the GitHub Release only after the Docker and crates.io release jobs succeed; reruns for the same version fail forward instead of mutating the existing release record
 
 Protected release tags are enforced as a GitHub-side prerequisite through repository rules or rulesets rather than re-checked at workflow runtime.
 
@@ -43,5 +50,39 @@ For manual rehearsal, the workflow:
 2. requires a stable `release_tag` input that matches `Cargo.toml`
 3. validates release metadata and release-notes rendering
 4. skips signed-tag and protected-tag enforcement because rehearsal happens before the irreversible tag is created
+5. summarizes the exact Docker tags and release version that the real release would publish
+6. skips Docker Hub publication, Sigstore signing, crates.io publication, and GitHub Release creation
 
-The workflow does not publish to crates.io or Docker Hub yet. That distribution work is wired by later release slices.
+## Release job boundaries
+
+The workflow keeps GitHub-specific orchestration in YAML and keeps install-surface validation in repo-owned scripts:
+
+- `scripts/validate-release-gates.sh` owns rehearsal/tag gate validation
+- `scripts/render-release-notes.sh` owns changelog-driven release-body rendering
+- `scripts/validate-install-surfaces.sh docker-registry-tag-absent` owns the Docker Hub preflight check that keeps the bare release tag immutable
+- `scripts/validate-install-surfaces.sh registry-install` owns post-publish crates.io verification, including retrying until the registry surface is visible
+- `scripts/validate-install-surfaces.sh docker-registry-image` owns post-publish Docker Hub verification, including retrying until the released image is pullable
+
+## Release environment and secrets
+
+Real publish jobs run in the GitHub `release` environment. The current workflow expects:
+
+| Secret | Purpose |
+| --- | --- |
+| `CARGO_REGISTRY_TOKEN` | `cargo publish` authentication for crates.io |
+| `DOCKER_USERNAME` | Docker Hub login username |
+| `DOCKER_TOKEN` | Docker Hub access token |
+
+For dress rehearsals, `workflow_dispatch` runs only the gate job and does not consume release secrets.
+
+Before the first real tag release, the `release` environment should allow both the `main` branch for rehearsal dispatches and stable `v*` tags for real publish runs.
+
+## Docker release contract
+
+- release images are built for `linux/amd64` and `linux/arm64`
+- published tags are `X.Y.Z`, `X.Y`, `X`, and `latest`
+- the bare release tag `X.Y.Z` must not exist before publish; if it already exists, the workflow fails and recovery happens with a new patch version
+- `latest` only moves on stable releases
+- the released manifest list is signed keylessly with Sigstore
+- provenance is published as part of the Docker release job
+- base images stay pinned by digest in `Dockerfile`; refreshing those digests is an intentional release-prep review step

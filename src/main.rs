@@ -1,7 +1,8 @@
+mod reconnect_policy;
+
 use std::env;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
-use std::future::Future;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -31,6 +32,8 @@ use tokio::net::lookup_host;
 use tokio::sync::watch;
 use x509_parser::parse_x509_certificate;
 
+use crate::reconnect_policy::ReconnectPolicy;
+
 mod cli;
 
 const MANUAL_CERT_RENEW_AFTER_DAYS: i64 = 60;
@@ -55,14 +58,12 @@ impl Error for LoggedRuntimeError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RetryAttemptKind {
     Initial,
-    ImmediateRetry,
-    IntervalRetry,
+    Retry,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RetryDisposition {
-    Immediate,
-    Interval,
+    Retry,
     Stop,
 }
 
@@ -126,98 +127,100 @@ async fn run_client_command(
     shutdown: &watch::Receiver<bool>,
 ) -> Result<(), Box<dyn Error>> {
     let mut connected_once = false;
+    let mut reconnect_policy = ReconnectPolicy::new();
     loop {
         if shutdown_requested(shutdown) {
             return Ok(());
         }
         ensure_client_identity_fresh(&settings.identity_directory)?;
         let phase = client_tunnel_phase(connected_once);
-        let Some((client, connected_dial_target)) = retry_with_immediate_retry(
-            settings.reconnect_interval,
-            shutdown,
-            retry_disposition_for_client_connect_error,
-            |attempt_kind| async move {
-                let log_attempt_kind = client_tunnel_attempt_kind(attempt_kind);
-                let dial_target = match resolve_client_tunnel_dial_target(settings).await {
-                    Ok(dial_target) => dial_target,
-                    Err(error) => {
-                        runewarp::runtime_log::client_tunnel_resolution_failed(
-                            phase,
-                            log_attempt_kind,
-                            &configured_server_addr(
-                                &settings.server_hostname,
-                                settings.server_port,
-                            ),
-                            settings.reconnect_interval,
+        let attempt_kind = client_tunnel_attempt_kind(reconnect_policy.is_fresh());
+        let dial_target = match tokio::select! {
+            _ = wait_for_shutdown(shutdown.clone()) => return Ok(()),
+            result = resolve_client_tunnel_dial_target(settings) => result,
+        } {
+            Ok(dial_target) => dial_target,
+            Err(error) => {
+                if matches!(
+                    retry_disposition_for_client_connect_error(&error),
+                    RetryDisposition::Retry
+                ) {
+                    let retry = reconnect_policy.next_retry();
+                    runewarp::runtime_log::client_tunnel_resolution_failed(
+                        phase,
+                        attempt_kind,
+                        &configured_server_addr(&settings.server_hostname, settings.server_port),
+                        retry.display_delay_secs,
+                        &error.to_string(),
+                    );
+                    if wait_for_retry_delay(retry.delay, shutdown).await {
+                        continue;
+                    }
+                    return Ok(());
+                }
+                return Err(Box::new(error));
+            }
+        };
+
+        runewarp::runtime_log::client_tunnel_connecting(
+            phase,
+            attempt_kind,
+            &dial_target.configured_server_addr,
+            dial_target.resolved_server_addr,
+        );
+
+        let client = match tokio::select! {
+            _ = wait_for_shutdown(shutdown.clone()) => return Ok(()),
+            result = PreparedClient::connect_to(settings, local_bind_addr, dial_target.resolved_server_addr) => result,
+        } {
+            Ok(client) => client,
+            Err(error) => {
+                if matches!(
+                    retry_disposition_for_client_connect_error(&error),
+                    RetryDisposition::Retry
+                ) {
+                    let retry = reconnect_policy.next_retry();
+                    if error
+                        .source()
+                        .and_then(|source| source.downcast_ref::<runewarp::ClientConnectError>())
+                        .is_some_and(runewarp::ClientConnectError::is_unauthorized_client_identity)
+                    {
+                        runewarp::runtime_log::client_tunnel_unauthorized(
+                            attempt_kind,
+                            &dial_target.configured_server_addr,
+                            retry.display_delay_secs,
                             &error.to_string(),
                         );
-                        return Err(error);
-                    }
-                };
-                runewarp::runtime_log::client_tunnel_connecting(
-                    phase,
-                    log_attempt_kind,
-                    &dial_target.configured_server_addr,
-                    dial_target.resolved_server_addr,
-                    settings.reconnect_interval,
-                );
-                match PreparedClient::connect_to(
-                    settings,
-                    local_bind_addr,
-                    dial_target.resolved_server_addr,
-                )
-                .await
-                {
-                    Ok(client) => {
-                        runewarp::runtime_log::client_tunnel_connected(
+                    } else {
+                        runewarp::runtime_log::client_tunnel_connect_failed(
                             phase,
+                            attempt_kind,
                             &dial_target.configured_server_addr,
                             dial_target.resolved_server_addr,
+                            retry.display_delay_secs,
+                            &error.to_string(),
                         );
-                        if !connected_once {
-                            runewarp::runtime_log::client_ready(
-                                &dial_target.configured_server_addr,
-                            );
-                        }
-                        Ok((client, dial_target))
                     }
-                    Err(error) => {
-                        if error
-                            .source()
-                            .and_then(|source| {
-                                source.downcast_ref::<runewarp::ClientConnectError>()
-                            })
-                            .is_some_and(
-                                runewarp::ClientConnectError::is_unauthorized_client_identity,
-                            )
-                        {
-                            runewarp::runtime_log::client_tunnel_unauthorized(
-                                log_attempt_kind,
-                                &dial_target.configured_server_addr,
-                                &error.to_string(),
-                            );
-                        } else {
-                            runewarp::runtime_log::client_tunnel_connect_failed(
-                                phase,
-                                log_attempt_kind,
-                                &dial_target.configured_server_addr,
-                                dial_target.resolved_server_addr,
-                                settings.reconnect_interval,
-                                &error.to_string(),
-                            );
-                        }
-                        Err(error)
+                    if wait_for_retry_delay(retry.delay, shutdown).await {
+                        continue;
                     }
+                    return Ok(());
                 }
-            },
-            |delay| tokio::time::sleep(delay),
-        )
-        .await
-        .map_err(|error| -> Box<dyn Error> { Box::new(error) })?
-        else {
-            return Ok(());
+                return Err(Box::new(error));
+            }
         };
+
+        let first_connection = !connected_once;
+        reconnect_policy.reset();
         connected_once = true;
+        runewarp::runtime_log::client_tunnel_connected(
+            phase,
+            &dial_target.configured_server_addr,
+            dial_target.resolved_server_addr,
+        );
+        if first_connection {
+            runewarp::runtime_log::client_ready(&dial_target.configured_server_addr);
+        }
 
         if let Err(error) = client
             .run_until_shutdown({
@@ -228,31 +231,35 @@ async fn run_client_command(
             })
             .await
         {
+            let next_attempt_kind = client_tunnel_attempt_kind(reconnect_policy.is_fresh());
+            let retry = reconnect_policy.next_retry();
             if is_unauthorized_client_connection_error(&error) {
                 runewarp::runtime_log::client_tunnel_unauthorized(
-                    client_tunnel_unauthorized_attempt_kind(connected_once),
-                    &connected_dial_target.configured_server_addr,
+                    next_attempt_kind,
+                    &dial_target.configured_server_addr,
+                    retry.display_delay_secs,
                     &error.to_string(),
                 );
-                tokio::select! {
-                    _ = wait_for_shutdown(shutdown.clone()) => return Ok(()),
-                    _ = tokio::time::sleep(settings.reconnect_interval) => {}
-                }
             } else {
                 if is_clean_client_tunnel_close(&error) {
                     runewarp::runtime_log::client_tunnel_closed(
-                        &connected_dial_target.configured_server_addr,
-                        connected_dial_target.resolved_server_addr,
+                        &dial_target.configured_server_addr,
+                        dial_target.resolved_server_addr,
+                        retry.display_delay_secs,
                     );
                 } else {
                     runewarp::runtime_log::client_tunnel_disconnected(
-                        &connected_dial_target.configured_server_addr,
-                        connected_dial_target.resolved_server_addr,
+                        &dial_target.configured_server_addr,
+                        dial_target.resolved_server_addr,
+                        retry.display_delay_secs,
                         &error.to_string(),
                     );
                 }
             }
-            continue;
+            if wait_for_retry_delay(retry.delay, shutdown).await {
+                continue;
+            }
+            return Ok(());
         }
 
         return Ok(());
@@ -666,13 +673,8 @@ fn retry_disposition_for_client_connect_error(
 ) -> RetryDisposition {
     match error {
         runewarp::ClientStartupError::Resolve(_)
-        | runewarp::ClientStartupError::MissingServerAddress { .. } => RetryDisposition::Immediate,
-        runewarp::ClientStartupError::Connect(source)
-            if source.is_unauthorized_client_identity() =>
-        {
-            RetryDisposition::Interval
-        }
-        runewarp::ClientStartupError::Connect(_) => RetryDisposition::Immediate,
+        | runewarp::ClientStartupError::MissingServerAddress { .. }
+        | runewarp::ClientStartupError::Connect(_) => RetryDisposition::Retry,
         _ => RetryDisposition::Stop,
     }
 }
@@ -686,26 +688,15 @@ fn client_tunnel_phase(connected_once: bool) -> runewarp::runtime_log::ClientTun
 }
 
 fn client_tunnel_attempt_kind(
-    attempt_kind: RetryAttemptKind,
+    is_fresh_attempt: bool,
 ) -> runewarp::runtime_log::ClientTunnelAttemptKind {
-    match attempt_kind {
-        RetryAttemptKind::Initial => runewarp::runtime_log::ClientTunnelAttemptKind::Initial,
-        RetryAttemptKind::ImmediateRetry => {
-            runewarp::runtime_log::ClientTunnelAttemptKind::ImmediateRetry
-        }
-        RetryAttemptKind::IntervalRetry => {
-            runewarp::runtime_log::ClientTunnelAttemptKind::IntervalRetry
-        }
-    }
-}
-
-fn client_tunnel_unauthorized_attempt_kind(
-    connected_once: bool,
-) -> runewarp::runtime_log::ClientTunnelAttemptKind {
-    if connected_once {
-        runewarp::runtime_log::ClientTunnelAttemptKind::IntervalRetry
+    match if is_fresh_attempt {
+        RetryAttemptKind::Initial
     } else {
-        runewarp::runtime_log::ClientTunnelAttemptKind::Initial
+        RetryAttemptKind::Retry
+    } {
+        RetryAttemptKind::Initial => runewarp::runtime_log::ClientTunnelAttemptKind::Initial,
+        RetryAttemptKind::Retry => runewarp::runtime_log::ClientTunnelAttemptKind::Retry,
     }
 }
 
@@ -763,6 +754,13 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     }
 }
 
+async fn wait_for_retry_delay(delay: Duration, shutdown: &watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        _ = wait_for_shutdown(shutdown.clone()) => false,
+        _ = tokio::time::sleep(delay) => true,
+    }
+}
+
 async fn wait_for_orderly_shutdown_signal() -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -785,57 +783,6 @@ async fn wait_for_orderly_shutdown_signal() -> io::Result<()> {
             .await
             .map_err(|error| io::Error::other(error.to_string()))?;
         Ok(())
-    }
-}
-
-async fn retry_with_immediate_retry<T, E, Attempt, AttemptFuture, Sleep, SleepFuture>(
-    retry_interval: Duration,
-    shutdown: &watch::Receiver<bool>,
-    retry_disposition: impl Fn(&E) -> RetryDisposition,
-    mut attempt: Attempt,
-    mut sleep: Sleep,
-) -> Result<Option<T>, E>
-where
-    Attempt: FnMut(RetryAttemptKind) -> AttemptFuture,
-    AttemptFuture: Future<Output = Result<T, E>>,
-    Sleep: FnMut(Duration) -> SleepFuture,
-    SleepFuture: Future<Output = ()>,
-{
-    let mut used_immediate_retry = false;
-    let mut attempt_kind = RetryAttemptKind::Initial;
-    loop {
-        if shutdown_requested(shutdown) {
-            return Ok(None);
-        }
-        let attempt_result = tokio::select! {
-            _ = wait_for_shutdown(shutdown.clone()) => return Ok(None),
-            result = attempt(attempt_kind) => result,
-        };
-        match attempt_result {
-            Ok(result) => return Ok(Some(result)),
-            Err(error) => match retry_disposition(&error) {
-                RetryDisposition::Immediate if used_immediate_retry => {
-                    tokio::select! {
-                        _ = wait_for_shutdown(shutdown.clone()) => return Ok(None),
-                        _ = sleep(retry_interval) => {}
-                    }
-                    attempt_kind = RetryAttemptKind::IntervalRetry;
-                }
-                RetryDisposition::Immediate => {
-                    used_immediate_retry = true;
-                    attempt_kind = RetryAttemptKind::ImmediateRetry;
-                }
-                RetryDisposition::Interval => {
-                    used_immediate_retry = true;
-                    tokio::select! {
-                        _ = wait_for_shutdown(shutdown.clone()) => return Ok(None),
-                        _ = sleep(retry_interval) => {}
-                    }
-                    attempt_kind = RetryAttemptKind::IntervalRetry;
-                }
-                RetryDisposition::Stop => return Err(error),
-            },
-        }
     }
 }
 
@@ -1252,7 +1199,6 @@ fn write_new_file(path: &Path, contents: &[u8]) -> io::Result<()> {
 mod tests {
     use std::fs;
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use quinn::{ApplicationClose, ConnectionClose, TransportErrorCode, VarInt};
@@ -1267,299 +1213,61 @@ mod tests {
     };
 
     use super::{
-        RetryAttemptKind, RetryDisposition, client_tunnel_unauthorized_attempt_kind,
-        ensure_client_identity_fresh, retry_with_immediate_retry,
+        RetryDisposition, client_tunnel_attempt_kind, ensure_client_identity_fresh,
+        wait_for_retry_delay,
     };
 
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum TestError {
-        ImmediateRetry,
-        IntervalRetry,
-        Permanent,
-    }
-
-    #[tokio::test]
-    async fn retries_immediately_once_then_waits_for_the_retry_interval() {
-        let attempts = Arc::new(Mutex::new(0));
-        let retry_attempts = Arc::new(Mutex::new(Vec::new()));
-        let sleeps = Arc::new(Mutex::new(Vec::new()));
-        let retry_interval = Duration::from_secs(5);
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
-            retry_interval,
-            &shutdown_rx,
-            |error: &TestError| match error {
-                TestError::ImmediateRetry => RetryDisposition::Immediate,
-                TestError::IntervalRetry => RetryDisposition::Interval,
-                TestError::Permanent => RetryDisposition::Stop,
-            },
-            {
-                let attempts = attempts.clone();
-                let retry_attempts = retry_attempts.clone();
-                move |attempt_kind| {
-                    let attempts = attempts.clone();
-                    let retry_attempts = retry_attempts.clone();
-                    async move {
-                        retry_attempts
-                            .lock()
-                            .expect("retry attempts mutex should not be poisoned")
-                            .push(attempt_kind);
-                        let mut attempts = attempts
-                            .lock()
-                            .expect("attempt count mutex should not be poisoned");
-                        *attempts += 1;
-                        match *attempts {
-                            1 | 2 => Err(TestError::ImmediateRetry),
-                            3 => Ok(()),
-                            _ => unreachable!(),
-                        }
-                    }
-                }
-            },
-            {
-                let sleeps = sleeps.clone();
-                move |delay| {
-                    let sleeps = sleeps.clone();
-                    async move {
-                        sleeps
-                            .lock()
-                            .expect("sleep tracking mutex should not be poisoned")
-                            .push(delay);
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(result, Ok(Some(())));
-        assert_eq!(
-            *retry_attempts
-                .lock()
-                .expect("retry attempts mutex should not be poisoned"),
-            vec![
-                RetryAttemptKind::Initial,
-                RetryAttemptKind::ImmediateRetry,
-                RetryAttemptKind::IntervalRetry,
-            ]
-        );
-        assert_eq!(
-            *sleeps
-                .lock()
-                .expect("sleep tracking mutex should not be poisoned"),
-            vec![retry_interval]
-        );
-    }
-
-    #[tokio::test]
-    async fn permanent_errors_do_not_retry() {
-        let sleeps = Arc::new(Mutex::new(Vec::new()));
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
-            Duration::from_secs(5),
-            &shutdown_rx,
-            |error: &TestError| match error {
-                TestError::ImmediateRetry => RetryDisposition::Immediate,
-                TestError::IntervalRetry => RetryDisposition::Interval,
-                TestError::Permanent => RetryDisposition::Stop,
-            },
-            |_attempt_kind| async { Result::<(), TestError>::Err(TestError::Permanent) },
-            {
-                let sleeps = sleeps.clone();
-                move |delay| {
-                    let sleeps = sleeps.clone();
-                    async move {
-                        sleeps
-                            .lock()
-                            .expect("sleep tracking mutex should not be poisoned")
-                            .push(delay);
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(result, Err(TestError::Permanent));
-        assert!(
-            sleeps
-                .lock()
-                .expect("sleep tracking mutex should not be poisoned")
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn interval_retry_errors_skip_the_immediate_retry_attempt() {
-        let retry_attempts = Arc::new(Mutex::new(Vec::new()));
-        let sleeps = Arc::new(Mutex::new(Vec::new()));
-        let retry_interval = Duration::from_secs(5);
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
-            retry_interval,
-            &shutdown_rx,
-            |error: &TestError| match error {
-                TestError::ImmediateRetry => RetryDisposition::Immediate,
-                TestError::IntervalRetry => RetryDisposition::Interval,
-                TestError::Permanent => RetryDisposition::Stop,
-            },
-            {
-                let retry_attempts = retry_attempts.clone();
-                move |attempt_kind| {
-                    let retry_attempts = retry_attempts.clone();
-                    async move {
-                        retry_attempts
-                            .lock()
-                            .expect("retry attempts mutex should not be poisoned")
-                            .push(attempt_kind);
-                        if retry_attempts
-                            .lock()
-                            .expect("retry attempts mutex should not be poisoned")
-                            .len()
-                            == 1
-                        {
-                            Err(TestError::IntervalRetry)
-                        } else {
-                            Ok(())
-                        }
-                    }
-                }
-            },
-            {
-                let sleeps = sleeps.clone();
-                move |delay| {
-                    let sleeps = sleeps.clone();
-                    async move {
-                        sleeps
-                            .lock()
-                            .expect("sleep tracking mutex should not be poisoned")
-                            .push(delay);
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(result, Ok(Some(())));
-        assert_eq!(
-            *retry_attempts
-                .lock()
-                .expect("retry attempts mutex should not be poisoned"),
-            vec![RetryAttemptKind::Initial, RetryAttemptKind::IntervalRetry]
-        );
-        assert_eq!(
-            *sleeps
-                .lock()
-                .expect("sleep tracking mutex should not be poisoned"),
-            vec![retry_interval]
-        );
-    }
-
-    #[tokio::test]
-    async fn shutdown_stops_before_an_immediate_retry_attempt() {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let retry_attempts = Arc::new(Mutex::new(Vec::new()));
-
-        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
-            Duration::from_secs(5),
-            &shutdown_rx,
-            |_: &TestError| RetryDisposition::Immediate,
-            {
-                let retry_attempts = retry_attempts.clone();
-                let shutdown_tx = shutdown_tx.clone();
-                move |attempt_kind| {
-                    let retry_attempts = retry_attempts.clone();
-                    let shutdown_tx = shutdown_tx.clone();
-                    async move {
-                        retry_attempts
-                            .lock()
-                            .expect("retry attempts mutex should not be poisoned")
-                            .push(attempt_kind);
-                        let _ = shutdown_tx.send(true);
-                        Err(TestError::ImmediateRetry)
-                    }
-                }
-            },
-            |_delay| async {},
-        )
-        .await;
-
-        assert_eq!(result, Ok(None));
-        assert_eq!(
-            *retry_attempts
-                .lock()
-                .expect("retry attempts mutex should not be poisoned"),
-            vec![RetryAttemptKind::Initial]
-        );
-    }
-
-    #[tokio::test]
-    async fn shutdown_stops_while_waiting_for_an_interval_retry() {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let retry_attempts = Arc::new(Mutex::new(Vec::new()));
-        let sleeps = Arc::new(Mutex::new(Vec::new()));
-
-        let result: Result<Option<()>, TestError> = retry_with_immediate_retry(
-            Duration::from_secs(5),
-            &shutdown_rx,
-            |_: &TestError| RetryDisposition::Interval,
-            {
-                let retry_attempts = retry_attempts.clone();
-                move |attempt_kind| {
-                    let retry_attempts = retry_attempts.clone();
-                    async move {
-                        retry_attempts
-                            .lock()
-                            .expect("retry attempts mutex should not be poisoned")
-                            .push(attempt_kind);
-                        Err(TestError::IntervalRetry)
-                    }
-                }
-            },
-            {
-                let sleeps = sleeps.clone();
-                let shutdown_tx = shutdown_tx.clone();
-                move |delay| {
-                    let sleeps = sleeps.clone();
-                    let shutdown_tx = shutdown_tx.clone();
-                    async move {
-                        sleeps
-                            .lock()
-                            .expect("sleep tracking mutex should not be poisoned")
-                            .push(delay);
-                        let _ = shutdown_tx.send(true);
-                        tokio::task::yield_now().await;
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(result, Ok(None));
-        assert_eq!(
-            *retry_attempts
-                .lock()
-                .expect("retry attempts mutex should not be poisoned"),
-            vec![RetryAttemptKind::Initial]
-        );
-        assert_eq!(
-            *sleeps
-                .lock()
-                .expect("sleep tracking mutex should not be poisoned"),
-            vec![Duration::from_secs(5)]
-        );
-    }
-
     #[test]
-    fn unauthorized_tunnel_failures_log_the_next_retry_shape() {
+    fn retry_attempt_kind_matches_fresh_policy_state() {
         assert_eq!(
-            client_tunnel_unauthorized_attempt_kind(false),
+            client_tunnel_attempt_kind(true),
             runewarp::runtime_log::ClientTunnelAttemptKind::Initial
         );
         assert_eq!(
-            client_tunnel_unauthorized_attempt_kind(true),
-            runewarp::runtime_log::ClientTunnelAttemptKind::IntervalRetry
+            client_tunnel_attempt_kind(false),
+            runewarp::runtime_log::ClientTunnelAttemptKind::Retry
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_retry_delay_completes_when_the_delay_elapses() {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        assert!(wait_for_retry_delay(Duration::ZERO, &shutdown_rx).await);
+    }
+
+    #[tokio::test]
+    async fn wait_for_retry_delay_stops_when_shutdown_arrives_first() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        assert!(!wait_for_retry_delay(Duration::from_secs(60), &shutdown_rx).await);
+    }
+
+    #[test]
+    fn client_connect_failures_share_one_retry_disposition() {
+        let resolve = runewarp::ClientStartupError::Resolve(std::io::Error::other("lookup failed"));
+        let missing = runewarp::ClientStartupError::MissingServerAddress {
+            server_hostname: "tunnel.example.test".to_owned(),
+        };
+        let connect = runewarp::ClientStartupError::Connect(runewarp::ClientConnectError::Bind(
+            std::io::Error::other("dial failed"),
+        ));
+
+        assert_eq!(
+            super::retry_disposition_for_client_connect_error(&resolve),
+            RetryDisposition::Retry
+        );
+        assert_eq!(
+            super::retry_disposition_for_client_connect_error(&missing),
+            RetryDisposition::Retry
+        );
+        assert_eq!(
+            super::retry_disposition_for_client_connect_error(&connect),
+            RetryDisposition::Retry
         );
     }
 

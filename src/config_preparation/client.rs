@@ -1,13 +1,10 @@
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
 use crate::config_preparation::{
     PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
 };
 use crate::settings::{
-    DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS, LogLevel, RawClientAcmeConfig, RawClientConfig,
-    RawClientServiceConfig, SettingsError, collect_client_unknown_field_messages,
-    deserialize_selected_section, load_log_level_from_path, load_optional_selected_section_value,
+    LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig, SettingsError,
+    collect_client_unknown_field_messages, deserialize_selected_section, load_log_level_from_path,
+    load_optional_selected_section_value,
 };
 use crate::trust::{
     ClientServerTrust, ResolveClientServerTrustError, resolve_client_server_trust_with_default,
@@ -16,6 +13,7 @@ use crate::{
     ClientRuntimeArgs, ClientSettingsResolutionError, SelectedClientConfig, XdgPathError,
     default_client_acme_state_dir, default_client_server_ca_path, default_config_path,
 };
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreparedClientConfig {
@@ -24,7 +22,6 @@ pub(crate) struct PreparedClientConfig {
     pub(crate) log_level: LogLevel,
     pub(crate) trust: PreparedClientTrust,
     pub(crate) identity_directory: PreparedValue<PathBuf>,
-    pub(crate) reconnect_interval: Duration,
     pub(crate) services: Vec<PreparedClientServiceConfig>,
     pub(crate) manual_public_cert_present: bool,
     pub(crate) manual_public_cert_directory: Option<PreparedValue<PathBuf>>,
@@ -306,7 +303,6 @@ fn prepare_raw_client_config_with_defaults(
             &config_dir,
             defaults.default_identity_directory,
         ),
-        reconnect_interval: Duration::from_secs(DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS),
         services: raw
             .services
             .into_iter()
@@ -431,8 +427,6 @@ fn default_public_cert_dir() -> Result<PathBuf, XdgPathError> {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::time::Duration;
-
     use tempfile::tempdir;
 
     use super::{
@@ -481,10 +475,6 @@ mod tests {
             Some("tunnel.example.test".to_owned())
         );
         assert_eq!(prepared.log_level, LogLevel::Info);
-        assert_eq!(
-            prepared.reconnect_interval,
-            Duration::from_secs(crate::DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS)
-        );
         assert_eq!(prepared.trust, PreparedClientTrust::System);
         assert_eq!(
             prepared.identity_directory,
@@ -580,10 +570,6 @@ hostname = "tunnel.example.test"
         );
 
         assert_eq!(prepared.log_level, LogLevel::Info);
-        assert_eq!(
-            prepared.reconnect_interval,
-            Duration::from_secs(crate::DEFAULT_CLIENT_RECONNECT_INTERVAL_SECS)
-        );
         assert_eq!(
             prepared.identity_directory,
             PreparedValue::Ready(identity_directory)

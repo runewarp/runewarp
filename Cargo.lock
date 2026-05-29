@@ -1266,6 +1266,7 @@ dependencies = [
  "futures-util",
  "proptest",
  "quinn",
+ "rand",
  "rcgen 0.14.8",
  "rustls",
  "rustls-acme",

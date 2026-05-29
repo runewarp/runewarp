@@ -1,4 +1,4 @@
-# AGENTS.md
+# AGENTS
 
 - Read `README.md` and the files in `docs/` before changing behavior. In particular `docs/architecture.md`, `docs/protocol.md` and `docs/security.md`.
 - Keep documentation up to date with implementation. If behavior or design changes, update the relevant docs in the same change.

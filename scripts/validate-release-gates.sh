@@ -8,7 +8,7 @@ repo_root="$tool_root"
 . "$tool_root/scripts/lib.sh"
 
 usage() {
-  usage_error "$(basename "$0") <rehearsal|tag> [--repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]"
+  usage_error "$(basename "$0") <rehearsal|tag> [--repo-root PATH] [--metadata-repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]"
 }
 
 is_stable_version() {
@@ -32,26 +32,28 @@ require_commit_reachable_from_main() {
 
 validate_rehearsal_mode() {
   local repo_root="$1"
-  local release_tag="$2"
+  local metadata_repo_root="$2"
+  local release_tag="$3"
   local cargo_version expected_tag
 
   [[ -n "$release_tag" ]] || die "rehearsal mode requires --tag vX.Y.Z"
-  cargo_version="$(runewarp_version "$repo_root")" || die "failed to read version from Cargo.toml"
+  cargo_version="$(runewarp_version "$metadata_repo_root")" || die "failed to read version from Cargo.toml"
   is_stable_version "$cargo_version" || die "rehearsal mode requires a stable Cargo version, found $cargo_version"
   expected_tag="v$cargo_version"
   [[ "$release_tag" == "$expected_tag" ]] || die "rehearsal tag $release_tag must match Cargo version $cargo_version as $expected_tag"
 
   require_commit_reachable_from_main "$repo_root" HEAD
-  "$tool_root/scripts/validate-release-metadata.sh" ci --repo-root "$repo_root"
-  "$tool_root/scripts/render-release-notes.sh" --repo-root "$repo_root" --version "$cargo_version" >/dev/null
+  "$tool_root/scripts/validate-release-metadata.sh" ci --repo-root "$metadata_repo_root"
+  "$tool_root/scripts/render-release-notes.sh" --repo-root "$metadata_repo_root" --version "$cargo_version" >/dev/null
 
   success "release rehearsal gate is valid"
 }
 
 validate_tag_mode() {
   local repo_root="$1"
-  local release_tag="$2"
-  local allowed_signers_file="$3"
+  local metadata_repo_root="$2"
+  local release_tag="$3"
+  local allowed_signers_file="$4"
 
   [[ -n "$release_tag" ]] || die "tag mode requires --tag vX.Y.Z"
   [[ -n "$allowed_signers_file" ]] || die "tag mode requires --allowed-signers-file"
@@ -59,7 +61,7 @@ validate_tag_mode() {
 
   require_command git
 
-  "$tool_root/scripts/validate-release-metadata.sh" release --repo-root "$repo_root" --tag "$release_tag"
+  "$tool_root/scripts/validate-release-metadata.sh" release --repo-root "$metadata_repo_root" --tag-repo-root "$repo_root" --tag "$release_tag"
   require_commit_reachable_from_main "$repo_root" "$release_tag"
 
   section "Verifying signed release tag"
@@ -81,6 +83,7 @@ main() {
   local mode="${1:-}"
   local release_tag=""
   local allowed_signers_file=""
+  local metadata_repo_root=""
 
   [[ -n "$mode" ]] || usage
   shift
@@ -97,6 +100,11 @@ main() {
         release_tag="$2"
         shift 2
         ;;
+      --metadata-repo-root)
+        [[ $# -ge 2 ]] || usage
+        metadata_repo_root="$2"
+        shift 2
+        ;;
       --allowed-signers-file)
         [[ $# -ge 2 ]] || usage
         allowed_signers_file="$2"
@@ -108,12 +116,16 @@ main() {
     esac
   done
 
+  if [[ -z "$metadata_repo_root" ]]; then
+    metadata_repo_root="$repo_root"
+  fi
+
   case "$mode" in
     rehearsal)
-      validate_rehearsal_mode "$repo_root" "$release_tag"
+      validate_rehearsal_mode "$repo_root" "$metadata_repo_root" "$release_tag"
       ;;
     tag)
-      validate_tag_mode "$repo_root" "$release_tag" "$allowed_signers_file"
+      validate_tag_mode "$repo_root" "$metadata_repo_root" "$release_tag" "$allowed_signers_file"
       ;;
     *)
       usage

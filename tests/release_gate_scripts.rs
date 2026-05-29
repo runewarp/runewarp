@@ -181,6 +181,55 @@ fn tag_mode_accepts_an_ssh_signed_tag_from_the_allowed_signers_file() {
 }
 
 #[test]
+fn tag_mode_can_validate_tagged_release_metadata_from_a_separate_source_tree() {
+    let temp_dir = TempDir::new().unwrap();
+    write_repo_files(
+        temp_dir.path(),
+        "0.1.0",
+        "# Changelog\n\nAll notable changes to Runewarp will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [0.1.0] - 2026-05-29\n\n### Added\n\n- Public release metadata contract.\n",
+    );
+    let allowed_signers =
+        init_git_repo_with_signed_tag(temp_dir.path(), "v0.1.0", "release@test.example");
+
+    write_repo_files(
+        temp_dir.path(),
+        "0.2.0-dev",
+        "# Changelog\n\nAll notable changes to Runewarp will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [Unreleased]\n\n### Changed\n\n- Start the next development cycle.\n",
+    );
+    run_git(temp_dir.path(), &["add", "Cargo.toml", "CHANGELOG.md"]);
+    run_git(temp_dir.path(), &["commit", "-qm", "post release main"]);
+    run_git(temp_dir.path(), &["push"]);
+
+    let release_source = temp_dir.path().join("release-source");
+    let clone_status = Command::new("git")
+        .args([
+            "clone",
+            "-q",
+            temp_dir.path().to_str().unwrap(),
+            release_source.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(clone_status.success());
+    run_git(&release_source, &["checkout", "-q", "v0.1.0"]);
+
+    let output = run_validator(
+        temp_dir.path(),
+        &[
+            "tag",
+            "--tag",
+            "v0.1.0",
+            "--allowed-signers-file",
+            allowed_signers.to_str().unwrap(),
+            "--metadata-repo-root",
+            release_source.to_str().unwrap(),
+        ],
+    );
+
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
 fn tag_mode_rejects_a_tag_signed_by_an_untrusted_key() {
     let temp_dir = TempDir::new().unwrap();
     write_repo_files(

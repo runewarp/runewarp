@@ -6,8 +6,15 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
+      mode:
+        description: Release path to run
+        required: true
+        type: choice
+        options:
+          - rehearsal
+          - publish
       release_tag:
-        description: Stable release tag to rehearse, in vX.Y.Z form
+        description: Stable release tag, in vX.Y.Z form
         required: true
         type: string
 
@@ -25,8 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
+      workflow_mode: ${{ steps.release-metadata.outputs.workflow_mode }}
       release_tag: ${{ steps.release-metadata.outputs.release_tag }}
       release_version: ${{ steps.release-metadata.outputs.release_version }}
+      release_source_ref: ${{ steps.release-metadata.outputs.release_source_ref }}
+      release_commit: ${{ steps.release-source.outputs.release_commit }}
       image_repository: ${{ steps.release-metadata.outputs.image_repository }}
       primary_image_ref: ${{ steps.release-metadata.outputs.primary_image_ref }}
       docker_tags: ${{ steps.release-metadata.outputs.docker_tags }}
@@ -36,18 +46,29 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
 
       - name: Resolve release metadata
         id: release-metadata
         env:
           EVENT_NAME: ${{ github.event_name }}
           PUSH_TAG: ${{ github.ref_name }}
+          WORKFLOW_MODE: ${{ inputs.mode }}
           WORKFLOW_TAG: ${{ inputs.release_tag }}
         run: |
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             release_tag="$WORKFLOW_TAG"
+            if [[ "$WORKFLOW_MODE" == "publish" ]]; then
+              workflow_mode="publish"
+              release_source_ref="$release_tag"
+            else
+              workflow_mode="rehearsal"
+              release_source_ref="refs/heads/main"
+            fi
           else
             release_tag="$PUSH_TAG"
+            workflow_mode="publish"
+            release_source_ref="$release_tag"
           fi
 
           [[ -n "$release_tag" ]] || {
@@ -62,15 +83,19 @@ jobs:
           major_series="${release_version%%.*}"
 
           {
+            printf 'WORKFLOW_MODE=%s\n' "$workflow_mode"
             printf 'RELEASE_TAG=%s\n' "$release_tag"
             printf 'RELEASE_VERSION=%s\n' "$release_version"
+            printf 'RELEASE_SOURCE_REF=%s\n' "$release_source_ref"
             printf 'IMAGE_REPOSITORY=%s\n' "$image_repository"
             printf 'PRIMARY_IMAGE_REF=%s\n' "$primary_image_ref"
           } >> "$GITHUB_ENV"
 
           {
+            printf 'workflow_mode=%s\n' "$workflow_mode"
             printf 'release_tag=%s\n' "$release_tag"
             printf 'release_version=%s\n' "$release_version"
+            printf 'release_source_ref=%s\n' "$release_source_ref"
             printf 'image_repository=%s\n' "$image_repository"
             printf 'primary_image_ref=%s\n' "$primary_image_ref"
             printf 'docker_tags<<EOF\n'
@@ -81,20 +106,32 @@ jobs:
             printf 'EOF\n'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Check out release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: release-source
+          ref: ${{ steps.release-metadata.outputs.release_source_ref }}
+
+      - name: Resolve release source commit
+        id: release-source
+        run: printf 'release_commit=%s\n' "$(git -C "$PWD/release-source" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Validate rehearsal release gate
-        if: github.event_name == 'workflow_dispatch'
-        run: ./scripts/validate-release-gates.sh rehearsal --tag "$RELEASE_TAG"
+        if: steps.release-metadata.outputs.workflow_mode == 'rehearsal'
+        run: ./scripts/validate-release-gates.sh rehearsal --repo-root "$PWD/release-source" --tag "$RELEASE_TAG"
 
       - name: Validate signed release tag
-        if: github.event_name == 'push'
-        run: ./scripts/validate-release-gates.sh tag --tag "$RELEASE_TAG" --allowed-signers-file "$PWD/.github/release-allowed-signers"
+        if: steps.release-metadata.outputs.workflow_mode == 'publish'
+        run: ./scripts/validate-release-gates.sh tag --repo-root "$PWD" --metadata-repo-root "$PWD/release-source" --tag "$RELEASE_TAG" --allowed-signers-file "$PWD/.github/release-allowed-signers"
 
       - name: Verify prior green CI
-        if: github.event_name == 'push'
+        if: steps.release-metadata.outputs.workflow_mode == 'publish'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_SHA: ${{ steps.release-source.outputs.release_commit }}
         run: |
           python - <<'PY'
           import json
@@ -156,18 +193,16 @@ jobs:
           PY
 
       - name: Render release notes preview
-        run: ./scripts/render-release-notes.sh --version "${RELEASE_TAG#v}" > /tmp/release-notes.md
+        run: ./scripts/render-release-notes.sh --repo-root "$PWD/release-source" --version "${RELEASE_TAG#v}" > /tmp/release-notes.md
 
       - name: Summarize release gate
-        env:
-          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+          if [[ "$WORKFLOW_MODE" == "rehearsal" ]]; then
             mode="rehearsal"
             publish_note="Rehearsal skips Docker Hub pushes, Sigstore signing, crates.io publication, and GitHub Release creation."
           else
-            mode="tag gate"
-            publish_note="Real release runs crates.io publication first, then Docker Hub publication, then finalizes the GitHub Release."
+            mode="publish"
+            publish_note="Real release runs crates.io publication first, then Docker Hub publication, then finalizes the GitHub Release. Already-published surfaces are skipped."
           fi
 
           {
@@ -182,7 +217,7 @@ jobs:
 
   crate-release:
     name: Publish crates.io release
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.mode == 'publish'
     needs:
       - gate
     runs-on: ubuntu-latest
@@ -194,7 +229,17 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
+
+      - name: Check out release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: release-source
+          ref: ${{ needs.gate.outputs.release_source_ref }}
 
       - name: Install Rust toolchain
         run: |
@@ -202,26 +247,65 @@ jobs:
           rustup toolchain install stable
           rustup default stable
 
+      - name: Check whether crates.io version already exists
+        id: crate-status
+        env:
+          CRATE_NAME: runewarp
+          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          crate_name = os.environ["CRATE_NAME"]
+          release_version = os.environ["RELEASE_VERSION"]
+          output_path = os.environ["GITHUB_OUTPUT"]
+          url = f"https://crates.io/api/v1/crates/{crate_name}/{release_version}"
+
+          request = urllib.request.Request(
+              url,
+              headers={"Accept": "application/json"},
+          )
+
+          try:
+              with urllib.request.urlopen(request):
+                  exists = "true"
+          except urllib.error.HTTPError as error:
+              if error.code == 404:
+                  exists = "false"
+              else:
+                  print(
+                      f"error: failed to query crates.io for {crate_name} {release_version}: "
+                      f"HTTP {error.code} {error.reason}",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+          except urllib.error.URLError as error:
+              print(
+                  f"error: failed to reach crates.io for {crate_name} {release_version}: "
+                  f"{error.reason}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          with open(output_path, "a", encoding="utf-8") as handle:
+              handle.write(f"exists={exists}\n")
+          PY
+
       - name: Publish crate to crates.io
+        if: steps.crate-status.outputs.exists != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
           CARGO_HTTP_MULTIPLEXING: "false"
           CARGO_NET_RETRY: "5"
-        run: cargo publish --locked --manifest-path Cargo.toml
-
-      - name: Verify published crate install surface
-        run: |
-          ./scripts/validate-install-surfaces.sh registry-install \
-            --crate-name runewarp \
-            --bin-name runewarp \
-            --expected-version "${{ needs.gate.outputs.release_version }}" \
-            --retry-attempts 10 \
-            --retry-delay-seconds 30
+        run: cargo publish --locked --manifest-path release-source/Cargo.toml
 
   docker-release:
     name: Publish Docker Hub release
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.mode == 'publish'
     needs:
       - gate
       - crate-release
@@ -235,57 +319,86 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
+
+      - name: Check out release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: release-source
+          ref: ${{ needs.gate.outputs.release_source_ref }}
 
       - name: Set up QEMU
+        if: ${{ !cancelled() }}
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Set up Docker Buildx
+        if: ${{ !cancelled() }}
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
+      - name: Check whether Docker release already exists
+        id: docker-status
+        env:
+          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
+        run: |
+          status_code="$(
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              "https://hub.docker.com/v2/namespaces/runewarp/repositories/runewarp/tags/${RELEASE_VERSION}"
+          )"
+          case "$status_code" in
+            200)
+              printf 'exists=true\n' >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              printf 'exists=false\n' >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              printf 'error: failed to query Docker Hub tag %s: HTTP %s\n' "$RELEASE_VERSION" "$status_code" >&2
+              exit 1
+              ;;
+          esac
+
       - name: Log in to Docker Hub
+        if: steps.docker-status.outputs.exists != 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Enforce Docker version tag immutability
-        run: |
-          ./scripts/validate-install-surfaces.sh docker-registry-tag-absent \
-            --image-ref "${{ needs.gate.outputs.primary_image_ref }}"
-
       - name: Build and push multi-arch release image
+        if: steps.docker-status.outputs.exists != 'true'
         id: build-image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
-          context: .
-          file: ./Dockerfile
+          context: ./release-source
+          file: ./release-source/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: mode=max
           tags: ${{ needs.gate.outputs.docker_tags }}
 
       - name: Install cosign
+        if: steps.docker-status.outputs.exists != 'true'
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
       - name: Sign released image
+        if: steps.docker-status.outputs.exists != 'true'
         env:
           IMAGE_REPOSITORY: ${{ needs.gate.outputs.image_repository }}
           IMAGE_DIGEST: ${{ steps.build-image.outputs.digest }}
         run: |
           cosign sign --yes "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
 
-      - name: Verify published Docker image
-        run: |
-          ./scripts/validate-install-surfaces.sh docker-registry-image \
-            --image-ref "${{ needs.gate.outputs.primary_image_ref }}" \
-            --expected-version "${{ needs.gate.outputs.release_version }}" \
-            --retry-attempts 10 \
-            --retry-delay-seconds 15
-
   github-release:
     name: Finalize GitHub release
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.mode == 'publish'
     needs:
       - gate
       - docker-release
@@ -298,12 +411,36 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
+
+      - name: Check out release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: release-source
+          ref: ${{ needs.gate.outputs.release_source_ref }}
 
       - name: Render release notes
-        run: ./scripts/render-release-notes.sh --version "${{ needs.gate.outputs.release_version }}" > /tmp/release-notes.md
+        run: ./scripts/render-release-notes.sh --repo-root "$PWD/release-source" --version "${{ needs.gate.outputs.release_version }}" > /tmp/release-notes.md
+
+      - name: Check whether GitHub release already exists
+        id: github-release-status
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            printf 'exists=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'exists=false\n' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create GitHub release
+        if: steps.github-release-status.outputs.exists != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}

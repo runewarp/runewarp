@@ -8,7 +8,7 @@ repo_root="$tool_root"
 . "$tool_root/scripts/lib.sh"
 
 usage() {
-  usage_error "validate-release-metadata.sh <ci|release> [--repo-root PATH] [--tag vX.Y.Z]"
+  usage_error "validate-release-metadata.sh <ci|release> [--repo-root PATH] [--tag-repo-root PATH] [--tag vX.Y.Z]"
 }
 
 is_stable_version() {
@@ -140,11 +140,10 @@ validate_ci_mode() {
 
 validate_release_mode() {
   local repo_root="$1"
-  local cargo_version="$2"
-  local release_tag="$3"
+  local tag_repo_root="$2"
+  local cargo_version="$3"
+  local release_tag="$4"
 
-  # Release mode validates the checked-out git state directly, so the caller must
-  # make the requested tag visible in the local clone.
   [[ -n "$release_tag" ]] || die "release mode requires --tag vX.Y.Z"
   is_stable_version "$cargo_version" || die "release mode requires a stable Cargo version, found $cargo_version"
 
@@ -152,8 +151,8 @@ validate_release_mode() {
   [[ "$release_tag" == "$expected_tag" ]] || die "release tag $release_tag must match Cargo version $cargo_version as $expected_tag"
 
   local tag_commit
-  tag_commit="$(git -C "$repo_root" rev-list -n1 "$release_tag" 2>/dev/null || true)"
-  [[ -n "$tag_commit" ]] || die "git tag $release_tag does not exist in $repo_root"
+  tag_commit="$(git -C "$tag_repo_root" rev-list -n1 "$release_tag" 2>/dev/null || true)"
+  [[ -n "$tag_commit" ]] || die "git tag $release_tag does not exist in $tag_repo_root"
 
   local head_commit
   head_commit="$(git -C "$repo_root" rev-parse HEAD)"
@@ -165,6 +164,7 @@ validate_release_mode() {
 main() {
   local mode="${1:-}"
   local release_tag=""
+  local tag_repo_root=""
 
   [[ -n "$mode" ]] || usage
   shift
@@ -179,6 +179,11 @@ main() {
       --tag)
         [[ $# -ge 2 ]] || usage
         release_tag="$2"
+        shift 2
+        ;;
+      --tag-repo-root)
+        [[ $# -ge 2 ]] || usage
+        tag_repo_root="$2"
         shift 2
         ;;
       *)
@@ -197,6 +202,10 @@ main() {
   local changelog_path="$repo_root/CHANGELOG.md"
   local cargo_toml_path="$repo_root/Cargo.toml"
 
+  if [[ -z "$tag_repo_root" ]]; then
+    tag_repo_root="$repo_root"
+  fi
+
   [[ -f "$cargo_toml_path" ]] || die "Cargo.toml is required at $cargo_toml_path"
   [[ -f "$changelog_path" ]] || die "CHANGELOG.md is required at $changelog_path"
   grep -qx '# Changelog' "$changelog_path" || die "CHANGELOG.md must start with a '# Changelog' heading"
@@ -207,7 +216,7 @@ main() {
   validate_ci_mode "$repo_root" "$cargo_version" "$changelog_path"
 
   if [[ "$mode" == "release" ]]; then
-    validate_release_mode "$repo_root" "$cargo_version" "$release_tag"
+    validate_release_mode "$repo_root" "$tag_repo_root" "$cargo_version" "$release_tag"
   fi
 
   success "release metadata is valid"

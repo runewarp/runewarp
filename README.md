@@ -113,6 +113,7 @@ A simple, open-source client/server tunneling tool whose config model and simple
 | [`docs/security.md`](docs/security.md) | Visibility model, trust model, and security limits |
 | [`docs/protocol.md`](docs/protocol.md) | Wire behavior and runtime invariants |
 | [`docs/release-automation.md`](docs/release-automation.md) | Current CI install-surface contract and signed release-tag gate |
+| [`docs/release-guide.md`](docs/release-guide.md) | Maintainer-facing stable release flow, trust boundaries, and recovery rules |
 | [`docs/roadmap.md`](docs/roadmap.md) | Forward-looking roadmap and planned features |
 | [`examples/docker/README.md`](examples/docker/README.md) | Walkthrough of the Docker example |
 

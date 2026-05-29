@@ -120,6 +120,22 @@ _Avoid_: Duplicate hostname config, registration
 The internal module that selects the active config input, applies CLI/XDG/hardcoded defaults, resolves config-relative paths, and emits prepared **Server** or **Client** config before validation and startup side effects.
 _Avoid_: Settings loader, validation pass, startup defaults
 
+**Release-prep PR**:
+The maintainer change that prepares one stable release by updating versioned release metadata on `main` before the real release tag is cut.
+_Avoid_: Release branch, release commit
+
+**Release rehearsal**:
+The non-publishing release validation run that exercises the release gates for one candidate stable version already reachable from `main`.
+_Avoid_: Real release, preview publish
+
+**Release tag**:
+The SSH-signed stable `vX.Y.Z` tag that triggers real public publication for one release.
+_Avoid_: Commit, branch tag
+
+**Release environment**:
+The GitHub environment that scopes release-only secrets to the privileged publication jobs.
+_Avoid_: CI environment, deploy target
+
 ## Relationships
 
 - A **Server** selects exactly one **Tunnel** for each routed **Public hostname**
@@ -156,6 +172,10 @@ _Avoid_: Settings loader, validation pass, startup defaults
 - A **Tunnel** owns one or more explicit **Public hostnames**
 - A **Catch-all Service** is valid only when there is exactly one configured **Service**
 - **Hostname mirroring** repeats one set of **Public hostnames** across **Tunnels** and **Services**, but the grouping does not have to line up one-to-one
+- A **Release-prep PR** prepares exactly one candidate stable release
+- A **Release rehearsal** validates exactly one candidate **Release tag** without publishing public artifacts
+- A **Release tag** publishes exactly one stable release from a green commit already on `main`
+- A **Release environment** scopes secrets for real publication jobs only
 
 ## Example dialogue
 
@@ -215,6 +235,12 @@ _Avoid_: Settings loader, validation pass, startup defaults
 >
 > **Dev:** "If the **Server** puts `app.example.com` and `api.example.com` in one **Tunnel**, but the **Client** splits them across two **Services**, is that still **Hostname mirroring**?"
 > **Domain expert:** "Yes. **Hostname mirroring** repeats the hostname set across both sides; the grouping into **Tunnels** and **Services** can differ."
+>
+> **Dev:** "What actually starts a public release?"
+> **Domain expert:** "A signed **Release tag** on a green `main` commit. A **Release rehearsal** checks the same gates without publishing."
+>
+> **Dev:** "Where do I make the version and changelog changes first?"
+> **Domain expert:** "In the **Release-prep PR**. The tag comes later, after that candidate commit is on `main` and green."
 
 ## Flagged ambiguities
 
@@ -238,3 +264,4 @@ _Avoid_: Settings loader, validation pass, startup defaults
 - "Hostname mirroring" could sound like it covered every valid routing topology — resolved: **Hostname mirroring** means both-sides explicit hostname matching; a **Catch-all Service** on the Client is described directly rather than named as a separate topology.
 - "Hostname mirroring" could sound like Tunnel and Service groups had to line up exactly — resolved: the mirrored unit is the explicit hostname set, not a one-to-one grouping.
 - "duplicate hostname config" sounded accidental — resolved: **Hostname mirroring** is the deliberate routing pattern.
+- "release" could blur rehearsal with real publication — resolved: **Release rehearsal** is the non-publishing gate run, while a **Release tag** starts the real published release.

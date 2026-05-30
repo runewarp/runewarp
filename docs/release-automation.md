@@ -15,9 +15,11 @@ The `CI` workflow is the required aggregate check for normal changes. It current
 - Rust formatting, Clippy, tests, and docs
 - Docker image build plus `--version` startup through `scripts/validate-install-surfaces.sh docker-image`
 - the end-to-end Docker example smoke test
-- workflow syntax with `actionlint`
+- workflow syntax plus embedded shell with `scripts/lint-workflows.sh` and its shell contract in `scripts/test-lint-workflows.sh`
 
 These checks run on both pull requests and `main` pushes and roll up into one required `CI` status.
+
+Local workflow edits can run `./scripts/lint-workflows.sh` directly. Running `./scripts/setup-git-hooks.sh` once per checkout configures `.githooks/pre-commit`, which reuses the same lint entry point against the staged workflow content before commit.
 
 ## Release workflow
 

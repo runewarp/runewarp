@@ -148,6 +148,8 @@ jobs:
         run: ./scripts/render-release-notes.sh --version "${RELEASE_TAG#v}" > /tmp/release-notes.md
 
       - name: Summarize release gate
+        env:
+          RELEASE_COMMIT: ${{ steps.release-source.outputs.release_commit }}
         run: |
           {
             printf '## Release workflow\n\n'
@@ -156,12 +158,13 @@ jobs:
             printf -- "- Release version: \`%s\`\n" "$RELEASE_VERSION"
             printf -- "- Workflow ref: \`%s\`\n" "$GITHUB_REF"
             printf -- "- Release source ref: \`%s\`\n" "$RELEASE_SOURCE_REF"
-            printf -- "- Release commit: \`%s\`\n" "${{ steps.release-source.outputs.release_commit }}"
+            printf -- "- Release commit: \`%s\`\n" "$RELEASE_COMMIT"
             printf -- '- Docker tags:'
             separator=' '
             while IFS= read -r tag; do
               [[ -n "$tag" ]] || continue
-              printf -- '%s\`%s\`' "$separator" "${tag#${IMAGE_REPOSITORY}:}"
+              stripped_tag="${tag#"${IMAGE_REPOSITORY}:"}"
+              printf -- "%s\`%s\`" "$separator" "$stripped_tag"
               separator=', '
             done <<< "$DOCKER_TAGS"
             printf '\n'
@@ -489,7 +492,9 @@ jobs:
           ref: ${{ needs.gate.outputs.release_source_ref }}
 
       - name: Render release notes
-        run: ./scripts/render-release-notes.sh --version "${{ needs.gate.outputs.release_version }}" > /tmp/release-notes.md
+        env:
+          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
+        run: ./scripts/render-release-notes.sh --version "$RELEASE_VERSION" > /tmp/release-notes.md
 
       - name: Check whether GitHub release already exists
         id: github-release-status
@@ -506,12 +511,13 @@ jobs:
 
       - name: Create GitHub release
         env:
+          GITHUB_RELEASE_EXISTS: ${{ steps.github-release-status.outputs.exists }}
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          if [[ "${{ steps.github-release-status.outputs.exists }}" == "true" ]]; then
+          if [[ "$GITHUB_RELEASE_EXISTS" == "true" ]]; then
             gh release edit "$RELEASE_TAG" \
               --repo "$REPOSITORY" \
               --latest \

@@ -22,17 +22,11 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Install actionlint
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSLo actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.8/actionlint_1.7.8_linux_amd64.tar.gz
-          echo 'be92c2652ab7b6d08425428797ceabeb16e31a781c07bc388456b4e592f3e36a  actionlint.tar.gz' | sha256sum --check
-          tar -xzf actionlint.tar.gz actionlint
-          install -m 0755 actionlint "$HOME/.local/bin/actionlint"
-          printf '%s\n' "$HOME/.local/bin" >> "$GITHUB_PATH"
-
       - name: Lint workflows
-        run: actionlint -color
+        run: ./scripts/lint-workflows.sh
+
+      - name: Test workflow lint script
+        run: ./scripts/test-lint-workflows.sh
 
   release-metadata:
     name: Release metadata

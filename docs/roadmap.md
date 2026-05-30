@@ -13,46 +13,6 @@ Runewarp already ships:
 | Explicit routing | Required Server `public-hostnames`, multiple Server **Tunnels**, multiple Client **Services** |
 | Packaging | Shared Docker image, non-root container execution, CI automation, and preview image export workflows |
 
-## Public release
-
-This track focuses on the first public release.
-
-### Release notes and changelog discipline
-
-**Goal**
-
-- the first public release has a supportable release story rather than ad hoc notes
-
-**Planned work**
-
-- introduce a root changelog
-- define the release-note voice for operator-facing changes, boundaries, and limitations
-- call out changes that affect configuration, trust material, or rollout expectations
-
-### Public distribution channels
-
-**Goal**
-
-- operators can install Runewarp through the release channels described by the public docs
-
-**Planned work**
-
-- publish the crate to crates.io
-- publish the shared container image to Docker Hub
-- keep binary versioning, image naming, and release tags aligned
-
-### Install and packaging validation
-
-**Goal**
-
-- the documented install paths are tested as release surfaces rather than assumed
-
-**Planned work**
-
-- validate `cargo install runewarp`
-- validate public container pulls and basic startup
-- make sure the docs and release artifacts describe the same operator surface
-
 ## Availability
 
 This track reduces avoidable downtime across client and server deployment shapes.

@@ -56,9 +56,11 @@ jobs:
           WORKFLOW_MODE: ${{ inputs.mode }}
           WORKFLOW_TAG: ${{ inputs.release_tag }}
         run: |
+          workflow_mode_input="${WORKFLOW_MODE:-}"
+
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             release_tag="$WORKFLOW_TAG"
-            if [[ "$WORKFLOW_MODE" == "publish" ]]; then
+            if [[ "$workflow_mode_input" == "publish" ]]; then
               workflow_mode="publish"
               release_source_ref="$release_tag"
             else

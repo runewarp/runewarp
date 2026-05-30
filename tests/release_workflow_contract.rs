@@ -22,6 +22,14 @@ fn ci_workflow() -> String {
 }
 
 #[test]
+fn release_workflow_defaults_dispatch_mode_before_branching() {
+    let workflow = release_workflow();
+
+    assert!(workflow.contains("workflow_mode_input=\"${WORKFLOW_MODE:-}\""));
+    assert!(workflow.contains("if [[ \"$workflow_mode_input\" == \"publish\" ]]; then"));
+}
+
+#[test]
 fn release_workflow_checks_docker_release_status_before_arch_build_push() {
     let workflow = release_workflow();
 

@@ -1,6 +1,6 @@
 # Usage
 
-Use this guide for the operator workflow: install Runewarp, prepare trust material, start the runtime, and verify traffic. Use [`docs/configuration.md`](configuration.md) for the full key reference, validation rules, and alternate config shapes.
+Use this guide to install Runewarp, prepare trust material, start the runtime, and verify traffic. Use [`docs/configuration.md`](configuration.md) for the full key reference, validation rules, and alternate config shapes.
 
 ## Choose a path
 
@@ -14,15 +14,13 @@ Use this guide for the operator workflow: install Runewarp, prepare trust materi
 Runewarp assumes:
 
 - a public **Server** reachable on its configured `server.public-bind-address` for **Visitor** TLS traffic and `server.tunnel-bind-address` for **Client** **Tunnel connections**
-- one or more operator-owned **Public hostnames** that resolve to the Server
+- one or more **Public hostnames** that resolve to the Server
 - a **Local backend** behind the Client
 - a decision about the Server certificate path and, if any Service uses `tls-mode = "terminate"`, the Client certificate path for those **Public hostnames**
 
-If the product language here feels unfamiliar, read [`CONTEXT.md`](../CONTEXT.md) first.
-
 ## Evaluate with the Docker example
 
-The repository ships one concrete example under [`examples/docker/`](../examples/docker/). Use it when you want to prove the end-to-end path before writing your own config.
+The repository ships a concrete example under [`examples/docker/`](../examples/docker/). Use it when you want to verify the end-to-end path before writing your own config.
 
 ```bash
 git clone https://github.com/runewarp/runewarp.git
@@ -52,7 +50,7 @@ runewarp client --help
 
 ### 2. Choose the Server certificate path
 
-Choose one of the supported Server-certificate paths:
+Choose one Server certificate path:
 
 | Path | When to use it | What to do |
 | --- | --- | --- |
@@ -108,7 +106,7 @@ runewarp client public-cert init
 
 ### 5. Write the smallest practical config
 
-The smallest practical setup is a Server with explicit **Public hostnames** and one Client **Catch-all Service**:
+The smallest practical setup is a server with explicit **Public hostnames** and one client **Catch-all Service**:
 
 ```toml
 # /etc/runewarp/server.toml
@@ -132,7 +130,7 @@ server-address = "tunnel.example.com"
 backend-address = "localhost:8443"
 ```
 
-That Client uses a **Catch-all Service**: the Server still owns explicit **Public hostname authorization**, while the sole Client Service forwards every admitted hostname to one **Local backend**.
+That client uses a **Catch-all Service**: the server still owns explicit **Public hostname** authorization, while the sole client service forwards every admitted hostname to one **Local backend**.
 
 If you are using the manual/private-CA Server path, add:
 
@@ -142,7 +140,7 @@ server-trust = "ca-file"
 # server-ca-file = "/etc/runewarp/server-ca.crt"
 ```
 
-For exact-match Client routing, multiple Services or Tunnels, terminate-mode config, defaults, and full key definitions, use [`docs/configuration.md`](configuration.md).
+For exact-match client routing, multiple services or tunnels, terminate-mode config, defaults, and full key definitions, use [`docs/configuration.md`](configuration.md).
 
 ### 6. Prepare DNS and deployment
 
@@ -152,7 +150,7 @@ Run the **Server** on a machine with a public IP so **Visitors** and **Client in
 - use each **Public hostname** as a CNAME to the **Server hostname** as the standard DNS pattern
 - if you deploy the Server behind NAT or port mapping, make sure public TCP 443 still reaches the Server for Visitor TLS and ACME traffic
 
-Pointing a **Public hostname** directly at the same public IP can also work, but CNAME-to-Server-hostname keeps the public routing shape clearer in most deployments.
+Pointing a **Public hostname** directly at the same public IP can also work, but a CNAME to the **Server hostname** is usually clearer.
 
 ### 7. Start the runtime
 
@@ -169,9 +167,9 @@ If you omit `--config`, Runewarp looks for `$XDG_CONFIG_HOME/runewarp/config.tom
 2. Make a TLS request to the Public hostname.
 3. Confirm the expected application answers.
 
-Under **TLS passthrough**, the backend's own certificate should appear. In **Terminate mode**, the Client-presented **Public hostname certificate** should appear and the backend should receive plaintext.
+Under **TLS passthrough**, the backend's own certificate should appear. In **Terminate mode**, the client-presented **Public hostname certificate** should appear and the backend should receive plaintext.
 
-At the default `log-level = "info"`, Runewarp logs readiness, tunnel connection lifecycle, warnings, and errors to stderr. Set `log-level = "debug"` when you need per-connection routing detail. Use [`docs/configuration.md`](configuration.md) for the exact logging semantics.
+At the default `log-level = "info"`, Runewarp logs readiness, tunnel connection lifecycle, warnings, and errors to stderr. Set `log-level = "debug"` when you need per-connection routing detail.
 
 ## Troubleshooting
 

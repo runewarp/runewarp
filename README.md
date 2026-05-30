@@ -14,19 +14,6 @@
 
 Runewarp is an ingress tunneling tool for exposing local services without moving TLS termination to the edge. Clients connect out over QUIC, so you can publish services without putting your backend directly on the Internet or leaking your public IP.
 
-## Goals
-
-- **TLS passthrough ingress tunneling** — Server routes traffic by SNI without terminating or inspecting TLS
-- **Privacy-respecting by design** — Server never sees HTTP headers or application plaintext
-- **Traverse NAT and firewalls** — Client uses outbound QUIC, so no port forwarding or public IP is required
-- **Self-hostable and operator-controlled** — single Rust binary for both Client and Server
-- **Remain operationally simple** — TOML config, a handful of CLI commands, no runtime dependencies
-
-## Non-goals
-
-- **Server TLS termination** — Server never decrypts or re-encrypts Visitor traffic
-- **HTTP-layer routing** — no path-based routing, header inspection, or Layer 7 awareness of any kind
-
 ## Install
 
 Available from [crates.io](https://crates.io/crates/runewarp):
@@ -39,11 +26,24 @@ Container image from [Docker Hub](https://hub.docker.com/r/runewarp/runewarp):
 docker pull runewarp/runewarp
 ```
 
-## Getting started
+## Get started
 
-1. Read and run the Docker example [`examples/docker/README.md`](examples/docker/README.md).
-2. Read [`docs/usage.md`](docs/usage.md) for the operator workflow.
-3. Read [`docs/configuration.md`](docs/configuration.md) for config keys and examples.
+1. Run the Docker example in [`examples/docker/README.md`](examples/docker/README.md) to verify the end-to-end path.
+2. Use [`docs/usage.md`](docs/usage.md) for the operator workflow.
+3. Use [`docs/configuration.md`](docs/configuration.md) for config keys, defaults, and examples.
+
+## Goals
+
+- **TLS passthrough ingress tunneling** — Server routes traffic by SNI without terminating or inspecting TLS
+- **Privacy-respecting by design** — Server never sees HTTP headers or application plaintext
+- **Traverse NAT and firewalls** — Client uses outbound QUIC, so no port forwarding or public IP is required
+- **Self-hostable and operator-controlled** — single Rust binary for both Client and Server
+- **Remain operationally simple** — TOML config, a handful of CLI commands, no runtime dependencies
+
+## Non-goals
+
+- **Server TLS termination** — Server never decrypts or re-encrypts Visitor traffic
+- **HTTP-layer routing** — no path-based routing, header inspection, or Layer 7 awareness of any kind
 
 ## Compatibility
 
@@ -73,7 +73,7 @@ flowchart TD
     C -->|"select Service and proxy"| B
 ```
 
-Visitors connect to the public **Server** over TLS, and each **Client instance** maintains its own long-lived QUIC/TLS **Tunnel connection** back to it. After SNI-based **Tunnel** selection, the **Server** forwards the encrypted stream to the selected **Client instance**, which proxies it to the **Local backend**; a **Service** can also opt into **Terminate mode**. See [`docs/architecture.md`](docs/architecture.md) for the detailed transport view.
+Visitors connect to the public server over TLS, and each client instance keeps one long-lived QUIC tunnel connection back to it. The server routes by SNI and forwards the encrypted stream to the selected client, which then proxies it to the local backend. A service can opt into terminate mode when the client, not the backend, should terminate TLS. See [`docs/architecture.md`](docs/architecture.md) for the detailed transport view.
 
 ## Comparison
 
@@ -111,13 +111,13 @@ A simple, open-source client/server tunneling tool whose config model and simple
 
 | Document | Purpose |
 | --- | --- |
-| [`docs/usage.md`](docs/usage.md) | Guide for installation, setup, startup, verification, and troubleshooting |
-| [`docs/configuration.md`](docs/configuration.md) | Configuration reference, defaults, and example configs |
-| [`docs/architecture.md`](docs/architecture.md) | High-level design, routing model, trust boundaries, and topology diagrams |
-| [`docs/security.md`](docs/security.md) | Visibility model, trust model, and security limits |
+| [`docs/usage.md`](docs/usage.md) | Install, configure, start, verify, and troubleshoot Runewarp |
+| [`docs/configuration.md`](docs/configuration.md) | Config reference, defaults, validation rules, and examples |
+| [`docs/architecture.md`](docs/architecture.md) | System shape, routing model, trust model, and topology diagrams |
+| [`docs/security.md`](docs/security.md) | Visibility limits, authentication, certificate handling, and trade-offs |
 | [`docs/protocol.md`](docs/protocol.md) | Wire behavior and runtime invariants |
-| [`docs/release-automation.md`](docs/release-automation.md) | Current CI install-surface contract and signed release-tag gate |
-| [`docs/release-guide.md`](docs/release-guide.md) | Maintainer-facing stable release flow, trust boundaries, and recovery rules |
+| [`docs/release-automation.md`](docs/release-automation.md) | Release CI and publication automation |
+| [`docs/release-guide.md`](docs/release-guide.md) | Maintainer release procedure and recovery steps |
 | [`docs/roadmap.md`](docs/roadmap.md) | Forward-looking roadmap and planned features |
 | [`examples/docker/README.md`](examples/docker/README.md) | Walkthrough of the Docker example |
 

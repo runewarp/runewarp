@@ -163,8 +163,10 @@ fn render_release_notes_outputs_the_changelog_entry_and_install_appendix() {
     assert!(output.status.success());
 
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("### Added"));
+    assert!(stdout.contains("\n## Added\n"));
+    assert!(!stdout.contains("\n### Added\n"));
     assert!(stdout.contains("- Public release metadata contract."));
+    assert!(stdout.contains("\n## Security\n"));
     assert!(stdout.contains("## Install"));
     assert!(stdout.contains("cargo install --version 0.1.0 runewarp"));
     assert!(stdout.contains("docker pull runewarp/runewarp:0.1.0"));

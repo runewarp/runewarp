@@ -51,6 +51,9 @@ main() {
     }
 
     in_section {
+      if ($0 ~ /^### /) {
+        sub(/^### /, "## ", $0)
+      }
       print
     }
   ' "$changelog_path"

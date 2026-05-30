@@ -3,7 +3,7 @@
 
 require_relative "lib/runewarp"
 
-def usage(message = "docker_example <prepare|smoke>")
+def usage(message = "docker-example <prepare|smoke>")
   Runewarp::Core.usage_error(message)
 end
 
@@ -76,7 +76,7 @@ Runewarp::Core.run_cli do
   case command
   when "prepare"
     reset_requested = ARGV == ["--reset"]
-    usage("docker_example <prepare|smoke> [--reset]") unless ARGV.empty? || reset_requested
+    usage("docker-example <prepare|smoke> [--reset]") unless ARGV.empty? || reset_requested
     prepare_example(reset_requested: reset_requested)
   when "smoke"
     usage unless ARGV.empty?

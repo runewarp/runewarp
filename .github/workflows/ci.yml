@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Lint workflows
-        run: ./scripts/lint_workflows
+        run: ./scripts/lint-workflows
 
   automation-contract:
     name: Automation contract
@@ -34,10 +34,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Validate release metadata
-        run: ./scripts/validate_release_metadata ci
+        run: ./scripts/validate-release-metadata ci
 
       - name: Run Ruby automation tests
-        run: ./scripts/test_automation
+        run: ./scripts/test-automation
 
   install-path-linux:
     name: Install path (Linux)
@@ -55,7 +55,7 @@ jobs:
 
       - name: Check Linux cargo install path
         run: |
-          ./scripts/check_distribution cargo-install \
+          ./scripts/check-distribution cargo-install \
             --bin-name runewarp \
             --probe-arg --help \
             --expected-text "Usage: runewarp"
@@ -76,7 +76,7 @@ jobs:
 
       - name: Check macOS cargo install path
         run: |
-          ./scripts/check_distribution cargo-install \
+          ./scripts/check-distribution cargo-install \
             --bin-name runewarp \
             --probe-arg --help \
             --expected-text "Usage: runewarp"
@@ -96,7 +96,7 @@ jobs:
           rustup default stable
 
       - name: Check package readiness
-        run: ./scripts/check_distribution package-readiness
+        run: ./scripts/check-distribution package-readiness
 
   rust-contract:
     name: Rust contract
@@ -148,13 +148,13 @@ jobs:
 
       - name: Check Docker image path
         run: |
-          ./scripts/check_distribution docker-image \
+          ./scripts/check-distribution docker-image \
             --probe-arg --help \
             --expected-text "Usage: runewarp" \
             --image-tag runewarp:ci
 
       - name: Run Docker example smoke
-        run: ./scripts/docker_example smoke
+        run: ./scripts/docker-example smoke
 
   ci:
     name: CI

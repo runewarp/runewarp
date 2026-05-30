@@ -33,7 +33,7 @@ class DistributionChecksTest < Minitest::Test
   def test_cargo_install_mode_installs_the_binary_and_checks_its_version
     Dir.mktmpdir do |repo_root|
       write_minimal_binary_crate(repo_root, version: "0.3.1")
-      result = run_command(ruby_script("scripts", "check_distribution"), "cargo-install", "--repo-root", repo_root, "--bin-name", "install-surface-fixture", "--expected-version", "0.3.1")
+      result = run_command(ruby_script("scripts", "check-distribution"), "cargo-install", "--repo-root", repo_root, "--bin-name", "install-surface-fixture", "--expected-version", "0.3.1")
       assert(result.success?, result.stderr)
     end
   end
@@ -52,7 +52,7 @@ class DistributionChecksTest < Minitest::Test
         RUBY
       )
 
-      result = run_command(ruby_script("scripts", "check_distribution"), "package-readiness", "--repo-root", repo_root, env: { "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}" })
+      result = run_command(ruby_script("scripts", "check-distribution"), "package-readiness", "--repo-root", repo_root, env: { "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}" })
       assert(result.success?, result.stderr)
       assert_equal("sparse\n", File.read(observed_protocol, encoding: "utf-8"))
     end
@@ -86,7 +86,7 @@ class DistributionChecksTest < Minitest::Test
         RUBY
       )
 
-      result = run_command(ruby_script("scripts", "check_distribution"), "registry-install", "--crate-name", "install-surface-fixture", "--bin-name", "install-surface-fixture", "--expected-version", "0.3.1", "--retry-attempts", "3", "--retry-delay-seconds", "0", env: { "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}" })
+      result = run_command(ruby_script("scripts", "check-distribution"), "registry-install", "--crate-name", "install-surface-fixture", "--bin-name", "install-surface-fixture", "--expected-version", "0.3.1", "--retry-attempts", "3", "--retry-delay-seconds", "0", env: { "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}" })
       assert(result.success?, result.stderr)
       assert_equal("3", File.read(attempts_file, encoding: "utf-8"))
     end
@@ -95,7 +95,7 @@ class DistributionChecksTest < Minitest::Test
   def test_registry_install_mode_rejects_zero_retry_attempts
     Dir.mktmpdir do |repo_root|
       write_minimal_binary_crate(repo_root, version: "0.3.1")
-      result = run_command(ruby_script("scripts", "check_distribution"), "registry-install", "--crate-name", "install-surface-fixture", "--bin-name", "install-surface-fixture", "--expected-version", "0.3.1", "--retry-attempts", "0", "--retry-delay-seconds", "0")
+      result = run_command(ruby_script("scripts", "check-distribution"), "registry-install", "--crate-name", "install-surface-fixture", "--bin-name", "install-surface-fixture", "--expected-version", "0.3.1", "--retry-attempts", "0", "--retry-delay-seconds", "0")
       refute(result.success?)
       assert_includes(result.stderr, "--retry-attempts must be at least 1")
     end
@@ -122,7 +122,7 @@ class DistributionChecksTest < Minitest::Test
         RUBY
       )
 
-      result = run_command(ruby_script("scripts", "check_distribution"), "docker-registry-image", "--image-ref", "docker.io/runewarp/runewarp:0.1.0", "--expected-text", "Usage: runewarp", "--probe-arg", "--help", env: { "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}" })
+      result = run_command(ruby_script("scripts", "check-distribution"), "docker-registry-image", "--image-ref", "docker.io/runewarp/runewarp:0.1.0", "--expected-text", "Usage: runewarp", "--probe-arg", "--help", env: { "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}" })
       assert(result.success?, result.stderr)
       assert_equal("pull docker.io/runewarp/runewarp:0.1.0\nrun --rm docker.io/runewarp/runewarp:0.1.0 --help\n", File.read(commands_file, encoding: "utf-8"))
     end
@@ -156,7 +156,7 @@ class DistributionChecksTest < Minitest::Test
         RUBY
       )
 
-      result = run_command(ruby_script("scripts", "check_distribution"), "docker-registry-image", "--image-ref", "docker.io/runewarp/runewarp:0.1.0", "--expected-version", "0.1.0", "--retry-attempts", "3", "--retry-delay-seconds", "0", env: { "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}" })
+      result = run_command(ruby_script("scripts", "check-distribution"), "docker-registry-image", "--image-ref", "docker.io/runewarp/runewarp:0.1.0", "--expected-version", "0.1.0", "--retry-attempts", "3", "--retry-delay-seconds", "0", env: { "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}" })
       assert(result.success?, result.stderr)
       assert_equal("3", File.read(attempts_file, encoding: "utf-8"))
     end
@@ -165,7 +165,7 @@ class DistributionChecksTest < Minitest::Test
   def test_docker_registry_image_mode_rejects_zero_retry_attempts
     Dir.mktmpdir do |repo_root|
       write_minimal_binary_crate(repo_root, version: "0.3.1")
-      result = run_command(ruby_script("scripts", "check_distribution"), "docker-registry-image", "--image-ref", "docker.io/runewarp/runewarp:0.1.0", "--expected-version", "0.1.0", "--retry-attempts", "0", "--retry-delay-seconds", "0")
+      result = run_command(ruby_script("scripts", "check-distribution"), "docker-registry-image", "--image-ref", "docker.io/runewarp/runewarp:0.1.0", "--expected-version", "0.1.0", "--retry-attempts", "0", "--retry-delay-seconds", "0")
       refute(result.success?)
       assert_includes(result.stderr, "--retry-attempts must be at least 1")
     end
@@ -174,7 +174,7 @@ class DistributionChecksTest < Minitest::Test
   def test_docker_registry_tag_absent_mode_allows_a_new_version_tag
     Dir.mktmpdir do |repo_root|
       write_minimal_binary_crate(repo_root, version: "0.3.1")
-      result = run_command(ruby_script("scripts", "check_distribution"), "docker-registry-tag-absent", "--image-ref", "docker.io/runewarp/runewarp:0.1.0", env: { "RUNEWARP_DOCKER_HUB_STATUS_OVERRIDE" => "404" })
+      result = run_command(ruby_script("scripts", "check-distribution"), "docker-registry-tag-absent", "--image-ref", "docker.io/runewarp/runewarp:0.1.0", env: { "RUNEWARP_DOCKER_HUB_STATUS_OVERRIDE" => "404" })
       assert(result.success?, result.stderr)
     end
   end
@@ -182,7 +182,7 @@ class DistributionChecksTest < Minitest::Test
   def test_docker_registry_tag_absent_mode_rejects_an_existing_version_tag
     Dir.mktmpdir do |repo_root|
       write_minimal_binary_crate(repo_root, version: "0.3.1")
-      result = run_command(ruby_script("scripts", "check_distribution"), "docker-registry-tag-absent", "--image-ref", "docker.io/runewarp/runewarp:0.1.0", env: { "RUNEWARP_DOCKER_HUB_STATUS_OVERRIDE" => "200" })
+      result = run_command(ruby_script("scripts", "check-distribution"), "docker-registry-tag-absent", "--image-ref", "docker.io/runewarp/runewarp:0.1.0", env: { "RUNEWARP_DOCKER_HUB_STATUS_OVERRIDE" => "200" })
       refute(result.success?)
       assert_includes(result.stderr, "docker registry tag already exists for docker.io/runewarp/runewarp:0.1.0")
     end
@@ -191,7 +191,7 @@ class DistributionChecksTest < Minitest::Test
   def test_package_readiness_mode_accepts_a_publishable_crate
     Dir.mktmpdir do |repo_root|
       write_minimal_binary_crate(repo_root, version: "0.3.1")
-      result = run_command(ruby_script("scripts", "check_distribution"), "package-readiness", "--repo-root", repo_root)
+      result = run_command(ruby_script("scripts", "check-distribution"), "package-readiness", "--repo-root", repo_root)
       assert(result.success?, result.stderr)
     end
   end

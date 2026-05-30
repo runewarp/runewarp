@@ -12,20 +12,54 @@ class WorkflowContractTest < Minitest::Test
   end
 
   def test_ci_workflow_uses_ruby_entry_points
-    assert_includes(ci_workflow, "run: ./scripts/lint_workflows")
-    assert_includes(ci_workflow, "run: ./scripts/test_automation")
+    assert_includes(ci_workflow, "run: ./scripts/lint-workflows")
+    assert_includes(ci_workflow, "run: ./scripts/validate-release-metadata ci")
+    assert_includes(ci_workflow, "run: ./scripts/test-automation")
+    assert_includes(ci_workflow, "./scripts/check-distribution cargo-install")
+    assert_includes(ci_workflow, "run: ./scripts/check-distribution package-readiness")
+    assert_includes(ci_workflow, "./scripts/check-distribution docker-image")
+    assert_includes(ci_workflow, "run: ./scripts/docker-example smoke")
     refute_includes(ci_workflow, ".sh")
   end
 
   def test_release_workflow_uses_ruby_release_helpers
-    assert_includes(release_workflow, "run: ./scripts/resolve_release_metadata")
-    assert_includes(release_workflow, "run: ./scripts/check_github_check_run")
-    assert_includes(release_workflow, "run: ./scripts/render_release_notes --version \"$RELEASE_VERSION\" > /tmp/release-notes.md")
-    assert_includes(release_workflow, "run: ./scripts/write_release_summary")
-    assert_includes(release_workflow, "run: ./scripts/check_docker_hub_tag --image-ref \"$PRIMARY_IMAGE_REF\"")
-    assert_includes(release_workflow, "run: ./scripts/merge_docker_manifest")
-    assert_includes(release_workflow, "run: ./scripts/upsert_github_release")
+    assert_includes(release_workflow, "run: ./scripts/resolve-release-metadata")
+    assert_includes(release_workflow, "run: ./scripts/validate-release-gates rehearsal")
+    assert_includes(release_workflow, "run: ./scripts/validate-release-gates tag")
+    assert_includes(release_workflow, "run: ./scripts/check-github-check-run")
+    assert_includes(release_workflow, "run: ./scripts/render-release-notes --version \"$RELEASE_VERSION\" > /tmp/release-notes.md")
+    assert_includes(release_workflow, "run: ./scripts/write-release-summary")
+    assert_includes(release_workflow, "run: ./scripts/check-crates-io-release")
+    assert_includes(release_workflow, "run: ./scripts/check-docker-hub-tag --image-ref \"$PRIMARY_IMAGE_REF\"")
+    assert_includes(release_workflow, "run: ./scripts/merge-docker-manifest")
+    assert_includes(release_workflow, "run: ./scripts/upsert-github-release")
     refute_includes(release_workflow, "python - <<'PY'")
+  end
+
+  def test_public_script_entrypoints_are_kebab_case_without_extensions
+    expected_entrypoints = %w[
+      check-crates-io-release
+      check-distribution
+      check-docker-hub-tag
+      check-github-check-run
+      ci
+      docker-example
+      docker-image
+      lint-workflows
+      merge-docker-manifest
+      render-release-notes
+      resolve-release-metadata
+      test-automation
+      upsert-github-release
+      validate-release-gates
+      validate-release-metadata
+      write-release-summary
+    ]
+    scripts_dir = File.join(REPO_ROOT, "scripts")
+    public_entrypoints = Dir.children(scripts_dir).select { |entry| File.file?(File.join(scripts_dir, entry)) }.sort
+
+    assert_equal(expected_entrypoints, public_entrypoints)
+    refute(public_entrypoints.any? { |entry| entry.include?("_") || entry.end_with?(".rb") })
   end
 
   def test_release_workflow_preserves_publish_ordering

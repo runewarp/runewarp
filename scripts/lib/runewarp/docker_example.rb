@@ -124,7 +124,7 @@ module Runewarp
       return if relative_paths.all? { |relative_path| File.file?(File.join(base_dir, relative_path)) }
       return unless relative_paths.any? { |relative_path| File.exist?(File.join(base_dir, relative_path)) }
 
-      Core.die("found incomplete #{label} in #{base_dir}; rerun ./scripts/docker_example prepare --reset to rebuild it cleanly")
+      Core.die("found incomplete #{label} in #{base_dir}; rerun ./scripts/docker-example prepare --reset to rebuild it cleanly")
     end
 
     def run_runewarp_with_xdg_data_home(example_dir, image_tag, xdg_data_home, *arguments)

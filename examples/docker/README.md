@@ -51,19 +51,75 @@ The example uses:
 From the repository root:
 
 ```bash
-./scripts/docker_example prepare
+./scripts/docker-example prepare
 ```
 
-`./scripts/docker_example prepare`:
+`./scripts/docker-example prepare`:
 
 - builds the local `runewarp/runewarp:local` image
-- generates manual/private-CA Server material under `examples/docker/generated/server/source-data/runewarp/server/cert`
-- generates Client identity material under `examples/docker/generated/client/source-data/runewarp/client/identity`
+- runs `runewarp server cert init --hostname tunnel.example.test` inside that image with `XDG_DATA_HOME=/workspace/generated/server/source-data`
+- runs `runewarp client identity init` inside that image with `XDG_DATA_HOME=/workspace/generated/client/source-data`
+- copies the generated certificate, identity, and trust material into the read-only runtime trees under `examples/docker/generated/server` and `examples/docker/generated/client`
 - renders XDG-style runtime config and data trees under `examples/docker/generated/server`, `examples/docker/generated/client`, and `examples/docker/generated/caddy`, so the containers use default config discovery plus default material and trust paths inside the example
 
 The Compose file uses that locally built `runewarp/runewarp:local` image for both the server and client. It does not pull a published image from Docker Hub.
 
-Use `./scripts/docker_example prepare --reset` when you want to discard generated state and rebuild it cleanly.
+If you want to do the same setup manually instead of using the helper script, run the equivalent steps from the repository root:
+
+```bash
+docker build --file Dockerfile --tag runewarp/runewarp:local .
+
+mkdir -p \
+  examples/docker/generated/server/source-data/runewarp/server/cert/state \
+  examples/docker/generated/server/data/runewarp/server/cert \
+  examples/docker/generated/server/config/runewarp \
+  examples/docker/generated/client/source-data/runewarp/client/identity \
+  examples/docker/generated/client/data/runewarp/client/identity \
+  examples/docker/generated/client/data/runewarp/client \
+  examples/docker/generated/client/config/runewarp \
+  examples/docker/generated/caddy/data \
+  examples/docker/generated/caddy/config
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --volume "$PWD/examples/docker:/workspace" \
+  --env XDG_DATA_HOME=/workspace/generated/server/source-data \
+  runewarp/runewarp:local \
+  server cert init --hostname tunnel.example.test
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --volume "$PWD/examples/docker:/workspace" \
+  --env XDG_DATA_HOME=/workspace/generated/client/source-data \
+  runewarp/runewarp:local \
+  client identity init
+
+cp examples/docker/generated/server/source-data/runewarp/server/cert/server.crt \
+  examples/docker/generated/server/data/runewarp/server/cert/server.crt
+cp examples/docker/generated/server/source-data/runewarp/server/cert/server.key \
+  examples/docker/generated/server/data/runewarp/server/cert/server.key
+cp examples/docker/generated/server/source-data/runewarp/server/cert/server-ca.crt \
+  examples/docker/generated/server/data/runewarp/server/cert/server-ca.crt
+cp examples/docker/generated/client/source-data/runewarp/client/identity/client.crt \
+  examples/docker/generated/client/data/runewarp/client/identity/client.crt
+cp examples/docker/generated/client/source-data/runewarp/client/identity/client.key \
+  examples/docker/generated/client/data/runewarp/client/identity/client.key
+cp examples/docker/generated/client/source-data/runewarp/client/identity/client-identity.txt \
+  examples/docker/generated/client/data/runewarp/client/identity/client-identity.txt
+cp examples/docker/generated/server/source-data/runewarp/server/cert/server-ca.crt \
+  examples/docker/generated/client/data/runewarp/client/server-ca.crt
+
+client_identity="$(tr -d '[:space:]' < examples/docker/generated/client/source-data/runewarp/client/identity/client-identity.txt)"
+sed "s/__CLIENT_IDENTITY__/${client_identity}/" \
+  examples/docker/server/config.toml.template \
+  > examples/docker/generated/server/config/runewarp/config.toml
+cp examples/docker/client/config.toml.template \
+  examples/docker/generated/client/config/runewarp/config.toml
+```
+
+Those commands are the manual equivalent of the helper script: they build the image, generate the Server certificate and Client identity with the real `runewarp` CLI, then stage the runtime files where Compose mounts them read-only.
+
+Use `./scripts/docker-example prepare --reset` when you want to discard generated state and rebuild it cleanly.
 
 ## Start the stack
 
@@ -84,10 +140,10 @@ The example publishes the Server on `localhost:8443` for local testing while the
 The quickest end-to-end verification is:
 
 ```bash
-./scripts/docker_example smoke
+./scripts/docker-example smoke
 ```
 
-`./scripts/docker_example smoke` resets the stack, prepares fresh state, starts the containers, waits for Caddy's local CA, verifies both hostnames over TLS, and then shuts the stack back down.
+`./scripts/docker-example smoke` resets the stack, prepares fresh state, starts the containers, waits for Caddy's local CA, verifies both hostnames over TLS, and then shuts the stack back down.
 
 If you want to keep the stack running and inspect it manually:
 
@@ -105,7 +161,7 @@ curl --cacert examples/docker/generated/caddy/root.crt \
 
 ```bash
 docker compose -f examples/docker/docker-compose.yml down --volumes --remove-orphans
-./scripts/docker_example prepare --reset
+./scripts/docker-example prepare --reset
 ```
 
 ## Where to go next

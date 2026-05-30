@@ -6,19 +6,19 @@ This document describes the repository automation for release preparation and pu
 
 The `CI` workflow is the required aggregate check for normal changes. It currently validates:
 
-- release metadata structure through `./scripts/validate_release_metadata ci`
-- release metadata resolution, Docker Hub lookup, release gates, distribution checks, and workflow contracts through `./scripts/test_automation`
-- Linux Cargo install from source through `./scripts/check_distribution cargo-install`
+- release metadata structure through `./scripts/validate-release-metadata ci`
+- release metadata resolution, Docker Hub lookup, release gates, distribution checks, and workflow contracts through `./scripts/test-automation`
+- Linux Cargo install from source through `./scripts/check-distribution cargo-install`
 - macOS Cargo install from source through the same distribution-check script
-- crate packaging readiness through `./scripts/check_distribution package-readiness`
+- crate packaging readiness through `./scripts/check-distribution package-readiness`
 - Rust formatting, Clippy, tests, and docs
-- Docker image build plus `--version` startup through `./scripts/check_distribution docker-image`
+- Docker image build plus `--version` startup through `./scripts/check-distribution docker-image`
 - the end-to-end Docker example smoke test
-- workflow syntax through `./scripts/lint_workflows`
+- workflow syntax through `./scripts/lint-workflows`
 
 These checks run on both pull requests and `main` pushes and roll up into one required `CI` status.
 
-Local workflow edits can run `./scripts/lint_workflows` directly, and `./scripts/test_automation` exercises the repository-owned Ruby workflow helpers against the same public entry points used by CI.
+Local workflow edits can run `./scripts/lint-workflows` directly, and `./scripts/test-automation` exercises the repository-owned Ruby workflow helpers against the same public entry points used by CI.
 
 ## Release workflow
 
@@ -73,8 +73,8 @@ For manual `publish`, the workflow:
 
 The workflow keeps GitHub-specific orchestration and publish-job boundaries in YAML. Repo-owned Ruby entry points keep the rules and reusable adapters:
 
-- `scripts/lib/runewarp/release_metadata.rb` owns stable release-tag parsing plus derived release metadata, and `scripts/resolve_release_metadata` is the GitHub Actions adapter that writes those results into the gate job environment and outputs
-- `scripts/lib/runewarp/docker_hub.rb` owns Docker Hub tag URL resolution plus HTTP status lookups, `scripts/check_docker_hub_tag` is the workflow adapter for outputs, and `scripts/check_distribution docker-registry-tag-absent` reuses the same lookup seam for local distribution checks
+- `scripts/lib/runewarp/release_metadata.rb` owns stable release-tag parsing plus derived release metadata, and `scripts/resolve-release-metadata` is the GitHub Actions adapter that writes those results into the gate job environment and outputs
+- `scripts/lib/runewarp/docker_hub.rb` owns Docker Hub tag URL resolution plus HTTP status lookups, `scripts/check-docker-hub-tag` is the workflow adapter for outputs, and `scripts/check-distribution docker-registry-tag-absent` reuses the same lookup seam for local distribution checks
 - `scripts/lib/runewarp/release_docs.rb` owns changelog and version validation plus changelog-driven release-body rendering
 - `scripts/lib/runewarp/release_gates.rb` owns rehearsal/tag gate validation
 - `scripts/lib/runewarp/workflow_helpers.rb` owns the GitHub API, crates.io API, Docker manifest merge, release-summary, and GitHub Release upsert helpers that the release workflow shells out to through Ruby entry points

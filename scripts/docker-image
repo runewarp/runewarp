@@ -4,7 +4,7 @@
 require_relative "lib/runewarp"
 
 Runewarp::Core.run_cli do
-  Runewarp::Core.usage_error("docker_image <platform> <output-dir>") unless ARGV.length == 2
+  Runewarp::Core.usage_error("docker-image <platform> <output-dir>") unless ARGV.length == 2
 
   repo_root = File.expand_path("..", __dir__)
   platform, output_dir = ARGV

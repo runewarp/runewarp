@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
-use super::tunnel_registry::TunnelRegistry;
+use super::tunnel_registry::{TunnelRegistry, TunnelRouteOutcome};
 use crate::acme::ACME_TLS_ALPN;
 use crate::client_hello::read_client_hello;
 use crate::hostname::validate_public_hostname;
@@ -66,24 +66,26 @@ impl VisitorStreamHandler {
             };
         }
 
-        if !self
+        let tunnel_connection = match self
             .tunnel_registry
-            .contains_public_hostname(&public_hostname)
-        {
-            runtime_log::server_route(&public_hostname, ServerRouteOutcome::RejectedUnauthorized);
-            return Ok(());
-        }
-
-        let Some(tunnel_connection) = self
-            .tunnel_registry
-            .current_connection(&public_hostname)
+            .route_tunnel_connection(&public_hostname)
             .await
-        else {
-            runtime_log::server_route(
-                &public_hostname,
-                ServerRouteOutcome::NoActiveTunnelConnection,
-            );
-            return Ok(());
+        {
+            TunnelRouteOutcome::Unauthorized => {
+                runtime_log::server_route(
+                    &public_hostname,
+                    ServerRouteOutcome::RejectedUnauthorized,
+                );
+                return Ok(());
+            }
+            TunnelRouteOutcome::NoActiveTunnelConnection => {
+                runtime_log::server_route(
+                    &public_hostname,
+                    ServerRouteOutcome::NoActiveTunnelConnection,
+                );
+                return Ok(());
+            }
+            TunnelRouteOutcome::Connected(tunnel_connection) => tunnel_connection,
         };
 
         self.forward_to_tunnel(

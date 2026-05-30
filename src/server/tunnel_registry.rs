@@ -13,6 +13,12 @@ use crate::{
 
 use super::active_client::ActiveClientSlot;
 
+pub(crate) enum TunnelRouteOutcome {
+    Unauthorized,
+    NoActiveTunnelConnection,
+    Connected(Connection),
+}
+
 #[derive(Clone)]
 pub(crate) struct TunnelRegistry {
     client_identity_to_tunnel: Arc<HashMap<ClientIdentity, usize>>,
@@ -122,16 +128,18 @@ impl TunnelRegistry {
         })
     }
 
-    pub(crate) async fn current_connection(&self, public_hostname: &str) -> Option<Connection> {
-        let tunnel_index = self
-            .public_hostname_to_tunnel
-            .get(public_hostname)
-            .copied()?;
-        self.tunnel_slots[tunnel_index].current_connection().await
-    }
-
-    pub(crate) fn contains_public_hostname(&self, public_hostname: &str) -> bool {
-        self.public_hostname_to_tunnel.contains_key(public_hostname)
+    pub(crate) async fn route_tunnel_connection(
+        &self,
+        public_hostname: &str,
+    ) -> TunnelRouteOutcome {
+        let Some(tunnel_index) = self.public_hostname_to_tunnel.get(public_hostname).copied()
+        else {
+            return TunnelRouteOutcome::Unauthorized;
+        };
+        let Some(connection) = self.tunnel_slots[tunnel_index].current_connection().await else {
+            return TunnelRouteOutcome::NoActiveTunnelConnection;
+        };
+        TunnelRouteOutcome::Connected(connection)
     }
 
     pub(crate) async fn register(&self, connection: Connection) {
@@ -202,11 +210,55 @@ mod tests {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use tokio::time::timeout;
 
-    use super::TunnelRegistry;
+    use super::{TunnelRegistry, TunnelRouteOutcome};
     use crate::{
         GeneratedClientIdentity, ServerTunnelSettings, generate_client_identity,
         make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
     };
+
+    #[tokio::test]
+    async fn returns_unauthorized_when_public_hostname_is_not_authorized() -> io::Result<()> {
+        let registry = TunnelRegistry::single(vec!["app.example.test".to_owned()])?;
+
+        assert!(matches!(
+            registry.route_tunnel_connection("other.example.test").await,
+            TunnelRouteOutcome::Unauthorized
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn returns_no_active_tunnel_connection_for_authorized_public_hostname() -> io::Result<()>
+    {
+        let registry = TunnelRegistry::single(vec!["app.example.test".to_owned()])?;
+
+        assert!(matches!(
+            registry.route_tunnel_connection("app.example.test").await,
+            TunnelRouteOutcome::NoActiveTunnelConnection
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn returns_connected_tunnel_connection_for_authorized_public_hostname() -> io::Result<()>
+    {
+        let client_identity = generate_test_client_identity()?;
+        let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        let registry = TunnelRegistry::configured(
+            "tunnel.example.test",
+            &[ServerTunnelSettings {
+                public_hostnames: vec!["app.example.test".to_owned()],
+                client_identity: client_identity.client_identity.clone(),
+            }],
+        )?;
+        registry.register(fixture.server_connection).await;
+
+        assert!(matches!(
+            registry.route_tunnel_connection("app.example.test").await,
+            TunnelRouteOutcome::Connected(_)
+        ));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn stopped_registry_rejects_late_tunnel_registration() -> io::Result<()> {
@@ -223,12 +275,10 @@ mod tests {
         registry.stop_accepting();
         registry.register(fixture.server_connection).await;
 
-        assert!(
-            registry
-                .current_connection("app.example.test")
-                .await
-                .is_none()
-        );
+        assert!(matches!(
+            registry.route_tunnel_connection("app.example.test").await,
+            TunnelRouteOutcome::NoActiveTunnelConnection
+        ));
         Ok(())
     }
 

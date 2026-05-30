@@ -1,0 +1,42 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "lib/runewarp"
+
+Runewarp::Core.run_cli do
+  event_name = ENV["EVENT_NAME"].to_s
+  image_repository = ENV["IMAGE_REPOSITORY"].to_s
+  github_env = ENV["GITHUB_ENV"].to_s
+  github_output = ENV["GITHUB_OUTPUT"].to_s
+
+  Runewarp::Core.die("EVENT_NAME is required") if event_name.empty?
+  Runewarp::Core.die("IMAGE_REPOSITORY is required") if image_repository.empty?
+  Runewarp::Core.die("GITHUB_ENV is required") if github_env.empty?
+  Runewarp::Core.die("GITHUB_OUTPUT is required") if github_output.empty?
+
+  resolved = Runewarp::ReleaseMetadata.resolve(
+    event_name: event_name,
+    push_tag: ENV["PUSH_TAG"].to_s,
+    workflow_mode_input: ENV["WORKFLOW_MODE"].to_s,
+    workflow_tag: ENV["WORKFLOW_TAG"].to_s,
+    image_repository: image_repository
+  )
+  docker_tags = Runewarp::ReleaseMetadata.docker_tags(image_repository, resolved.fetch("release_version")).join("\n")
+
+  File.open(github_env, "a", encoding: "utf-8") do |handle|
+    handle.write("WORKFLOW_MODE=#{resolved.fetch('workflow_mode')}\n")
+    handle.write("RELEASE_TAG=#{resolved.fetch('release_tag')}\n")
+    handle.write("RELEASE_VERSION=#{resolved.fetch('release_version')}\n")
+    handle.write("RELEASE_SOURCE_REF=#{resolved.fetch('release_source_ref')}\n")
+    handle.write("IMAGE_REPOSITORY=#{resolved.fetch('image_repository')}\n")
+    handle.write("PRIMARY_IMAGE_REF=#{resolved.fetch('primary_image_ref')}\n")
+  end
+  Runewarp::Core.write_github_multiline_output(github_env, "DOCKER_TAGS", docker_tags)
+
+  File.open(github_output, "a", encoding: "utf-8") do |handle|
+    resolved.each do |key, value|
+      handle.write("#{key}=#{value}\n")
+    end
+  end
+  Runewarp::Core.write_github_multiline_output(github_output, "docker_tags", docker_tags)
+end

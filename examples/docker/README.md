@@ -43,6 +43,7 @@ The example uses:
 
 - Docker
 - Docker Compose
+- Ruby
 - `curl`
 
 ## Prepare the example
@@ -51,10 +52,10 @@ From the repository root:
 
 ```bash
 cd examples/docker
-./prepare.sh
+ruby ./prepare.rb
 ```
 
-`./prepare.sh`:
+`ruby ./prepare.rb`:
 
 - builds the local `runewarp/runewarp:local` image
 - generates manual/private-CA Server material under `generated/server/source-data/runewarp/server/cert`
@@ -63,7 +64,7 @@ cd examples/docker
 
 The Compose file uses that locally built `runewarp/runewarp:local` image for both the server and client. It does not pull a published image from Docker Hub.
 
-Use `./prepare.sh --reset` when you want to discard generated state and rebuild it cleanly.
+Use `ruby ./prepare.rb --reset` when you want to discard generated state and rebuild it cleanly.
 
 ## Start the stack
 
@@ -84,10 +85,10 @@ The example publishes the Server on `localhost:8443` for local testing while the
 The quickest end-to-end verification is:
 
 ```bash
-./smoke.sh
+ruby ./smoke.rb
 ```
 
-`./smoke.sh` resets the stack, prepares fresh state, starts the containers, waits for Caddy's local CA, verifies both hostnames over TLS, and then shuts the stack back down.
+`ruby ./smoke.rb` resets the stack, prepares fresh state, starts the containers, waits for Caddy's local CA, verifies both hostnames over TLS, and then shuts the stack back down.
 
 If you want to keep the stack running and inspect it manually:
 
@@ -105,7 +106,7 @@ curl --cacert ./generated/caddy/root.crt \
 
 ```bash
 docker compose down --volumes --remove-orphans
-./prepare.sh --reset
+ruby ./prepare.rb --reset
 ```
 
 ## Where to go next

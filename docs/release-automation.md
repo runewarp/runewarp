@@ -6,20 +6,19 @@ This document describes the repository automation for release preparation and pu
 
 The `CI` workflow is the required aggregate check for normal changes. It currently validates:
 
-- release metadata structure through `scripts/validate-release-metadata.sh ci`
-- release metadata resolution through `scripts/resolve-release-metadata.sh` and its shell contract in `scripts/test-release-metadata.sh`
-- Docker Hub tag lookup through `scripts/check-docker-hub-tag.sh` and its shell contract in `scripts/test-docker-hub-tag.sh`
-- Linux Cargo install from source through `scripts/validate-install-surfaces.sh cargo-install`
+- release metadata structure through `ruby ./scripts/validate-release-metadata.rb ci`
+- release metadata resolution, Docker Hub lookup, release gates, install-surface seams, and workflow contracts through `ruby ./scripts/test-automation.rb`
+- Linux Cargo install from source through `ruby ./scripts/validate-install-surfaces.rb cargo-install`
 - macOS Cargo install from source through the same install-surface script
-- crate packaging readiness through `scripts/validate-install-surfaces.sh package-readiness`
+- crate packaging readiness through `ruby ./scripts/validate-install-surfaces.rb package-readiness`
 - Rust formatting, Clippy, tests, and docs
-- Docker image build plus `--version` startup through `scripts/validate-install-surfaces.sh docker-image`
+- Docker image build plus `--version` startup through `ruby ./scripts/validate-install-surfaces.rb docker-image`
 - the end-to-end Docker example smoke test
-- workflow syntax plus embedded shell with `scripts/lint-workflows.sh` and its shell contract in `scripts/test-lint-workflows.sh`
+- workflow syntax through `ruby ./scripts/lint-workflows.rb`
 
 These checks run on both pull requests and `main` pushes and roll up into one required `CI` status.
 
-Local workflow edits can run `./scripts/lint-workflows.sh` directly. Running `./scripts/setup-git-hooks.sh` once per checkout configures `.githooks/pre-commit`, which reuses the same lint entry point against the staged workflow content before commit.
+Local workflow edits can run `ruby ./scripts/lint-workflows.rb` directly, and `ruby ./scripts/test-automation.rb` exercises the repository-owned Ruby workflow helpers against the same public entry points used by CI.
 
 ## Release workflow
 
@@ -72,15 +71,14 @@ For manual `publish`, the workflow:
 
 ## Workflow boundaries
 
-The workflow keeps GitHub-specific orchestration and idempotent publish checks in YAML. Repo-owned scripts keep the release gates and release-notes rules:
+The workflow keeps GitHub-specific orchestration and publish-job boundaries in YAML. Repo-owned Ruby entry points keep the rules and reusable adapters:
 
-- `scripts/validate-release-gates.sh` owns rehearsal/tag gate validation
-- `scripts/lib-release-metadata.sh` owns stable release-tag parsing plus derived release metadata, and `scripts/resolve-release-metadata.sh` is the thin GitHub Actions adapter that writes those results into the gate job environment and outputs
-- `scripts/lib-docker-hub.sh` owns Docker Hub tag URL resolution plus HTTP status lookups, `scripts/check-docker-hub-tag.sh` is the thin GitHub Actions adapter for workflow outputs, and `scripts/validate-install-surfaces.sh docker-registry-tag-absent` reuses the same Docker Hub lookup seam for local install-surface validation
-- `scripts/validate-release-metadata.sh` owns changelog and version validation for both rehearsal and release mode
-- `scripts/render-release-notes.sh` owns changelog-driven release-body rendering, including exact release-entry selection, validation of the requested entry's changelog subsection headings, and promotion of those subsection headings to release-note H2 headings
-- release-time idempotency decisions for crates.io, Docker Hub, and GitHub Releases still live in the workflow because they are GitHub-hosted orchestration decisions rather than reusable local install-surface validation
-- per-architecture Docker builds and manifest publication live in the workflow because runner selection, registry login, and digest promotion are GitHub-hosted orchestration concerns
+- `scripts/lib/runewarp/release_metadata.rb` owns stable release-tag parsing plus derived release metadata, and `scripts/resolve-release-metadata.rb` is the GitHub Actions adapter that writes those results into the gate job environment and outputs
+- `scripts/lib/runewarp/docker_hub.rb` owns Docker Hub tag URL resolution plus HTTP status lookups, `scripts/check-docker-hub-tag.rb` is the workflow adapter for outputs, and `scripts/validate-install-surfaces.rb docker-registry-tag-absent` reuses the same lookup seam for local validation
+- `scripts/lib/runewarp/release_docs.rb` owns changelog and version validation plus changelog-driven release-body rendering
+- `scripts/lib/runewarp/release_gates.rb` owns rehearsal/tag gate validation
+- `scripts/lib/runewarp/workflow_helpers.rb` owns the GitHub API, crates.io API, Docker manifest merge, release-summary, and GitHub Release upsert helpers that the release workflow shells out to through Ruby entry points
+- per-architecture Docker builds and manifest publication still live in the workflow because runner selection, registry login, and digest promotion are GitHub-hosted orchestration concerns
 - post-publish install-surface probes are enforced in `CI`, not repeated in the release workflow
 
 ## Release environment and secrets

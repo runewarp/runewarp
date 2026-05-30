@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "lib/runewarp"
+
+Runewarp::Core.run_cli do
+  Runewarp::WorkflowHelpers.verify_prior_green_ci!(
+    repository: ENV.fetch("REPOSITORY"),
+    commit_sha: ENV.fetch("COMMIT_SHA"),
+    token: ENV.fetch("GITHUB_TOKEN")
+  )
+end

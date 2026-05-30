@@ -1,0 +1,33 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require_relative "lib/runewarp"
+
+repo_root = File.expand_path("..", __dir__)
+options = {
+  repo_root: repo_root,
+  retry_attempts: 10,
+  retry_delay_seconds: 30
+}
+mode = ARGV.shift
+
+Runewarp::Core.run_cli do
+  Runewarp::Core.usage_error("validate-install-surfaces.rb <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]") if mode.nil? || mode.empty?
+
+  OptionParser.new do |parser|
+    parser.banner = "usage: validate-install-surfaces.rb <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]"
+    parser.on("--repo-root PATH") { |value| options[:repo_root] = value }
+    parser.on("--bin-name NAME") { |value| options[:bin_name] = value }
+    parser.on("--crate-name NAME") { |value| options[:crate_name] = value }
+    parser.on("--expected-version VERSION") { |value| options[:expected_version] = value }
+    parser.on("--expected-text TEXT") { |value| options[:expected_text] = value }
+    parser.on("--probe-arg ARG") { |value| options[:probe_arg] = value }
+    parser.on("--image-tag TAG") { |value| options[:image_tag] = value }
+    parser.on("--image-ref REF") { |value| options[:image_ref] = value }
+    parser.on("--retry-attempts COUNT", Integer) { |value| options[:retry_attempts] = value }
+    parser.on("--retry-delay-seconds SECONDS", Integer) { |value| options[:retry_delay_seconds] = value }
+  end.parse!
+
+  Runewarp::InstallSurfaces.validate!(mode: mode, **options)
+end

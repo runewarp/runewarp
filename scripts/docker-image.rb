@@ -1,0 +1,44 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "lib/runewarp"
+
+Runewarp::Core.run_cli do
+  Runewarp::Core.usage_error("docker-image.rb <platform> <output-dir>") unless ARGV.length == 2
+
+  repo_root = File.expand_path("..", __dir__)
+  platform, output_dir = ARGV
+  artifact_dir = File.join(repo_root, output_dir)
+  version = Runewarp::Core.runewarp_version(repo_root)
+  Runewarp::Core.die("failed to read version from Cargo.toml") if version.nil? || version.empty?
+  commit = Runewarp::Core.runewarp_git_commit(repo_root)
+  Runewarp::Core.die("failed to resolve git commit") if commit.nil? || commit.empty?
+  platform_suffix = platform.tr("/", "-")
+  artifact_name = "runewarp-v#{version}-#{commit}-#{platform_suffix}"
+  artifact_path = File.join(artifact_dir, "#{artifact_name}.oci.tar")
+
+  Runewarp::Core.require_command("docker")
+  Runewarp::Core.die("docker buildx is required to export OCI image artifacts") unless Runewarp::Shell.successful?("docker", "buildx", "version")
+
+  FileUtils.mkdir_p(artifact_dir)
+  Runewarp::Core.section("Exporting OCI image")
+  Runewarp::Core.note("Platform: #{platform}")
+  Runewarp::Core.note("Destination: #{artifact_path}")
+  Runewarp::Shell.run!(
+    "docker",
+    "buildx",
+    "build",
+    "--file",
+    File.join(repo_root, "Dockerfile"),
+    "--platform",
+    platform,
+    "--output",
+    "type=oci,dest=#{artifact_path}",
+    "--tag",
+    "runewarp:#{artifact_name}",
+    repo_root
+  )
+  Runewarp::Core.success("OCI image exported")
+  Runewarp::Core.note("Artifact ready at #{artifact_path}")
+  puts(artifact_path)
+end

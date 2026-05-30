@@ -25,9 +25,9 @@ The repository ships a concrete example under [`examples/docker/`](../examples/d
 ```bash
 git clone https://github.com/runewarp/runewarp.git
 cd runewarp/examples/docker
-./prepare.sh
+ruby ./prepare.rb
 docker compose up -d
-./smoke.sh
+ruby ./smoke.rb
 ```
 
 Use [`examples/docker/README.md`](../examples/docker/README.md) for the full walkthrough and reset flow.

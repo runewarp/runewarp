@@ -10,7 +10,7 @@ Runewarp treats a stable release as one sequence:
 2. Merge that PR to `main` and wait for the aggregate `CI` check to finish green on the release commit.
 3. Optionally run a **Release rehearsal** through `workflow_dispatch` to prove the candidate release metadata and gates without publishing.
 4. Create and push an SSH-signed `vX.Y.Z` **Release tag** on that green `main` commit.
-5. Let the `Release` workflow publish crates.io first, then build both Docker architectures and publish the manifest tags, then finalize the GitHub Release.
+5. Let the `Release` workflow run the repo-owned Ruby release helpers from `main`, publish crates.io first, then build both Docker architectures and publish the manifest tags, then finalize the GitHub Release.
 6. If a trusted existing release tag needs a recovery rerun, use manual **Release publish** through `workflow_dispatch` with the same tag; already-published surfaces are skipped instead of being mutated.
 7. Move `main` forward in a follow-up change to the next minor `-dev` version and reopen `CHANGELOG.md` with `Unreleased`.
 
@@ -92,7 +92,7 @@ Use manual publish when the tag already exists and you need the current release 
 4. Watch the workflow summary to confirm it is in publish mode and targeting the expected tag.
 5. Let the workflow skip any surface that is already published and complete any missing surface that is still absent.
 
-Manual publish applies the same signed-tag, trusted-commit, and prior-green-`CI` checks as the normal tag-driven release path. The workflow definition and release notes come from the current `main`, while crate and Docker artifacts still target the selected release tag's source tree. If the GitHub release already exists, the workflow updates its title and notes to match the current rendered changelog entry for that version.
+Manual publish applies the same signed-tag, trusted-commit, and prior-green-`CI` checks as the normal tag-driven release path. The workflow definition, Ruby release helpers, and release notes come from the current `main`, while crate and Docker artifacts still target the selected release tag's source tree. If the GitHub release already exists, the workflow updates its title and notes to match the current rendered changelog entry for that version.
 
 ## Recovery playbooks
 

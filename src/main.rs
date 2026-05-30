@@ -1,5 +1,6 @@
 mod cert_commands;
 mod client_runtime;
+mod error_handling;
 mod reconnect_policy;
 
 use std::env;
@@ -13,6 +14,9 @@ use cert_commands::{
     run_client_identity_command, run_client_public_cert_command, run_server_cert_command,
 };
 use clap::{CommandFactory, Parser};
+use error_handling::{
+    RunError, RunTermination, classify_runtime_error, finish_run, logged_runtime_failure,
+};
 use runewarp::{
     ClientRuntimeArgs, ClientSettingsResolutionError, PreparedServer,
     ServerSettingsResolutionError, SettingsError, default_config_path,
@@ -21,33 +25,12 @@ use runewarp::{
 
 mod cli;
 
-enum RunError {
-    Cli(clap::Error),
-    Other(Box<dyn Error>),
-    Logged,
-}
-
-#[derive(Debug)]
-struct LoggedRuntimeError;
-
-impl std::fmt::Display for LoggedRuntimeError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("runtime failure already logged")
-    }
-}
-
-impl Error for LoggedRuntimeError {}
-
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(env::args().skip(1)).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(RunError::Cli(error)) => error.exit(),
-        Err(RunError::Other(error)) => {
-            eprintln!("{error}");
-            ExitCode::FAILURE
-        }
-        Err(RunError::Logged) => ExitCode::FAILURE,
+    let mut stderr = io::stderr().lock();
+    match finish_run(run(env::args().skip(1)).await, &mut stderr) {
+        RunTermination::Exit(code) => code,
+        RunTermination::Clap(error) => error.exit(),
     }
 }
 
@@ -66,22 +49,12 @@ async fn run(args: impl Iterator<Item = String>) -> Result<(), RunError> {
 
     let cli = cli::Cli::try_parse_from(argv).map_err(RunError::Cli)?;
     match cli.command {
-        Some(cli::TopLevelCommand::Server(command)) => match run_server_command(command).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.downcast_ref::<LoggedRuntimeError>().is_some() => {
-                Err(RunError::Logged)
-            }
-            Err(error) => Err(RunError::Other(error)),
-        },
-        Some(cli::TopLevelCommand::Client(command)) => {
-            match run_client_command_from_cli(command).await {
-                Ok(()) => Ok(()),
-                Err(error) if error.downcast_ref::<LoggedRuntimeError>().is_some() => {
-                    Err(RunError::Logged)
-                }
-                Err(error) => Err(RunError::Other(error)),
-            }
-        }
+        Some(cli::TopLevelCommand::Server(command)) => run_server_command(command)
+            .await
+            .map_err(classify_runtime_error),
+        Some(cli::TopLevelCommand::Client(command)) => run_client_command_from_cli(command)
+            .await
+            .map_err(classify_runtime_error),
         None => Ok(()),
     }
 }
@@ -280,9 +253,4 @@ fn uses_nondefault_config_path(config_path: &Path) -> bool {
 
 fn wildcard(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
-}
-
-fn logged_runtime_failure(error: Box<dyn Error>) -> Box<dyn Error> {
-    runewarp::runtime_log::emit(runewarp::runtime_log::EventLevel::Error, &error.to_string());
-    Box::new(LoggedRuntimeError)
 }

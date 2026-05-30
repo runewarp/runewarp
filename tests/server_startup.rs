@@ -7,7 +7,7 @@ use std::time::Duration;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     PreparedClient, PreparedServer, generate_client_identity, initialize_manual_server_certificate,
-    load_client_settings, load_server_settings,
+    load_client_config, load_server_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -43,7 +43,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     )
     .unwrap();
 
-    let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
     let server = PreparedServer::bind(&settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -76,7 +76,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     )
     .unwrap();
 
-    let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
     let server = PreparedServer::bind(
         &settings,
         settings.public_bind_address,
@@ -162,7 +162,7 @@ backend-address = "__BACKEND_ADDRESS__"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -170,7 +170,7 @@ backend-address = "__BACKEND_ADDRESS__"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -265,7 +265,7 @@ backend-address = "__BACKEND_ADDRESS__"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -273,7 +273,7 @@ backend-address = "__BACKEND_ADDRESS__"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -369,7 +369,7 @@ backend-address = "{}"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -377,7 +377,7 @@ backend-address = "{}"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -472,7 +472,7 @@ backend-address = "{}"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -480,7 +480,7 @@ backend-address = "{}"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -611,7 +611,7 @@ backend-address = "{}"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -619,15 +619,13 @@ backend-address = "{}"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let app_client_settings =
-        load_client_settings(&tempdir.path().join("client-app.toml")).unwrap();
+    let app_client_settings = load_client_config(&tempdir.path().join("client-app.toml")).unwrap();
     let app_client = PreparedClient::connect_to(&app_client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
     let app_client_task = tokio::spawn(app_client.run());
 
-    let api_client_settings =
-        load_client_settings(&tempdir.path().join("client-api.toml")).unwrap();
+    let api_client_settings = load_client_config(&tempdir.path().join("client-api.toml")).unwrap();
     let api_client = PreparedClient::connect_to(&api_client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -778,7 +776,7 @@ backend-address = "{}"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -787,15 +785,14 @@ backend-address = "{}"
     let server_task = tokio::spawn(server.run());
 
     let app_client_one_settings =
-        load_client_settings(&tempdir.path().join("client-app-one.toml")).unwrap();
+        load_client_config(&tempdir.path().join("client-app-one.toml")).unwrap();
     let app_client_one =
         PreparedClient::connect_to(&app_client_one_settings, localhost(0), tunnel_addr)
             .await
             .unwrap();
     let app_client_one_task = tokio::spawn(app_client_one.run());
 
-    let api_client_settings =
-        load_client_settings(&tempdir.path().join("client-api.toml")).unwrap();
+    let api_client_settings = load_client_config(&tempdir.path().join("client-api.toml")).unwrap();
     let api_client = PreparedClient::connect_to(&api_client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -812,7 +809,7 @@ backend-address = "{}"
     assert_eq!(first_api_response, *b"api!");
 
     let app_client_two_settings =
-        load_client_settings(&tempdir.path().join("client-app-two.toml")).unwrap();
+        load_client_config(&tempdir.path().join("client-app-two.toml")).unwrap();
     let app_client_two =
         PreparedClient::connect_to(&app_client_two_settings, localhost(0), tunnel_addr)
             .await
@@ -915,7 +912,7 @@ backend-address = "__BACKEND_ADDRESS__"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -923,7 +920,7 @@ backend-address = "__BACKEND_ADDRESS__"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr).await;
     let client_task = client.ok().map(|client| tokio::spawn(client.run()));
 
@@ -968,7 +965,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     )
     .unwrap();
 
-    let settings = load_server_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
     let server = PreparedServer::bind(&settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -1052,14 +1049,14 @@ backend-address = "127.0.0.1:1"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
     let client = timeout(Duration::from_secs(1), async {
         loop {
             match PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr).await {

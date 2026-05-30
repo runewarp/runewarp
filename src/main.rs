@@ -1,8 +1,8 @@
 mod cert_commands;
 mod client_runtime;
+mod config_hints;
 mod error_handling;
 mod reconnect_policy;
-mod settings_hints;
 
 use std::env;
 use std::error::Error;
@@ -14,15 +14,13 @@ use cert_commands::{
     run_client_identity_command, run_client_public_cert_command, run_server_cert_command,
 };
 use clap::{CommandFactory, Parser};
+use config_hints::{wrap_client_config_resolution_error, wrap_server_config_resolution_error};
 use error_handling::{
     RunError, RunTermination, classify_runtime_error, finish_run, logged_runtime_failure,
 };
 use runewarp::{
-    ClientRuntimeArgs, PreparedServer, resolve_client_settings_from_cli,
-    resolve_server_settings_from_cli,
-};
-use settings_hints::{
-    wrap_client_settings_resolution_error, wrap_server_settings_resolution_error,
+    ClientRuntimeArgs, PreparedServer, resolve_client_config_from_cli,
+    resolve_server_config_from_cli,
 };
 
 mod cli;
@@ -67,13 +65,13 @@ async fn run_server_command(command: cli::ServerArgs) -> Result<(), Box<dyn Erro
         return run_server_cert_command(config, command);
     }
 
-    let settings =
-        resolve_server_settings_from_cli(config).map_err(wrap_server_settings_resolution_error)?;
-    runewarp::runtime_log::install(settings.log_level)?;
+    let config =
+        resolve_server_config_from_cli(config).map_err(wrap_server_config_resolution_error)?;
+    runewarp::runtime_log::install(config.log_level)?;
     let server = match PreparedServer::bind(
-        &settings,
-        settings.public_bind_address,
-        settings.tunnel_connection_bind_address,
+        &config,
+        config.public_bind_address,
+        config.tunnel_connection_bind_address,
     )
     .await
     {
@@ -125,11 +123,11 @@ async fn run_client_command_from_cli(command: cli::ClientArgs) -> Result<(), Box
         server_address,
         backend_address,
     };
-    let settings = resolve_client_settings_from_cli(config.clone(), runtime)
-        .map_err(wrap_client_settings_resolution_error)?;
-    runewarp::runtime_log::install(settings.log_level)?;
+    let config = resolve_client_config_from_cli(config.clone(), runtime)
+        .map_err(wrap_client_config_resolution_error)?;
+    runewarp::runtime_log::install(config.log_level)?;
     client_runtime::run_until_orderly_shutdown(
-        &settings,
+        &config,
         wildcard(0),
         wait_for_orderly_shutdown_signal(),
     )

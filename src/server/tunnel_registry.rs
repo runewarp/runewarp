@@ -7,7 +7,7 @@ use quinn::Connection;
 use rustls::pki_types::CertificateDer;
 
 use crate::{
-    ClientIdentity, ServerTunnelSettings, client_identity_from_certificate_der,
+    ClientIdentity, ServerTunnelConfig, client_identity_from_certificate_der,
     hostname::validate_public_hostname,
 };
 
@@ -60,7 +60,7 @@ impl TunnelRegistry {
     }
     pub(crate) fn configured(
         server_hostname: &str,
-        tunnels: &[ServerTunnelSettings],
+        tunnels: &[ServerTunnelConfig],
     ) -> io::Result<Self> {
         let normalized_server_hostname =
             validate_public_hostname(server_hostname).map_err(|error| {
@@ -212,7 +212,7 @@ mod tests {
 
     use super::{TunnelRegistry, TunnelRouteOutcome};
     use crate::{
-        GeneratedClientIdentity, ServerTunnelSettings, generate_client_identity,
+        GeneratedClientIdentity, ServerTunnelConfig, generate_client_identity,
         make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
     };
 
@@ -246,7 +246,7 @@ mod tests {
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         let registry = TunnelRegistry::configured(
             "tunnel.example.test",
-            &[ServerTunnelSettings {
+            &[ServerTunnelConfig {
                 public_hostnames: vec!["app.example.test".to_owned()],
                 client_identity: client_identity.client_identity.clone(),
             }],
@@ -266,7 +266,7 @@ mod tests {
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         let registry = TunnelRegistry::configured(
             "tunnel.example.test",
-            &[ServerTunnelSettings {
+            &[ServerTunnelConfig {
                 public_hostnames: vec!["app.example.test".to_owned()],
                 client_identity: client_identity.client_identity.clone(),
             }],

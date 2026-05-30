@@ -233,7 +233,7 @@ mod tests {
     use crate::LogLevel;
     use crate::acme::ACME_TLS_ALPN;
     use crate::{
-        CLIENT_HELLO_BUFFER_LIMIT, GeneratedClientIdentity, ServerTunnelSettings,
+        CLIENT_HELLO_BUFFER_LIMIT, GeneratedClientIdentity, ServerTunnelConfig,
         generate_client_identity, make_client_quic_config_with_client_auth,
         make_server_quic_config_with_client_auth,
     };
@@ -327,7 +327,7 @@ mod tests {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
             "Tunnel.Example.Test.",
-            &[ServerTunnelSettings {
+            &[ServerTunnelConfig {
                 public_hostnames: vec!["App.Example.Test.".to_owned()],
                 client_identity: client_identity.client_identity.clone(),
             }],
@@ -565,7 +565,7 @@ mod tests {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
             "Tunnel.Example.Test.",
-            &[ServerTunnelSettings {
+            &[ServerTunnelConfig {
                 public_hostnames: vec!["App.Example.Test.".to_owned()],
                 client_identity: client_identity.client_identity.clone(),
             }],
@@ -590,7 +590,7 @@ mod tests {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
             "Tunnel.Example.Test.",
-            &[ServerTunnelSettings {
+            &[ServerTunnelConfig {
                 public_hostnames: vec!["App.Example.Test.".to_owned()],
                 client_identity: client_identity.client_identity.clone(),
             }],

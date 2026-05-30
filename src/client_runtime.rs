@@ -25,7 +25,7 @@ struct ClientTunnelDialTarget {
 }
 
 pub(crate) async fn run_until_orderly_shutdown<F>(
-    settings: &runewarp::ClientSettings,
+    settings: &runewarp::ClientConfig,
     local_bind_addr: SocketAddr,
     shutdown_signal: F,
 ) -> Result<(), Box<dyn Error>>
@@ -49,7 +49,7 @@ where
 }
 
 async fn run_until_shutdown(
-    settings: &runewarp::ClientSettings,
+    settings: &runewarp::ClientConfig,
     local_bind_addr: SocketAddr,
     shutdown: &watch::Receiver<bool>,
 ) -> Result<(), Box<dyn Error>> {
@@ -234,7 +234,7 @@ fn client_tunnel_attempt_kind(
 }
 
 async fn resolve_client_tunnel_dial_target(
-    settings: &runewarp::ClientSettings,
+    settings: &runewarp::ClientConfig,
 ) -> Result<ClientTunnelDialTarget, runewarp::ClientStartupError> {
     let mut server_addrs = lookup_host((settings.server_hostname.as_str(), settings.server_port))
         .await

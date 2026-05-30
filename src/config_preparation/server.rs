@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use crate::config_preparation::{
-    PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
-};
-use crate::settings::{
-    LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig, SettingsError,
+use crate::config::{
+    ConfigFileError, LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig,
     collect_server_unknown_field_messages, deserialize_selected_section, load_log_level_from_path,
     load_optional_selected_section_value,
+};
+use crate::config_preparation::{
+    PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
 };
 use crate::{
     XdgPathError, default_config_path, default_server_acme_state_dir,
@@ -45,9 +45,9 @@ pub(crate) fn select_server_config_path(config: Option<PathBuf>) -> Result<PathB
 
 pub(crate) fn prepare_server_config_from_path(
     path: &Path,
-) -> Result<PreparedServerConfig, SettingsError> {
+) -> Result<PreparedServerConfig, ConfigFileError> {
     let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
-        return Err(SettingsError::Validation {
+        return Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
             section: "server",
             messages: vec!["missing [server] section".to_owned()],
@@ -167,7 +167,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{PreparedDirectory, PreparedValue, prepare_server_config_from_path};
-    use crate::settings::{LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig};
+    use crate::config::{LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig};
 
     #[test]
     fn server_config_selection_prefers_the_explicit_path() -> Result<(), Box<dyn std::error::Error>>

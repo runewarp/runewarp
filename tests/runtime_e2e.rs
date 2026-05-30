@@ -6,14 +6,13 @@ use std::time::Duration;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
-    ClientPublicCertConfig, ClientRuntimeArgs, ClientServiceSettings, ClientSettings,
-    ClientSettingsResolutionDefaults, ClientTlsMode, GeneratedClientIdentity, LogLevel,
-    PreparedClient, PreparedServer, SelectedClientConfig, Server, ServerConfig,
-    ServerTunnelSettings, generate_client_identity, initialize_manual_server_certificate,
-    load_client_settings, load_server_settings, make_client_quic_config,
-    make_client_quic_config_with_client_auth, make_server_quic_config,
-    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
-    resolve_selected_client_settings,
+    ClientConfigResolutionDefaults, ClientConnectConfig, ClientPublicCertConfig, ClientRuntimeArgs,
+    ClientTlsMode, GeneratedClientIdentity, LogLevel, PreparedClient, PreparedServer,
+    SelectedClientConfig, Server, ServerBindConfig, ServerTunnelConfig, ServiceConfig,
+    generate_client_identity, initialize_manual_server_certificate, load_client_config,
+    load_server_config, make_client_quic_config, make_client_quic_config_with_client_auth,
+    make_server_quic_config, make_server_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth_resolver, resolve_selected_client_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -56,7 +55,7 @@ async fn forwards_tls_passthrough_end_to_end() {
         tls_stream.shutdown().await.unwrap();
     });
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -74,7 +73,7 @@ async fn forwards_tls_passthrough_end_to_end() {
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client = Client::connect(ClientConfig {
+    let client = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -188,7 +187,7 @@ backend-address = "__BACKEND_ADDRESS__"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -196,7 +195,7 @@ backend-address = "__BACKEND_ADDRESS__"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -281,19 +280,19 @@ identity-dir = "client-identity"
 "#,
     )?;
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml"))?;
+    let server_settings = load_server_config(&tempdir.path().join("server.toml"))?;
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0)).await?;
     let public_addr = server.public_addr()?;
     let tunnel_addr = server.tunnel_addr()?;
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = resolve_selected_client_settings(
+    let client_settings = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("client.toml")),
         &ClientRuntimeArgs {
             server_address: Some("tunnel.example.test".to_owned()),
             backend_address: Some(backend.0.to_string()),
         },
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory: tempdir.path().join("unused-default"),
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
@@ -323,7 +322,7 @@ identity-dir = "client-identity"
 async fn drops_public_tls_when_no_client_is_connected() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let trusted_client = generate_client_identity().unwrap();
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -374,7 +373,7 @@ async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
         .unwrap();
     challenge_server_config.alpn_protocols = vec![b"acme-tls/1".to_vec()];
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -443,7 +442,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
         .unwrap();
     challenge_server_config.alpn_protocols = vec![b"acme-tls/1".to_vec()];
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -461,7 +460,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client = Client::connect(ClientConfig {
+    let client = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -536,7 +535,7 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
         server_cert_a.clone(),
         private_key_from_der(&server_key_a),
     ));
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -570,7 +569,7 @@ backend-address = "__BACKEND_ADDRESS__"
         .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
     )
     .unwrap();
-    let client_a_settings = load_client_settings(&tempdir.path().join("client-a.toml")).unwrap();
+    let client_a_settings = load_client_config(&tempdir.path().join("client-a.toml")).unwrap();
     let client_a = PreparedClient::connect_to(&client_a_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -605,7 +604,7 @@ backend-address = "__BACKEND_ADDRESS__"
         .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
     )
     .unwrap();
-    let client_b_settings = load_client_settings(&tempdir.path().join("client-b.toml")).unwrap();
+    let client_b_settings = load_client_config(&tempdir.path().join("client-b.toml")).unwrap();
     let client_b = PreparedClient::connect_to(&client_b_settings, localhost(0), tunnel_addr).await;
 
     assert!(client_b.is_ok());
@@ -629,7 +628,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
     )
     .await;
     let trusted_client = generate_client_identity().unwrap();
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -648,7 +647,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client = Client::connect(ClientConfig {
+    let client = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -684,7 +683,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
 async fn library_constructors_expose_addresses_before_running() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let trusted_client = generate_client_identity().unwrap();
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -705,7 +704,7 @@ async fn library_constructors_expose_addresses_before_running() {
     assert_ne!(tunnel_addr.port(), 0);
 
     let server_task = tokio::spawn(server.run());
-    let client = Client::connect(ClientConfig {
+    let client = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -731,7 +730,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_hostnames() {
     let first_client = generate_client_identity().unwrap();
     let second_client = generate_client_identity().unwrap();
 
-    let error = match Server::bind(ServerConfig {
+    let error = match Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -762,7 +761,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_client_identities() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let shared_client = generate_client_identity().expect("shared client identity should generate");
 
-    let error = match Server::bind(ServerConfig {
+    let error = match Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -794,7 +793,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_client_identities() {
 async fn server_bind_rejects_empty_configured_tunnels() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
 
-    let error = match Server::bind(ServerConfig {
+    let error = match Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -837,7 +836,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
 
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let shared_client = generate_client_identity().expect("shared client identity should generate");
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -859,7 +858,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         .expect("tunnel listener should have an address");
     let server_task = tokio::spawn(server.run());
 
-    let client_one = Client::connect(ClientConfig {
+    let client_one = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -877,7 +876,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         .expect("public TLS request should succeed");
     assert_eq!(first_response, *b"one!");
 
-    let client_two = Client::connect(ClientConfig {
+    let client_two = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -917,7 +916,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let shared_client = generate_client_identity().unwrap();
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -939,7 +938,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
         .expect("tunnel listener should have an address");
     let server_task = tokio::spawn(server.run());
 
-    let client = Client::connect(ClientConfig {
+    let client = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -980,7 +979,7 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let shared_client = generate_client_identity().unwrap();
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -998,7 +997,7 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client = Client::connect(ClientConfig {
+    let client = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -1054,7 +1053,7 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let shared_client = generate_client_identity().expect("shared client identity should generate");
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -1085,7 +1084,7 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
         }
     });
 
-    let client_config = ClientConfig {
+    let client_config = ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -1142,7 +1141,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let shared_client = generate_client_identity().unwrap();
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -1160,7 +1159,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client = Client::connect(ClientConfig {
+    let client = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -1206,7 +1205,7 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
 
     let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
     let shared_client = generate_client_identity().unwrap();
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
@@ -1224,7 +1223,7 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_one = Client::connect(ClientConfig {
+    let client_one = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -1259,7 +1258,7 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
     tls_stream.read_exact(&mut initial_bytes).await.unwrap();
     assert_eq!(&initial_bytes, b"on");
 
-    let client_two = Client::connect(ClientConfig {
+    let client_two = Client::connect(ClientConnectConfig {
         local_bind_addr: localhost(0),
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
@@ -1398,7 +1397,7 @@ tls-mode = "terminate"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -1406,7 +1405,7 @@ tls-mode = "terminate"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -1544,7 +1543,7 @@ tls-mode = "passthrough"
     )
     .unwrap();
 
-    let server_settings = load_server_settings(&tempdir.path().join("server.toml")).unwrap();
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
     let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
         .await
         .unwrap();
@@ -1552,7 +1551,7 @@ tls-mode = "passthrough"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = load_client_settings(&tempdir.path().join("client.toml")).unwrap();
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -1629,7 +1628,7 @@ async fn server_forwards_acme_tls_alpn_challenges_for_public_hostnames_to_client
     let acme_state_dir = tempdir.path().join("acme-state");
     std::fs::create_dir(&acme_state_dir).unwrap();
 
-    let server_settings = load_server_settings(&{
+    let server_settings = load_server_config(&{
         let path = tempdir.path().join("server.toml");
         std::fs::write(
             &path,
@@ -1658,13 +1657,13 @@ client-identity = "{}"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = ClientSettings {
+    let client_settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
         identity_directory: tempdir.path().join("client-identity"),
-        services: vec![ClientServiceSettings {
+        services: vec![ServiceConfig {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: "localhost:80".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
@@ -1793,7 +1792,7 @@ async fn acme_terminating_client_serves_https_with_cached_certificate() {
         backend_stream.shutdown().await.unwrap();
     });
 
-    let server_settings = load_server_settings(&{
+    let server_settings = load_server_config(&{
         let path = tempdir.path().join("server.toml");
         std::fs::write(
             &path,
@@ -1822,13 +1821,13 @@ client-identity = "{}"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = ClientSettings {
+    let client_settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
         identity_directory: tempdir.path().join("client-identity"),
-        services: vec![ClientServiceSettings {
+        services: vec![ServiceConfig {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: backend_address.to_string(),
             tls_mode: ClientTlsMode::Terminate,
@@ -1912,7 +1911,7 @@ async fn acme_terminating_client_fails_closed_before_cert_is_acquired() {
     let acme_state_dir = tempdir.path().join("acme-state");
     std::fs::create_dir(&acme_state_dir).unwrap();
 
-    let server_settings = load_server_settings(&{
+    let server_settings = load_server_config(&{
         let path = tempdir.path().join("server.toml");
         std::fs::write(
             &path,
@@ -1941,13 +1940,13 @@ client-identity = "{}"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = ClientSettings {
+    let client_settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
         identity_directory: tempdir.path().join("client-identity"),
-        services: vec![ClientServiceSettings {
+        services: vec![ServiceConfig {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: "localhost:80".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
@@ -2048,7 +2047,7 @@ async fn acme_tls_alpn_challenge_for_public_hostname_does_not_reach_backend() {
         let _ = _guard.send(());
     });
 
-    let server_settings = load_server_settings(&{
+    let server_settings = load_server_config(&{
         let path = tempdir.path().join("server.toml");
         std::fs::write(
             &path,
@@ -2077,13 +2076,13 @@ client-identity = "{}"
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 
-    let client_settings = ClientSettings {
+    let client_settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
         identity_directory: tempdir.path().join("client-identity"),
-        services: vec![ClientServiceSettings {
+        services: vec![ServiceConfig {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: backend_address.to_string(),
             tls_mode: ClientTlsMode::Terminate,
@@ -2161,8 +2160,8 @@ fn private_key_from_der(der: &[u8]) -> PrivateKeyDer<'static> {
 fn configured_tunnel(
     public_hostnames: &[&str],
     client_identity: &GeneratedClientIdentity,
-) -> ServerTunnelSettings {
-    ServerTunnelSettings {
+) -> ServerTunnelConfig {
+    ServerTunnelConfig {
         public_hostnames: public_hostnames
             .iter()
             .map(|hostname| (*hostname).to_owned())

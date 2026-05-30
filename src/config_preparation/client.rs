@@ -1,16 +1,16 @@
-use crate::config_preparation::{
-    PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
-};
-use crate::settings::{
-    LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig, SettingsError,
+use crate::config::{
+    ConfigFileError, LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig,
     collect_client_unknown_field_messages, deserialize_selected_section, load_log_level_from_path,
     load_optional_selected_section_value,
+};
+use crate::config_preparation::{
+    PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
 };
 use crate::trust::{
     ClientServerTrust, ResolveClientServerTrustError, resolve_client_server_trust_with_default,
 };
 use crate::{
-    ClientRuntimeArgs, ClientSettingsResolutionError, SelectedClientConfig, XdgPathError,
+    ClientConfigResolutionError, ClientRuntimeArgs, SelectedClientConfig, XdgPathError,
     default_client_acme_state_dir, default_client_server_ca_path, default_config_path,
 };
 use std::path::{Path, PathBuf};
@@ -65,12 +65,12 @@ pub(crate) enum PreparedClientTlsMode {
     Invalid(String),
 }
 
-pub(crate) fn prepare_client_settings_from_cli(
+pub(crate) fn prepare_client_config_from_cli(
     config: Option<PathBuf>,
     runtime: ClientRuntimeArgs,
-) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
+) -> Result<PreparedClientConfig, ClientConfigResolutionError> {
     let selected_config = select_client_config_with_default(config, default_config_path)
-        .map_err(ClientSettingsResolutionError::XdgPath)?;
+        .map_err(ClientConfigResolutionError::XdgPath)?;
     prepare_selected_client_config(
         selected_config,
         &runtime,
@@ -87,9 +87,9 @@ pub(crate) fn select_client_config(
 
 pub(crate) fn prepare_client_config_from_path(
     path: &Path,
-) -> Result<PreparedClientConfig, SettingsError> {
+) -> Result<PreparedClientConfig, ConfigFileError> {
     let Some(prepared) = prepare_optional_client_config_from_path(path)? else {
-        return Err(SettingsError::Validation {
+        return Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
             section: "client",
             messages: vec!["missing [client] section".to_owned()],
@@ -100,7 +100,7 @@ pub(crate) fn prepare_client_config_from_path(
 
 pub(crate) fn prepare_optional_client_config_from_path(
     path: &Path,
-) -> Result<Option<PreparedClientConfig>, SettingsError> {
+) -> Result<Option<PreparedClientConfig>, ConfigFileError> {
     let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
         return Ok(None);
     };
@@ -122,7 +122,7 @@ pub(crate) fn prepare_selected_client_config(
     runtime: &ClientRuntimeArgs,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
     default_public_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
-) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
+) -> Result<PreparedClientConfig, ClientConfigResolutionError> {
     match selected_config {
         SelectedClientConfig::None => prepare_cli_only_client_config(
             None,
@@ -147,11 +147,11 @@ fn prepare_selected_config_client_config(
     runtime: &ClientRuntimeArgs,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
     default_public_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
-) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
+) -> Result<PreparedClientConfig, ClientConfigResolutionError> {
     let section_value = load_optional_selected_section_value(&path, "client")
-        .map_err(ClientSettingsResolutionError::Settings)?;
+        .map_err(ClientConfigResolutionError::ConfigFile)?;
     let log_level =
-        load_log_level_from_path(&path).map_err(ClientSettingsResolutionError::Settings)?;
+        load_log_level_from_path(&path).map_err(ClientConfigResolutionError::ConfigFile)?;
     let Some(section_value) = section_value else {
         return prepare_cli_only_client_config(
             Some(&path),
@@ -165,7 +165,7 @@ fn prepare_selected_config_client_config(
     let service_block_count = selected_service_block_count(&section_value);
     let mut messages = collect_client_unknown_field_messages(&section_value);
     let mut raw = deserialize_selected_section::<RawClientConfig>(&path, "client", &section_value)
-        .map_err(ClientSettingsResolutionError::Settings)?;
+        .map_err(ClientConfigResolutionError::ConfigFile)?;
 
     if let Some(server_address) = &runtime.server_address {
         raw.server_address = Some(server_address.clone());
@@ -202,7 +202,7 @@ fn prepare_cli_only_client_config(
     runtime: &ClientRuntimeArgs,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
     default_public_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
-) -> Result<PreparedClientConfig, ClientSettingsResolutionError> {
+) -> Result<PreparedClientConfig, ClientConfigResolutionError> {
     let mut messages = Vec::new();
     let missing_context = match selected_path {
         Some(_) => "the selected config has no [client] section",
@@ -219,7 +219,7 @@ fn prepare_cli_only_client_config(
         ));
     }
     if !messages.is_empty() {
-        return Err(ClientSettingsResolutionError::Validation {
+        return Err(ClientConfigResolutionError::Validation {
             path: selected_path.map(Path::to_path_buf),
             messages,
         });
@@ -433,7 +433,7 @@ mod tests {
         ClientPreparationDefaults, PreparedClientTlsMode, PreparedClientTrust, PreparedDirectory,
         PreparedValue, prepare_selected_client_config,
     };
-    use crate::settings::{LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig};
+    use crate::config::{LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig};
     use crate::{ClientRuntimeArgs, SelectedClientConfig};
 
     #[test]

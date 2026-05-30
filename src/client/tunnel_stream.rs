@@ -14,19 +14,18 @@ use crate::client_hello::{ParsedClientHello, read_client_hello};
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
 use crate::{
-    ClientServiceSettings, ClientTlsMode, proxy::proxy_stream_error_code,
-    proxy::proxy_tcp_over_quic,
+    ClientTlsMode, ServiceConfig, proxy::proxy_stream_error_code, proxy::proxy_tcp_over_quic,
 };
 
 #[derive(Clone)]
 pub(crate) struct TunnelConnectionStreamHandler {
-    services: Arc<[ClientServiceSettings]>,
+    services: Arc<[ServiceConfig]>,
     termination_tls_configs: TerminationTlsConfigs,
 }
 
 impl TunnelConnectionStreamHandler {
     pub(crate) fn new(
-        services: Vec<ClientServiceSettings>,
+        services: Vec<ServiceConfig>,
         termination_tls_configs: TerminationTlsConfigs,
     ) -> Self {
         Self {
@@ -100,7 +99,7 @@ impl TunnelConnectionStreamHandler {
         send: SendStream,
         recv: RecvStream,
         parsed_client_hello: ParsedClientHello,
-        service: &ClientServiceSettings,
+        service: &ServiceConfig,
     ) -> io::Result<()> {
         let public_hostname = parsed_client_hello.server_name().to_owned();
         if parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN)
@@ -208,7 +207,7 @@ impl TunnelConnectionStreamHandler {
         }
     }
 
-    fn select_service(&self, public_hostname: &str) -> Option<&ClientServiceSettings> {
+    fn select_service(&self, public_hostname: &str) -> Option<&ServiceConfig> {
         if let [service] = &*self.services
             && service.public_hostnames.is_none()
         {
@@ -315,7 +314,7 @@ mod tests {
 
     use super::{ACME_TLS_ALPN, TunnelConnectionStreamHandler};
     use crate::{
-        ClientServiceSettings, ClientTlsMode, LogLevel, client::TerminationTlsConfigs,
+        ClientTlsMode, LogLevel, ServiceConfig, client::TerminationTlsConfigs,
         make_client_quic_config, make_server_quic_config,
     };
 
@@ -325,12 +324,12 @@ mod tests {
     async fn forwards_streams_for_exact_match_services() -> io::Result<()> {
         assert_forwarded_stream(
             vec![
-                ClientServiceSettings {
+                ServiceConfig {
                     public_hostnames: Some(vec!["app.example.test".to_owned()]),
                     backend_address: "127.0.0.1:443".to_owned(),
                     tls_mode: ClientTlsMode::Passthrough,
                 },
-                ClientServiceSettings {
+                ServiceConfig {
                     public_hostnames: Some(vec!["api.example.test".to_owned()]),
                     backend_address: backend_placeholder(),
                     tls_mode: ClientTlsMode::Passthrough,
@@ -344,7 +343,7 @@ mod tests {
     #[tokio::test]
     async fn forwards_streams_for_the_catch_all_service() -> io::Result<()> {
         assert_forwarded_stream(
-            vec![ClientServiceSettings {
+            vec![ServiceConfig {
                 public_hostnames: None,
                 backend_address: backend_placeholder(),
                 tls_mode: ClientTlsMode::Passthrough,
@@ -357,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_streams_without_a_matching_service() -> io::Result<()> {
         assert_rejected_stream(
-            vec![ClientServiceSettings {
+            vec![ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
@@ -373,7 +372,7 @@ mod tests {
         let backend_address = unused_localhost_address().await?.to_string();
 
         assert_rejected_stream(
-            vec![ClientServiceSettings {
+            vec![ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
@@ -399,7 +398,7 @@ mod tests {
         });
 
         assert_rejected_stream(
-            vec![ClientServiceSettings {
+            vec![ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
@@ -422,7 +421,7 @@ mod tests {
             "DEBUG client route passthrough: public-hostname=app.example.test backend-address=",
             async {
                 assert_forwarded_stream_without_spawning_handler(
-                    vec![ClientServiceSettings {
+                    vec![ServiceConfig {
                         public_hostnames: Some(vec!["app.example.test".to_owned()]),
                         backend_address: backend_placeholder(),
                         tls_mode: ClientTlsMode::Passthrough,
@@ -446,7 +445,7 @@ mod tests {
             "WARN client route unavailable: public-hostname=app.example.test reason=tls-config-missing",
             async {
                 assert_forwarded_stream_without_spawning_handler(
-                    vec![ClientServiceSettings {
+                    vec![ServiceConfig {
                         public_hostnames: Some(vec!["app.example.test".to_owned()]),
                         backend_address: backend_placeholder(),
                         tls_mode: ClientTlsMode::Passthrough,
@@ -456,7 +455,7 @@ mod tests {
                 .await?;
 
                 assert_rejected_stream_without_spawning_handler(
-                    vec![ClientServiceSettings {
+                    vec![ServiceConfig {
                         public_hostnames: Some(vec!["app.example.test".to_owned()]),
                         backend_address: "127.0.0.1:443".to_owned(),
                         tls_mode: ClientTlsMode::Passthrough,
@@ -468,7 +467,7 @@ mod tests {
 
                 let backend_address = unused_localhost_address().await?.to_string();
                 assert_rejected_stream_without_spawning_handler(
-                    vec![ClientServiceSettings {
+                    vec![ServiceConfig {
                         public_hostnames: Some(vec!["app.example.test".to_owned()]),
                         backend_address,
                         tls_mode: ClientTlsMode::Passthrough,
@@ -479,7 +478,7 @@ mod tests {
                 .await?;
 
                 assert_rejected_stream_without_spawning_handler(
-                    vec![ClientServiceSettings {
+                    vec![ServiceConfig {
                         public_hostnames: Some(vec!["app.example.test".to_owned()]),
                         backend_address: "127.0.0.1:8080".to_owned(),
                         tls_mode: ClientTlsMode::Terminate,
@@ -509,7 +508,7 @@ mod tests {
     }
 
     async fn assert_forwarded_stream_without_spawning_handler(
-        mut services: Vec<ClientServiceSettings>,
+        mut services: Vec<ServiceConfig>,
         requested_hostname: &str,
     ) -> io::Result<()> {
         let (backend_cert, backend_key) = make_self_signed_cert(requested_hostname)?;
@@ -550,7 +549,7 @@ mod tests {
     }
 
     async fn assert_rejected_stream_without_spawning_handler(
-        services: Vec<ClientServiceSettings>,
+        services: Vec<ServiceConfig>,
         requested_hostname: &str,
         assert_handler_result: impl FnOnce(io::Result<()>),
     ) -> io::Result<()> {
@@ -592,7 +591,7 @@ mod tests {
     }
 
     async fn assert_forwarded_stream(
-        mut services: Vec<ClientServiceSettings>,
+        mut services: Vec<ServiceConfig>,
         requested_hostname: &str,
     ) -> io::Result<()> {
         let (backend_cert, backend_key) = make_self_signed_cert(requested_hostname)?;
@@ -637,7 +636,7 @@ mod tests {
     }
 
     async fn assert_rejected_stream(
-        services: Vec<ClientServiceSettings>,
+        services: Vec<ServiceConfig>,
         requested_hostname: &str,
         assert_handler_result: impl FnOnce(io::Result<()>) + Send + 'static,
     ) -> io::Result<()> {
@@ -1040,7 +1039,7 @@ mod tests {
             Ok::<(), io::Error>(())
         });
 
-        let services = vec![ClientServiceSettings {
+        let services = vec![ServiceConfig {
             public_hostnames: Some(vec![hostname.to_owned()]),
             backend_address,
             tls_mode: ClientTlsMode::Terminate,
@@ -1125,7 +1124,7 @@ mod tests {
             Ok::<(), io::Error>(())
         });
 
-        let services = vec![ClientServiceSettings {
+        let services = vec![ServiceConfig {
             public_hostnames: Some(vec![hostname.to_owned()]),
             backend_address,
             tls_mode: ClientTlsMode::Terminate,
@@ -1305,12 +1304,12 @@ mod tests {
             spawn_tls_backend(private_key_from_der(&pass_key), pass_cert.clone(), *b"pong").await?;
 
         let services = vec![
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec![terminate_hostname.to_owned()]),
                 backend_address: term_backend_address,
                 tls_mode: ClientTlsMode::Terminate,
             },
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec![passthrough_hostname.to_owned()]),
                 backend_address: pass_backend_address,
                 tls_mode: ClientTlsMode::Passthrough,

@@ -3,14 +3,16 @@ use std::io;
 use std::path::Path;
 
 use runewarp::{
-    ClientSettingsResolutionError, ServerSettingsResolutionError, SettingsError,
-    default_config_path,
+    ClientConfigResolutionError, ConfigFileError, ServerConfigResolutionError, default_config_path,
 };
 
-pub(crate) fn wrap_server_settings_resolution_error(
-    error: ServerSettingsResolutionError,
+pub(crate) fn wrap_server_config_resolution_error(
+    error: ServerConfigResolutionError,
 ) -> Box<dyn Error> {
-    if error.settings_error().is_some_and(server_material_missing) {
+    if error
+        .config_file_error()
+        .is_some_and(server_material_missing)
+    {
         return Box::new(io::Error::other(format!(
             "{error}\nHint: {}",
             error.selected_config_path().map_or_else(
@@ -22,8 +24,8 @@ pub(crate) fn wrap_server_settings_resolution_error(
     Box::new(error)
 }
 
-pub(crate) fn wrap_client_settings_resolution_error(
-    error: ClientSettingsResolutionError,
+pub(crate) fn wrap_client_config_resolution_error(
+    error: ClientConfigResolutionError,
 ) -> Box<dyn Error> {
     if error
         .validation_messages()
@@ -37,9 +39,9 @@ pub(crate) fn wrap_client_settings_resolution_error(
     Box::new(error)
 }
 
-fn server_material_missing(error: &SettingsError) -> bool {
+fn server_material_missing(error: &ConfigFileError) -> bool {
     any_message_starts_with(
-        settings_messages(error),
+        config_messages(error),
         &[
             "server.cert-dir directory not found:",
             "server.cert-dir file not found:",
@@ -47,10 +49,10 @@ fn server_material_missing(error: &SettingsError) -> bool {
     )
 }
 
-fn settings_messages(error: &SettingsError) -> &[String] {
+fn config_messages(error: &ConfigFileError) -> &[String] {
     match error {
-        SettingsError::Validation { messages, .. } => messages,
-        SettingsError::Read { .. } | SettingsError::Parse { .. } => &[],
+        ConfigFileError::Validation { messages, .. } => messages,
+        ConfigFileError::Read { .. } | ConfigFileError::Parse { .. } => &[],
     }
 }
 
@@ -105,12 +107,12 @@ fn any_message_starts_with(messages: &[String], prefixes: &[&str]) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use runewarp::{ClientSettingsResolutionError, ServerSettingsResolutionError, SettingsError};
+    use runewarp::{ClientConfigResolutionError, ConfigFileError, ServerConfigResolutionError};
 
     #[test]
     fn server_wrapper_adds_hint_for_missing_server_material() {
-        let wrapped = super::wrap_server_settings_resolution_error(
-            ServerSettingsResolutionError::Settings(SettingsError::Validation {
+        let wrapped = super::wrap_server_config_resolution_error(
+            ServerConfigResolutionError::ConfigFile(ConfigFileError::Validation {
                 path: PathBuf::from("custom.toml"),
                 section: "server",
                 messages: vec!["server.cert-dir directory not found: custom-certs".to_owned()],
@@ -125,12 +127,11 @@ mod tests {
 
     #[test]
     fn client_wrapper_adds_hint_for_missing_client_identity_material() {
-        let wrapped = super::wrap_client_settings_resolution_error(
-            ClientSettingsResolutionError::Validation {
+        let wrapped =
+            super::wrap_client_config_resolution_error(ClientConfigResolutionError::Validation {
                 path: Some(PathBuf::from("custom.toml")),
                 messages: vec!["client.identity-dir file not found: client.pem".to_owned()],
-            },
-        );
+            });
 
         assert_eq!(
             wrapped.to_string(),

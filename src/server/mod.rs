@@ -12,18 +12,18 @@ use tokio::net::TcpListener;
 use std::future::Future;
 
 use crate::{
-    HANDSHAKE_TIMEOUT, ServerTunnelSettings, quic::with_handshake_timeout, runtime_log,
+    HANDSHAKE_TIMEOUT, ServerTunnelConfig, quic::with_handshake_timeout, runtime_log,
     shutdown::GracefulShutdown,
 };
 
 use self::tunnel_registry::TunnelRegistry;
 use self::visitor_stream::VisitorStreamHandler;
 
-pub struct ServerConfig {
+pub struct ServerBindConfig {
     pub public_bind_addr: SocketAddr,
     pub tunnel_connection_bind_addr: SocketAddr,
     pub server_hostname: String,
-    pub configured_tunnels: Vec<ServerTunnelSettings>,
+    pub configured_tunnels: Vec<ServerTunnelConfig>,
     pub public_tls_config: Option<Arc<rustls::ServerConfig>>,
     pub quic_server_config: quinn::ServerConfig,
 }
@@ -60,7 +60,7 @@ where
 }
 
 impl Server {
-    pub async fn bind(config: ServerConfig) -> io::Result<Self> {
+    pub async fn bind(config: ServerBindConfig) -> io::Result<Self> {
         if config.configured_tunnels.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

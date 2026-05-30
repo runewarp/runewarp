@@ -2,9 +2,9 @@ use std::error::Error;
 use std::fs;
 
 use runewarp::{
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientPublicCertConfig,
-    ClientRuntimeArgs, ClientSettingsResolutionDefaults, ClientSettingsResolutionError, LogLevel,
-    SelectedClientConfig, resolve_selected_client_settings,
+    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
+    ClientConfigResolutionDefaults, ClientConfigResolutionError, ClientPublicCertConfig,
+    ClientRuntimeArgs, LogLevel, SelectedClientConfig, resolve_selected_client_config,
 };
 use tempfile::tempdir;
 
@@ -15,13 +15,13 @@ fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<
     let identity_directory = tempdir.path().join("client-identity");
     write_identity_material(&identity_directory)?;
 
-    let settings = resolve_selected_client_settings(
+    let settings = resolve_selected_client_config(
         SelectedClientConfig::None,
         &ClientRuntimeArgs {
             server_address: Some("Tunnel.Example.Test.".to_owned()),
             backend_address: Some("localhost:8443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory: identity_directory.clone(),
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
@@ -45,13 +45,13 @@ fn cli_only_resolution_requires_backend_address_without_a_selected_config()
     let identity_directory = tempdir.path().join("client-identity");
     write_identity_material(&identity_directory)?;
 
-    let error = resolve_selected_client_settings(
+    let error = resolve_selected_client_config(
         SelectedClientConfig::None,
         &ClientRuntimeArgs {
             server_address: Some("tunnel.example.test".to_owned()),
             backend_address: None,
         },
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
@@ -59,7 +59,7 @@ fn cli_only_resolution_requires_backend_address_without_a_selected_config()
     .expect_err("expected backend-address validation error");
 
     match error {
-        ClientSettingsResolutionError::Validation {
+        ClientConfigResolutionError::Validation {
             path: None,
             messages,
         } => {
@@ -89,13 +89,13 @@ hostname = "tunnel.example.test"
 "#,
     )?;
 
-    let settings = resolve_selected_client_settings(
+    let settings = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs {
             server_address: Some("tunnel.example.test:9443".to_owned()),
             backend_address: Some("backend.internal:443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
@@ -125,13 +125,13 @@ log-level = "off"
 "#,
     )?;
 
-    let settings = resolve_selected_client_settings(
+    let settings = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs {
             server_address: Some("Tunnel.Example.Test.".to_owned()),
             backend_address: Some("backend.internal:443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
@@ -162,13 +162,13 @@ server-address = "127.0.0.1:443"
 "#,
     )?;
 
-    let settings = resolve_selected_client_settings(
+    let settings = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs {
             server_address: Some("Tunnel.Example.Test.".to_owned()),
             backend_address: Some("backend.internal:443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
@@ -200,13 +200,13 @@ backend-address = "backend.internal:443"
 "#,
     )?;
 
-    let error = resolve_selected_client_settings(
+    let error = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs {
             server_address: None,
             backend_address: Some("override.internal:8443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
@@ -241,13 +241,13 @@ public-hostnames = ["app.example.test"]
 "#,
     )?;
 
-    let error = resolve_selected_client_settings(
+    let error = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs {
             server_address: None,
             backend_address: Some("override.internal:8443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
@@ -271,13 +271,13 @@ fn cli_only_resolution_rejects_ip_literal_server_addresses() -> Result<(), Box<d
     let identity_directory = tempdir.path().join("client-identity");
     write_identity_material(&identity_directory)?;
 
-    let error = resolve_selected_client_settings(
+    let error = resolve_selected_client_config(
         SelectedClientConfig::None,
         &ClientRuntimeArgs {
             server_address: Some("127.0.0.1:443".to_owned()),
             backend_address: Some("backend.internal:443".to_owned()),
         },
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
@@ -316,10 +316,10 @@ tls-mode = "terminate"
 "#,
     )?;
 
-    let settings = resolve_selected_client_settings(
+    let settings = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs::default(),
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory,
             public_cert_directory: public_cert_directory.clone(),
         },

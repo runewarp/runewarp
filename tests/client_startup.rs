@@ -1,8 +1,8 @@
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, LogLevel,
-    PreparedClient, Server, ServerConfig, ServerTunnelSettings, generate_client_identity,
-    initialize_manual_client_public_cert, load_client_settings,
+    ClientConfig, ClientPublicCertConfig, ClientTlsMode, LogLevel, PreparedClient, Server,
+    ServerBindConfig, ServerTunnelConfig, ServiceConfig, generate_client_identity,
+    initialize_manual_client_public_cert, load_client_config,
     make_server_quic_config_with_client_auth,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -19,11 +19,11 @@ async fn prepared_client_connects_from_validated_settings() {
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        configured_tunnels: vec![ServerTunnelSettings {
+        configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec!["app.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
@@ -72,7 +72,7 @@ backend-address = "localhost:443"
     )
     .unwrap();
 
-    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
     let client = PreparedClient::connect_to(&settings, localhost(0), tunnel_addr)
         .await
         .unwrap();
@@ -91,11 +91,11 @@ async fn prepared_client_uses_the_configured_server_address_port() {
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
         tunnel_connection_bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
         server_hostname: "localhost".to_owned(),
-        configured_tunnels: vec![ServerTunnelSettings {
+        configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec!["app.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
@@ -147,7 +147,7 @@ backend-address = "localhost:443"
     )
     .unwrap();
 
-    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
     let client = PreparedClient::connect(&settings, SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)))
         .await
         .unwrap();
@@ -175,11 +175,11 @@ async fn prepared_client_rejects_settings_without_services() {
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        configured_tunnels: vec![ServerTunnelSettings {
+        configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec!["app.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
@@ -213,7 +213,7 @@ async fn prepared_client_rejects_settings_without_services() {
     )
     .unwrap();
 
-    let settings = ClientSettings {
+    let settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Info,
@@ -236,7 +236,7 @@ async fn prepared_client_rejects_settings_without_services() {
     assert!(
         error
             .to_string()
-            .contains("client settings must include at least one Service")
+            .contains("client config must include at least one Service")
     );
 
     server_task.abort();
@@ -271,19 +271,19 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
     )
     .unwrap();
 
-    let settings = ClientSettings {
+    let settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Info,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: None,
                 backend_address: "localhost:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
             },
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "localhost:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
@@ -330,19 +330,19 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
     )
     .unwrap();
 
-    let settings = ClientSettings {
+    let settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Info,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["App.Example.Test.".to_owned()]),
                 backend_address: "localhost:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
             },
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "localhost:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
@@ -386,13 +386,13 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
     let public_cert_dir = tempdir.path().join("public-cert");
     fs::create_dir(&public_cert_dir).unwrap();
 
-    let settings = ClientSettings {
+    let settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Off,
         server_ca_file: None,
         identity_directory: tempdir.path().join("client-identity"),
-        services: vec![ClientServiceSettings {
+        services: vec![ServiceConfig {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: "localhost:443".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
@@ -422,11 +422,11 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        configured_tunnels: vec![ServerTunnelSettings {
+        configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec!["app.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
@@ -463,13 +463,13 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     let public_cert_dir = tempdir.path().join("public-cert");
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
 
-    let settings = ClientSettings {
+    let settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-ca-not-needed.pem")),
         identity_directory: tempdir.path().join("client-identity"),
-        services: vec![ClientServiceSettings {
+        services: vec![ServiceConfig {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: "localhost:443".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
@@ -492,7 +492,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     let server_ca_path = tempdir.path().join("server-ca.pem");
     fs::write(&server_ca_path, server_cert_pem).unwrap();
 
-    let settings = ClientSettings {
+    let settings = ClientConfig {
         server_ca_file: Some(server_ca_path),
         ..settings
     };
@@ -527,11 +527,11 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        configured_tunnels: vec![ServerTunnelSettings {
+        configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec!["app.example.test".to_owned(), "api.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
@@ -569,19 +569,19 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     let public_cert_dir = tempdir.path().join("public-cert");
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
 
-    let settings = ClientSettings {
+    let settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Off,
         server_ca_file: None,
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "localhost:8080".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
             },
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["api.example.test".to_owned()]),
                 backend_address: "localhost:9443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
@@ -619,11 +619,11 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        configured_tunnels: vec![ServerTunnelSettings {
+        configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec!["app.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
@@ -667,13 +667,13 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
         .pem();
     fs::write(tempdir.path().join("server-ca.pem"), server_ca_pem).unwrap();
 
-    let settings = ClientSettings {
+    let settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
-        services: vec![ClientServiceSettings {
+        services: vec![ServiceConfig {
             public_hostnames: Some(vec!["app.example.test".to_owned()]),
             backend_address: "localhost:80".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
@@ -713,11 +713,11 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
-    let server = Server::bind(ServerConfig {
+    let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         server_hostname: "tunnel.example.test".to_owned(),
-        configured_tunnels: vec![ServerTunnelSettings {
+        configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec!["app.example.test".to_owned(), "api.example.test".to_owned()],
             client_identity: client_identity.client_identity.clone(),
         }],
@@ -761,19 +761,19 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
     fs::write(tempdir.path().join("server-ca.pem"), server_ca_pem).unwrap();
 
     // Two services: one terminating (ACME-managed), one passthrough (no cert needed).
-    let settings = ClientSettings {
+    let settings = ClientConfig {
         server_hostname: "tunnel.example.test".to_owned(),
         server_port: 443,
         log_level: LogLevel::Off,
         server_ca_file: Some(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "localhost:80".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
             },
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["api.example.test".to_owned()]),
                 backend_address: "localhost:8080".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,

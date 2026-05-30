@@ -1,13 +1,13 @@
 use std::fs;
 
 use runewarp::{
-    ClientPublicCertConfig, ClientRuntimeArgs, ClientSettingsResolutionDefaults, ClientTlsMode,
-    LogLevel, SelectedClientConfig, load_client_settings, resolve_selected_client_settings,
+    ClientConfigResolutionDefaults, ClientPublicCertConfig, ClientRuntimeArgs, ClientTlsMode,
+    LogLevel, SelectedClientConfig, load_client_config, resolve_selected_client_config,
 };
 use tempfile::tempdir;
 
 #[test]
-fn client_settings_accept_exact_match_services_and_default_log_level_to_info() {
+fn client_config_accept_exact_match_services_and_default_log_level_to_info() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -39,7 +39,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
@@ -54,7 +54,7 @@ backend-address = "localhost:8443"
 }
 
 #[test]
-fn client_settings_accept_server_address_with_default_port_and_flat_identity_dir() {
+fn client_config_accept_server_address_with_default_port_and_flat_identity_dir() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -86,7 +86,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
@@ -105,7 +105,7 @@ backend-address = "localhost:8443"
 }
 
 #[test]
-fn client_settings_accept_server_address_with_an_explicit_port() {
+fn client_config_accept_server_address_with_an_explicit_port() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -136,14 +136,14 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.server_hostname, "tunnel.example.test");
     assert_eq!(settings.server_port, 9443);
 }
 
 #[test]
-fn client_settings_accept_top_level_log_level_values() {
+fn client_config_accept_top_level_log_level_values() {
     for (raw_level, expected_level) in [
         ("off", LogLevel::Off),
         ("error", LogLevel::Error),
@@ -186,14 +186,14 @@ backend-address = "localhost:8443"
         )
         .unwrap();
 
-        let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+        let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
         assert_eq!(settings.log_level, expected_level);
     }
 }
 
 #[test]
-fn client_settings_reject_legacy_client_logs_as_an_unknown_field() {
+fn client_config_reject_legacy_client_logs_as_an_unknown_field() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -225,7 +225,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
     let message = error.to_string();
 
     assert!(!message.contains("failed to parse [client]"));
@@ -233,7 +233,7 @@ backend-address = "localhost:8443"
 }
 
 #[test]
-fn client_settings_reject_ip_literals_in_server_address() {
+fn client_config_reject_ip_literals_in_server_address() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -264,7 +264,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error
@@ -274,7 +274,7 @@ backend-address = "localhost:8443"
 }
 
 #[test]
-fn client_settings_reject_invalid_ports_in_server_address() {
+fn client_config_reject_invalid_ports_in_server_address() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -305,7 +305,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error
@@ -315,7 +315,7 @@ backend-address = "localhost:8443"
 }
 
 #[test]
-fn client_settings_report_all_selected_mode_errors_together() {
+fn client_config_report_all_selected_mode_errors_together() {
     let tempdir = tempdir().unwrap();
     fs::write(
         tempdir.path().join("config.toml"),
@@ -334,7 +334,7 @@ backend-address = "127.0.0.1:443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
     let message = error.to_string();
 
     assert!(message.contains("client.server-address is required"));
@@ -350,7 +350,7 @@ backend-address = "127.0.0.1:443"
 }
 
 #[test]
-fn client_settings_reject_the_legacy_flat_client_surface() {
+fn client_config_reject_the_legacy_flat_client_surface() {
     let tempdir = tempdir().unwrap();
     fs::write(
         tempdir.path().join("config.toml"),
@@ -367,7 +367,7 @@ local-addr = "127.0.0.1:443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
     let message = error.to_string();
 
     assert!(!message.contains("failed to parse [client]"));
@@ -379,7 +379,7 @@ local-addr = "127.0.0.1:443"
 }
 
 #[test]
-fn client_settings_reject_server_ca_file_without_ca_file_trust_mode() {
+fn client_config_reject_server_ca_file_without_ca_file_trust_mode() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -412,7 +412,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error.to_string().contains(
@@ -422,7 +422,7 @@ backend-address = "localhost:8443"
 }
 
 #[test]
-fn client_settings_accept_ca_file_trust_with_an_explicit_server_ca_file() {
+fn client_config_accept_ca_file_trust_with_an_explicit_server_ca_file() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -456,7 +456,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(
         settings.server_ca_file,
@@ -465,7 +465,7 @@ backend-address = "localhost:8443"
 }
 
 #[test]
-fn client_settings_reject_duplicate_public_hostnames_after_normalization() {
+fn client_config_reject_duplicate_public_hostnames_after_normalization() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -501,7 +501,7 @@ backend-address = "nginx.local:443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(error.to_string().contains(
         "client.services[].public-hostnames must be unique after normalization: app.example.test"
@@ -509,7 +509,7 @@ backend-address = "nginx.local:443"
 }
 
 #[test]
-fn client_settings_reject_empty_public_hostname_lists() {
+fn client_config_reject_empty_public_hostname_lists() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -541,7 +541,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error
@@ -551,7 +551,7 @@ backend-address = "localhost:8443"
 }
 
 #[test]
-fn client_settings_report_duplicate_hostnames_even_when_another_hostname_is_invalid() {
+fn client_config_report_duplicate_hostnames_even_when_another_hostname_is_invalid() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
@@ -587,7 +587,7 @@ backend-address = "nginx.local:443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
     let message = error.to_string();
 
     assert!(message.contains(
@@ -612,7 +612,7 @@ fn write_base_client_identity(tempdir: &std::path::Path) {
 }
 
 #[test]
-fn client_settings_default_tls_mode_is_passthrough() {
+fn client_config_default_tls_mode_is_passthrough() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::write(
@@ -629,13 +629,13 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.services[0].tls_mode, ClientTlsMode::Passthrough);
 }
 
 #[test]
-fn client_settings_accept_explicit_passthrough_tls_mode() {
+fn client_config_accept_explicit_passthrough_tls_mode() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::write(
@@ -653,13 +653,13 @@ tls-mode = "passthrough"
     )
     .unwrap();
 
-    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.services[0].tls_mode, ClientTlsMode::Passthrough);
 }
 
 #[test]
-fn client_settings_reject_unknown_tls_mode_value() {
+fn client_config_reject_unknown_tls_mode_value() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::write(
@@ -677,7 +677,7 @@ tls-mode = "proxy"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error
@@ -690,7 +690,7 @@ tls-mode = "proxy"
 // ── Slice 2: catch-all cannot opt into termination ───────────────────────────
 
 #[test]
-fn client_settings_reject_terminate_on_catch_all_service() {
+fn client_config_reject_terminate_on_catch_all_service() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::create_dir(tempdir.path().join("certs")).unwrap();
@@ -709,7 +709,7 @@ tls-mode = "terminate"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error.to_string().contains(
@@ -722,7 +722,7 @@ tls-mode = "terminate"
 // ── Slice 3: terminating service requires a Client public-cert config ─────────
 
 #[test]
-fn client_settings_use_the_default_public_cert_dir_for_terminate_mode_when_acme_is_absent() {
+fn client_config_use_the_default_public_cert_dir_for_terminate_mode_when_acme_is_absent() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     let default_public_cert_directory = tempdir.path().join("xdg-data/client/public-cert");
@@ -742,10 +742,10 @@ tls-mode = "terminate"
     )
     .unwrap();
 
-    let settings = resolve_selected_client_settings(
+    let settings = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs::default(),
-        &ClientSettingsResolutionDefaults {
+        &ClientConfigResolutionDefaults {
             identity_directory: tempdir.path().join("client-identity"),
             public_cert_directory: default_public_cert_directory.clone(),
         },
@@ -765,7 +765,7 @@ tls-mode = "terminate"
 // ── Slice 4: client.public-cert-dir validation ────────────────────────────────
 
 #[test]
-fn client_settings_accept_terminate_with_public_cert_dir() {
+fn client_config_accept_terminate_with_public_cert_dir() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::create_dir(tempdir.path().join("certs")).unwrap();
@@ -785,7 +785,7 @@ tls-mode = "terminate"
     )
     .unwrap();
 
-    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.services[0].tls_mode, ClientTlsMode::Terminate);
     assert!(
@@ -799,7 +799,7 @@ tls-mode = "terminate"
 }
 
 #[test]
-fn client_settings_reject_public_cert_dir_not_found() {
+fn client_config_reject_public_cert_dir_not_found() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::write(
@@ -818,7 +818,7 @@ tls-mode = "terminate"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error
@@ -829,7 +829,7 @@ tls-mode = "terminate"
 }
 
 #[test]
-fn client_settings_reject_public_cert_dir_without_any_terminating_service() {
+fn client_config_reject_public_cert_dir_without_any_terminating_service() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::create_dir(tempdir.path().join("certs")).unwrap();
@@ -848,7 +848,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error.to_string().contains(
@@ -859,7 +859,7 @@ backend-address = "localhost:8443"
 }
 
 #[test]
-fn client_settings_reject_acme_without_any_terminating_service() {
+fn client_config_reject_acme_without_any_terminating_service() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::create_dir(tempdir.path().join("acme-state")).unwrap();
@@ -881,7 +881,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error.to_string().contains(
@@ -894,7 +894,7 @@ backend-address = "localhost:8443"
 // ── Slice 5: [client.acme] validation ────────────────────────────────────────
 
 #[test]
-fn client_settings_accept_terminate_with_acme_and_explicit_state_dir() {
+fn client_config_accept_terminate_with_acme_and_explicit_state_dir() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::create_dir(tempdir.path().join("acme-state")).unwrap();
@@ -917,7 +917,7 @@ tls-mode = "terminate"
     )
     .unwrap();
 
-    let settings = load_client_settings(&tempdir.path().join("config.toml")).unwrap();
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.services[0].tls_mode, ClientTlsMode::Terminate);
     assert!(
@@ -931,7 +931,7 @@ tls-mode = "terminate"
 }
 
 #[test]
-fn client_settings_reject_acme_without_email() {
+fn client_config_reject_acme_without_email() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::create_dir(tempdir.path().join("acme-state")).unwrap();
@@ -953,7 +953,7 @@ tls-mode = "terminate"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error.to_string().contains("client.acme.email is required"),
@@ -962,7 +962,7 @@ tls-mode = "terminate"
 }
 
 #[test]
-fn client_settings_reject_acme_state_dir_not_found() {
+fn client_config_reject_acme_state_dir_not_found() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::write(
@@ -984,7 +984,7 @@ tls-mode = "terminate"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error
@@ -997,7 +997,7 @@ tls-mode = "terminate"
 // ── Slice 6: mutual exclusion of cert config modes ───────────────────────────
 
 #[test]
-fn client_settings_reject_both_public_cert_dir_and_acme() {
+fn client_config_reject_both_public_cert_dir_and_acme() {
     let tempdir = tempdir().unwrap();
     write_base_client_identity(tempdir.path());
     fs::create_dir(tempdir.path().join("certs")).unwrap();
@@ -1021,7 +1021,7 @@ backend-address = "localhost:8443"
     )
     .unwrap();
 
-    let error = load_client_settings(&tempdir.path().join("config.toml")).unwrap_err();
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
 
     assert!(
         error

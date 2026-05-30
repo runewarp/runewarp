@@ -9,7 +9,7 @@ use x509_parser::parse_x509_certificate;
 
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
-    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, SettingsError, XdgPathError,
+    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ConfigFileError, XdgPathError,
     default_client_identity_material_dir, default_client_public_cert_material_dir,
     default_config_path, default_server_cert_material_dir, generate_client_identity,
     initialize_manual_client_public_cert, initialize_manual_server_certificate,
@@ -368,7 +368,7 @@ fn resolve_server_cert_hostname(
 fn resolve_material_dir(
     config: Option<PathBuf>,
     directory: Option<PathBuf>,
-    configured_dir: impl Fn(&Path) -> Result<Option<PathBuf>, SettingsError>,
+    configured_dir: impl Fn(&Path) -> Result<Option<PathBuf>, ConfigFileError>,
     default_dir: impl Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Result<PathBuf, Box<dyn Error>> {
     if let Some(directory) = directory {

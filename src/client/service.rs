@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::ClientServiceSettings;
+use crate::ServiceConfig;
 use crate::hostname::{PublicHostnameError, validate_public_hostname};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,8 +39,8 @@ impl fmt::Display for ClientServiceValidationError {
 impl std::error::Error for ClientServiceValidationError {}
 
 pub(crate) fn validate_services(
-    services: &[ClientServiceSettings],
-) -> Result<Vec<ClientServiceSettings>, ClientServiceValidationError> {
+    services: &[ServiceConfig],
+) -> Result<Vec<ServiceConfig>, ClientServiceValidationError> {
     let multiple_services = services.len() > 1;
     let mut seen_hostnames = HashSet::new();
     let mut validated_services = Vec::with_capacity(services.len());
@@ -77,7 +77,7 @@ pub(crate) fn validate_services(
             }
         };
 
-        validated_services.push(ClientServiceSettings {
+        validated_services.push(ServiceConfig {
             public_hostnames,
             backend_address: service.backend_address.clone(),
             tls_mode: service.tls_mode.clone(),
@@ -89,19 +89,19 @@ pub(crate) fn validate_services(
 
 #[cfg(test)]
 mod tests {
-    use crate::{ClientServiceSettings, ClientTlsMode};
+    use crate::{ClientTlsMode, ServiceConfig};
 
     use super::{ClientServiceValidationError, validate_services};
 
     #[test]
     fn rejects_multi_service_catch_all_shapes() {
         let services = vec![
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: None,
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
             },
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "127.0.0.1:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
@@ -117,12 +117,12 @@ mod tests {
     #[test]
     fn rejects_duplicate_hostnames_after_normalization() {
         let services = vec![
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["App.Example.Test.".to_owned()]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
             },
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "127.0.0.1:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,

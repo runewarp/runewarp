@@ -23,12 +23,12 @@ use crate::tls_material::{
     load_private_key,
 };
 use crate::{
-    CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConnectError, ClientIdentity,
-    ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, QuicConfigError,
-    Server, ServerCertificateSettings, ServerConfig, ServerSettings, client::TerminationTlsConfigs,
-    client::validate_services, make_client_quic_config_with_client_auth,
-    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
-    shutdown::GracefulShutdown,
+    CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig, ClientConnectError,
+    ClientIdentity, ClientPublicCertConfig, ClientTlsMode, QuicConfigError, Server,
+    ServerBindConfig, ServerCertificateConfig, ServerConfig, ServiceConfig,
+    client::TerminationTlsConfigs, client::validate_services,
+    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth_resolver, shutdown::GracefulShutdown,
 };
 
 pub struct PreparedServer {
@@ -39,18 +39,18 @@ pub struct PreparedServer {
 
 impl PreparedServer {
     pub async fn bind(
-        settings: &ServerSettings,
+        config: &ServerConfig,
         public_bind_addr: SocketAddr,
         tunnel_connection_bind_addr: SocketAddr,
     ) -> Result<Self, ServerStartupError> {
-        prepare_default_server_acme_state_dir(settings)?;
-        let trusted_client_identities = settings
+        prepare_default_server_acme_state_dir(config)?;
+        let trusted_client_identities = config
             .tunnels
             .iter()
             .map(|tunnel| tunnel.client_identity.clone())
             .collect::<Vec<_>>();
-        let (quic_server_config, acme_runtime) = match &settings.certificate {
-            ServerCertificateSettings::Manual { directory } => {
+        let (quic_server_config, acme_runtime) = match &config.certificate {
+            ServerCertificateConfig::Manual { directory } => {
                 let cert_chain = load_certificate_chain(&directory.join(SERVER_CERT_FILENAME))?;
                 let private_key = load_private_key(&directory.join(SERVER_KEY_FILENAME))?;
                 let quic_server_config = make_server_quic_config_with_client_auth(
@@ -61,24 +61,23 @@ impl PreparedServer {
                 .map_err(ServerStartupError::QuicConfig)?;
                 (quic_server_config, None)
             }
-            ServerCertificateSettings::Acme {
+            ServerCertificateConfig::Acme {
                 email,
                 state_directory,
                 ..
             } => {
-                if should_warn_server_acme_non_standard_public_port(settings, public_bind_addr) {
+                if should_warn_server_acme_non_standard_public_port(config, public_bind_addr) {
                     runtime_log::acme(
                         AcmeRole::Server {
-                            server_hostname: &settings.hostname,
+                            server_hostname: &config.hostname,
                         },
                         AcmeEvent::NonStandardPublicBind {
                             bind_address: public_bind_addr,
                         },
                     );
                 }
-                let acme_state = build_acme_state(&settings.hostname, email, state_directory);
-                let acme_lifecycle =
-                    AcmeLifecycle::server(&settings.hostname, state_directory).await;
+                let acme_state = build_acme_state(&config.hostname, email, state_directory);
+                let acme_lifecycle = AcmeLifecycle::server(&config.hostname, state_directory).await;
                 let quic_server_config = make_server_quic_config_with_client_auth_resolver(
                     acme_state.resolver(),
                     &trusted_client_identities,
@@ -93,11 +92,11 @@ impl PreparedServer {
                 )
             }
         };
-        let server = Server::bind(ServerConfig {
+        let server = Server::bind(ServerBindConfig {
             public_bind_addr,
             tunnel_connection_bind_addr,
-            server_hostname: settings.hostname.clone(),
-            configured_tunnels: settings.tunnels.clone(),
+            server_hostname: config.hostname.clone(),
+            configured_tunnels: config.tunnels.clone(),
             public_tls_config: acme_runtime
                 .as_ref()
                 .map(|acme| acme.state.challenge_rustls_config()),
@@ -187,52 +186,52 @@ type LoadedTerminationTls = (TerminationTlsConfigs, Vec<ManagedAcmeRuntime>);
 
 impl PreparedClient {
     pub async fn connect(
-        settings: &ClientSettings,
+        config: &ClientConfig,
         local_bind_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
-        let mut server_addrs =
-            lookup_host((settings.server_hostname.as_str(), settings.server_port))
-                .await
-                .map_err(ClientStartupError::Resolve)?;
+        let mut server_addrs = lookup_host((config.server_hostname.as_str(), config.server_port))
+            .await
+            .map_err(ClientStartupError::Resolve)?;
         let Some(server_addr) = server_addrs.next() else {
             return Err(ClientStartupError::MissingServerAddress {
-                server_hostname: settings.server_hostname.clone(),
+                server_hostname: config.server_hostname.clone(),
             });
         };
-        Self::connect_to(settings, local_bind_addr, server_addr).await
+        Self::connect_to(config, local_bind_addr, server_addr).await
     }
 
     pub async fn connect_to(
-        settings: &ClientSettings,
+        config: &ClientConfig,
         local_bind_addr: SocketAddr,
         server_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
-        if settings.services.is_empty() {
+        if config.services.is_empty() {
             return Err(ClientStartupError::InvalidSettings(
-                "client settings must include at least one Service".to_owned(),
+                "client config must include at least one Service".to_owned(),
             ));
         }
-        let services = validate_services(&settings.services)
+        let services = validate_services(&config.services)
             .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
-        prepare_default_client_acme_state_dir(settings)?;
+        prepare_default_client_acme_state_dir(config)?;
 
-        let (termination_tls_configs, acme_runtimes) = load_termination_tls_configs(settings)
-            .await
-            .map_err(ClientStartupError::InvalidSettings)?;
+        let (termination_tls_configs, acme_runtimes) =
+            load_termination_tls_configs(config)
+                .await
+                .map_err(ClientStartupError::InvalidSettings)?;
 
-        let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
+        let loaded_roots = load_root_store(config.server_ca_file.as_deref())?;
         let cert_chain =
-            load_certificate_chain(&settings.identity_directory.join(CLIENT_CERT_FILENAME))
+            load_certificate_chain(&config.identity_directory.join(CLIENT_CERT_FILENAME))
                 .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
-        let private_key = load_private_key(&settings.identity_directory.join(CLIENT_KEY_FILENAME))
+        let private_key = load_private_key(&config.identity_directory.join(CLIENT_KEY_FILENAME))
             .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
         let quic_client_config =
             make_client_quic_config_with_client_auth(loaded_roots.roots, cert_chain, private_key)
                 .map_err(ClientStartupError::QuicConfig)?;
-        let client = Client::connect_with_services(crate::client::RoutedClientConfig {
+        let client = Client::connect_with_services(crate::client::RoutedClientConnectConfig {
             local_bind_addr,
             server_addr,
-            server_name: settings.server_hostname.clone(),
+            server_name: config.server_hostname.clone(),
             services,
             quic_client_config,
             termination_tls_configs,
@@ -304,10 +303,10 @@ impl PreparedClient {
 }
 
 fn should_warn_server_acme_non_standard_public_port(
-    settings: &ServerSettings,
+    settings: &ServerConfig,
     public_bind_addr: SocketAddr,
 ) -> bool {
-    matches!(settings.certificate, ServerCertificateSettings::Acme { .. })
+    matches!(settings.certificate, ServerCertificateConfig::Acme { .. })
         && public_bind_addr.port() != 443
 }
 
@@ -471,9 +470,9 @@ impl std::error::Error for ClientStartupError {
 }
 
 fn prepare_default_server_acme_state_dir(
-    settings: &ServerSettings,
+    settings: &ServerConfig,
 ) -> Result<(), ServerStartupError> {
-    let ServerCertificateSettings::Acme {
+    let ServerCertificateConfig::Acme {
         state_directory,
         state_directory_was_defaulted: true,
         ..
@@ -490,7 +489,7 @@ fn prepare_default_server_acme_state_dir(
 }
 
 fn prepare_default_client_acme_state_dir(
-    settings: &ClientSettings,
+    settings: &ClientConfig,
 ) -> Result<(), ClientStartupError> {
     let Some(ClientPublicCertConfig::Acme {
         state_directory,
@@ -588,7 +587,7 @@ fn should_emit_client_trust_store_warning(errors: usize, emitted: &AtomicBool) -
 
 /// Returns the set of explicit public hostnames for all terminating services.
 /// Used to determine which hostnames should be managed by ACME.
-pub(crate) fn acme_terminating_hostnames(services: &[ClientServiceSettings]) -> Vec<String> {
+pub(crate) fn acme_terminating_hostnames(services: &[ServiceConfig]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut hostnames = Vec::new();
     for service in services {
@@ -611,7 +610,7 @@ pub(crate) fn acme_terminating_hostnames(services: &[ClientServiceSettings]) -> 
 /// Returns a map from normalized hostname to the rustls::ServerConfig for that hostname,
 /// plus an optional ACME state that must be driven to keep certificates current.
 async fn load_termination_tls_configs(
-    settings: &ClientSettings,
+    settings: &ClientConfig,
 ) -> Result<LoadedTerminationTls, String> {
     match &settings.public_cert_config {
         None => Ok((TerminationTlsConfigs::empty(), Vec::new())),
@@ -631,7 +630,7 @@ async fn load_termination_tls_configs(
 }
 
 fn load_manual_termination_tls_configs(
-    settings: &ClientSettings,
+    settings: &ClientConfig,
     directory: &std::path::Path,
 ) -> Result<HashMap<String, Arc<rustls::ServerConfig>>, String> {
     let mut configs = HashMap::new();
@@ -677,7 +676,7 @@ fn load_manual_termination_tls_configs(
 /// The shared state directory still allows the Let's Encrypt account cache to be reused,
 /// while each terminating hostname keeps its own certificate cache entry and lifecycle logs.
 async fn build_acme_termination_configs(
-    settings: &ClientSettings,
+    settings: &ClientConfig,
     email: &str,
     state_directory: &std::path::Path,
 ) -> Result<LoadedTerminationTls, String> {
@@ -730,8 +729,8 @@ mod tests {
     };
     use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
     use crate::{
-        ClientIdentity, ClientPublicCertConfig, ClientServiceSettings, ClientSettings,
-        ClientTlsMode, LogLevel, ServerCertificateSettings, ServerSettings, ServerTunnelSettings,
+        ClientConfig, ClientIdentity, ClientPublicCertConfig, ClientTlsMode, LogLevel,
+        ServerCertificateConfig, ServerConfig, ServerTunnelConfig, ServiceConfig,
     };
 
     #[test]
@@ -836,12 +835,12 @@ mod tests {
     #[test]
     fn acme_terminating_hostnames_only_includes_terminate_mode_services() {
         let services = vec![
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "localhost:80".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
             },
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["api.example.test".to_owned()]),
                 backend_address: "localhost:8080".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
@@ -855,7 +854,7 @@ mod tests {
 
     #[test]
     fn acme_terminating_hostnames_skips_catch_all_service() {
-        let services = vec![ClientServiceSettings {
+        let services = vec![ServiceConfig {
             public_hostnames: None, // catch-all has no explicit hostnames
             backend_address: "localhost:80".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
@@ -872,7 +871,7 @@ mod tests {
     #[test]
     fn acme_terminating_hostnames_deduplicates_across_services() {
         let services = vec![
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec![
                     "app.example.test".to_owned(),
                     "api.example.test".to_owned(),
@@ -880,7 +879,7 @@ mod tests {
                 backend_address: "localhost:80".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
             },
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "localhost:8080".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
@@ -898,12 +897,12 @@ mod tests {
     #[test]
     fn acme_terminating_hostnames_empty_when_no_terminate_services() {
         let services = vec![
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "localhost:80".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
             },
-            ClientServiceSettings {
+            ServiceConfig {
                 public_hostnames: Some(vec!["api.example.test".to_owned()]),
                 backend_address: "localhost:8080".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
@@ -920,10 +919,10 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let tempdir = tempfile::tempdir()?;
         let state_directory = tempdir.path().join("server/acme");
-        let settings = ServerSettings {
+        let settings = ServerConfig {
             hostname: "tunnel.example.test".to_owned(),
             log_level: LogLevel::Info,
-            certificate: ServerCertificateSettings::Acme {
+            certificate: ServerCertificateConfig::Acme {
                 email: "admin@example.test".to_owned(),
                 state_directory: state_directory.clone(),
                 state_directory_was_defaulted: true,
@@ -941,10 +940,10 @@ mod tests {
 
     #[test]
     fn non_standard_server_acme_public_port_warning_only_applies_to_server_acme() {
-        let acme_settings = ServerSettings {
+        let acme_settings = ServerConfig {
             hostname: "tunnel.example.test".to_owned(),
             log_level: LogLevel::Info,
-            certificate: ServerCertificateSettings::Acme {
+            certificate: ServerCertificateConfig::Acme {
                 email: "admin@example.test".to_owned(),
                 state_directory: PathBuf::from("/tmp/server-acme"),
                 state_directory_was_defaulted: false,
@@ -953,8 +952,8 @@ mod tests {
             tunnel_connection_bind_address: "127.0.0.1:443".parse().unwrap(),
             tunnels: Vec::new(),
         };
-        let manual_settings = ServerSettings {
-            certificate: ServerCertificateSettings::Manual {
+        let manual_settings = ServerConfig {
+            certificate: ServerCertificateConfig::Manual {
                 directory: PathBuf::from("/tmp/server-cert"),
             },
             ..acme_settings.clone()
@@ -977,13 +976,13 @@ mod tests {
     #[tokio::test]
     async fn client_acme_builds_one_runtime_per_terminating_hostname() {
         let tempdir = tempfile::tempdir().unwrap();
-        let settings = ClientSettings {
+        let settings = ClientConfig {
             server_hostname: "tunnel.example.test".to_owned(),
             server_port: 443,
             log_level: LogLevel::Info,
             server_ca_file: None,
             identity_directory: tempdir.path().join("client-identity"),
-            services: vec![ClientServiceSettings {
+            services: vec![ServiceConfig {
                 public_hostnames: Some(vec![
                     "app.example.test".to_owned(),
                     "api.example.test".to_owned(),
@@ -1022,13 +1021,13 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let tempdir = tempfile::tempdir()?;
         let state_directory = tempdir.path().join("client/acme");
-        let settings = ClientSettings {
+        let settings = ClientConfig {
             server_hostname: "tunnel.example.test".to_owned(),
             server_port: 443,
             log_level: LogLevel::Info,
             server_ca_file: None,
             identity_directory: tempdir.path().join("client-identity"),
-            services: vec![ClientServiceSettings {
+            services: vec![ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
@@ -1053,10 +1052,10 @@ mod tests {
         let blocked_parent = tempdir.path().join("blocked");
         fs::write(&blocked_parent, "not a directory")?;
         let state_directory = blocked_parent.join("acme");
-        let settings = ServerSettings {
+        let settings = ServerConfig {
             hostname: "tunnel.example.test".to_owned(),
             log_level: LogLevel::Info,
-            certificate: ServerCertificateSettings::Acme {
+            certificate: ServerCertificateConfig::Acme {
                 email: "admin@example.test".to_owned(),
                 state_directory: state_directory.clone(),
                 state_directory_was_defaulted: true,
@@ -1089,13 +1088,13 @@ mod tests {
         let blocked_parent = tempdir.path().join("blocked");
         fs::write(&blocked_parent, "not a directory")?;
         let state_directory = blocked_parent.join("acme");
-        let settings = ClientSettings {
+        let settings = ClientConfig {
             server_hostname: "tunnel.example.test".to_owned(),
             server_port: 443,
             log_level: LogLevel::Info,
             server_ca_file: None,
             identity_directory: tempdir.path().join("client-identity"),
-            services: vec![ClientServiceSettings {
+            services: vec![ServiceConfig {
                 public_hostnames: Some(vec!["app.example.test".to_owned()]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
@@ -1205,16 +1204,16 @@ mod tests {
         Ok(())
     }
 
-    fn server_settings(certificate_directory: &Path) -> ServerSettings {
-        ServerSettings {
+    fn server_settings(certificate_directory: &Path) -> ServerConfig {
+        ServerConfig {
             hostname: "tunnel.example.test".to_owned(),
             log_level: LogLevel::Info,
-            certificate: ServerCertificateSettings::Manual {
+            certificate: ServerCertificateConfig::Manual {
                 directory: certificate_directory.to_path_buf(),
             },
             public_bind_address: "127.0.0.1:0".parse().unwrap(),
             tunnel_connection_bind_address: "127.0.0.1:0".parse().unwrap(),
-            tunnels: vec![ServerTunnelSettings {
+            tunnels: vec![ServerTunnelConfig {
                 public_hostnames: vec!["app.example.test".to_owned()],
                 client_identity: ClientIdentity::from_str(
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",

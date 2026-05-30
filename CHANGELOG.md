@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - Rewrote the main documentation set for a tighter, more direct operator and maintainer voice.
+- Renamed the public validated configuration API around `config` terminology, including `load_client_config`, `load_server_config`, `ClientConfigResolutionDefaults`, and precise runtime types `ClientConnectConfig` and `ServerBindConfig`.
 
 ## [0.1.0] - 2026-05-29
 

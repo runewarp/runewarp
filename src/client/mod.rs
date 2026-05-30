@@ -1,5 +1,5 @@
+mod config_resolution;
 mod service;
-mod settings_resolution;
 mod termination_tls;
 mod tunnel_stream;
 
@@ -13,21 +13,21 @@ use quinn::{Connection, Endpoint};
 pub(crate) use self::termination_tls::TerminationTlsConfigs;
 use self::tunnel_stream::TunnelConnectionStreamHandler;
 use crate::{
-    ClientServiceSettings, ClientTlsMode, HANDSHAKE_TIMEOUT, quic::with_handshake_timeout,
+    ClientTlsMode, HANDSHAKE_TIMEOUT, ServiceConfig, quic::with_handshake_timeout,
     shutdown::GracefulShutdown,
 };
 
-type RouteModeServicesAndConfigs = (Vec<ClientServiceSettings>, TerminationTlsConfigs);
+type RouteModeServicesAndConfigs = (Vec<ServiceConfig>, TerminationTlsConfigs);
 
-pub(crate) use service::validate_services;
-pub use settings_resolution::{
-    ClientRuntimeArgs, ClientSettingsResolutionDefaults, ClientSettingsResolutionError,
-    SelectedClientConfig, resolve_client_settings_from_cli, resolve_selected_client_settings,
+pub use config_resolution::{
+    ClientConfigResolutionDefaults, ClientConfigResolutionError, ClientRuntimeArgs,
+    SelectedClientConfig, resolve_client_config_from_cli, resolve_selected_client_config,
     select_client_config,
 };
+pub(crate) use service::validate_services;
 
 #[derive(Clone)]
-pub struct ClientConfig {
+pub struct ClientConnectConfig {
     pub local_bind_addr: SocketAddr,
     pub server_addr: SocketAddr,
     pub server_name: String,
@@ -36,11 +36,11 @@ pub struct ClientConfig {
 }
 
 #[derive(Clone)]
-pub(crate) struct RoutedClientConfig {
+pub(crate) struct RoutedClientConnectConfig {
     pub(crate) local_bind_addr: SocketAddr,
     pub(crate) server_addr: SocketAddr,
     pub(crate) server_name: String,
-    pub(crate) services: Vec<ClientServiceSettings>,
+    pub(crate) services: Vec<ServiceConfig>,
     pub(crate) quic_client_config: quinn::ClientConfig,
     pub(crate) termination_tls_configs: TerminationTlsConfigs,
 }
@@ -50,7 +50,7 @@ enum ClientRouteMode {
         backend_address: String,
     },
     Routed {
-        services: Vec<ClientServiceSettings>,
+        services: Vec<ServiceConfig>,
         termination_tls_configs: TerminationTlsConfigs,
     },
 }
@@ -95,7 +95,7 @@ impl ClientConnectError {
 }
 
 impl Client {
-    pub async fn connect(config: ClientConfig) -> Result<Self, ClientConnectError> {
+    pub async fn connect(config: ClientConnectConfig) -> Result<Self, ClientConnectError> {
         Self::connect_internal(
             config.local_bind_addr,
             config.server_addr,
@@ -109,7 +109,7 @@ impl Client {
     }
 
     pub(crate) async fn connect_with_services(
-        config: RoutedClientConfig,
+        config: RoutedClientConnectConfig,
     ) -> Result<Self, ClientConnectError> {
         Self::connect_internal(
             config.local_bind_addr,
@@ -219,7 +219,7 @@ impl Client {
 fn services_and_configs_for_route_mode(route_mode: ClientRouteMode) -> RouteModeServicesAndConfigs {
     match route_mode {
         ClientRouteMode::CatchAll { backend_address } => (
-            vec![ClientServiceSettings {
+            vec![ServiceConfig {
                 public_hostnames: None,
                 backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
@@ -246,7 +246,7 @@ mod tests {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use tokio::time::timeout;
 
-    use super::{Client, ClientConfig, ClientConnectError};
+    use super::{Client, ClientConnectConfig, ClientConnectError};
     use crate::{
         GeneratedClientIdentity, generate_client_identity,
         make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
@@ -280,7 +280,7 @@ mod tests {
         )
         .map_err(io::Error::other)?;
 
-        let client_config = ClientConfig {
+        let client_config = ClientConnectConfig {
             local_bind_addr: localhost(0),
             server_addr: server_endpoint.local_addr()?,
             server_name: "tunnel.example.test".to_owned(),

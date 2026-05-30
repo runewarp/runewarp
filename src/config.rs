@@ -43,23 +43,23 @@ impl LogLevel {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ServerSettings {
+pub struct ServerConfig {
     pub hostname: String,
     pub log_level: LogLevel,
-    pub certificate: ServerCertificateSettings,
+    pub certificate: ServerCertificateConfig,
     pub public_bind_address: SocketAddr,
     pub tunnel_connection_bind_address: SocketAddr,
-    pub tunnels: Vec<ServerTunnelSettings>,
+    pub tunnels: Vec<ServerTunnelConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ServerTunnelSettings {
+pub struct ServerTunnelConfig {
     pub public_hostnames: Vec<String>,
     pub client_identity: ClientIdentity,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ServerCertificateSettings {
+pub enum ServerCertificateConfig {
     Manual {
         directory: PathBuf,
     },
@@ -71,13 +71,13 @@ pub enum ServerCertificateSettings {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClientSettings {
+pub struct ClientConfig {
     pub server_hostname: String,
     pub server_port: u16,
     pub log_level: LogLevel,
     pub server_ca_file: Option<PathBuf>,
     pub identity_directory: PathBuf,
-    pub services: Vec<ClientServiceSettings>,
+    pub services: Vec<ServiceConfig>,
     pub public_cert_config: Option<ClientPublicCertConfig>,
 }
 
@@ -94,7 +94,7 @@ pub enum ClientPublicCertConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClientServiceSettings {
+pub struct ServiceConfig {
     pub public_hostnames: Option<Vec<String>>,
     pub backend_address: String,
     pub tls_mode: ClientTlsMode,
@@ -119,13 +119,13 @@ struct ValidatedOptionalPublicHostnames {
 }
 
 struct ValidatedServerTunnel {
-    settings: Option<ServerTunnelSettings>,
+    settings: Option<ServerTunnelConfig>,
     public_hostnames: Vec<String>,
     client_identity: Option<ClientIdentity>,
 }
 
 struct ValidatedClientService {
-    settings: Option<ClientServiceSettings>,
+    settings: Option<ServiceConfig>,
     public_hostnames: Vec<String>,
     parsed_tls_mode: Option<ClientTlsMode>,
 }
@@ -136,7 +136,7 @@ struct ValidatedAcmeStateDirectory {
 }
 
 #[derive(Debug)]
-pub enum SettingsError {
+pub enum ConfigFileError {
     Read {
         path: PathBuf,
         source: std::io::Error,
@@ -153,7 +153,7 @@ pub enum SettingsError {
     },
 }
 
-impl fmt::Display for SettingsError {
+impl fmt::Display for ConfigFileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Read { path, .. } => {
@@ -179,7 +179,7 @@ impl fmt::Display for SettingsError {
     }
 }
 
-impl std::error::Error for SettingsError {
+impl std::error::Error for ConfigFileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Read { source, .. } => Some(source),
@@ -190,75 +190,75 @@ impl std::error::Error for SettingsError {
 }
 
 #[derive(Debug)]
-pub enum ServerSettingsResolutionError {
+pub enum ServerConfigResolutionError {
     XdgPath(XdgPathError),
-    Settings(SettingsError),
+    ConfigFile(ConfigFileError),
 }
 
-impl ServerSettingsResolutionError {
+impl ServerConfigResolutionError {
     pub fn selected_config_path(&self) -> Option<&Path> {
         match self {
-            Self::Settings(SettingsError::Read { path, .. })
-            | Self::Settings(SettingsError::Parse { path, .. })
-            | Self::Settings(SettingsError::Validation { path, .. }) => Some(path.as_path()),
+            Self::ConfigFile(ConfigFileError::Read { path, .. })
+            | Self::ConfigFile(ConfigFileError::Parse { path, .. })
+            | Self::ConfigFile(ConfigFileError::Validation { path, .. }) => Some(path.as_path()),
             Self::XdgPath(_) => None,
         }
     }
 
-    pub fn settings_error(&self) -> Option<&SettingsError> {
+    pub fn config_file_error(&self) -> Option<&ConfigFileError> {
         match self {
-            Self::Settings(error) => Some(error),
+            Self::ConfigFile(error) => Some(error),
             Self::XdgPath(_) => None,
         }
     }
 }
 
-impl fmt::Display for ServerSettingsResolutionError {
+impl fmt::Display for ServerConfigResolutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::XdgPath(error) => write!(formatter, "{error}"),
-            Self::Settings(error) => write!(formatter, "{error}"),
+            Self::ConfigFile(error) => write!(formatter, "{error}"),
         }
     }
 }
 
-impl std::error::Error for ServerSettingsResolutionError {
+impl std::error::Error for ServerConfigResolutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::XdgPath(error) => Some(error),
-            Self::Settings(error) => Some(error),
+            Self::ConfigFile(error) => Some(error),
         }
     }
 }
 
-pub fn load_server_settings(path: &Path) -> Result<ServerSettings, SettingsError> {
+pub fn load_server_config(path: &Path) -> Result<ServerConfig, ConfigFileError> {
     let prepared = crate::config_preparation::server::prepare_server_config_from_path(path)?;
-    validate_prepared_server_settings(path, prepared)
+    validate_prepared_server_config(path, prepared)
 }
 
-pub fn resolve_server_settings_from_cli(
+pub fn resolve_server_config_from_cli(
     config: Option<PathBuf>,
-) -> Result<ServerSettings, ServerSettingsResolutionError> {
+) -> Result<ServerConfig, ServerConfigResolutionError> {
     let config_path = crate::config_preparation::server::select_server_config_path(config)
-        .map_err(ServerSettingsResolutionError::XdgPath)?;
-    load_server_settings(&config_path).map_err(ServerSettingsResolutionError::Settings)
+        .map_err(ServerConfigResolutionError::XdgPath)?;
+    load_server_config(&config_path).map_err(ServerConfigResolutionError::ConfigFile)
 }
 
-pub fn load_client_settings(path: &Path) -> Result<ClientSettings, SettingsError> {
+pub fn load_client_config(path: &Path) -> Result<ClientConfig, ConfigFileError> {
     let prepared = crate::config_preparation::client::prepare_client_config_from_path(path)?;
-    validate_prepared_client_settings(path, prepared)
+    validate_prepared_client_config(path, prepared)
 }
 
 pub fn resolve_server_cert_material_dir_from_config(
     path: &Path,
-) -> Result<Option<PathBuf>, SettingsError> {
+) -> Result<Option<PathBuf>, ConfigFileError> {
     let base_dir = config_dir(path);
     let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
         return Ok(None);
     };
     let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
     if !unknown_field_messages.is_empty() {
-        return Err(SettingsError::Validation {
+        return Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
             section: "server",
             messages: unknown_field_messages,
@@ -268,13 +268,13 @@ pub fn resolve_server_cert_material_dir_from_config(
     Ok(raw.cert_dir.map(|path| resolve_path(base_dir, &path)))
 }
 
-pub fn resolve_server_hostname_from_config(path: &Path) -> Result<Option<String>, SettingsError> {
+pub fn resolve_server_hostname_from_config(path: &Path) -> Result<Option<String>, ConfigFileError> {
     let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
         return Ok(None);
     };
     let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
     if !unknown_field_messages.is_empty() {
-        return Err(SettingsError::Validation {
+        return Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
             section: "server",
             messages: unknown_field_messages,
@@ -288,7 +288,7 @@ pub fn resolve_server_hostname_from_config(path: &Path) -> Result<Option<String>
     if messages.is_empty() {
         Ok(hostname)
     } else {
-        Err(SettingsError::Validation {
+        Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
             section: "server",
             messages,
@@ -298,14 +298,14 @@ pub fn resolve_server_hostname_from_config(path: &Path) -> Result<Option<String>
 
 pub fn resolve_client_public_cert_material_dir_from_config(
     path: &Path,
-) -> Result<Option<PathBuf>, SettingsError> {
+) -> Result<Option<PathBuf>, ConfigFileError> {
     let base_dir = config_dir(path);
     let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
         return Ok(None);
     };
     let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
     if !unknown_field_messages.is_empty() {
-        return Err(SettingsError::Validation {
+        return Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
             section: "client",
             messages: unknown_field_messages,
@@ -320,13 +320,13 @@ pub fn resolve_client_public_cert_material_dir_from_config(
 /// `None` when no `[client]` section exists in the config file.
 pub fn resolve_terminating_hostnames_from_config(
     path: &Path,
-) -> Result<Option<Vec<String>>, SettingsError> {
+) -> Result<Option<Vec<String>>, ConfigFileError> {
     let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
         return Ok(None);
     };
     let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
     if !unknown_field_messages.is_empty() {
-        return Err(SettingsError::Validation {
+        return Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
             section: "client",
             messages: unknown_field_messages,
@@ -346,14 +346,14 @@ pub fn resolve_terminating_hostnames_from_config(
 
 pub fn resolve_client_identity_material_dir_from_config(
     path: &Path,
-) -> Result<Option<PathBuf>, SettingsError> {
+) -> Result<Option<PathBuf>, ConfigFileError> {
     let base_dir = config_dir(path);
     let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
         return Ok(None);
     };
     let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
     if !unknown_field_messages.is_empty() {
-        return Err(SettingsError::Validation {
+        return Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
             section: "client",
             messages: unknown_field_messages,
@@ -366,30 +366,33 @@ pub fn resolve_client_identity_material_dir_from_config(
 pub(crate) fn load_optional_selected_section_value(
     path: &Path,
     section: &'static str,
-) -> Result<Option<toml::Value>, SettingsError> {
+) -> Result<Option<toml::Value>, ConfigFileError> {
     let document = load_config_document(path, section)?;
     Ok(document.get(section).cloned())
 }
 
-pub(crate) fn load_log_level_from_path(path: &Path) -> Result<LogLevel, SettingsError> {
+pub(crate) fn load_log_level_from_path(path: &Path) -> Result<LogLevel, ConfigFileError> {
     let document = load_config_document(path, "config")?;
     document
         .try_into::<RawGlobalConfig>()
         .map(|raw| raw.log_level.unwrap_or_default())
-        .map_err(|source| SettingsError::Parse {
+        .map_err(|source| ConfigFileError::Parse {
             path: path.to_path_buf(),
             section: "config",
             source: Box::new(source),
         })
 }
 
-fn load_config_document(path: &Path, section: &'static str) -> Result<toml::Value, SettingsError> {
-    let contents = fs::read_to_string(path).map_err(|source| SettingsError::Read {
+fn load_config_document(
+    path: &Path,
+    section: &'static str,
+) -> Result<toml::Value, ConfigFileError> {
+    let contents = fs::read_to_string(path).map_err(|source| ConfigFileError::Read {
         path: path.to_path_buf(),
         source,
     })?;
     let document =
-        toml::from_str::<toml::Value>(&contents).map_err(|source| SettingsError::Parse {
+        toml::from_str::<toml::Value>(&contents).map_err(|source| ConfigFileError::Parse {
             path: path.to_path_buf(),
             section,
             source: Box::new(source),
@@ -405,24 +408,24 @@ pub(crate) fn deserialize_selected_section<T>(
     path: &Path,
     section: &'static str,
     section_value: &toml::Value,
-) -> Result<T, SettingsError>
+) -> Result<T, ConfigFileError>
 where
     T: DeserializeOwned,
 {
     section_value
         .clone()
         .try_into::<T>()
-        .map_err(|source| SettingsError::Parse {
+        .map_err(|source| ConfigFileError::Parse {
             path: path.to_path_buf(),
             section,
             source: Box::new(source),
         })
 }
 
-fn validate_prepared_server_settings(
+fn validate_prepared_server_config(
     path: &Path,
     prepared: PreparedServerConfig,
-) -> Result<ServerSettings, SettingsError> {
+) -> Result<ServerConfig, ConfigFileError> {
     let PreparedServerConfig {
         hostname,
         log_level,
@@ -469,8 +472,8 @@ fn validate_prepared_server_settings(
         None
     };
     let certificate = match acme_present {
-        false => manual.map(|directory| ServerCertificateSettings::Manual { directory }),
-        true => acme.map(|(email, state_directory)| ServerCertificateSettings::Acme {
+        false => manual.map(|directory| ServerCertificateConfig::Manual { directory }),
+        true => acme.map(|(email, state_directory)| ServerCertificateConfig::Acme {
             email,
             state_directory: state_directory.path,
             state_directory_was_defaulted: state_directory.was_defaulted,
@@ -502,7 +505,7 @@ fn validate_prepared_server_settings(
         .collect::<Vec<_>>();
 
     if messages.is_empty() {
-        Ok(ServerSettings {
+        Ok(ServerConfig {
             hostname,
             log_level,
             certificate: certificate.expect("validated server certificate settings"),
@@ -512,7 +515,7 @@ fn validate_prepared_server_settings(
             tunnels,
         })
     } else {
-        Err(SettingsError::Validation {
+        Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
             section: "server",
             messages,
@@ -520,10 +523,10 @@ fn validate_prepared_server_settings(
     }
 }
 
-pub(crate) fn validate_prepared_client_settings(
+pub(crate) fn validate_prepared_client_config(
     path: &Path,
     prepared: PreparedClientConfig,
-) -> Result<ClientSettings, SettingsError> {
+) -> Result<ClientConfig, ConfigFileError> {
     let PreparedClientConfig {
         server_address,
         log_level,
@@ -664,7 +667,7 @@ pub(crate) fn validate_prepared_client_settings(
         .collect::<Vec<_>>();
 
     if messages.is_empty() {
-        Ok(ClientSettings {
+        Ok(ClientConfig {
             server_hostname: server_address
                 .as_ref()
                 .expect("validated client.server-address")
@@ -681,7 +684,7 @@ pub(crate) fn validate_prepared_client_settings(
             public_cert_config,
         })
     } else {
-        Err(SettingsError::Validation {
+        Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
             section: "client",
             messages,
@@ -855,7 +858,7 @@ fn validate_prepared_server_tunnel(
     let settings = if public_hostnames.is_valid {
         client_identity
             .clone()
-            .map(|client_identity| ServerTunnelSettings {
+            .map(|client_identity| ServerTunnelConfig {
                 public_hostnames: public_hostnames.values.clone(),
                 client_identity,
             })
@@ -917,7 +920,7 @@ fn validate_prepared_client_service(
     }
 
     let settings = if public_hostnames.is_valid && parsed_tls_mode.is_some() {
-        backend_address.map(|backend_address| ClientServiceSettings {
+        backend_address.map(|backend_address| ServiceConfig {
             public_hostnames: public_hostnames.values.clone(),
             backend_address,
             tls_mode: parsed_tls_mode.clone().expect("validated tls mode"),
@@ -1283,7 +1286,7 @@ mod tests {
     use std::io;
     use std::path::PathBuf;
 
-    use super::{SettingsError, is_valid_backend_address, resolve_path};
+    use super::{ConfigFileError, is_valid_backend_address, resolve_path};
 
     #[test]
     fn resolves_relative_paths_against_the_config_directory() {
@@ -1304,9 +1307,9 @@ mod tests {
     }
 
     #[test]
-    fn settings_error_display_omits_nested_io_detail() {
+    fn config_file_error_display_omits_nested_io_detail() {
         assert_eq!(
-            SettingsError::Read {
+            ConfigFileError::Read {
                 path: PathBuf::from("/tmp/runewarp/config.toml"),
                 source: io::Error::other("no such file or directory"),
             }

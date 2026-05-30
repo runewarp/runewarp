@@ -1,8 +1,8 @@
 # Docker example
 
-This example is the fastest way to see Runewarp working end to end. It demonstrates a minimal one **Server**, one **Client**, one **Tunnel**, and a **Catch-all Service** that forwards both `app.example.test` and `api.example.test` to Caddy.
+This is the fastest way to see Runewarp working end to end. It runs one server, one client, one tunnel, and a catch-all service that forwards both `app.example.test` and `api.example.test` to Caddy.
 
-## What this example proves
+## What you'll verify
 
 - the Server routes only explicit **Public hostnames**
 - the Client uses one sole **Catch-all Service**
@@ -61,7 +61,7 @@ cd examples/docker
 - generates Client identity material under `generated/client/source-data/runewarp/client/identity`
 - renders XDG-style runtime config and data trees under `generated/server`, `generated/client`, and `generated/caddy`, so the containers use default config discovery plus default material and trust paths inside the example
 
-The Compose file uses that locally built `runewarp/runewarp:local` image for both the Server and Client; it does not pull a published image from Docker Hub.
+The Compose file uses that locally built `runewarp/runewarp:local` image for both the server and client. It does not pull a published image from Docker Hub.
 
 Use `./prepare.sh --reset` when you want to discard generated state and rebuild it cleanly.
 
@@ -89,7 +89,7 @@ The quickest end-to-end verification is:
 
 `./smoke.sh` resets the stack, prepares fresh state, starts the containers, waits for Caddy's local CA, verifies both hostnames over TLS, and then shuts the stack back down.
 
-If you want to keep the stack running and inspect it manually instead:
+If you want to keep the stack running and inspect it manually:
 
 ```bash
 curl --cacert ./generated/caddy/root.crt \

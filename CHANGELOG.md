@@ -8,8 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Moved release metadata derivation behind a shared shell module plus GitHub Actions adapter, and added a shell contract test for the release workflow metadata surface.
-- Moved Docker Hub release-tag lookups behind a shared shell module plus workflow adapter so release jobs and install-surface validation reuse the same registry query path.
+- Rewrote the main documentation set for a tighter, more direct operator and maintainer voice.
 
 ## [0.1.0] - 2026-05-29
 

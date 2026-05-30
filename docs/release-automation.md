@@ -1,8 +1,8 @@
 # Release automation
 
-This document describes the current repository automation for release preparation and publication. It covers the CI contract that backs Runewarp's supported install surfaces and the release workflow that controls signed release tags, dry-run rehearsals, and real release-channel publication. For the maintainer-facing operating sequence and recovery guidance, see [`release-guide.md`](release-guide.md).
+This document describes the repository automation for release preparation and publication. It covers the CI checks behind the supported install surfaces and the release workflow for signed tags, rehearsals, and real publication. For the maintainer procedure and recovery steps, see [`release-guide.md`](release-guide.md).
 
-## CI contract
+## CI coverage
 
 The `CI` workflow is the required aggregate check for normal changes. It currently validates:
 
@@ -17,7 +17,7 @@ The `CI` workflow is the required aggregate check for normal changes. It current
 - the end-to-end Docker example smoke test
 - workflow syntax with `actionlint`
 
-These checks are unconditional across pull requests and `main` pushes and roll up into one required `CI` status.
+These checks run on both pull requests and `main` pushes and roll up into one required `CI` status.
 
 ## Release workflow
 
@@ -68,9 +68,9 @@ For manual `publish`, the workflow:
 5. publishes only the still-missing crate or Docker surfaces for that tag
 6. always refreshes the GitHub Release title and notes from the current workflow checkout on `main`, so release-note fixes can be replayed for an existing tag without rebuilding artifacts from a new commit
 
-## Release job boundaries
+## Workflow boundaries
 
-The workflow keeps GitHub-specific orchestration and idempotent publish checks in YAML, while repo-owned scripts keep the release gate and release-notes rules:
+The workflow keeps GitHub-specific orchestration and idempotent publish checks in YAML. Repo-owned scripts keep the release gates and release-notes rules:
 
 - `scripts/validate-release-gates.sh` owns rehearsal/tag gate validation
 - `scripts/lib-release-metadata.sh` owns stable release-tag parsing plus derived release metadata, and `scripts/resolve-release-metadata.sh` is the thin GitHub Actions adapter that writes those results into the gate job environment and outputs
@@ -93,7 +93,7 @@ Real publish jobs run in the GitHub `release` environment. The current workflow 
 
 For dress rehearsals, the workflow still rebuilds the crate and both Docker release images, but it does not push to registries, sign images, or mutate the GitHub Release.
 
-Before the first real tag release, the `release` environment should allow rehearsal dispatches, manual publish dispatches, and stable `v*` tags, while the repo-owned gate keeps real publish paths constrained to commits already reachable from `origin/main`.
+Before the first real tag release, the `release` environment should allow rehearsal dispatches, manual publish dispatches, and stable `v*` tags. The repo-owned gate still keeps real publish paths constrained to commits already reachable from `origin/main`.
 
 ## Docker release contract
 

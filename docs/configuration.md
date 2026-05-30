@@ -1,10 +1,10 @@
 # Configuration
 
-This document defines the Runewarp configuration model. Use [`docs/usage.md`](usage.md) for the operator workflow. Use this document for the key reference, defaults, validation rules, and the small set of canonical config shapes.
+Use this document as the configuration reference: keys, defaults, validation rules, and example shapes. Use [`docs/usage.md`](usage.md) for the step-by-step operator workflow.
 
 Runewarp `0.1.x` is a public pre-1.0 release line. Minor releases may include breaking CLI or configuration changes, so use the config reference that matches the version you deploy.
 
-## Ownership and routing model
+## Who configures what
 
 | Config area | Owns |
 | --- | --- |
@@ -21,7 +21,7 @@ Runewarp keeps routing split cleanly:
 - Server Catch-all is not supported
 - Catch-all Services must use `tls-mode = "passthrough"`
 
-## Canonical routing shapes
+## Routing shapes
 
 | Shape | Server | Client | When to use it |
 | --- | --- | --- | --- |
@@ -64,7 +64,7 @@ When the matching config key is omitted, Runewarp uses:
 | Server ACME state | `$XDG_STATE_HOME/runewarp/server/acme/` or `~/.local/state/runewarp/server/acme/` |
 | Client ACME state | `$XDG_STATE_HOME/runewarp/client/acme/` or `~/.local/state/runewarp/client/acme/` |
 
-## Canonical examples
+## Examples
 
 ### Minimal Server
 
@@ -167,7 +167,7 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 
 Client reconnect behavior is runtime-owned. There is no `client.reconnect-interval` setting or CLI flag; both config-driven and CLI-only startup use the same built-in jittered backoff described in `docs/protocol.md`.
 
-## Material and trust notes
+## Certificates and trust
 
 ### Server certificate material
 
@@ -207,7 +207,7 @@ When one or more Services use `tls-mode = "terminate"`, the Client needs either 
 
 `[client.acme]` still depends on public TCP 443 reachability at the Server edge because `acme-tls/1` traffic for terminating **Public hostnames** follows the same public ingress and Tunnel path as ordinary Visitor TLS.
 
-### Client Server trust
+### Client-to-server trust
 
 Runewarp supports two Client trust modes:
 

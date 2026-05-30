@@ -2,12 +2,12 @@ mod cert_commands;
 mod client_runtime;
 mod error_handling;
 mod reconnect_policy;
+mod settings_hints;
 
 use std::env;
 use std::error::Error;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path;
 use std::process::ExitCode;
 
 use cert_commands::{
@@ -18,9 +18,11 @@ use error_handling::{
     RunError, RunTermination, classify_runtime_error, finish_run, logged_runtime_failure,
 };
 use runewarp::{
-    ClientRuntimeArgs, ClientSettingsResolutionError, PreparedServer,
-    ServerSettingsResolutionError, SettingsError, default_config_path,
-    resolve_client_settings_from_cli, resolve_server_settings_from_cli,
+    ClientRuntimeArgs, PreparedServer, resolve_client_settings_from_cli,
+    resolve_server_settings_from_cli,
+};
+use settings_hints::{
+    wrap_client_settings_resolution_error, wrap_server_settings_resolution_error,
 };
 
 mod cli;
@@ -171,83 +173,6 @@ async fn wait_for_orderly_shutdown_signal() -> io::Result<()> {
             .await
             .map_err(|error| io::Error::other(error.to_string()))?;
         Ok(())
-    }
-}
-
-fn wrap_server_settings_resolution_error(error: ServerSettingsResolutionError) -> Box<dyn Error> {
-    if error.settings_error().is_some_and(server_material_missing) {
-        return Box::new(io::Error::other(format!(
-            "{error}\nHint: {}",
-            error.selected_config_path().map_or_else(
-                || "runewarp server cert init".to_owned(),
-                server_cert_init_hint
-            )
-        )));
-    }
-    Box::new(error)
-}
-
-fn wrap_client_settings_resolution_error(error: ClientSettingsResolutionError) -> Box<dyn Error> {
-    if error
-        .validation_messages()
-        .is_some_and(client_identity_messages_missing)
-    {
-        return Box::new(io::Error::other(format!(
-            "{error}\nHint: {}",
-            client_identity_init_hint_from_optional_path(error.selected_config_path())
-        )));
-    }
-    Box::new(error)
-}
-
-fn server_material_missing(error: &SettingsError) -> bool {
-    settings_messages(error).iter().any(|message| {
-        message.starts_with("server.cert-dir directory not found:")
-            || message.starts_with("server.cert-dir file not found:")
-    })
-}
-
-fn settings_messages(error: &SettingsError) -> &[String] {
-    match error {
-        SettingsError::Validation { messages, .. } => messages,
-        SettingsError::Read { .. } | SettingsError::Parse { .. } => &[],
-    }
-}
-
-fn server_cert_init_hint(config_path: &Path) -> String {
-    hint_command("runewarp server cert init", config_path)
-}
-
-fn client_identity_init_hint(config_path: &Path) -> String {
-    hint_command("runewarp client identity init", config_path)
-}
-
-fn client_identity_init_hint_from_optional_path(config_path: Option<&Path>) -> String {
-    config_path.map_or_else(
-        || "runewarp client identity init".to_owned(),
-        client_identity_init_hint,
-    )
-}
-
-fn client_identity_messages_missing(messages: &[String]) -> bool {
-    messages.iter().any(|message| {
-        message.starts_with("client.identity-dir directory not found:")
-            || message.starts_with("client.identity-dir file not found:")
-    })
-}
-
-fn hint_command(base: &str, config_path: &Path) -> String {
-    if uses_nondefault_config_path(config_path) {
-        format!("{base} --config {}", config_path.display())
-    } else {
-        base.to_owned()
-    }
-}
-
-fn uses_nondefault_config_path(config_path: &Path) -> bool {
-    match default_config_path() {
-        Ok(default_path) => default_path != config_path,
-        Err(_) => true,
     }
 }
 

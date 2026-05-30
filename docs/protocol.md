@@ -1,6 +1,6 @@
 # Protocol
 
-This document describes the committed Runewarp wire behavior and runtime invariants.
+This document describes Runewarp's wire behavior and runtime invariants.
 
 ## Listener model
 
@@ -26,6 +26,16 @@ For each inbound TCP connection on the configured `server.public-bind-address`:
 10. Open a bidirectional stream on the selected Tunnel connection, forward the buffered ClientHello bytes, then continue streaming in both directions.
 
 The buffered ClientHello must never be logged or echoed back in diagnostics. With top-level `log-level = "debug"`, stderr diagnostics may log the normalized **Public hostname** using stable event plus key=value fields such as `public-hostname`, `backend-address`, and `reason`. `acme-tls/1` traffic for the **Server hostname** is logged as `server acme challenge handled` with `server-hostname=...`, while Client-side `acme-tls/1` traffic for terminating **Public hostnames** is logged as distinct ACME challenge handling rather than ordinary terminate routing. Runtime tunnel failure causes keep separate full-detail lines whose operator-facing `warn` lines are shortened.
+The buffered ClientHello must never be logged or echoed back in diagnostics.
+
+At `log-level = "debug"`, stderr may include:
+
+- the normalized **Public hostname**
+- stable key=value fields such as `public-hostname`, `backend-address`, and `reason`
+- `server acme challenge handled` with `server-hostname=...` for `acme-tls/1` traffic on the **Server hostname**
+- separate Client ACME challenge handling lines for terminating **Public hostnames**
+
+It must not include HTTP headers, bodies, decrypted application plaintext, or the raw buffered ClientHello.
 
 ## Drop conditions
 
@@ -107,7 +117,7 @@ Client instance reconnect behavior is:
 3. keep using the same sequence, capped at `60` seconds, until an authenticated **Tunnel connection** succeeds
 4. reset back to the first `1` second window after every successful authenticated **Tunnel connection**
 
-This reconnect policy is runtime-owned rather than configurable. There is no reconnect tuning knob in the config or CLI-only startup path.
+This reconnect policy is fixed. There is no reconnect tuning knob in the config or the CLI-only startup path.
 
 Unauthorized **Client identity** failures use the same reconnect policy as every other reconnect failure. There is no dedicated immediate-retry exception for that case.
 

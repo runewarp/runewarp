@@ -25,9 +25,10 @@ use crate::tls_material::{
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConnectError, ClientIdentity,
     ClientPublicCertConfig, ClientServiceSettings, ClientSettings, ClientTlsMode, QuicConfigError,
-    Server, ServerCertificateSettings, ServerConfig, ServerSettings, client::validate_services,
-    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
-    make_server_quic_config_with_client_auth_resolver, shutdown::GracefulShutdown,
+    Server, ServerCertificateSettings, ServerConfig, ServerSettings, client::TerminationTlsConfigs,
+    client::validate_services, make_client_quic_config_with_client_auth,
+    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
+    shutdown::GracefulShutdown,
 };
 
 pub struct PreparedServer {
@@ -182,13 +183,7 @@ pub struct PreparedClient {
     acme_runtimes: Vec<ManagedAcmeRuntime>,
 }
 
-type TerminationTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
-type TerminationAcmeChallengeTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
-type LoadedTerminationTls = (
-    TerminationTlsConfigs,
-    TerminationAcmeChallengeTlsConfigs,
-    Vec<ManagedAcmeRuntime>,
-);
+type LoadedTerminationTls = (TerminationTlsConfigs, Vec<ManagedAcmeRuntime>);
 
 impl PreparedClient {
     pub async fn connect(
@@ -221,10 +216,9 @@ impl PreparedClient {
             .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
         prepare_default_client_acme_state_dir(settings)?;
 
-        let (hostname_tls_configs, hostname_acme_challenge_tls_configs, acme_runtimes) =
-            load_termination_tls_configs(settings)
-                .await
-                .map_err(ClientStartupError::InvalidSettings)?;
+        let (termination_tls_configs, acme_runtimes) = load_termination_tls_configs(settings)
+            .await
+            .map_err(ClientStartupError::InvalidSettings)?;
 
         let loaded_roots = load_root_store(settings.server_ca_file.as_deref())?;
         let cert_chain =
@@ -241,8 +235,7 @@ impl PreparedClient {
             server_name: settings.server_hostname.clone(),
             services,
             quic_client_config,
-            hostname_tls_configs,
-            hostname_acme_challenge_tls_configs,
+            termination_tls_configs,
         })
         .await
         .map_err(ClientStartupError::Connect)?;
@@ -621,10 +614,13 @@ async fn load_termination_tls_configs(
     settings: &ClientSettings,
 ) -> Result<LoadedTerminationTls, String> {
     match &settings.public_cert_config {
-        None => Ok((HashMap::new(), HashMap::new(), Vec::new())),
+        None => Ok((TerminationTlsConfigs::empty(), Vec::new())),
         Some(ClientPublicCertConfig::Manual { directory }) => {
             let configs = load_manual_termination_tls_configs(settings, directory)?;
-            Ok((configs, HashMap::new(), Vec::new()))
+            Ok((
+                TerminationTlsConfigs::new(configs, HashMap::new()),
+                Vec::new(),
+            ))
         }
         Some(ClientPublicCertConfig::Acme {
             email,
@@ -637,7 +633,7 @@ async fn load_termination_tls_configs(
 fn load_manual_termination_tls_configs(
     settings: &ClientSettings,
     directory: &std::path::Path,
-) -> Result<TerminationTlsConfigs, String> {
+) -> Result<HashMap<String, Arc<rustls::ServerConfig>>, String> {
     let mut configs = HashMap::new();
     for service in &settings.services {
         if service.tls_mode != ClientTlsMode::Terminate {
@@ -711,7 +707,10 @@ async fn build_acme_termination_configs(
             lifecycle: acme_lifecycle,
         });
     }
-    Ok((configs, challenge_configs, acme_runtimes))
+    Ok((
+        TerminationTlsConfigs::new(configs, challenge_configs),
+        acme_runtimes,
+    ))
 }
 
 #[cfg(test)]
@@ -999,13 +998,22 @@ mod tests {
             }),
         };
 
-        let (configs, challenge_configs, acme_runtimes) =
-            super::load_termination_tls_configs(&settings)
-                .await
-                .expect("ACME termination configs should build");
+        let (configs, acme_runtimes) = super::load_termination_tls_configs(&settings)
+            .await
+            .expect("ACME termination configs should build");
 
-        assert_eq!(configs.len(), 2);
-        assert_eq!(challenge_configs.len(), 2);
+        assert!(configs.default_server_config("app.example.test").is_some());
+        assert!(configs.default_server_config("api.example.test").is_some());
+        assert!(
+            configs
+                .acme_challenge_server_config("app.example.test")
+                .is_some()
+        );
+        assert!(
+            configs
+                .acme_challenge_server_config("api.example.test")
+                .is_some()
+        );
         assert_eq!(acme_runtimes.len(), 2);
     }
 

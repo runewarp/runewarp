@@ -1,6 +1,6 @@
 # Security
 
-Runewarp is a private tunneling system. In the default **passthrough** mode it is not an edge TLS terminator: the **Server** sees routing metadata to authorize **Public hostnames** and forward traffic, but customer TLS is terminated only on the operator's **Local backend**. The opt-in **terminate** mode allows the **Client** to terminate TLS itself using operator-managed certificate material; in that mode the Local backend receives plaintext.
+In the default passthrough mode, Runewarp does not terminate customer TLS on the public server. The server sees only the metadata it needs to authorize hostnames and forward traffic. When a service opts into terminate mode, the client terminates TLS and the local backend receives plaintext.
 
 ## What the Server can and cannot see
 
@@ -24,7 +24,24 @@ Runewarp is a private tunneling system. In the default **passthrough** mode it i
 
 ## Diagnostics visibility
 
-Runtime diagnostics follow the same visibility boundary: stderr logs may include the normalized **Public hostname**, routing outcome, connection timing, transport errors, a **Client instance** `server-address` plus resolved socket address on connection-attempt lines, rejected or authenticated **Client identity** values on tunnel-auth warnings, Client-side `backend-address` values in routing diagnostics, explicit graceful-shutdown lifecycle lines for entering shutdown and closing active **Tunnel connections**, `server acme challenge handled` lines keyed by `server-hostname` for `acme-tls/1` traffic addressed to the **Server hostname**, and distinct Client ACME challenge-handling lines for `acme-tls/1` traffic on terminating **Public hostnames**, but never the buffered ClientHello bytes, HTTP headers, bodies, or decrypted application plaintext.
+Runtime diagnostics follow the same boundary.
+
+**May be logged**
+
+- normalized **Public hostname**
+- routing outcome, connection timing, and transport errors
+- Client `server-address` values plus resolved socket addresses on connection-attempt lines
+- rejected or authenticated **Client identity** values on tunnel-auth warnings
+- Client `backend-address` values in routing diagnostics
+- graceful-shutdown lifecycle lines
+- `server acme challenge handled` with `server-hostname=...` for `acme-tls/1` traffic on the **Server hostname**
+- distinct Client ACME challenge-handling lines for terminating **Public hostnames**
+
+**Must not be logged**
+
+- buffered ClientHello bytes
+- HTTP headers or bodies
+- decrypted application plaintext
 
 ## Public traffic invariants
 
@@ -45,7 +62,7 @@ The tunnel-connection trust model is:
 3. the Client presents its own certificate
 4. the Server verifies the pinned `client-identity` from the Client public key
 
-The pinned value is the Client public key, not the certificate lifetime or serial number.
+The pinned value is the client public key, not the certificate lifetime or serial number.
 
 ## Certificate and identity lifecycle
 
@@ -125,4 +142,4 @@ The Client starts with a live ACME manager at startup and does not block on cert
 | Public hostname CA location | The manual path keeps the Public hostname CA private key on the Client machine alongside the running service |
 | Same-Tunnel availability | The runtime keeps one active connection per Tunnel rather than a load-balanced pool |
 
-These are deliberate boundaries and current limits, not hidden guarantees.
+These are current limits, not hidden guarantees.

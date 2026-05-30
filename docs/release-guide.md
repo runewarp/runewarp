@@ -1,10 +1,10 @@
 # Maintainer release guide
 
-This guide documents the maintainer-facing release path for stable Runewarp releases. It covers the human workflow, the workflow trust boundaries, and the recovery rules around partial publication. For the automation contract that the repository currently enforces, see [`release-automation.md`](release-automation.md).
+This guide covers the maintainer release path for stable Runewarp releases: the human workflow, the trust boundaries around publication, and the recovery rules for partial publication. For the automation contract enforced by the repository, see [`release-automation.md`](release-automation.md).
 
-## Canonical release model
+## Release flow
 
-Runewarp treats a stable release as one deliberate sequence:
+Runewarp treats a stable release as one sequence:
 
 1. Open a **Release-prep PR** that prepares the versioned release metadata.
 2. Merge that PR to `main` and wait for the aggregate `CI` check to finish green on the release commit.
@@ -14,7 +14,7 @@ Runewarp treats a stable release as one deliberate sequence:
 6. If a trusted existing release tag needs a recovery rerun, use manual **Release publish** through `workflow_dispatch` with the same tag; already-published surfaces are skipped instead of being mutated.
 7. Move `main` forward in a follow-up change to the next minor `-dev` version and reopen `CHANGELOG.md` with `Unreleased`.
 
-Normal release work flows through the release-prep PR. Direct pushes to `main` remain an escape hatch for repository recovery, not a second release path.
+Normal release work goes through the release-prep PR. Direct pushes to `main` remain an escape hatch for repository recovery, not a second release path.
 
 ## Prerequisites
 
@@ -29,7 +29,7 @@ Before cutting a stable release, make sure all of these are already true:
 | Candidate commit | The release commit is already reachable from `origin/main`. |
 | CI | The aggregate `CI` check is green on the release commit before the release tag is pushed. |
 
-## Workflow trust boundaries
+## Trust boundaries
 
 The release workflow is intentionally narrow about what can cross from untrusted changes into privileged publish jobs.
 
@@ -45,7 +45,7 @@ The release workflow is intentionally narrow about what can cross from untrusted
 
 ## Release-prep PR
 
-The release-prep PR is the canonical place to make the release candidate reviewable.
+The release-prep PR is where the release candidate becomes reviewable.
 
 1. Update `Cargo.toml` and `Cargo.lock` to the target stable version.
 2. Move curated notes out of `Unreleased` into the versioned `CHANGELOG.md` entry.
@@ -80,7 +80,7 @@ Once the candidate is green, cut the real stable release:
    - crates.io serves the released `runewarp` version.
    - GitHub shows the release record only after the publish jobs complete successfully.
 
-The pushed stable tag remains the canonical first publish trigger. Manual dispatch also supports a real `publish` mode for rerunning the current release automation against an existing trusted tag.
+The pushed stable tag remains the primary publish trigger. Manual dispatch also supports a real `publish` mode for rerunning the current release automation against an existing trusted tag.
 
 ## Manual publish recovery
 

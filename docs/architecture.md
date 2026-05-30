@@ -1,8 +1,8 @@
 # Architecture
 
-This document describes the committed Runewarp design: **TLS passthrough** on the public edge by default, **Server-authoritative routing**, mutually authenticated **Tunnel connections**, and Client-side forwarding to operator-run **Local backends**. Client-side TLS termination is opt-in per **Service**.
+Runewarp keeps public ingress simple: the server routes encrypted traffic to a client, and the backend still terminates TLS unless a service opts into client-side termination.
 
-## At a glance
+## Summary
 
 | Concern | Runewarp design |
 | --- | --- |
@@ -21,15 +21,15 @@ This document describes the committed Runewarp design: **TLS passthrough** on th
 | **Client instance** | Maintains one **Tunnel connection**, selects a **Service**, and forwards traffic to a **Local backend** |
 | **Local backend** | Terminates TLS under **TLS passthrough** or receives plaintext in **Terminate mode** and serves the operator application |
 
-## Internal configuration flow
+## Config handling
 
-Runewarp keeps configuration handling behind one internal **Config preparation** seam:
+Runewarp prepares config in three steps:
 
-- **Config preparation** selects the active config input, applies CLI overlays where allowed, fills XDG and hardcoded defaults, and resolves config-relative paths into concrete paths
-- validation consumes those prepared **Server** and **Client instance** config shapes and focuses on invariants, mutual exclusion, trust rules, and routing rules
-- startup preparation owns side effects such as creating omitted ACME state directories after validation has succeeded
+1. Select the active config input, apply CLI overrides where allowed, and resolve defaults and config-relative paths.
+2. Validate routing, trust, and mutual-exclusion rules against the prepared config.
+3. Perform startup side effects only after validation succeeds.
 
-This split keeps the operator-visible behavior unchanged while giving config precedence and defaulting one obvious home.
+This keeps config discovery and defaulting predictable without mixing them into startup side effects.
 
 ## End-to-end flow
 
@@ -55,20 +55,20 @@ flowchart TD
     C -->|"select Service and proxy"| B
 ```
 
-In **passthrough** mode (default), the forwarded byte stream begins with the Visitor's original ClientHello and stays encrypted until the Local backend terminates TLS. In **terminate** mode, the Client terminates TLS using its own certificate material and proxies plaintext TCP to the Local backend.
+In passthrough mode, the forwarded byte stream stays encrypted until the local backend terminates TLS. In terminate mode, the client terminates TLS and proxies plaintext TCP to the backend.
 
-## Routing authority
+## Routing model
 
-Runewarp keeps ingress authority on the **Server**:
+Runewarp keeps public routing authority on the server:
 
 - every Server `[[tunnels]]` entry lists explicit **Public hostnames**
 - the Server routes only those hostnames into a **Tunnel**
 - the Client does not register hostnames with the Server
 - hostname overlap is rejected within Server **Tunnels** and within Client **Services**
 
-This keeps public hostname ownership explicit even when the Client chooses a different local routing shape.
+That keeps public hostname ownership explicit even when the client uses a different local routing shape.
 
-## Routing shapes
+## Supported routing shapes
 
 | Shape | Server side | Client side | Use when |
 | --- | --- | --- | --- |
@@ -113,9 +113,9 @@ The Local backend receives unencrypted bytes directly and does not need to termi
 | **Public hostname CA** (manual) | Private trust anchor in `client.public-cert-dir` shared with Visitors when `tls-mode = "terminate"` is in use |
 | **Public hostname certificates via Client ACME** | Automatically provisioned by Let's Encrypt via `[client.acme]` for **Public hostnames** of terminating Services; `acme-tls/1` challenge traffic for those hostnames is routed through the Server to the Client like ordinary Visitor TLS |
 
-The Client validates the Server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The Server authenticates the pinned `client-identity` from the Client public key rather than from a certificate lifetime.
+The client validates the server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The server authenticates the pinned `client-identity` from the client public key rather than the certificate lifetime.
 
-## Runtime shape
+## Current runtime limits
 
 - each **Client instance** establishes exactly one **Tunnel connection**
 - the runtime keeps one active connection per **Tunnel**
@@ -124,10 +124,7 @@ The Client validates the Server certificate either through system trust or throu
 - same-Tunnel load-balanced pools are not part of the current runtime shape
 - orderly local shutdown is runtime-owned: the **Server** stops accepting new Visitor traffic and new **Tunnel connections** before closing active **Tunnel connections**, and the **Client instance** stops reconnect work before closing its active **Tunnel connection**
 - graceful shutdown waits only a short fixed grace period after sending the QUIC close; it does not drain Visitor traffic or proxied streams
-
-## Product boundaries
-
-- TLS passthrough is the default and the lowest-privilege mode
-- customer TLS may be terminated on the **Local backend** (passthrough, default) or on the **Client instance** (terminate, opt-in)
+- TLS passthrough is the default and lowest-privilege mode
+- customer TLS is terminated either on the **Local backend** (passthrough) or on the **Client instance** (terminate)
 - plain HTTP backends require `tls-mode = "terminate"` on the matching Service
-- edge TLS termination managed by the Server for customer traffic is out of scope
+- the server does not terminate customer TLS

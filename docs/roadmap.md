@@ -1,25 +1,25 @@
 # Roadmap
 
-The reference docs describe the committed Runewarp design. This document owns forward-looking sequencing and the mini-projects that may expand the product over time.
+The reference docs describe the current Runewarp design. This document tracks the larger pieces of work that may expand the product over time.
 
-## Shipped baseline
+## Current baseline
 
-Runewarp already ships the following baseline:
+Runewarp already ships:
 
 | Area | Shipped baseline |
 | --- | --- |
 | Core data path | Public TLS passthrough from the **Server** to a **Client**-side **Local backend** |
 | Operator surface and trust | `runewarp server`, `runewarp client`, `runewarp server cert ...`, `runewarp client identity ...`, ACME, manual/private-CA certificates, and pinned Client authentication |
 | Explicit routing | Required Server `public-hostnames`, multiple Server **Tunnels**, multiple Client **Services** |
-| Preview packaging | Shared Docker image, non-root container execution, CI automation, and preview image export workflows |
+| Packaging | Shared Docker image, non-root container execution, CI automation, and preview image export workflows |
 
 ## Public release
 
-This track turns the shipped baseline into a clean first public release.
+This track focuses on the first public release.
 
 ### Release notes and changelog discipline
 
-**Outcome**
+**Goal**
 
 - the first public release has a supportable release story rather than ad hoc notes
 
@@ -31,7 +31,7 @@ This track turns the shipped baseline into a clean first public release.
 
 ### Public distribution channels
 
-**Outcome**
+**Goal**
 
 - operators can install Runewarp through the release channels described by the public docs
 
@@ -43,7 +43,7 @@ This track turns the shipped baseline into a clean first public release.
 
 ### Install and packaging validation
 
-**Outcome**
+**Goal**
 
 - the documented install paths are tested as release surfaces rather than assumed
 
@@ -55,11 +55,11 @@ This track turns the shipped baseline into a clean first public release.
 
 ## Availability
 
-This track hardens routed hostname sets against avoidable downtime across **Client** and **Server** deployment shapes.
+This track reduces avoidable downtime across client and server deployment shapes.
 
 ### Same-Tunnel Client pools
 
-**Outcome**
+**Goal**
 
 - one **Tunnel** can be served by multiple concurrent Client instances so capacity and availability no longer hinge on one active connection
 
@@ -71,7 +71,7 @@ This track hardens routed hostname sets against avoidable downtime across **Clie
 
 ### Pool selection policy
 
-**Outcome**
+**Goal**
 
 - stream placement is predictable under load and understandable during incidents
 
@@ -83,7 +83,7 @@ This track hardens routed hostname sets against avoidable downtime across **Clie
 
 ### Replica identity model
 
-**Outcome**
+**Goal**
 
 - multi-instance deployments have a clear trust and misconfiguration story
 
@@ -95,7 +95,7 @@ This track hardens routed hostname sets against avoidable downtime across **Clie
 
 ### Multi-node Server deployments
 
-**Outcome**
+**Goal**
 
 - more than one public **Server** node can participate in the same logical Runewarp deployment for failover and higher edge availability
 
@@ -107,7 +107,7 @@ This track hardens routed hostname sets against avoidable downtime across **Clie
 
 ### Zero-downtime Server rollouts
 
-**Outcome**
+**Goal**
 
 - operators can replace or restart public **Server** nodes without avoidable downtime during planned changes
 
@@ -119,11 +119,11 @@ This track hardens routed hostname sets against avoidable downtime across **Clie
 
 ## Protocol expansion
 
-This track grows the data plane without changing the product boundary.
+This track expands the data plane without changing the product boundary.
 
 ### Public QUIC passthrough
 
-**Outcome**
+**Goal**
 
 - Runewarp can route QUIC-based application traffic on the public edge as well as TLS over TCP, including HTTP/3-capable **Local backends** and visitors that already speak QUIC natively
 
@@ -138,7 +138,7 @@ This track grows the data plane without changing the product boundary.
 
 ### Wildcard Public hostnames
 
-**Outcome**
+**Goal**
 
 - one Tunnel or Service can intentionally own a bounded wildcard hostname set
 
@@ -150,7 +150,7 @@ This track grows the data plane without changing the product boundary.
 
 ### PROXY protocol delivery
 
-**Outcome**
+**Goal**
 
 - Local backends can opt into receiving original Visitor source metadata without changing the default data path
 
@@ -162,11 +162,11 @@ This track grows the data plane without changing the product boundary.
 
 ## Operations
 
-This track improves day-2 operation, observability, and safer runtime change management.
+This track improves day-2 operations, observability, and safer runtime changes.
 
 ### Live config reload
 
-**Outcome**
+**Goal**
 
 - operators can apply approved config changes without restarting the whole runtime
 
@@ -179,7 +179,7 @@ This track improves day-2 operation, observability, and safer runtime change man
 
 ### CLI and config ergonomics
 
-**Outcome**
+**Goal**
 
 - operators can discover, inspect, initialize, and edit the selected config path without guessing where Runewarp keeps state
 
@@ -191,7 +191,7 @@ This track improves day-2 operation, observability, and safer runtime change man
 
 ### Background runtime ergonomics
 
-**Outcome**
+**Goal**
 
 - operators can run long-lived Server and Client processes cleanly under service managers and, when needed, from the CLI in the background without a fork-and-forget trap
 
@@ -203,7 +203,7 @@ This track improves day-2 operation, observability, and safer runtime change man
 
 ### Health-aware routing
 
-**Outcome**
+**Goal**
 
 - routing decisions can account for backend or Client health instead of only connection presence
 
@@ -215,7 +215,7 @@ This track improves day-2 operation, observability, and safer runtime change man
 
 ### Metrics and logging
 
-**Outcome**
+**Goal**
 
 - larger deployments can observe routing behavior without scraping human-readable logs alone
 
@@ -227,7 +227,7 @@ This track improves day-2 operation, observability, and safer runtime change man
 
 ### Routing lint and doctor tooling
 
-**Outcome**
+**Goal**
 
 - operators can detect configuration drift before it becomes a production incident
 
@@ -239,7 +239,7 @@ This track improves day-2 operation, observability, and safer runtime change man
 
 ### Port flexibility and deployment ergonomics
 
-**Outcome**
+**Goal**
 
 - operators can fit Runewarp into a wider range of network and platform constraints
 
@@ -251,7 +251,7 @@ This track improves day-2 operation, observability, and safer runtime change man
 
 ### Backend connection reuse benchmarks
 
-**Outcome**
+**Goal**
 
 - backend connection reuse is introduced only if measurement shows it improves latency without breaking the protocol boundary
 
@@ -275,11 +275,11 @@ This track improves day-2 operation, observability, and safer runtime change man
 
 ## Advanced networking
 
-This track handles harder privacy and trust-distribution problems.
+This track covers harder privacy and trust-distribution problems.
 
 ### Encrypted ClientHello
 
-**Outcome**
+**Goal**
 
 - public and tunnel traffic can hide more routing metadata where the surrounding ecosystem supports it
 
@@ -291,7 +291,7 @@ This track handles harder privacy and trust-distribution problems.
 
 ### Zero-downtime trust rotation
 
-**Outcome**
+**Goal**
 
 - operators can rotate trust anchors and identities without coordinated outages
 
@@ -303,11 +303,11 @@ This track handles harder privacy and trust-distribution problems.
 
 ## Managed service and control plane
 
-This track explores the trust and management surfaces needed for a future managed Runewarp offering without redefining the current self-hosted baseline too early.
+This track explores what a future managed Runewarp offering would need without redefining the current self-hosted baseline too early.
 
 ### Managed Client authentication
 
-**Outcome**
+**Goal**
 
 - a managed control plane can authorize Client instances with control-plane-issued trust material while the underlying durable Client identity model stays coherent
 
@@ -320,7 +320,7 @@ This track explores the trust and management surfaces needed for a future manage
 
 ### Server configuration API
 
-**Outcome**
+**Goal**
 
 - a future managed control plane can manage Server-side routing and trust state through an explicit management surface rather than by smuggling config through the data path
 

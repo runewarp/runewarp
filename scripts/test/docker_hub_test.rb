@@ -10,7 +10,7 @@ class DockerHubTest < Minitest::Test
 
       result = run_command(
         "ruby",
-        ruby_script("scripts", "check_docker_hub_tag"),
+        ruby_script("scripts", "check-docker-hub-tag"),
         "--image-ref",
         "docker.io/runewarp/runewarp:0.1.0",
         env: {
@@ -31,7 +31,7 @@ class DockerHubTest < Minitest::Test
 
       result = run_command(
         "ruby",
-        ruby_script("scripts", "check_docker_hub_tag"),
+        ruby_script("scripts", "check-docker-hub-tag"),
         "--image-ref",
         "docker.io/runewarp/runewarp:0.1.0",
         env: {

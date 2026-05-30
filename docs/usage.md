@@ -25,7 +25,7 @@ The repository ships a concrete example under [`examples/docker/`](../examples/d
 ```bash
 git clone https://github.com/runewarp/runewarp.git
 cd runewarp
-./scripts/docker_example smoke
+./scripts/docker-example smoke
 ```
 
 Use [`examples/docker/README.md`](../examples/docker/README.md) for the full walkthrough and reset flow.

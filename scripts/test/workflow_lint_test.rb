@@ -30,7 +30,7 @@ class WorkflowLintTest < Minitest::Test
 
       result = run_command(
         "ruby",
-        ruby_script("scripts", "lint_workflows"),
+        ruby_script("scripts", "lint-workflows"),
         env: {
           "PATH" => "#{temp_dir}:#{ENV.fetch('PATH')}",
           "RUNEWARP_REPO_ROOT" => temp_dir
@@ -74,7 +74,7 @@ class WorkflowLintTest < Minitest::Test
 
       result = run_command(
         "ruby",
-        ruby_script("scripts", "lint_workflows"),
+        ruby_script("scripts", "lint-workflows"),
         "--staged",
         env: {
           "PATH" => "#{temp_dir}:#{ENV.fetch('PATH')}",

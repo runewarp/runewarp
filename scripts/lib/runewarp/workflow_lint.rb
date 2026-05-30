@@ -18,7 +18,7 @@ module Runewarp
 
     def lint(repo_root:, staged_only:, requested_paths:)
       if staged_only
-        raise UsageError, "usage: lint_workflows [--staged] [PATH ...]" unless requested_paths.empty?
+        raise UsageError, "usage: lint-workflows [--staged] [PATH ...]" unless requested_paths.empty?
 
         workflow_paths = staged_workflow_paths(repo_root)
         if workflow_paths.empty?

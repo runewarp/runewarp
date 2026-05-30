@@ -26,7 +26,7 @@ class ReleaseDocsTest < Minitest::Test
   def test_ci_mode_accepts_a_stable_release_entry_without_unreleased
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: stable_changelog)
-      result = run_command(ruby_script("scripts", "validate_release_metadata"), "ci", "--repo-root", repo_root)
+      result = run_command(ruby_script("scripts", "validate-release-metadata"), "ci", "--repo-root", repo_root)
       assert(result.success?, result.stderr)
     end
   end
@@ -34,7 +34,7 @@ class ReleaseDocsTest < Minitest::Test
   def test_ci_mode_rejects_unreleased_for_a_stable_version
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: stable_with_unreleased_changelog)
-      result = run_command(ruby_script("scripts", "validate_release_metadata"), "ci", "--repo-root", repo_root)
+      result = run_command(ruby_script("scripts", "validate-release-metadata"), "ci", "--repo-root", repo_root)
       refute(result.success?)
       assert_includes(result.stderr, "must not keep an Unreleased section")
     end
@@ -43,7 +43,7 @@ class ReleaseDocsTest < Minitest::Test
   def test_ci_mode_accepts_a_dev_version_with_unreleased
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.2.0-dev", changelog: unreleased_changelog)
-      result = run_command(ruby_script("scripts", "validate_release_metadata"), "ci", "--repo-root", repo_root)
+      result = run_command(ruby_script("scripts", "validate-release-metadata"), "ci", "--repo-root", repo_root)
       assert(result.success?, result.stderr)
     end
   end
@@ -51,7 +51,7 @@ class ReleaseDocsTest < Minitest::Test
   def test_ci_mode_rejects_nonstandard_changelog_subsections
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: invalid_subsection_changelog)
-      result = run_command(ruby_script("scripts", "validate_release_metadata"), "ci", "--repo-root", repo_root)
+      result = run_command(ruby_script("scripts", "validate-release-metadata"), "ci", "--repo-root", repo_root)
       refute(result.success?)
       assert_includes(result.stderr, "invalid changelog subsection: Features")
     end
@@ -61,7 +61,7 @@ class ReleaseDocsTest < Minitest::Test
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: stable_changelog)
       init_git_repo(repo_root, "v0.1.0")
-      result = run_command(ruby_script("scripts", "validate_release_metadata"), "release", "--repo-root", repo_root, "--tag", "v0.1.0")
+      result = run_command(ruby_script("scripts", "validate-release-metadata"), "release", "--repo-root", repo_root, "--tag", "v0.1.0")
       assert(result.success?, result.stderr)
     end
   end
@@ -70,7 +70,7 @@ class ReleaseDocsTest < Minitest::Test
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: stable_changelog)
       init_git_repo(repo_root, "v0.1.0")
-      result = run_command(ruby_script("scripts", "validate_release_metadata"), "release", "--repo-root", repo_root, "--tag", "v0.1.1")
+      result = run_command(ruby_script("scripts", "validate-release-metadata"), "release", "--repo-root", repo_root, "--tag", "v0.1.1")
       refute(result.success?)
       assert_includes(result.stderr, "must match Cargo version 0.1.0")
     end
@@ -79,7 +79,7 @@ class ReleaseDocsTest < Minitest::Test
   def test_render_release_notes_outputs_the_changelog_entry_and_install_appendix
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: release_notes_changelog)
-      result = run_command(ruby_script("scripts", "render_release_notes"), "--repo-root", repo_root, "--version", "0.1.0")
+      result = run_command(ruby_script("scripts", "render-release-notes"), "--repo-root", repo_root, "--version", "0.1.0")
       assert(result.success?, result.stderr)
       assert_includes(result.stdout, "\n## Added\n")
       refute_includes(result.stdout, "\n### Added\n")
@@ -94,7 +94,7 @@ class ReleaseDocsTest < Minitest::Test
   def test_render_release_notes_rejects_a_near_match_heading
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: near_match_changelog)
-      result = run_command(ruby_script("scripts", "render_release_notes"), "--repo-root", repo_root, "--version", "0.1.0")
+      result = run_command(ruby_script("scripts", "render-release-notes"), "--repo-root", repo_root, "--version", "0.1.0")
       refute(result.success?)
       assert_includes(result.stderr, "does not contain a release entry for 0.1.0")
     end
@@ -103,7 +103,7 @@ class ReleaseDocsTest < Minitest::Test
   def test_render_release_notes_rejects_invalid_subsections_in_the_requested_release
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: invalid_subsection_changelog)
-      result = run_command(ruby_script("scripts", "render_release_notes"), "--repo-root", repo_root, "--version", "0.1.0")
+      result = run_command(ruby_script("scripts", "render-release-notes"), "--repo-root", repo_root, "--version", "0.1.0")
       refute(result.success?)
       assert_includes(result.stderr, "invalid changelog subsection: Features")
     end
@@ -112,7 +112,7 @@ class ReleaseDocsTest < Minitest::Test
   def test_render_release_notes_only_validates_the_requested_release_section
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: future_invalid_subsection_changelog)
-      result = run_command(ruby_script("scripts", "render_release_notes"), "--repo-root", repo_root, "--version", "0.1.0")
+      result = run_command(ruby_script("scripts", "render-release-notes"), "--repo-root", repo_root, "--version", "0.1.0")
       assert(result.success?, result.stderr)
       assert_includes(result.stdout, "- Public release metadata contract.")
       refute_includes(result.stdout, "Future invalid subsection.")

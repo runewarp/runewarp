@@ -9,18 +9,17 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
 use crate::acme::ACME_TLS_ALPN;
-use crate::client::TerminationTlsConfigs;
+use crate::client::{ServiceSelector, TerminationTlsConfigs};
 use crate::client_hello::{ParsedClientHello, read_client_hello};
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
 use crate::{
-    ClientTlsMode, PublicHostname, ServiceConfig, proxy::proxy_stream_error_code,
-    proxy::proxy_tcp_over_quic,
+    ClientTlsMode, ServiceConfig, proxy::proxy_stream_error_code, proxy::proxy_tcp_over_quic,
 };
 
 #[derive(Clone)]
 pub(crate) struct TunnelConnectionStreamHandler {
-    services: Arc<[ServiceConfig]>,
+    service_selector: ServiceSelector,
     termination_tls_configs: TerminationTlsConfigs,
 }
 
@@ -30,7 +29,7 @@ impl TunnelConnectionStreamHandler {
         termination_tls_configs: TerminationTlsConfigs,
     ) -> Self {
         Self {
-            services: services.into(),
+            service_selector: ServiceSelector::new(services),
             termination_tls_configs,
         }
     }
@@ -45,7 +44,7 @@ impl TunnelConnectionStreamHandler {
             }
         };
         let public_hostname = parsed_client_hello.public_hostname().clone();
-        let Some(service) = self.select_service(&public_hostname) else {
+        let Some(service) = self.service_selector.select(&public_hostname) else {
             runtime_log::client_route(
                 public_hostname.as_str(),
                 ClientRouteOutcome::RejectedNoMatchingService,
@@ -206,20 +205,6 @@ impl TunnelConnectionStreamHandler {
                 )))
             }
         }
-    }
-
-    fn select_service(&self, public_hostname: &PublicHostname) -> Option<&ServiceConfig> {
-        if let [service] = &*self.services
-            && service.public_hostnames.is_none()
-        {
-            return Some(service);
-        }
-
-        self.services.iter().find(|service| {
-            service.public_hostnames.as_ref().is_some_and(|hostnames| {
-                hostnames.iter().any(|hostname| hostname == public_hostname)
-            })
-        })
     }
 }
 

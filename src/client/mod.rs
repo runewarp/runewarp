@@ -24,7 +24,7 @@ pub use config_resolution::{
     SelectedClientConfig, resolve_client_config_from_cli, resolve_selected_client_config,
     select_client_config,
 };
-pub(crate) use service::validate_services;
+pub(crate) use service::{ServiceSelector, validate_services};
 
 #[derive(Clone)]
 pub struct ClientConnectConfig {

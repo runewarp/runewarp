@@ -147,6 +147,34 @@ fn registry_install_mode_retries_until_the_registry_surface_is_available() {
 }
 
 #[test]
+fn registry_install_mode_rejects_zero_retry_attempts() {
+    let temp_dir = TempDir::new().unwrap();
+    write_minimal_binary_crate(temp_dir.path(), "0.3.1");
+
+    let output = run_validator(
+        temp_dir.path(),
+        &[
+            "registry-install",
+            "--crate-name",
+            "install-surface-fixture",
+            "--bin-name",
+            "install-surface-fixture",
+            "--expected-version",
+            "0.3.1",
+            "--retry-attempts",
+            "0",
+            "--retry-delay-seconds",
+            "0",
+        ],
+    );
+
+    assert!(!output.status.success(), "{output:?}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--retry-attempts must be at least 1"));
+}
+
+#[test]
 fn docker_registry_image_mode_pulls_and_runs_the_released_image() {
     let temp_dir = TempDir::new().unwrap();
     write_minimal_binary_crate(temp_dir.path(), "0.3.1");
@@ -217,6 +245,32 @@ fn docker_registry_image_mode_retries_until_the_image_is_available() {
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(fs::read_to_string(attempts_file).unwrap(), "3");
+}
+
+#[test]
+fn docker_registry_image_mode_rejects_zero_retry_attempts() {
+    let temp_dir = TempDir::new().unwrap();
+    write_minimal_binary_crate(temp_dir.path(), "0.3.1");
+
+    let output = run_validator(
+        temp_dir.path(),
+        &[
+            "docker-registry-image",
+            "--image-ref",
+            "docker.io/runewarp/runewarp:0.1.0",
+            "--expected-version",
+            "0.1.0",
+            "--retry-attempts",
+            "0",
+            "--retry-delay-seconds",
+            "0",
+        ],
+    );
+
+    assert!(!output.status.success(), "{output:?}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--retry-attempts must be at least 1"));
 }
 
 #[test]

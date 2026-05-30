@@ -12,31 +12,26 @@ use tokio_rustls::TlsAcceptor;
 use super::tunnel_registry::{TunnelRegistry, TunnelRouteOutcome};
 use crate::acme::ACME_TLS_ALPN;
 use crate::client_hello::read_client_hello;
-use crate::hostname::validate_public_hostname;
 use crate::proxy::proxy_tcp_over_quic;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ServerRouteOutcome};
+use crate::{PublicHostname, ServerHostname};
 
 #[derive(Clone)]
 pub(crate) struct VisitorStreamHandler {
-    server_hostname: String,
+    server_hostname: ServerHostname,
     tunnel_registry: TunnelRegistry,
     public_tls_config: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl VisitorStreamHandler {
     pub(crate) fn new(
-        server_hostname: String,
+        server_hostname: ServerHostname,
         tunnel_registry: TunnelRegistry,
         public_tls_config: Option<Arc<rustls::ServerConfig>>,
     ) -> io::Result<Self> {
         Ok(Self {
-            server_hostname: validate_public_hostname(&server_hostname).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("server.hostname is invalid: {error}"),
-                )
-            })?,
+            server_hostname,
             tunnel_registry,
             public_tls_config,
         })
@@ -53,13 +48,13 @@ impl VisitorStreamHandler {
         let serves_acme_tls_alpn_01 = parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN);
         let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
 
-        if public_hostname == self.server_hostname {
+        if public_hostname.as_str() == self.server_hostname.as_str() {
             return if serves_acme_tls_alpn_01 {
                 self.serve_acme_tls_alpn_01(visitor_stream, public_hostname, buffered_bytes)
                     .await
             } else {
                 runtime_log::server_route(
-                    &public_hostname,
+                    public_hostname.as_str(),
                     ServerRouteOutcome::RejectedServerHostname,
                 );
                 Ok(())
@@ -73,14 +68,14 @@ impl VisitorStreamHandler {
         {
             TunnelRouteOutcome::Unauthorized => {
                 runtime_log::server_route(
-                    &public_hostname,
+                    public_hostname.as_str(),
                     ServerRouteOutcome::RejectedUnauthorized,
                 );
                 return Ok(());
             }
             TunnelRouteOutcome::NoActiveTunnelConnection => {
                 runtime_log::server_route(
-                    &public_hostname,
+                    public_hostname.as_str(),
                     ServerRouteOutcome::NoActiveTunnelConnection,
                 );
                 return Ok(());
@@ -100,13 +95,13 @@ impl VisitorStreamHandler {
     async fn serve_acme_tls_alpn_01(
         &self,
         visitor_stream: TcpStream,
-        server_hostname: String,
+        server_hostname: PublicHostname,
         buffered_bytes: Vec<u8>,
     ) -> io::Result<()> {
         if let Some(public_tls_config) = self.public_tls_config.clone() {
             runtime_log::acme(
                 AcmeRole::Server {
-                    server_hostname: &server_hostname,
+                    server_hostname: server_hostname.as_str(),
                 },
                 AcmeEvent::ChallengeHandled,
             );
@@ -118,7 +113,10 @@ impl VisitorStreamHandler {
                 let _ = tls_stream.shutdown().await;
             }
         } else {
-            runtime_log::server_route(&server_hostname, ServerRouteOutcome::MissingAcmeTlsConfig);
+            runtime_log::server_route(
+                server_hostname.as_str(),
+                ServerRouteOutcome::MissingAcmeTlsConfig,
+            );
         }
         Ok(())
     }
@@ -126,7 +124,7 @@ impl VisitorStreamHandler {
     async fn forward_to_tunnel(
         &self,
         visitor_stream: TcpStream,
-        public_hostname: String,
+        public_hostname: PublicHostname,
         buffered_bytes: Vec<u8>,
         tunnel_connection: Connection,
     ) -> io::Result<()> {
@@ -134,13 +132,13 @@ impl VisitorStreamHandler {
             Ok(stream) => stream,
             Err(_) => {
                 runtime_log::server_route(
-                    &public_hostname,
+                    public_hostname.as_str(),
                     ServerRouteOutcome::NoActiveTunnelConnection,
                 );
                 return Ok(());
             }
         };
-        runtime_log::server_route(&public_hostname, ServerRouteOutcome::Forwarded);
+        runtime_log::server_route(public_hostname.as_str(), ServerRouteOutcome::Forwarded);
 
         proxy_tcp_over_quic(visitor_stream, buffered_bytes, send, recv).await
     }
@@ -233,10 +231,18 @@ mod tests {
     use crate::LogLevel;
     use crate::acme::ACME_TLS_ALPN;
     use crate::{
-        CLIENT_HELLO_BUFFER_LIMIT, GeneratedClientIdentity, ServerTunnelConfig,
-        generate_client_identity, make_client_quic_config_with_client_auth,
+        CLIENT_HELLO_BUFFER_LIMIT, GeneratedClientIdentity, PublicHostname, ServerHostname,
+        ServerTunnelConfig, generate_client_identity, make_client_quic_config_with_client_auth,
         make_server_quic_config_with_client_auth,
     };
+
+    fn public_hostname(hostname: &str) -> PublicHostname {
+        PublicHostname::try_from(hostname).unwrap()
+    }
+
+    fn server_hostname(hostname: &str) -> ServerHostname {
+        ServerHostname::try_from(hostname).unwrap()
+    }
 
     static LOG_CAPTURE_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 
@@ -326,15 +332,16 @@ mod tests {
     {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
-            "Tunnel.Example.Test.",
+            &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
-                public_hostnames: vec!["App.Example.Test.".to_owned()],
+                public_hostnames: vec![public_hostname("App.Example.Test.")],
                 client_identity: client_identity.client_identity.clone(),
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         registry.register(fixture.server_connection.clone()).await;
-        let router = VisitorStreamHandler::new("Tunnel.Example.Test.".to_owned(), registry, None)?;
+        let router =
+            VisitorStreamHandler::new(server_hostname("Tunnel.Example.Test."), registry, None)?;
 
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
@@ -371,10 +378,10 @@ mod tests {
 
     #[tokio::test]
     async fn serves_acme_tls_for_the_server_hostname() -> io::Result<()> {
-        let registry = TunnelRegistry::single(vec!["app.example.test".to_owned()])?;
+        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
         let (certificate, public_tls_config) = make_public_tls_config("tunnel.example.test")?;
         let router = VisitorStreamHandler::new(
-            "Tunnel.Example.Test.".to_owned(),
+            server_hostname("Tunnel.Example.Test."),
             registry,
             Some(public_tls_config),
         )?;
@@ -412,11 +419,11 @@ mod tests {
             LogLevel::Debug,
             "DEBUG server acme challenge handled: server-hostname=tunnel.example.test",
             async {
-                let registry = TunnelRegistry::single(vec!["app.example.test".to_owned()])?;
+                let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
                 let (certificate, public_tls_config) =
                     make_public_tls_config("tunnel.example.test")?;
                 let router = VisitorStreamHandler::new(
-                    "Tunnel.Example.Test.".to_owned(),
+                    server_hostname("Tunnel.Example.Test."),
                     registry,
                     Some(public_tls_config),
                 )?;
@@ -548,8 +555,9 @@ mod tests {
 
     #[tokio::test]
     async fn drops_public_hostname_when_the_tunnel_has_no_active_connection() -> io::Result<()> {
-        let registry = TunnelRegistry::single(vec!["app.example.test".to_owned()])?;
-        let router = VisitorStreamHandler::new("tunnel.example.test".to_owned(), registry, None)?;
+        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
+        let router =
+            VisitorStreamHandler::new(server_hostname("tunnel.example.test"), registry, None)?;
 
         assert_drop_without_opening_a_tunnel_stream(
             router,
@@ -564,9 +572,9 @@ mod tests {
     -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
-            "Tunnel.Example.Test.",
+            &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
-                public_hostnames: vec!["App.Example.Test.".to_owned()],
+                public_hostnames: vec![public_hostname("App.Example.Test.")],
                 client_identity: client_identity.client_identity.clone(),
             }],
         )?;
@@ -575,7 +583,8 @@ mod tests {
         fixture
             .server_connection
             .close(0_u32.into(), b"closed before visitor handling");
-        let router = VisitorStreamHandler::new("Tunnel.Example.Test.".to_owned(), registry, None)?;
+        let router =
+            VisitorStreamHandler::new(server_hostname("Tunnel.Example.Test."), registry, None)?;
 
         assert_drop_without_opening_a_tunnel_stream(
             router,
@@ -589,15 +598,16 @@ mod tests {
     -> io::Result<(VisitorStreamHandler, Connection)> {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
-            "Tunnel.Example.Test.",
+            &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
-                public_hostnames: vec!["App.Example.Test.".to_owned()],
+                public_hostnames: vec![public_hostname("App.Example.Test.")],
                 client_identity: client_identity.client_identity.clone(),
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         registry.register(fixture.server_connection.clone()).await;
-        let router = VisitorStreamHandler::new("Tunnel.Example.Test.".to_owned(), registry, None)?;
+        let router =
+            VisitorStreamHandler::new(server_hostname("Tunnel.Example.Test."), registry, None)?;
 
         Ok((router, fixture.client_connection))
     }

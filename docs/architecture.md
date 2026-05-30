@@ -31,6 +31,16 @@ Runewarp prepares config in three steps:
 
 This keeps config discovery and defaulting predictable without mixing them into startup side effects.
 
+## Hostname domain values
+
+Runewarp turns hostname input into opaque canonical domain values at the first validation seam:
+
+- `server.hostname` and the host portion of `client.server-address` become **Server hostname** values
+- `server.tunnels[].public-hostnames`, `client.services[].public-hostnames`, and parsed ClientHello SNI become **Public hostname** values
+- lowercase normalization and trailing-dot stripping happen before duplicate detection and route lookup
+
+After a hostname crosses that seam, routing and service-selection code carries the typed value instead of raw strings. That keeps normalization, equality, and hashing rules in one place while preserving the domain distinction between the public routed hostname and the Runewarp edge hostname.
+
 ## End-to-end flow
 
 ```mermaid

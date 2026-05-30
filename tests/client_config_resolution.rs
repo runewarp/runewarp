@@ -27,7 +27,7 @@ fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<
         },
     )?;
 
-    assert_eq!(settings.server_hostname, "tunnel.example.test");
+    assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
     assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(settings.server_ca_file, None);
@@ -101,7 +101,7 @@ hostname = "tunnel.example.test"
         },
     )?;
 
-    assert_eq!(settings.server_hostname, "tunnel.example.test");
+    assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 9443);
     assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(settings.services.len(), 1);
@@ -137,7 +137,7 @@ log-level = "off"
         },
     )?;
 
-    assert_eq!(settings.server_hostname, "tunnel.example.test");
+    assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
     assert_eq!(settings.log_level, LogLevel::Off);
     assert_eq!(settings.services.len(), 1);
@@ -174,7 +174,7 @@ server-address = "127.0.0.1:443"
         },
     )?;
 
-    assert_eq!(settings.server_hostname, "tunnel.example.test");
+    assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
     assert_eq!(settings.log_level, LogLevel::Off);
     assert_eq!(settings.services.len(), 1);

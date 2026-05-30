@@ -76,7 +76,10 @@ async fn run_until_shutdown(
                     runewarp::runtime_log::client_tunnel_resolution_failed(
                         phase,
                         attempt_kind,
-                        &configured_server_addr(&settings.server_hostname, settings.server_port),
+                        &configured_server_addr(
+                            settings.server_hostname.as_str(),
+                            settings.server_port,
+                        ),
                         retry.display_delay_secs,
                         &error.to_string(),
                     );
@@ -241,12 +244,12 @@ async fn resolve_client_tunnel_dial_target(
         .map_err(runewarp::ClientStartupError::Resolve)?;
     let Some(resolved_server_addr) = server_addrs.next() else {
         return Err(runewarp::ClientStartupError::MissingServerAddress {
-            server_hostname: settings.server_hostname.clone(),
+            server_hostname: settings.server_hostname.to_string(),
         });
     };
     Ok(ClientTunnelDialTarget {
         configured_server_addr: configured_server_addr(
-            &settings.server_hostname,
+            settings.server_hostname.as_str(),
             settings.server_port,
         ),
         resolved_server_addr,

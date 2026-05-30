@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Rewrote the main documentation set for a tighter, more direct operator and maintainer voice.
 - Renamed the public validated configuration API around `config` terminology, including `load_client_config`, `load_server_config`, `ClientConfigResolutionDefaults`, and precise runtime types `ClientConnectConfig` and `ServerBindConfig`.
+- Deepened hostname handling around distinct typed **Server hostname** and **Public hostname** values so config validation, ClientHello parsing, and routing all share one canonical normalization seam.
 
 ## [0.1.0] - 2026-05-29
 

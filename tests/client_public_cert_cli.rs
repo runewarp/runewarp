@@ -514,6 +514,65 @@ tls-mode = "terminate"
     assert_exists(configured_dir.join("api.example.test/public.crt").as_path());
 }
 
+#[test]
+fn client_public_cert_init_with_config_reports_existing_and_new_hostnames_in_one_run()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+public-cert-dir = "public-cert"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "127.0.0.1:3000"
+tls-mode = "terminate"
+
+[[client.services]]
+public-hostnames = ["api.example.test"]
+backend-address = "127.0.0.1:4000"
+tls-mode = "terminate"
+"#,
+    )?;
+
+    Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args(["client", "--config", "client.toml", "public-cert", "init"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+
+    assert!(
+        stdout
+            .contains("Public hostname certificate material already exists for: app.example.test")
+    );
+    assert!(stdout.contains("Initialized leaf certificate(s) for: api.example.test"));
+    assert_exists(
+        tempdir
+            .path()
+            .join("public-cert/api.example.test/public.crt")
+            .as_path(),
+    );
+    Ok(())
+}
+
 fn assert_exists(path: &Path) {
     assert!(
         path.exists(),

@@ -56,7 +56,7 @@ jobs:
           WORKFLOW_MODE: ${{ inputs.mode }}
           WORKFLOW_TAG: ${{ inputs.release_tag }}
           IMAGE_REPOSITORY: docker.io/runewarp/runewarp
-        run: ruby ./scripts/resolve-release-metadata.rb
+        run: ./scripts/resolve-release-metadata
 
       - name: Check out release source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -72,11 +72,11 @@ jobs:
 
       - name: Validate rehearsal release gate
         if: steps.release-metadata.outputs.workflow_mode == 'rehearsal'
-        run: ruby ./scripts/validate-release-gates.rb rehearsal --repo-root "$PWD/release-source" --tag "$RELEASE_TAG"
+        run: ./scripts/validate-release-gates rehearsal --repo-root "$PWD/release-source" --tag "$RELEASE_TAG"
 
       - name: Validate signed release tag
         if: steps.release-metadata.outputs.workflow_mode == 'publish'
-        run: ruby ./scripts/validate-release-gates.rb tag --repo-root "$PWD" --metadata-repo-root "$PWD/release-source" --tag "$RELEASE_TAG" --allowed-signers-file "$PWD/.github/release-allowed-signers"
+        run: ./scripts/validate-release-gates tag --repo-root "$PWD" --metadata-repo-root "$PWD/release-source" --tag "$RELEASE_TAG" --allowed-signers-file "$PWD/.github/release-allowed-signers"
 
       - name: Verify prior green CI
         if: steps.release-metadata.outputs.workflow_mode == 'publish'
@@ -84,16 +84,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ steps.release-source.outputs.release_commit }}
-        run: ruby ./scripts/check-github-check-run.rb
+        run: ./scripts/check-github-check-run
 
       - name: Render release notes preview
-        run: ruby ./scripts/render-release-notes.rb --version "$RELEASE_VERSION" > /tmp/release-notes.md
+        run: ./scripts/render-release-notes --version "$RELEASE_VERSION" > /tmp/release-notes.md
 
       - name: Summarize release gate
         env:
           RELEASE_COMMIT: ${{ steps.release-source.outputs.release_commit }}
           RELEASE_NOTES_PATH: /tmp/release-notes.md
-        run: ruby ./scripts/write-release-summary.rb
+        run: ./scripts/write-release-summary
 
   crate-release:
     name: Publish crates.io release
@@ -132,7 +132,7 @@ jobs:
         env:
           CRATE_NAME: runewarp
           RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
-        run: ruby ./scripts/check-crates-io-release.rb
+        run: ./scripts/check-crates-io-release
 
       - name: Publish crate to crates.io
         if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.crate-status.outputs.exists != 'true'
@@ -189,7 +189,7 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'
         env:
           PRIMARY_IMAGE_REF: ${{ needs.gate.outputs.primary_image_ref }}
-        run: ruby ./scripts/check-docker-hub-tag.rb --image-ref "$PRIMARY_IMAGE_REF"
+        run: ./scripts/check-docker-hub-tag --image-ref "$PRIMARY_IMAGE_REF"
 
       - name: Log in to Docker Hub
         if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.docker-status.outputs.exists != 'true'
@@ -256,7 +256,7 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'
         env:
           PRIMARY_IMAGE_REF: ${{ needs.gate.outputs.primary_image_ref }}
-        run: ruby ./scripts/check-docker-hub-tag.rb --image-ref "$PRIMARY_IMAGE_REF"
+        run: ./scripts/check-docker-hub-tag --image-ref "$PRIMARY_IMAGE_REF"
 
       - name: Log in to Docker Hub
         if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.docker-status.outputs.exists != 'true'
@@ -320,7 +320,7 @@ jobs:
           DOCKER_TAGS: ${{ needs.gate.outputs.docker_tags }}
           IMAGE_REPOSITORY: ${{ needs.gate.outputs.image_repository }}
           RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
-        run: ruby ./scripts/merge-docker-manifest.rb
+        run: ./scripts/merge-docker-manifest
 
       - name: Install cosign
         if: needs.docker-release-amd64.outputs.docker_exists != 'true'
@@ -364,7 +364,7 @@ jobs:
       - name: Render release notes
         env:
           RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
-        run: ruby ./scripts/render-release-notes.rb --version "$RELEASE_VERSION" > /tmp/release-notes.md
+        run: ./scripts/render-release-notes --version "$RELEASE_VERSION" > /tmp/release-notes.md
 
       - name: Upsert GitHub release
         env:
@@ -373,4 +373,4 @@ jobs:
           RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
           RELEASE_NOTES_PATH: /tmp/release-notes.md
           REPOSITORY: ${{ github.repository }}
-        run: ruby ./scripts/upsert-github-release.rb
+        run: ./scripts/upsert-github-release

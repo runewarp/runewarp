@@ -1,0 +1,87 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "lib/runewarp"
+
+def usage(message = "docker-example <prepare|smoke>")
+  Runewarp::Core.usage_error(message)
+end
+
+def example_dir
+  File.expand_path("../examples/docker", __dir__)
+end
+
+def repo_root
+  File.expand_path("..", __dir__)
+end
+
+def prepare_example(reset_requested:)
+  generated_dir = File.join(example_dir, "generated")
+  paths = Runewarp::DockerExample.layout(example_dir)
+
+  Runewarp::Core.require_command("docker")
+  Runewarp::DockerExample.reset_generated_state(example_dir, generated_dir) if reset_requested
+
+  Runewarp::Core.section("Preparing Docker example state")
+  Runewarp::DockerExample.prepare_directories(paths)
+  Runewarp::DockerExample.assert_complete_or_empty("server certificate material", paths[:server_source_dir], Runewarp::DockerExample::SERVER_SOURCE_FILES)
+  Runewarp::DockerExample.assert_complete_or_empty("client identity material", paths[:client_source_dir], Runewarp::DockerExample::CLIENT_SOURCE_FILES)
+  Runewarp::DockerExample.build_image(repo_root, Runewarp::DockerExample::IMAGE_TAG)
+  Runewarp::DockerExample.prepare_server_certificate_material(example_dir, paths, Runewarp::DockerExample::IMAGE_TAG)
+  Runewarp::DockerExample.prepare_client_identity_material(example_dir, paths, Runewarp::DockerExample::IMAGE_TAG)
+  Runewarp::DockerExample.render_runtime_configuration(paths, example_dir)
+
+  Runewarp::Core.success("Docker example is ready")
+  Runewarp::Core.note("Generated state: #{generated_dir}")
+  Runewarp::Core.note("Source material: generated/server/source-data and generated/client/source-data")
+end
+
+def smoke_example
+  generated_dir = File.join(example_dir, "generated")
+  compose_file = File.join(example_dir, "docker-compose.yml")
+  caddy_root_ca = File.join(generated_dir, "caddy", "root.crt")
+  caddy_container_root_ca = "/data/caddy/pki/authorities/local/root.crt"
+  stack_started = false
+
+  Runewarp::Core.require_command("docker")
+  Runewarp::Core.require_command("curl")
+  Runewarp::DockerExample.require_compose!(compose_file)
+
+  begin
+    Runewarp::DockerExample.reset_stack(compose_file)
+    prepare_example(reset_requested: true)
+
+    Runewarp::Core.section("Starting Docker example stack")
+    Runewarp::Shell.run!("docker", "compose", "-f", compose_file, "up", "-d", out: File::NULL)
+    stack_started = true
+
+    Runewarp::DockerExample.wait_for_caddy_root_ca(compose_file, caddy_container_root_ca, caddy_root_ca, 30, 1)
+    Runewarp::DockerExample.assert_hostname_response(compose_file, caddy_root_ca, "app.example.test", "app.example.test via runewarp")
+    Runewarp::DockerExample.assert_hostname_response(compose_file, caddy_root_ca, "api.example.test", "api.example.test via runewarp")
+  ensure
+    if stack_started
+      Runewarp::Core.section("Stopping Docker example stack")
+      Runewarp::DockerExample.stop_stack(compose_file)
+      Runewarp::Core.note("Docker example stack is down")
+    end
+  end
+
+  Runewarp::Core.success("Smoke test passed")
+  Runewarp::Core.note("Both public hostnames responded over TLS")
+end
+
+Runewarp::Core.run_cli do
+  command = ARGV.shift
+
+  case command
+  when "prepare"
+    reset_requested = ARGV == ["--reset"]
+    usage("docker-example <prepare|smoke> [--reset]") unless ARGV.empty? || reset_requested
+    prepare_example(reset_requested: reset_requested)
+  when "smoke"
+    usage unless ARGV.empty?
+    smoke_example
+  else
+    usage
+  end
+end

@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 require_relative "support/test_helper"
@@ -11,7 +10,7 @@ class ReleaseMetadataTest < Minitest::Test
 
       result = run_command(
         "ruby",
-        ruby_script("scripts", "resolve-release-metadata.rb"),
+        ruby_script("scripts", "resolve-release-metadata"),
         env: {
           "EVENT_NAME" => "push",
           "PUSH_TAG" => "v1.2.3",
@@ -56,7 +55,7 @@ class ReleaseMetadataTest < Minitest::Test
 
       result = run_command(
         "ruby",
-        ruby_script("scripts", "resolve-release-metadata.rb"),
+        ruby_script("scripts", "resolve-release-metadata"),
         env: {
           "EVENT_NAME" => "workflow_dispatch",
           "WORKFLOW_MODE" => "rehearsal",
@@ -82,7 +81,7 @@ class ReleaseMetadataTest < Minitest::Test
 
       result = run_command(
         "ruby",
-        ruby_script("scripts", "resolve-release-metadata.rb"),
+        ruby_script("scripts", "resolve-release-metadata"),
         env: {
           "EVENT_NAME" => "workflow_dispatch",
           "WORKFLOW_MODE" => "publish",
@@ -110,7 +109,7 @@ class ReleaseMetadataTest < Minitest::Test
 
       result = run_command(
         "ruby",
-        ruby_script("scripts", "resolve-release-metadata.rb"),
+        ruby_script("scripts", "resolve-release-metadata"),
         env: {
           "EVENT_NAME" => "push",
           "PUSH_TAG" => "v1.2.3-rc.1",

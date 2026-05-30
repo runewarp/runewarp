@@ -10,7 +10,7 @@
 - If a prompt is ambiguous and the default is not obvious, ask the user with clear options.
 - Keep commit messages concise when asked to commit. Commit messages should mark related issues as "Closes #123" where relevant.
 - All code must be formatted and linted with Clippy.
-- Workflow changes must pass `ruby ./scripts/lint-workflows.rb`.
+- Workflow changes must pass `./scripts/lint-workflows`.
 - Run relevant tests after changes. Run the full suite before any commit.
 - Keep comments and doc-comments useful, detailed where needed, and not excessive.
 - Always use TDD during implementation.

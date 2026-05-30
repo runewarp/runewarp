@@ -1,10 +1,24 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 require_relative "support/test_helper"
-require_relative "../scripts/lib/runewarp"
+require_relative "../lib/runewarp"
 
 class DockerExampleTest < Minitest::Test
+  def test_readme_documents_the_manual_prepare_commands
+    readme = File.read(File.join(REPO_ROOT, "examples", "docker", "README.md"), encoding: "utf-8")
+
+    assert_includes(readme, "runewarp server cert init --hostname tunnel.example.test")
+    assert_includes(readme, "runewarp client identity init")
+    assert_includes(readme, "docker run --rm")
+  end
+
+  def test_entrypoint_shows_prepare_and_smoke_subcommands
+    result = run_command(ruby_script("scripts", "docker-example"), "--help")
+
+    refute(result.success?)
+    assert_includes(result.stderr, "usage: docker-example <prepare|smoke>")
+  end
+
   def with_path(path)
     original_path = ENV["PATH"]
     ENV["PATH"] = "#{path}:#{original_path}"

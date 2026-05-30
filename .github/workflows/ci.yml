@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Lint workflows
-        run: ruby ./scripts/lint-workflows.rb
+        run: ./scripts/lint-workflows
 
   automation-contract:
     name: Automation contract
@@ -34,13 +34,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Validate release metadata
-        run: ruby ./scripts/validate-release-metadata.rb ci
+        run: ./scripts/validate-release-metadata ci
 
       - name: Run Ruby automation tests
-        run: ruby ./scripts/test-automation.rb
+        run: ./scripts/test-automation
 
-  install-surface-linux:
-    name: Install surface (Linux)
+  install-path-linux:
+    name: Install path (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -53,15 +53,15 @@ jobs:
           rustup toolchain install stable
           rustup default stable
 
-      - name: Validate Linux cargo install surface
+      - name: Check Linux cargo install path
         run: |
-          ruby ./scripts/validate-install-surfaces.rb cargo-install \
+          ./scripts/check-distribution cargo-install \
             --bin-name runewarp \
             --probe-arg --help \
             --expected-text "Usage: runewarp"
 
-  install-surface-macos:
-    name: Install surface (macOS)
+  install-path-macos:
+    name: Install path (macOS)
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -74,9 +74,9 @@ jobs:
           rustup toolchain install stable
           rustup default stable
 
-      - name: Validate macOS cargo install surface
+      - name: Check macOS cargo install path
         run: |
-          ruby ./scripts/validate-install-surfaces.rb cargo-install \
+          ./scripts/check-distribution cargo-install \
             --bin-name runewarp \
             --probe-arg --help \
             --expected-text "Usage: runewarp"
@@ -95,8 +95,8 @@ jobs:
           rustup toolchain install stable
           rustup default stable
 
-      - name: Validate package readiness
-        run: ruby ./scripts/validate-install-surfaces.rb package-readiness
+      - name: Check package readiness
+        run: ./scripts/check-distribution package-readiness
 
   rust-contract:
     name: Rust contract
@@ -146,15 +146,15 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Validate Docker image surface
+      - name: Check Docker image path
         run: |
-          ruby ./scripts/validate-install-surfaces.rb docker-image \
+          ./scripts/check-distribution docker-image \
             --probe-arg --help \
             --expected-text "Usage: runewarp" \
             --image-tag runewarp:ci
 
-      - name: Run Docker smoke test
-        run: ruby ./examples/docker/smoke.rb
+      - name: Run Docker example smoke
+        run: ./scripts/docker-example smoke
 
   ci:
     name: CI
@@ -164,8 +164,8 @@ jobs:
     needs:
       - workflow-lint
       - automation-contract
-      - install-surface-linux
-      - install-surface-macos
+      - install-path-linux
+      - install-path-macos
       - package-readiness
       - rust-contract
       - docker-contract
@@ -174,8 +174,8 @@ jobs:
         env:
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
           AUTOMATION_CONTRACT_RESULT: ${{ needs.automation-contract.result }}
-          INSTALL_SURFACE_LINUX_RESULT: ${{ needs.install-surface-linux.result }}
-          INSTALL_SURFACE_MACOS_RESULT: ${{ needs.install-surface-macos.result }}
+          INSTALL_PATH_LINUX_RESULT: ${{ needs.install-path-linux.result }}
+          INSTALL_PATH_MACOS_RESULT: ${{ needs.install-path-macos.result }}
           PACKAGE_READINESS_RESULT: ${{ needs.package-readiness.result }}
           RUST_CONTRACT_RESULT: ${{ needs.rust-contract.result }}
           DOCKER_CONTRACT_RESULT: ${{ needs.docker-contract.result }}
@@ -183,8 +183,8 @@ jobs:
           for check in \
             "workflow-lint:$WORKFLOW_LINT_RESULT" \
             "automation-contract:$AUTOMATION_CONTRACT_RESULT" \
-            "install-surface-linux:$INSTALL_SURFACE_LINUX_RESULT" \
-            "install-surface-macos:$INSTALL_SURFACE_MACOS_RESULT" \
+            "install-path-linux:$INSTALL_PATH_LINUX_RESULT" \
+            "install-path-macos:$INSTALL_PATH_MACOS_RESULT" \
             "package-readiness:$PACKAGE_READINESS_RESULT" \
             "rust-contract:$RUST_CONTRACT_RESULT" \
             "docker-contract:$DOCKER_CONTRACT_RESULT"; do

@@ -42,6 +42,11 @@ fn release_workflow_checks_docker_release_status_before_arch_build_push() {
         .expect("docker publish step should be present");
 
     assert!(guard < publish);
+    assert!(
+        workflow
+            .contains("run: ./scripts/check-docker-hub-tag.sh --image-ref \"$PRIMARY_IMAGE_REF\"")
+    );
+    assert!(!workflow.contains("https://hub.docker.com/v2/namespaces/runewarp/repositories/runewarp/tags/${RELEASE_VERSION}"));
 }
 
 #[test]
@@ -88,6 +93,13 @@ fn pinned_workflow_actions_include_inline_version_comments() {
             }
         }
     }
+}
+
+#[test]
+fn ci_contract_runs_docker_hub_shell_seam() {
+    let workflow = ci_workflow();
+
+    assert!(workflow.contains("./scripts/test-docker-hub-tag.sh"));
 }
 
 #[test]

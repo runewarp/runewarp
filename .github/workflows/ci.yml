@@ -46,6 +46,7 @@ jobs:
         run: |
           ./scripts/validate-release-metadata.sh ci
           ./scripts/test-release-metadata.sh
+          ./scripts/test-docker-hub-tag.sh
 
   install-surface-linux:
     name: Install surface (Linux)

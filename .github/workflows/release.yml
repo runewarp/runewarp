@@ -302,28 +302,8 @@ jobs:
         id: docker-status
         if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'
         env:
-          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
-        run: |
-          status_code="$(
-            curl \
-              --silent \
-              --show-error \
-              --output /dev/null \
-              --write-out '%{http_code}' \
-              "https://hub.docker.com/v2/namespaces/runewarp/repositories/runewarp/tags/${RELEASE_VERSION}"
-          )"
-          case "$status_code" in
-            200)
-              printf 'exists=true\n' >> "$GITHUB_OUTPUT"
-              ;;
-            404)
-              printf 'exists=false\n' >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              printf 'error: failed to query Docker Hub tag %s: HTTP %s\n' "$RELEASE_VERSION" "$status_code" >&2
-              exit 1
-              ;;
-          esac
+          PRIMARY_IMAGE_REF: ${{ needs.gate.outputs.primary_image_ref }}
+        run: ./scripts/check-docker-hub-tag.sh --image-ref "$PRIMARY_IMAGE_REF"
 
       - name: Log in to Docker Hub
         if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.docker-status.outputs.exists != 'true'
@@ -389,28 +369,8 @@ jobs:
         id: docker-status
         if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'
         env:
-          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
-        run: |
-          status_code="$(
-            curl \
-              --silent \
-              --show-error \
-              --output /dev/null \
-              --write-out '%{http_code}' \
-              "https://hub.docker.com/v2/namespaces/runewarp/repositories/runewarp/tags/${RELEASE_VERSION}"
-          )"
-          case "$status_code" in
-            200)
-              printf 'exists=true\n' >> "$GITHUB_OUTPUT"
-              ;;
-            404)
-              printf 'exists=false\n' >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              printf 'error: failed to query Docker Hub tag %s: HTTP %s\n' "$RELEASE_VERSION" "$status_code" >&2
-              exit 1
-              ;;
-          esac
+          PRIMARY_IMAGE_REF: ${{ needs.gate.outputs.primary_image_ref }}
+        run: ./scripts/check-docker-hub-tag.sh --image-ref "$PRIMARY_IMAGE_REF"
 
       - name: Log in to Docker Hub
         if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.docker-status.outputs.exists != 'true'

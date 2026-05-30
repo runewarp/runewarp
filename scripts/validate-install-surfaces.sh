@@ -97,7 +97,7 @@ validate_registry_install() {
   local probe_arg="$5"
   local retry_attempts="$6"
   local retry_delay_seconds="$7"
-  local install_root output attempt
+  local install_root output
 
   [[ -n "$crate_name" ]] || die "registry-install mode requires --crate-name"
   [[ -n "$bin_name" ]] || die "registry-install mode requires --bin-name"
@@ -105,8 +105,6 @@ validate_registry_install() {
   if [[ -z "$expected_version" && -z "$expected_text" ]]; then
     die "registry-install mode requires --expected-version or --expected-text"
   fi
-  [[ "$retry_attempts" =~ ^[0-9]+$ ]] || die "--retry-attempts must be a non-negative integer"
-  [[ "$retry_delay_seconds" =~ ^[0-9]+$ ]] || die "--retry-delay-seconds must be a non-negative integer"
   if [[ -z "$probe_arg" ]]; then
     if [[ -n "$expected_version" ]]; then
       probe_arg="--version"
@@ -125,28 +123,21 @@ validate_registry_install() {
   note "Binary: $bin_name"
   note "Retry attempts: $retry_attempts"
 
-  attempt=1
-  while (( attempt <= retry_attempts )); do
-    if CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
-      CARGO_HTTP_MULTIPLEXING=false \
-      CARGO_NET_RETRY=5 \
-      cargo install \
-        --locked \
-        --version "$expected_version" \
-        --root "$install_root" \
-        "$crate_name" \
-        >/dev/null; then
-      break
-    fi
-
-    if (( attempt == retry_attempts )); then
-      die "crate registry install did not succeed after $retry_attempts attempts"
-    fi
-
-    warn "crate registry install attempt $attempt failed; retrying after ${retry_delay_seconds}s"
-    sleep "$retry_delay_seconds"
-    attempt=$((attempt + 1))
-  done
+  runewarp_retry_command \
+    "$retry_attempts" \
+    "$retry_delay_seconds" \
+    "crate registry install" \
+    "crate registry install did not succeed after $retry_attempts attempts" \
+    env \
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_HTTP_MULTIPLEXING=false \
+    CARGO_NET_RETRY=5 \
+    cargo install \
+      --locked \
+      --version "$expected_version" \
+      --root "$install_root" \
+      "$crate_name" \
+      >/dev/null
 
   section "Checking installed registry binary"
   output="$("$install_root/bin/$bin_name" "$probe_arg")"
@@ -211,14 +202,12 @@ validate_docker_registry_image() {
   local probe_arg="$4"
   local retry_attempts="$5"
   local retry_delay_seconds="$6"
-  local output attempt
+  local output
 
   [[ -n "$image_ref" ]] || die "docker-registry-image mode requires --image-ref"
   if [[ -z "$expected_version" && -z "$expected_text" ]]; then
     die "docker-registry-image mode requires --expected-version or --expected-text"
   fi
-  [[ "$retry_attempts" =~ ^[0-9]+$ ]] || die "--retry-attempts must be a non-negative integer"
-  [[ "$retry_delay_seconds" =~ ^[0-9]+$ ]] || die "--retry-delay-seconds must be a non-negative integer"
   if [[ -z "$probe_arg" ]]; then
     if [[ -n "$expected_version" ]]; then
       probe_arg="--version"
@@ -232,20 +221,12 @@ validate_docker_registry_image() {
   section "Pulling Docker image"
   note "Image ref: $image_ref"
   note "Retry attempts: $retry_attempts"
-  attempt=1
-  while (( attempt <= retry_attempts )); do
-    if docker pull "$image_ref" >/dev/null; then
-      break
-    fi
-
-    if (( attempt == retry_attempts )); then
-      die "docker registry image did not become available after $retry_attempts attempts"
-    fi
-
-    warn "docker pull attempt $attempt failed; retrying after ${retry_delay_seconds}s"
-    sleep "$retry_delay_seconds"
-    attempt=$((attempt + 1))
-  done
+  runewarp_retry_command \
+    "$retry_attempts" \
+    "$retry_delay_seconds" \
+    "docker pull" \
+    "docker registry image did not become available after $retry_attempts attempts" \
+    docker pull "$image_ref" >/dev/null
 
   section "Checking released Docker image startup"
   output="$(docker run --rm "$image_ref" "$probe_arg")"

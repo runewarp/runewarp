@@ -171,3 +171,52 @@ fn render_release_notes_outputs_the_changelog_entry_and_install_appendix() {
     assert!(stdout.contains("cargo install --version 0.1.0 runewarp"));
     assert!(stdout.contains("docker pull runewarp/runewarp:0.1.0"));
 }
+
+#[test]
+fn render_release_notes_rejects_a_near_match_heading() {
+    let temp_dir = TempDir::new().unwrap();
+    write_repo_files(
+        temp_dir.path(),
+        "0.1.0",
+        "# Changelog\n\nAll notable changes to Runewarp will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [0x1x0] - 2026-05-29\n\n### Added\n\n- Wrong release heading.\n",
+    );
+
+    let output = run_release_notes(temp_dir.path(), "0.1.0");
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("does not contain a release entry for 0.1.0"));
+}
+
+#[test]
+fn render_release_notes_rejects_invalid_subsections_in_the_requested_release() {
+    let temp_dir = TempDir::new().unwrap();
+    write_repo_files(
+        temp_dir.path(),
+        "0.1.0",
+        "# Changelog\n\nAll notable changes to Runewarp will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [0.1.0] - 2026-05-29\n\n### Features\n\n- Wrong subsection heading.\n",
+    );
+
+    let output = run_release_notes(temp_dir.path(), "0.1.0");
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("invalid changelog subsection: Features"));
+}
+
+#[test]
+fn render_release_notes_only_validates_the_requested_release_section() {
+    let temp_dir = TempDir::new().unwrap();
+    write_repo_files(
+        temp_dir.path(),
+        "0.1.0",
+        "# Changelog\n\nAll notable changes to Runewarp will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [0.2.0] - 2026-05-30\n\n### Features\n\n- Future invalid subsection.\n\n## [0.1.0] - 2026-05-29\n\n### Added\n\n- Public release metadata contract.\n",
+    );
+
+    let output = run_release_notes(temp_dir.path(), "0.1.0");
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("- Public release metadata contract."));
+    assert!(!stdout.contains("Future invalid subsection."));
+}

@@ -6,6 +6,7 @@ tool_root="$(cd "$script_dir/.." && pwd)"
 repo_root="$tool_root"
 
 . "$tool_root/scripts/lib.sh"
+. "$script_dir/lib-changelog.sh"
 
 usage() {
   usage_error "validate-release-metadata.sh <ci|release> [--repo-root PATH] [--tag-repo-root PATH] [--tag vX.Y.Z]"
@@ -15,143 +16,30 @@ is_stable_version() {
   [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
-read_first_h2_heading() {
-  awk '
-    /^## / {
-      sub(/^## /, "", $0)
-      print
-      exit
-    }
-  ' "$1"
-}
-
-normalize_changelog_heading() {
-  case "$1" in
-    "Unreleased"|"[Unreleased]")
-      printf 'Unreleased\n'
-      ;;
-    *)
-      printf '%s\n' "$1"
-      ;;
-  esac
-}
-
-has_unreleased_heading() {
-  grep -Eq '^## (\[Unreleased\]|Unreleased)$' "$1"
-}
-
-validate_version_headings() {
-  local changelog_path="$1"
-
-  awk '
-    /^## / {
-      if ($0 == "## Unreleased" || $0 == "## [Unreleased]") {
-        next
-      }
-
-      if ($0 !~ /^## \[[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$/) {
-        printf "error: invalid changelog release heading: %s\n", $0 > "/dev/stderr"
-        exit 1
-      }
-    }
-  ' "$changelog_path"
-}
-
-validate_subsection_headings() {
-  local changelog_path="$1"
-
-  awk '
-    BEGIN {
-      allowed["Added"] = 1
-      allowed["Changed"] = 1
-      allowed["Deprecated"] = 1
-      allowed["Removed"] = 1
-      allowed["Fixed"] = 1
-      allowed["Security"] = 1
-      in_section = 0
-    }
-
-    /^## / {
-      in_section = 1
-      next
-    }
-
-    /^### / {
-      heading = $0
-      sub(/^### /, "", heading)
-
-      if (!in_section) {
-        printf "error: changelog subsection must appear under a changelog section: %s\n", heading > "/dev/stderr"
-        exit 1
-      }
-
-      if (!(heading in allowed)) {
-        printf "error: invalid changelog subsection: %s\n", heading > "/dev/stderr"
-        exit 1
-      }
-    }
-  ' "$changelog_path"
-}
-
-find_release_heading() {
-  local changelog_path="$1"
-  local version="$2"
-
-  grep -E "^## \[$version\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" "$changelog_path" | head -n1 || true
-}
-
-section_has_list_item() {
-  local changelog_path="$1"
-  local heading="$2"
-
-  awk -v heading="$heading" '
-    $0 == heading {
-      in_section = 1
-      next
-    }
-
-    in_section && /^## / {
-      exit found ? 0 : 1
-    }
-
-    in_section && /^- / {
-      found = 1
-    }
-
-    END {
-      if (in_section) {
-        exit found ? 0 : 1
-      }
-
-      exit 2
-    }
-  ' "$changelog_path"
-}
-
 validate_ci_mode() {
   local repo_root="$1"
   local cargo_version="$2"
   local changelog_path="$3"
   local first_heading normalized_first_heading release_heading
 
-  first_heading="$(read_first_h2_heading "$changelog_path")"
+  first_heading="$(runewarp_changelog_first_h2_heading "$changelog_path")"
   [[ -n "$first_heading" ]] || die "CHANGELOG.md must contain at least one level-2 section heading"
-  normalized_first_heading="$(normalize_changelog_heading "$first_heading")"
+  normalized_first_heading="$(runewarp_changelog_normalize_heading "$first_heading")"
 
-  validate_version_headings "$changelog_path"
-  validate_subsection_headings "$changelog_path"
+  runewarp_changelog_validate_release_headings "$changelog_path"
+  runewarp_changelog_validate_subsection_headings "$changelog_path"
 
   if is_stable_version "$cargo_version"; then
-    release_heading="$(find_release_heading "$changelog_path" "$cargo_version")"
+    release_heading="$(runewarp_changelog_find_release_heading "$changelog_path" "$cargo_version")"
     [[ -n "$release_heading" ]] || die "stable Cargo version $cargo_version requires a matching changelog release entry"
-    ! has_unreleased_heading "$changelog_path" || die "stable Cargo version $cargo_version must not keep an Unreleased section"
+    ! runewarp_changelog_has_unreleased_heading "$changelog_path" || die "stable Cargo version $cargo_version must not keep an Unreleased section"
     [[ "$first_heading" == "[${cargo_version}]"* ]] || die "stable Cargo version $cargo_version requires the top changelog section to match that release"
-    section_has_list_item "$changelog_path" "$release_heading" || die "release entry $cargo_version must contain at least one bullet item"
+    runewarp_changelog_section_has_list_item "$changelog_path" "$release_heading" || die "release entry $cargo_version must contain at least one bullet item"
     return
   fi
 
   [[ "$normalized_first_heading" == "Unreleased" ]] || die "pre-release Cargo version $cargo_version requires Unreleased to be the top changelog section"
-  has_unreleased_heading "$changelog_path" || die "pre-release Cargo version $cargo_version requires an Unreleased section"
+  runewarp_changelog_has_unreleased_heading "$changelog_path" || die "pre-release Cargo version $cargo_version requires an Unreleased section"
 }
 
 validate_release_mode() {

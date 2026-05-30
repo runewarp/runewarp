@@ -72,7 +72,7 @@ The workflow keeps GitHub-specific orchestration and idempotent publish checks i
 
 - `scripts/validate-release-gates.sh` owns rehearsal/tag gate validation
 - `scripts/validate-release-metadata.sh` owns changelog and version validation for both rehearsal and release mode
-- `scripts/render-release-notes.sh` owns changelog-driven release-body rendering, including promoting changelog subsection headings to release-note H2 headings
+- `scripts/render-release-notes.sh` owns changelog-driven release-body rendering, including exact release-entry selection, validation of the requested entry's changelog subsection headings, and promotion of those subsection headings to release-note H2 headings
 - release-time idempotency checks for crates.io, Docker Hub, and GitHub Releases live in the workflow because they are GitHub-hosted orchestration decisions rather than reusable local install-surface validation
 - per-architecture Docker builds and manifest publication live in the workflow because runner selection, registry login, and digest promotion are GitHub-hosted orchestration concerns
 - post-publish install-surface probes are enforced in `CI`, not repeated in the release workflow

@@ -56,3 +56,30 @@ runewarp_git_commit() {
   [[ -n "$commit" ]] || return 1
   printf '%s\n' "$commit"
 }
+
+runewarp_retry_command() {
+  local retry_attempts="$1"
+  local retry_delay_seconds="$2"
+  local retry_label="$3"
+  local failure_message="$4"
+  shift 4
+
+  [[ "$retry_attempts" =~ ^[0-9]+$ ]] || die "--retry-attempts must be a non-negative integer"
+  [[ "$retry_delay_seconds" =~ ^[0-9]+$ ]] || die "--retry-delay-seconds must be a non-negative integer"
+  (( retry_attempts >= 1 )) || die "--retry-attempts must be at least 1"
+
+  local attempt=1
+  while (( attempt <= retry_attempts )); do
+    if "$@"; then
+      return 0
+    fi
+
+    if (( attempt == retry_attempts )); then
+      die "$failure_message"
+    fi
+
+    warn "$retry_label attempt $attempt failed; retrying after ${retry_delay_seconds}s"
+    sleep "$retry_delay_seconds"
+    attempt=$((attempt + 1))
+  done
+}

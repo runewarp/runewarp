@@ -80,7 +80,7 @@ fn ci_mode_rejects_unreleased_for_a_stable_version() {
     write_repo_files(
         temp_dir.path(),
         "0.1.0",
-        "# Changelog\n\nAll notable changes to Runewarp will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## Unreleased\n\n### Added\n\n- Work in progress.\n\n## [0.1.0] - 2026-05-29\n\n### Added\n\n- Public release metadata contract.\n",
+        "# Changelog\n\nAll notable changes to Runewarp will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [Unreleased]\n\n### Added\n\n- Work in progress.\n\n## [0.1.0] - 2026-05-29\n\n### Added\n\n- Public release metadata contract.\n",
     );
 
     let output = run_validator(temp_dir.path(), &["ci"]);
@@ -96,7 +96,7 @@ fn ci_mode_accepts_a_dev_version_with_unreleased() {
     write_repo_files(
         temp_dir.path(),
         "0.2.0-dev",
-        "# Changelog\n\nAll notable changes to Runewarp will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## Unreleased\n\n### Added\n\n- Upcoming release notes.\n\n## [0.1.0] - 2026-05-29\n\n### Added\n\n- Public release metadata contract.\n",
+        "# Changelog\n\nAll notable changes to Runewarp will be documented in this file.\n\nThe format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n\n## [Unreleased]\n\n### Added\n\n- Upcoming release notes.\n\n## [0.1.0] - 2026-05-29\n\n### Added\n\n- Public release metadata contract.\n",
     );
 
     let output = run_validator(temp_dir.path(), &["ci"]);

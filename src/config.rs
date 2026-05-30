@@ -21,7 +21,7 @@ use crate::tls_material::{
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
-    SERVER_CA_FILENAME, XdgPathError, hostname::validate_public_hostname,
+    PublicHostname, SERVER_CA_FILENAME, ServerHostname, XdgPathError,
 };
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -44,7 +44,7 @@ impl LogLevel {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerConfig {
-    pub hostname: String,
+    pub hostname: ServerHostname,
     pub log_level: LogLevel,
     pub certificate: ServerCertificateConfig,
     pub public_bind_address: SocketAddr,
@@ -54,7 +54,7 @@ pub struct ServerConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerTunnelConfig {
-    pub public_hostnames: Vec<String>,
+    pub public_hostnames: Vec<PublicHostname>,
     pub client_identity: ClientIdentity,
 }
 
@@ -72,7 +72,7 @@ pub enum ServerCertificateConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientConfig {
-    pub server_hostname: String,
+    pub server_hostname: ServerHostname,
     pub server_port: u16,
     pub log_level: LogLevel,
     pub server_ca_file: Option<PathBuf>,
@@ -95,7 +95,7 @@ pub enum ClientPublicCertConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServiceConfig {
-    pub public_hostnames: Option<Vec<String>>,
+    pub public_hostnames: Option<Vec<PublicHostname>>,
     pub backend_address: String,
     pub tls_mode: ClientTlsMode,
 }
@@ -108,25 +108,25 @@ pub enum ClientTlsMode {
 }
 
 struct ValidatedRequiredPublicHostnames {
-    values: Vec<String>,
+    values: Vec<PublicHostname>,
     is_valid: bool,
 }
 
 struct ValidatedOptionalPublicHostnames {
-    values: Option<Vec<String>>,
-    valid_hostnames: Vec<String>,
+    values: Option<Vec<PublicHostname>>,
+    valid_hostnames: Vec<PublicHostname>,
     is_valid: bool,
 }
 
 struct ValidatedServerTunnel {
     settings: Option<ServerTunnelConfig>,
-    public_hostnames: Vec<String>,
+    public_hostnames: Vec<PublicHostname>,
     client_identity: Option<ClientIdentity>,
 }
 
 struct ValidatedClientService {
     settings: Option<ServiceConfig>,
-    public_hostnames: Vec<String>,
+    public_hostnames: Vec<PublicHostname>,
     parsed_tls_mode: Option<ClientTlsMode>,
 }
 
@@ -268,7 +268,9 @@ pub fn resolve_server_cert_material_dir_from_config(
     Ok(raw.cert_dir.map(|path| resolve_path(base_dir, &path)))
 }
 
-pub fn resolve_server_hostname_from_config(path: &Path) -> Result<Option<String>, ConfigFileError> {
+pub fn resolve_server_hostname_from_config(
+    path: &Path,
+) -> Result<Option<ServerHostname>, ConfigFileError> {
     let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
         return Ok(None);
     };
@@ -282,9 +284,9 @@ pub fn resolve_server_hostname_from_config(path: &Path) -> Result<Option<String>
     }
     let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
     let mut messages = Vec::new();
-    let hostname = raw
-        .hostname
-        .and_then(|hostname| validate_hostname_field("server.hostname", hostname, &mut messages));
+    let hostname = raw.hostname.and_then(|hostname| {
+        validate_server_hostname_field("server.hostname", hostname, &mut messages)
+    });
     if messages.is_empty() {
         Ok(hostname)
     } else {
@@ -320,7 +322,7 @@ pub fn resolve_client_public_cert_material_dir_from_config(
 /// `None` when no `[client]` section exists in the config file.
 pub fn resolve_terminating_hostnames_from_config(
     path: &Path,
-) -> Result<Option<Vec<String>>, ConfigFileError> {
+) -> Result<Option<Vec<PublicHostname>>, ConfigFileError> {
     let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
         return Ok(None);
     };
@@ -333,15 +335,32 @@ pub fn resolve_terminating_hostnames_from_config(
         });
     }
     let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
-    let mut hostnames: Vec<String> = raw
+    let mut messages = Vec::new();
+    let mut hostnames = Vec::new();
+    for hostname in raw
         .services
         .into_iter()
-        .filter(|s| s.tls_mode.as_deref() == Some("terminate"))
-        .flat_map(|s| s.public_hostnames.unwrap_or_default())
-        .collect();
-    hostnames.sort();
+        .filter(|service| service.tls_mode.as_deref() == Some("terminate"))
+        .flat_map(|service| service.public_hostnames.unwrap_or_default())
+    {
+        match PublicHostname::try_from(hostname.as_str()) {
+            Ok(hostname) => hostnames.push(hostname),
+            Err(error) => messages.push(format!(
+                "client.services[].public-hostnames contains invalid hostname `{hostname}`: {error}"
+            )),
+        }
+    }
+    hostnames.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     hostnames.dedup();
-    Ok(Some(hostnames))
+    if messages.is_empty() {
+        Ok(Some(hostnames))
+    } else {
+        Err(ConfigFileError::Validation {
+            path: path.to_path_buf(),
+            section: "client",
+            messages,
+        })
+    }
 }
 
 pub fn resolve_client_identity_material_dir_from_config(
@@ -442,11 +461,11 @@ fn validate_prepared_server_config(
 
     let hostname = match hostname {
         Some(hostname) => {
-            validate_hostname_field("server.hostname", hostname, &mut messages).unwrap_or_default()
+            validate_server_hostname_field("server.hostname", hostname, &mut messages)
         }
         None => {
             messages.push("server.hostname is required".to_owned());
-            String::new()
+            None
         }
     };
 
@@ -459,7 +478,7 @@ fn validate_prepared_server_config(
             .and_then(|directory| {
                 validate_prepared_server_manual_cert_settings(
                     directory,
-                    hostname.as_str(),
+                    hostname.as_ref(),
                     &mut messages,
                 )
             })
@@ -498,7 +517,9 @@ fn validate_prepared_server_config(
         .map(|tunnel| validate_prepared_server_tunnel(tunnel, &mut messages))
         .collect::<Vec<_>>();
     validate_unique_client_identities(&validated_tunnels, &mut messages);
-    validate_unique_server_hostnames(&hostname, &validated_tunnels, &mut messages);
+    if let Some(hostname) = hostname.as_ref() {
+        validate_unique_server_hostnames(hostname, &validated_tunnels, &mut messages);
+    }
     let tunnels = validated_tunnels
         .into_iter()
         .filter_map(|tunnel| tunnel.settings)
@@ -506,7 +527,7 @@ fn validate_prepared_server_config(
 
     if messages.is_empty() {
         Ok(ServerConfig {
-            hostname,
+            hostname: hostname.expect("validated server.hostname"),
             log_level,
             certificate: certificate.expect("validated server certificate settings"),
             public_bind_address: public_bind_address.expect("validated server.public-bind-address"),
@@ -672,7 +693,7 @@ pub(crate) fn validate_prepared_client_config(
                 .as_ref()
                 .expect("validated client.server-address")
                 .hostname()
-                .to_owned(),
+                .clone(),
             server_port: server_address
                 .as_ref()
                 .expect("validated client.server-address")
@@ -715,7 +736,7 @@ fn validate_prepared_client_acme_settings(
 
 fn validate_prepared_server_manual_cert_settings(
     directory: PathBuf,
-    server_hostname: &str,
+    server_hostname: Option<&ServerHostname>,
     messages: &mut Vec<String>,
 ) -> Option<PathBuf> {
     let directory = validate_existing_directory_path("server.cert-dir", directory, messages)?;
@@ -733,8 +754,9 @@ fn validate_prepared_server_manual_cert_settings(
         cert_path.as_deref(),
         key_path.as_deref(),
         ca_path.as_deref(),
-    ) && let Err(error) =
-        validate_server_tls_material(cert_path, key_path, ca_path, server_hostname)
+    ) && let Some(server_hostname) = server_hostname
+        && let Err(error) =
+            validate_server_tls_material(cert_path, key_path, ca_path, server_hostname.as_str())
     {
         messages.push(format!("server TLS material is invalid: {error}"));
         return None;
@@ -936,12 +958,12 @@ fn validate_prepared_client_service(
     }
 }
 
-fn validate_hostname_field(
+fn validate_server_hostname_field(
     field_name: &str,
     hostname: String,
     messages: &mut Vec<String>,
-) -> Option<String> {
-    match validate_public_hostname(&hostname) {
+) -> Option<ServerHostname> {
+    match ServerHostname::try_from(hostname.as_str()) {
         Ok(hostname) => Some(hostname),
         Err(error) => {
             messages.push(format!("{field_name} is invalid: {error}"));
@@ -1035,7 +1057,7 @@ fn validate_public_hostnames(
     let mut validated = Vec::with_capacity(hostnames.len());
     let hostnames_len = hostnames.len();
     for hostname in hostnames {
-        match validate_public_hostname(&hostname) {
+        match PublicHostname::try_from(hostname.as_str()) {
             Ok(hostname) => validated.push(hostname),
             Err(error) => messages.push(format!(
                 "{field_name} contains invalid hostname `{hostname}`: {error}"
@@ -1067,14 +1089,14 @@ fn validate_unique_client_identities(
 }
 
 fn validate_unique_server_hostnames(
-    server_hostname: &str,
+    server_hostname: &ServerHostname,
     tunnels: &[ValidatedServerTunnel],
     messages: &mut Vec<String>,
 ) {
     let mut seen = HashSet::new();
     for tunnel in tunnels {
         for hostname in &tunnel.public_hostnames {
-            if !server_hostname.is_empty() && hostname == server_hostname {
+            if hostname.as_str() == server_hostname.as_str() {
                 messages.push(format!(
                     "server.tunnels[].public-hostnames must not include server.hostname `{server_hostname}`"
                 ));

@@ -14,7 +14,8 @@ use crate::client_hello::{ParsedClientHello, read_client_hello};
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
 use crate::{
-    ClientTlsMode, ServiceConfig, proxy::proxy_stream_error_code, proxy::proxy_tcp_over_quic,
+    ClientTlsMode, PublicHostname, ServiceConfig, proxy::proxy_stream_error_code,
+    proxy::proxy_tcp_over_quic,
 };
 
 #[derive(Clone)]
@@ -43,10 +44,10 @@ impl TunnelConnectionStreamHandler {
                 return Err(io::Error::other(error));
             }
         };
-        let public_hostname = parsed_client_hello.server_name().to_owned();
+        let public_hostname = parsed_client_hello.public_hostname().clone();
         let Some(service) = self.select_service(&public_hostname) else {
             runtime_log::client_route(
-                &public_hostname,
+                public_hostname.as_str(),
                 ClientRouteOutcome::RejectedNoMatchingService,
             );
             reject_stream(send, recv);
@@ -65,7 +66,7 @@ impl TunnelConnectionStreamHandler {
             Ok(stream) => stream,
             Err(error) => {
                 runtime_log::client_route(
-                    &public_hostname,
+                    public_hostname.as_str(),
                     ClientRouteOutcome::BackendConnectFailed {
                         backend_address: service.backend_address.as_str(),
                     },
@@ -76,7 +77,7 @@ impl TunnelConnectionStreamHandler {
         };
         if let Err(error) = backend_stream.write_all(&buffered_bytes).await {
             runtime_log::client_route(
-                &public_hostname,
+                public_hostname.as_str(),
                 ClientRouteOutcome::BackendWriteFailed {
                     backend_address: service.backend_address.as_str(),
                 },
@@ -85,7 +86,7 @@ impl TunnelConnectionStreamHandler {
             return Err(error);
         }
         runtime_log::client_route(
-            &public_hostname,
+            public_hostname.as_str(),
             ClientRouteOutcome::Passthrough {
                 backend_address: service.backend_address.as_str(),
             },
@@ -101,7 +102,7 @@ impl TunnelConnectionStreamHandler {
         parsed_client_hello: ParsedClientHello,
         service: &ServiceConfig,
     ) -> io::Result<()> {
-        let public_hostname = parsed_client_hello.server_name().to_owned();
+        let public_hostname = parsed_client_hello.public_hostname().clone();
         if parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN)
             && let Some(challenge_tls_config) = self
                 .termination_tls_configs
@@ -207,7 +208,7 @@ impl TunnelConnectionStreamHandler {
         }
     }
 
-    fn select_service(&self, public_hostname: &str) -> Option<&ServiceConfig> {
+    fn select_service(&self, public_hostname: &PublicHostname) -> Option<&ServiceConfig> {
         if let [service] = &*self.services
             && service.public_hostnames.is_none()
         {
@@ -314,23 +315,27 @@ mod tests {
 
     use super::{ACME_TLS_ALPN, TunnelConnectionStreamHandler};
     use crate::{
-        ClientTlsMode, LogLevel, ServiceConfig, client::TerminationTlsConfigs,
+        ClientTlsMode, LogLevel, PublicHostname, ServiceConfig, client::TerminationTlsConfigs,
         make_client_quic_config, make_server_quic_config,
     };
 
     static LOG_CAPTURE_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
+
+    fn public_hostname(hostname: &str) -> PublicHostname {
+        PublicHostname::try_from(hostname).unwrap()
+    }
 
     #[tokio::test]
     async fn forwards_streams_for_exact_match_services() -> io::Result<()> {
         assert_forwarded_stream(
             vec![
                 ServiceConfig {
-                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                    public_hostnames: Some(vec![public_hostname("app.example.test")]),
                     backend_address: "127.0.0.1:443".to_owned(),
                     tls_mode: ClientTlsMode::Passthrough,
                 },
                 ServiceConfig {
-                    public_hostnames: Some(vec!["api.example.test".to_owned()]),
+                    public_hostnames: Some(vec![public_hostname("api.example.test")]),
                     backend_address: backend_placeholder(),
                     tls_mode: ClientTlsMode::Passthrough,
                 },
@@ -357,7 +362,7 @@ mod tests {
     async fn rejects_streams_without_a_matching_service() -> io::Result<()> {
         assert_rejected_stream(
             vec![ServiceConfig {
-                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
             }],
@@ -373,7 +378,7 @@ mod tests {
 
         assert_rejected_stream(
             vec![ServiceConfig {
-                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
             }],
@@ -399,7 +404,7 @@ mod tests {
 
         assert_rejected_stream(
             vec![ServiceConfig {
-                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
             }],
@@ -422,7 +427,7 @@ mod tests {
             async {
                 assert_forwarded_stream_without_spawning_handler(
                     vec![ServiceConfig {
-                        public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                        public_hostnames: Some(vec![public_hostname("app.example.test")]),
                         backend_address: backend_placeholder(),
                         tls_mode: ClientTlsMode::Passthrough,
                     }],
@@ -446,7 +451,7 @@ mod tests {
             async {
                 assert_forwarded_stream_without_spawning_handler(
                     vec![ServiceConfig {
-                        public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                        public_hostnames: Some(vec![public_hostname("app.example.test")]),
                         backend_address: backend_placeholder(),
                         tls_mode: ClientTlsMode::Passthrough,
                     }],
@@ -456,7 +461,7 @@ mod tests {
 
                 assert_rejected_stream_without_spawning_handler(
                     vec![ServiceConfig {
-                        public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                        public_hostnames: Some(vec![public_hostname("app.example.test")]),
                         backend_address: "127.0.0.1:443".to_owned(),
                         tls_mode: ClientTlsMode::Passthrough,
                     }],
@@ -468,7 +473,7 @@ mod tests {
                 let backend_address = unused_localhost_address().await?.to_string();
                 assert_rejected_stream_without_spawning_handler(
                     vec![ServiceConfig {
-                        public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                        public_hostnames: Some(vec![public_hostname("app.example.test")]),
                         backend_address,
                         tls_mode: ClientTlsMode::Passthrough,
                     }],
@@ -479,7 +484,7 @@ mod tests {
 
                 assert_rejected_stream_without_spawning_handler(
                     vec![ServiceConfig {
-                        public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                        public_hostnames: Some(vec![public_hostname("app.example.test")]),
                         backend_address: "127.0.0.1:8080".to_owned(),
                         tls_mode: ClientTlsMode::Terminate,
                     }],
@@ -1040,7 +1045,7 @@ mod tests {
         });
 
         let services = vec![ServiceConfig {
-            public_hostnames: Some(vec![hostname.to_owned()]),
+            public_hostnames: Some(vec![public_hostname(hostname)]),
             backend_address,
             tls_mode: ClientTlsMode::Terminate,
         }];
@@ -1125,7 +1130,7 @@ mod tests {
         });
 
         let services = vec![ServiceConfig {
-            public_hostnames: Some(vec![hostname.to_owned()]),
+            public_hostnames: Some(vec![public_hostname(hostname)]),
             backend_address,
             tls_mode: ClientTlsMode::Terminate,
         }];
@@ -1305,12 +1310,12 @@ mod tests {
 
         let services = vec![
             ServiceConfig {
-                public_hostnames: Some(vec![terminate_hostname.to_owned()]),
+                public_hostnames: Some(vec![public_hostname(terminate_hostname)]),
                 backend_address: term_backend_address,
                 tls_mode: ClientTlsMode::Terminate,
             },
             ServiceConfig {
-                public_hostnames: Some(vec![passthrough_hostname.to_owned()]),
+                public_hostnames: Some(vec![public_hostname(passthrough_hostname)]),
                 backend_address: pass_backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
             },

@@ -41,6 +41,7 @@ pub use config::{
     resolve_server_cert_material_dir_from_config, resolve_server_config_from_cli,
     resolve_server_hostname_from_config, resolve_terminating_hostnames_from_config,
 };
+pub use hostname::{PublicHostname, PublicHostnameError, ServerHostname, ServerHostnameError};
 pub use identity::{
     CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientCertificateRenewalDecision,

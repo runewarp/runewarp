@@ -32,7 +32,7 @@ backend-address = "localhost:8443"
     )?;
 
     let config: ClientConfig = load_client_config(&tempdir.path().join("config.toml"))?;
-    assert_eq!(config.server_hostname, "tunnel.example.test");
+    assert_eq!(config.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(config.log_level, LogLevel::Info);
 
     let resolved = resolve_selected_client_config(

@@ -2,9 +2,14 @@ use std::fs;
 
 use runewarp::{
     ClientConfigResolutionDefaults, ClientPublicCertConfig, ClientRuntimeArgs, ClientTlsMode,
-    LogLevel, SelectedClientConfig, load_client_config, resolve_selected_client_config,
+    LogLevel, PublicHostname, SelectedClientConfig, load_client_config,
+    resolve_selected_client_config,
 };
 use tempfile::tempdir;
+
+fn public_hostname(hostname: &str) -> PublicHostname {
+    PublicHostname::try_from(hostname).unwrap()
+}
 
 #[test]
 fn client_config_accept_exact_match_services_and_default_log_level_to_info() {
@@ -41,14 +46,14 @@ backend-address = "localhost:8443"
 
     let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
-    assert_eq!(settings.server_hostname, "tunnel.example.test");
+    assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
     assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(
         settings.services[0].public_hostnames,
         Some(vec![
-            "app.example.test".to_owned(),
-            "api.example.test".to_owned(),
+            public_hostname("app.example.test"),
+            public_hostname("api.example.test"),
         ])
     );
 }
@@ -88,7 +93,7 @@ backend-address = "localhost:8443"
 
     let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
-    assert_eq!(settings.server_hostname, "tunnel.example.test");
+    assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
     assert_eq!(
         settings.identity_directory,
@@ -98,8 +103,8 @@ backend-address = "localhost:8443"
     assert_eq!(
         settings.services[0].public_hostnames,
         Some(vec![
-            "app.example.test".to_owned(),
-            "api.example.test".to_owned(),
+            public_hostname("app.example.test"),
+            public_hostname("api.example.test"),
         ])
     );
 }
@@ -138,7 +143,7 @@ backend-address = "localhost:8443"
 
     let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
-    assert_eq!(settings.server_hostname, "tunnel.example.test");
+    assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 9443);
 }
 

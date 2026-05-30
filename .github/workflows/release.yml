@@ -193,31 +193,25 @@ jobs:
           PY
 
       - name: Render release notes preview
-        run: ./scripts/render-release-notes.sh --repo-root "$PWD/release-source" --version "${RELEASE_TAG#v}" > /tmp/release-notes.md
+        run: ./scripts/render-release-notes.sh --version "${RELEASE_TAG#v}" > /tmp/release-notes.md
 
       - name: Summarize release gate
         run: |
-          if [[ "$WORKFLOW_MODE" == "rehearsal" ]]; then
-            mode="rehearsal"
-            publish_note="Rehearsal skips Docker Hub pushes, Sigstore signing, crates.io publication, and GitHub Release creation."
-          else
-            mode="publish"
-            publish_note="Real release runs crates.io publication first, then Docker Hub publication, then finalizes the GitHub Release. Already-published surfaces are skipped."
-          fi
-
           {
             printf '## Release workflow\n\n'
-            printf -- '- Mode: %s\n' "$mode"
+            printf -- '- Mode: %s\n' "$WORKFLOW_MODE"
             printf -- "- Release tag: \`%s\`\n" "$RELEASE_TAG"
             printf -- "- Release version: \`%s\`\n" "$RELEASE_VERSION"
-            printf -- "- Source ref: \`%s\`\n" "${GITHUB_REF}"
+            printf -- "- Workflow ref: \`%s\`\n" "$GITHUB_REF"
+            printf -- "- Release source ref: \`%s\`\n" "$RELEASE_SOURCE_REF"
+            printf -- "- Release commit: \`%s\`\n" "${{ steps.release-source.outputs.release_commit }}"
             printf -- "- Docker tags: \`%s\`, \`%s\`, \`%s\`, \`latest\`\n" "$RELEASE_VERSION" "${RELEASE_VERSION%.*}" "${RELEASE_VERSION%%.*}"
-            printf -- '- Publish status: %s\n' "$publish_note"
+            printf '\n## Release notes preview\n\n'
           } >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/release-notes.md >> "$GITHUB_STEP_SUMMARY"
 
   crate-release:
     name: Publish crates.io release
-    if: github.event_name == 'push' || inputs.mode == 'publish'
     needs:
       - gate
     runs-on: ubuntu-latest
@@ -249,6 +243,7 @@ jobs:
 
       - name: Check whether crates.io version already exists
         id: crate-status
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'
         env:
           CRATE_NAME: runewarp
           RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
@@ -295,7 +290,7 @@ jobs:
           PY
 
       - name: Publish crate to crates.io
-        if: steps.crate-status.outputs.exists != 'true'
+        if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.crate-status.outputs.exists != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
@@ -303,9 +298,16 @@ jobs:
           CARGO_NET_RETRY: "5"
         run: cargo publish --locked --manifest-path release-source/Cargo.toml
 
-  docker-release:
-    name: Publish Docker Hub release
-    if: github.event_name == 'push' || inputs.mode == 'publish'
+      - name: Rehearse crate publish
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'rehearsal'
+        env:
+          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+          CARGO_HTTP_MULTIPLEXING: "false"
+          CARGO_NET_RETRY: "5"
+        run: cargo publish --dry-run --locked --manifest-path release-source/Cargo.toml
+
+  docker-release-amd64:
+    name: Publish Docker Hub amd64 release
     needs:
       - gate
       - crate-release
@@ -314,7 +316,9 @@ jobs:
     environment: release
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      docker_exists: ${{ steps.docker-status.outputs.exists }}
+      image_digest: ${{ steps.build-image.outputs.digest }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -331,16 +335,13 @@ jobs:
           path: release-source
           ref: ${{ needs.gate.outputs.release_source_ref }}
 
-      - name: Set up QEMU
-        if: ${{ !cancelled() }}
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-
       - name: Set up Docker Buildx
         if: ${{ !cancelled() }}
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Check whether Docker release already exists
         id: docker-status
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'
         env:
           RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
         run: |
@@ -366,33 +367,178 @@ jobs:
           esac
 
       - name: Log in to Docker Hub
-        if: steps.docker-status.outputs.exists != 'true'
+        if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.docker-status.outputs.exists != 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: Build and push multi-arch release image
-        if: steps.docker-status.outputs.exists != 'true'
+      - name: Build amd64 release image rehearsal
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'rehearsal'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: ./release-source
+          file: ./release-source/Dockerfile
+          platforms: linux/amd64
+          outputs: type=docker,dest=/tmp/runewarp-amd64.tar
+          provenance: false
+
+      - name: Build and push amd64 release image by digest
+        if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.docker-status.outputs.exists != 'true'
         id: build-image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: ./release-source
           file: ./release-source/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: linux/amd64
+          outputs: type=image,name=${{ needs.gate.outputs.image_repository }},push-by-digest=true,name-canonical=true,push=true
           provenance: mode=max
-          tags: ${{ needs.gate.outputs.docker_tags }}
+  docker-release-arm64:
+    name: Publish Docker Hub arm64 release
+    needs:
+      - gate
+      - crate-release
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      docker_exists: ${{ steps.docker-status.outputs.exists }}
+      image_digest: ${{ steps.build-image.outputs.digest }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'refs/heads/main' || github.ref }}
+
+      - name: Check out release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: release-source
+          ref: ${{ needs.gate.outputs.release_source_ref }}
+
+      - name: Set up Docker Buildx
+        if: ${{ !cancelled() }}
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Check whether Docker release already exists
+        id: docker-status
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'
+        env:
+          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
+        run: |
+          status_code="$(
+            curl \
+              --silent \
+              --show-error \
+              --output /dev/null \
+              --write-out '%{http_code}' \
+              "https://hub.docker.com/v2/namespaces/runewarp/repositories/runewarp/tags/${RELEASE_VERSION}"
+          )"
+          case "$status_code" in
+            200)
+              printf 'exists=true\n' >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              printf 'exists=false\n' >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              printf 'error: failed to query Docker Hub tag %s: HTTP %s\n' "$RELEASE_VERSION" "$status_code" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Log in to Docker Hub
+        if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.docker-status.outputs.exists != 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Build arm64 release image rehearsal
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'rehearsal'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: ./release-source
+          file: ./release-source/Dockerfile
+          platforms: linux/arm64
+          outputs: type=docker,dest=/tmp/runewarp-arm64.tar
+          provenance: false
+
+      - name: Build and push arm64 release image by digest
+        if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.docker-status.outputs.exists != 'true'
+        id: build-image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: ./release-source
+          file: ./release-source/Dockerfile
+          platforms: linux/arm64
+          outputs: type=image,name=${{ needs.gate.outputs.image_repository }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+
+  docker-release-manifest:
+    name: Publish Docker Hub release manifest
+    if: github.event_name == 'push' || inputs.mode == 'publish'
+    needs:
+      - gate
+      - docker-release-amd64
+      - docker-release-arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up Docker Buildx
+        if: ${{ !cancelled() }}
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to Docker Hub
+        if: needs.docker-release-amd64.outputs.docker_exists != 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Merge manifest
+        if: needs.docker-release-amd64.outputs.docker_exists != 'true'
+        id: merge-manifest
+        env:
+          AMD64_DIGEST: ${{ needs.docker-release-amd64.outputs.image_digest }}
+          ARM64_DIGEST: ${{ needs.docker-release-arm64.outputs.image_digest }}
+          DOCKER_TAGS: ${{ needs.gate.outputs.docker_tags }}
+          IMAGE_REPOSITORY: ${{ needs.gate.outputs.image_repository }}
+          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
+        run: |
+          tag_args=()
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            tag_args+=("-t" "$tag")
+          done <<< "$DOCKER_TAGS"
+
+          docker buildx imagetools create \
+            "${tag_args[@]}" \
+            "${IMAGE_REPOSITORY}@${AMD64_DIGEST}" \
+            "${IMAGE_REPOSITORY}@${ARM64_DIGEST}"
+
+          manifest_digest="sha256:$(docker buildx imagetools inspect "${IMAGE_REPOSITORY}:${RELEASE_VERSION}" --raw | sha256sum | awk '{print $1}')"
+          printf 'digest=%s\n' "$manifest_digest" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
-        if: steps.docker-status.outputs.exists != 'true'
+        if: needs.docker-release-amd64.outputs.docker_exists != 'true'
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
       - name: Sign released image
-        if: steps.docker-status.outputs.exists != 'true'
+        if: needs.docker-release-amd64.outputs.docker_exists != 'true'
         env:
           IMAGE_REPOSITORY: ${{ needs.gate.outputs.image_repository }}
-          IMAGE_DIGEST: ${{ steps.build-image.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.merge-manifest.outputs.digest }}
         run: |
           cosign sign --yes "${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
 
@@ -401,8 +547,8 @@ jobs:
     if: github.event_name == 'push' || inputs.mode == 'publish'
     needs:
       - gate
-      - docker-release
       - crate-release
+      - docker-release-manifest
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -424,7 +570,7 @@ jobs:
           ref: ${{ needs.gate.outputs.release_source_ref }}
 
       - name: Render release notes
-        run: ./scripts/render-release-notes.sh --repo-root "$PWD/release-source" --version "${{ needs.gate.outputs.release_version }}" > /tmp/release-notes.md
+        run: ./scripts/render-release-notes.sh --version "${{ needs.gate.outputs.release_version }}" > /tmp/release-notes.md
 
       - name: Check whether GitHub release already exists
         id: github-release-status
@@ -440,16 +586,23 @@ jobs:
           fi
 
       - name: Create GitHub release
-        if: steps.github-release-status.outputs.exists != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          gh release create "$RELEASE_TAG" \
-            --repo "$REPOSITORY" \
-            --verify-tag \
-            --latest \
-            --title "Runewarp $RELEASE_VERSION" \
-            --notes-file /tmp/release-notes.md
+          if [[ "${{ steps.github-release-status.outputs.exists }}" == "true" ]]; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$REPOSITORY" \
+              --latest \
+              --title "$RELEASE_VERSION" \
+              --notes-file /tmp/release-notes.md
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$REPOSITORY" \
+              --verify-tag \
+              --latest \
+              --title "$RELEASE_VERSION" \
+              --notes-file /tmp/release-notes.md
+          fi

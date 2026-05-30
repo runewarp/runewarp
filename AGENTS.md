@@ -15,6 +15,7 @@
 - Always use TDD during implementation.
 - When release workflows, changelog discipline, or maintainer release expectations change, update `docs/release-guide.md` in the same change.
 - Keep shell scripts simple with consistent plain-text section headers and polished manual-run output.
+- Any user facing changes should be added to the "Unreleased" section of `CHANGELOG.md` during implementation strictly following "Keep a Changelog" format.
 
 ## Agent skills
 

@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 require_relative "support/test_helper"
@@ -61,7 +60,7 @@ class ReleaseGatesTest < Minitest::Test
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: stable_changelog)
       init_git_repo_with_origin_main(repo_root)
-      result = run_command("ruby", ruby_script("scripts", "validate-release-gates.rb"), "rehearsal", "--repo-root", repo_root, "--tag", "v0.1.0")
+      result = run_command(ruby_script("scripts", "validate_release_gates"), "rehearsal", "--repo-root", repo_root, "--tag", "v0.1.0")
       assert(result.success?, result.stderr)
     end
   end
@@ -75,7 +74,7 @@ class ReleaseGatesTest < Minitest::Test
       run_git(repo_root, "add", "feature.txt")
       run_git(repo_root, "commit", "-qm", "feature-only candidate")
 
-      result = run_command("ruby", ruby_script("scripts", "validate-release-gates.rb"), "rehearsal", "--repo-root", repo_root, "--tag", "v0.1.0")
+      result = run_command(ruby_script("scripts", "validate_release_gates"), "rehearsal", "--repo-root", repo_root, "--tag", "v0.1.0")
       refute(result.success?)
     end
   end
@@ -84,7 +83,7 @@ class ReleaseGatesTest < Minitest::Test
     Dir.mktmpdir do |repo_root|
       write_repo_files(repo_root, version: "0.1.0", changelog: stable_changelog)
       allowed_signers = init_git_repo_with_signed_tag(repo_root, "v0.1.0", "release@test.example")
-      result = run_command("ruby", ruby_script("scripts", "validate-release-gates.rb"), "tag", "--repo-root", repo_root, "--tag", "v0.1.0", "--allowed-signers-file", allowed_signers)
+      result = run_command(ruby_script("scripts", "validate_release_gates"), "tag", "--repo-root", repo_root, "--tag", "v0.1.0", "--allowed-signers-file", allowed_signers)
       assert(result.success?, result.stderr)
     end
   end
@@ -102,7 +101,7 @@ class ReleaseGatesTest < Minitest::Test
       system("git", "clone", "-q", repo_root, release_source, exception: true)
       run_git(release_source, "checkout", "-q", "v0.1.0")
 
-      result = run_command("ruby", ruby_script("scripts", "validate-release-gates.rb"), "tag", "--repo-root", repo_root, "--tag", "v0.1.0", "--allowed-signers-file", allowed_signers, "--metadata-repo-root", release_source)
+      result = run_command(ruby_script("scripts", "validate_release_gates"), "tag", "--repo-root", repo_root, "--tag", "v0.1.0", "--allowed-signers-file", allowed_signers, "--metadata-repo-root", release_source)
       assert(result.success?, result.stderr)
     end
   end
@@ -112,7 +111,7 @@ class ReleaseGatesTest < Minitest::Test
       write_repo_files(repo_root, version: "0.1.0", changelog: stable_changelog)
       init_git_repo_with_signed_tag(repo_root, "v0.1.0", "release@test.example")
       allowed_signers = write_allowed_signers(repo_root, "other@test.example")
-      result = run_command("ruby", ruby_script("scripts", "validate-release-gates.rb"), "tag", "--repo-root", repo_root, "--tag", "v0.1.0", "--allowed-signers-file", allowed_signers)
+      result = run_command(ruby_script("scripts", "validate_release_gates"), "tag", "--repo-root", repo_root, "--tag", "v0.1.0", "--allowed-signers-file", allowed_signers)
       refute(result.success?)
     end
   end
@@ -136,7 +135,7 @@ class ReleaseGatesTest < Minitest::Test
       run_git(repo_root, "config", "user.signingkey", signing_key)
       run_git(repo_root, "tag", "-s", "v0.1.0", "-m", "v0.1.0")
 
-      result = run_command("ruby", ruby_script("scripts", "validate-release-gates.rb"), "tag", "--repo-root", repo_root, "--tag", "v0.1.0", "--allowed-signers-file", allowed_signers)
+      result = run_command(ruby_script("scripts", "validate_release_gates"), "tag", "--repo-root", repo_root, "--tag", "v0.1.0", "--allowed-signers-file", allowed_signers)
       refute(result.success?)
     end
   end

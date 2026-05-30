@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 require_relative "support/test_helper"
@@ -31,7 +30,7 @@ class WorkflowLintTest < Minitest::Test
 
       result = run_command(
         "ruby",
-        ruby_script("scripts", "lint-workflows.rb"),
+        ruby_script("scripts", "lint_workflows"),
         env: {
           "PATH" => "#{temp_dir}:#{ENV.fetch('PATH')}",
           "RUNEWARP_REPO_ROOT" => temp_dir
@@ -75,7 +74,7 @@ class WorkflowLintTest < Minitest::Test
 
       result = run_command(
         "ruby",
-        ruby_script("scripts", "lint-workflows.rb"),
+        ruby_script("scripts", "lint_workflows"),
         "--staged",
         env: {
           "PATH" => "#{temp_dir}:#{ENV.fetch('PATH')}",

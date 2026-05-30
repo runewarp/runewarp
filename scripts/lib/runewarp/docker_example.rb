@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 require "fileutils"
@@ -19,7 +18,6 @@ module Runewarp
       prepare_directories(paths)
       assert_complete_or_empty("server certificate material", paths[:server_source_dir], SERVER_SOURCE_FILES)
       assert_complete_or_empty("client identity material", paths[:client_source_dir], CLIENT_SOURCE_FILES)
-
       build_image(repo_root, IMAGE_TAG)
       prepare_server_certificate_material(example_dir, paths, IMAGE_TAG)
       prepare_client_identity_material(example_dir, paths, IMAGE_TAG)
@@ -126,7 +124,7 @@ module Runewarp
       return if relative_paths.all? { |relative_path| File.file?(File.join(base_dir, relative_path)) }
       return unless relative_paths.any? { |relative_path| File.exist?(File.join(base_dir, relative_path)) }
 
-      Core.die("found incomplete #{label} in #{base_dir}; rerun prepare.rb --reset to rebuild it cleanly")
+      Core.die("found incomplete #{label} in #{base_dir}; rerun ./scripts/docker_example prepare --reset to rebuild it cleanly")
     end
 
     def run_runewarp_with_xdg_data_home(example_dir, image_tag, xdg_data_home, *arguments)

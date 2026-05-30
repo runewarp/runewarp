@@ -11,10 +11,10 @@ allowed_signers_file = nil
 mode = ARGV.shift
 
 Runewarp::Core.run_cli do
-  Runewarp::Core.usage_error("validate-release-gates.rb <rehearsal|tag> [--repo-root PATH] [--metadata-repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]") if mode.nil? || mode.empty?
+  Runewarp::Core.usage_error("validate_release_gates <rehearsal|tag> [--repo-root PATH] [--metadata-repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]") if mode.nil? || mode.empty?
 
   OptionParser.new do |parser|
-    parser.banner = "usage: validate-release-gates.rb <rehearsal|tag> [--repo-root PATH] [--metadata-repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]"
+    parser.banner = "usage: validate_release_gates <rehearsal|tag> [--repo-root PATH] [--metadata-repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]"
     parser.on("--repo-root PATH") { |value| repo_root = value }
     parser.on("--metadata-repo-root PATH") { |value| metadata_repo_root = value }
     parser.on("--tag TAG") { |value| release_tag = value }

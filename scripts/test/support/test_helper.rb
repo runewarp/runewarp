@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 require "fileutils"
@@ -7,7 +6,7 @@ require "open3"
 require "pathname"
 require "tmpdir"
 
-REPO_ROOT = File.expand_path("../..", __dir__)
+REPO_ROOT = File.expand_path("../../..", __dir__)
 
 CommandResult = Struct.new(:stdout, :stderr, :status) do
   def success?

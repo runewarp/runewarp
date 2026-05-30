@@ -1,10 +1,16 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 require_relative "support/test_helper"
-require_relative "../scripts/lib/runewarp"
+require_relative "../lib/runewarp"
 
 class DockerExampleTest < Minitest::Test
+  def test_entrypoint_shows_prepare_and_smoke_subcommands
+    result = run_command(ruby_script("scripts", "docker_example"), "--help")
+
+    refute(result.success?)
+    assert_includes(result.stderr, "usage: docker_example <prepare|smoke>")
+  end
+
   def with_path(path)
     original_path = ENV["PATH"]
     ENV["PATH"] = "#{path}:#{original_path}"

@@ -1,8 +1,7 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 module Runewarp
-  module InstallSurfaces
+  module DistributionChecks
     module_function
 
     def validate!(mode:, repo_root:, bin_name: nil, crate_name: nil, expected_version: nil, expected_text: nil, probe_arg: nil, image_tag: nil, image_ref: nil, retry_attempts: 10, retry_delay_seconds: 30)
@@ -20,7 +19,7 @@ module Runewarp
       when "docker-registry-tag-absent"
         validate_docker_registry_tag_absent(image_ref: image_ref)
       else
-        Core.usage_error("validate-install-surfaces.rb <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]")
+        Core.usage_error("check_distribution <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]")
       end
     end
 
@@ -30,7 +29,7 @@ module Runewarp
       probe_arg ||= expected_version ? "--version" : "--help"
 
       Core.require_command("cargo")
-      Core.with_temp_dir("runewarp-install-surface-") do |install_root|
+      Core.with_temp_dir("runewarp-distribution-check-") do |install_root|
         Core.section("Installing crate from source")
         Core.note("Repository root: #{repo_root}")
         Core.note("Binary: #{bin_name}")
@@ -40,7 +39,7 @@ module Runewarp
         Core.section("Checking installed binary")
         output = Shell.capture!(File.join(install_root, "bin", bin_name), probe_arg)
         validate_version_output!("installed binary", output, expected_version || expected_text)
-        Core.success("cargo install surface is valid")
+        Core.success("cargo install path is valid")
       end
     end
 
@@ -77,7 +76,7 @@ module Runewarp
       probe_arg ||= expected_version ? "--version" : "--help"
 
       Core.require_command("cargo")
-      Core.with_temp_dir("runewarp-install-surface-") do |install_root|
+      Core.with_temp_dir("runewarp-distribution-check-") do |install_root|
         Core.section("Installing crate from crates.io")
         Core.note("Crate: #{crate_name}")
         Core.note("Binary: #{bin_name}")
@@ -105,7 +104,7 @@ module Runewarp
         Core.section("Checking installed registry binary")
         output = Shell.capture!(File.join(install_root, "bin", bin_name), probe_arg)
         validate_version_output!("registry-installed binary", output, expected_version || expected_text)
-        Core.success("crates.io install surface is valid")
+        Core.success("crates.io install path is valid")
       end
     end
 
@@ -123,7 +122,7 @@ module Runewarp
       Core.section("Checking Docker image startup")
       output = Shell.capture!("docker", "run", "--rm", image_tag, probe_arg)
       validate_version_output!("docker image", output, expected_version || expected_text)
-      Core.success("docker image surface is valid")
+      Core.success("docker image path is valid")
     end
 
     def validate_docker_registry_image(image_ref:, expected_version:, expected_text:, probe_arg:, retry_attempts:, retry_delay_seconds:)
@@ -143,7 +142,7 @@ module Runewarp
       Core.section("Checking released Docker image startup")
       output = Shell.capture!("docker", "run", "--rm", image_ref, probe_arg)
       validate_version_output!("released docker image", output, expected_version || expected_text)
-      Core.success("docker registry image surface is valid")
+      Core.success("docker registry image path is valid")
     end
 
     def validate_docker_registry_tag_absent(image_ref:)

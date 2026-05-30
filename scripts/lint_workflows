@@ -13,12 +13,12 @@ Runewarp::Core.run_cli do
     argument = arguments.shift
     case argument
     when "--staged"
-      Runewarp::Core.usage_error("lint-workflows.rb [--staged] [PATH ...]") if staged_only
+      Runewarp::Core.usage_error("lint_workflows [--staged] [PATH ...]") if staged_only
       staged_only = true
     when "--help", "-h"
-      Runewarp::Core.usage_error("lint-workflows.rb [--staged] [PATH ...]")
+      Runewarp::Core.usage_error("lint_workflows [--staged] [PATH ...]")
     when /\A--/
-      Runewarp::Core.usage_error("lint-workflows.rb [--staged] [PATH ...]")
+      Runewarp::Core.usage_error("lint_workflows [--staged] [PATH ...]")
     else
       requested_paths << argument
     end

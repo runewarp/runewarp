@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 module Runewarp
@@ -14,7 +13,7 @@ module Runewarp
       when "tag"
         validate_tag_mode!(repo_root, metadata_repo_root, release_tag, allowed_signers_file)
       else
-        Core.usage_error("validate-release-gates.rb <rehearsal|tag> [--repo-root PATH] [--metadata-repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]")
+        Core.usage_error("validate_release_gates <rehearsal|tag> [--repo-root PATH] [--metadata-repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]")
       end
     end
 

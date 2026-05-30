@@ -13,10 +13,10 @@ options = {
 mode = ARGV.shift
 
 Runewarp::Core.run_cli do
-  Runewarp::Core.usage_error("validate-install-surfaces.rb <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]") if mode.nil? || mode.empty?
+  Runewarp::Core.usage_error("check_distribution <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]") if mode.nil? || mode.empty?
 
   OptionParser.new do |parser|
-    parser.banner = "usage: validate-install-surfaces.rb <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]"
+    parser.banner = "usage: check_distribution <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]"
     parser.on("--repo-root PATH") { |value| options[:repo_root] = value }
     parser.on("--bin-name NAME") { |value| options[:bin_name] = value }
     parser.on("--crate-name NAME") { |value| options[:crate_name] = value }
@@ -29,5 +29,5 @@ Runewarp::Core.run_cli do
     parser.on("--retry-delay-seconds SECONDS", Integer) { |value| options[:retry_delay_seconds] = value }
   end.parse!
 
-  Runewarp::InstallSurfaces.validate!(mode: mode, **options)
+  Runewarp::DistributionChecks.validate!(mode: mode, **options)
 end

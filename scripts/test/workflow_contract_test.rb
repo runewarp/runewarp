@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 # frozen_string_literal: true
 
 require_relative "support/test_helper"
@@ -13,19 +12,19 @@ class WorkflowContractTest < Minitest::Test
   end
 
   def test_ci_workflow_uses_ruby_entry_points
-    assert_includes(ci_workflow, "run: ruby ./scripts/lint-workflows.rb")
-    assert_includes(ci_workflow, "run: ruby ./scripts/test-automation.rb")
+    assert_includes(ci_workflow, "run: ./scripts/lint_workflows")
+    assert_includes(ci_workflow, "run: ./scripts/test_automation")
     refute_includes(ci_workflow, ".sh")
   end
 
   def test_release_workflow_uses_ruby_release_helpers
-    assert_includes(release_workflow, "run: ruby ./scripts/resolve-release-metadata.rb")
-    assert_includes(release_workflow, "run: ruby ./scripts/check-github-check-run.rb")
-    assert_includes(release_workflow, "run: ruby ./scripts/render-release-notes.rb --version \"$RELEASE_VERSION\" > /tmp/release-notes.md")
-    assert_includes(release_workflow, "run: ruby ./scripts/write-release-summary.rb")
-    assert_includes(release_workflow, "run: ruby ./scripts/check-docker-hub-tag.rb --image-ref \"$PRIMARY_IMAGE_REF\"")
-    assert_includes(release_workflow, "run: ruby ./scripts/merge-docker-manifest.rb")
-    assert_includes(release_workflow, "run: ruby ./scripts/upsert-github-release.rb")
+    assert_includes(release_workflow, "run: ./scripts/resolve_release_metadata")
+    assert_includes(release_workflow, "run: ./scripts/check_github_check_run")
+    assert_includes(release_workflow, "run: ./scripts/render_release_notes --version \"$RELEASE_VERSION\" > /tmp/release-notes.md")
+    assert_includes(release_workflow, "run: ./scripts/write_release_summary")
+    assert_includes(release_workflow, "run: ./scripts/check_docker_hub_tag --image-ref \"$PRIMARY_IMAGE_REF\"")
+    assert_includes(release_workflow, "run: ./scripts/merge_docker_manifest")
+    assert_includes(release_workflow, "run: ./scripts/upsert_github_release")
     refute_includes(release_workflow, "python - <<'PY'")
   end
 

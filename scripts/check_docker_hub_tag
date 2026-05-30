@@ -8,7 +8,7 @@ image_ref = nil
 
 Runewarp::Core.run_cli do
   OptionParser.new do |parser|
-    parser.banner = "usage: check-docker-hub-tag.rb --image-ref docker.io/<namespace>/<repository>:<tag>"
+    parser.banner = "usage: check_docker_hub_tag --image-ref docker.io/<namespace>/<repository>:<tag>"
     parser.on("--image-ref IMAGE_REF") { |value| image_ref = value }
   end.parse!
 

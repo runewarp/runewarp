@@ -1,0 +1,20 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require_relative "lib/runewarp"
+
+repo_root = File.expand_path("..", __dir__)
+version = nil
+
+Runewarp::Core.run_cli do
+  OptionParser.new do |parser|
+    parser.banner = "usage: render-release-notes.rb --version X.Y.Z [--repo-root PATH]"
+    parser.on("--repo-root PATH") { |value| repo_root = value }
+    parser.on("--version VERSION") { |value| version = value }
+  end.parse!
+
+  Runewarp::Core.usage_error("render-release-notes.rb --version X.Y.Z [--repo-root PATH]") if version.nil? || version.empty?
+
+  puts(Runewarp::ReleaseDocs.render_release_notes(repo_root: repo_root, version: version))
+end

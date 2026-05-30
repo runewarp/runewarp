@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Rewrote the main documentation set for a tighter, more direct operator and maintainer voice.
 - Renamed the public validated configuration API around `config` terminology, including `load_client_config`, `load_server_config`, `ClientConfigResolutionDefaults`, and precise runtime types `ClientConnectConfig` and `ServerBindConfig`.
+- Replaced the repository-owned release, CI, workflow-lint, Docker example, and release publication helper scripts with Ruby entry points and Ruby automation tests, and removed the repo-owned git hooks.
 
 ## [0.1.0] - 2026-05-29
 

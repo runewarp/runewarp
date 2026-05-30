@@ -1,0 +1,25 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require_relative "lib/runewarp"
+
+repo_root = File.expand_path("..", __dir__)
+metadata_repo_root = nil
+release_tag = nil
+allowed_signers_file = nil
+mode = ARGV.shift
+
+Runewarp::Core.run_cli do
+  Runewarp::Core.usage_error("validate-release-gates.rb <rehearsal|tag> [--repo-root PATH] [--metadata-repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]") if mode.nil? || mode.empty?
+
+  OptionParser.new do |parser|
+    parser.banner = "usage: validate-release-gates.rb <rehearsal|tag> [--repo-root PATH] [--metadata-repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]"
+    parser.on("--repo-root PATH") { |value| repo_root = value }
+    parser.on("--metadata-repo-root PATH") { |value| metadata_repo_root = value }
+    parser.on("--tag TAG") { |value| release_tag = value }
+    parser.on("--allowed-signers-file PATH") { |value| allowed_signers_file = value }
+  end.parse!
+
+  Runewarp::ReleaseGates.validate!(mode: mode, repo_root: repo_root, metadata_repo_root: metadata_repo_root, release_tag: release_tag, allowed_signers_file: allowed_signers_file)
+end

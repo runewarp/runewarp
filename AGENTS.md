@@ -10,13 +10,12 @@
 - If a prompt is ambiguous and the default is not obvious, ask the user with clear options.
 - Keep commit messages concise when asked to commit. Commit messages should mark related issues as "Closes #123" where relevant.
 - All code must be formatted and linted with Clippy.
-- Run `./scripts/setup-git-hooks.sh` after cloning so the repo-owned pre-commit checks stay active.
-- Workflow changes must pass `./scripts/lint-workflows.sh`; the pre-commit hook reruns it against staged workflow files.
+- Workflow changes must pass `ruby ./scripts/lint-workflows.rb`.
 - Run relevant tests after changes. Run the full suite before any commit.
 - Keep comments and doc-comments useful, detailed where needed, and not excessive.
 - Always use TDD during implementation.
 - When release workflows, changelog discipline, or maintainer release expectations change, update `docs/release-guide.md` in the same change.
-- Keep shell scripts simple with consistent plain-text section headers and polished manual-run output.
+- Keep Ruby automation simple with consistent plain-text section headers and polished manual-run output.
 - Any user facing changes should be added to the "Unreleased" section of `CHANGELOG.md` during implementation strictly following "Keep a Changelog" format.
 
 ## Agent skills

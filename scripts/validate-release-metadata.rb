@@ -1,0 +1,24 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require_relative "lib/runewarp"
+
+repo_root = File.expand_path("..", __dir__)
+tag_repo_root = nil
+release_tag = nil
+mode = ARGV.shift
+
+Runewarp::Core.run_cli do
+  Runewarp::Core.usage_error("validate-release-metadata.rb <ci|release> [--repo-root PATH] [--tag-repo-root PATH] [--tag vX.Y.Z]") if mode.nil? || mode.empty?
+
+  OptionParser.new do |parser|
+    parser.banner = "usage: validate-release-metadata.rb <ci|release> [--repo-root PATH] [--tag-repo-root PATH] [--tag vX.Y.Z]"
+    parser.on("--repo-root PATH") { |value| repo_root = value }
+    parser.on("--tag-repo-root PATH") { |value| tag_repo_root = value }
+    parser.on("--tag TAG") { |value| release_tag = value }
+  end.parse!
+
+  Runewarp::Core.usage_error("validate-release-metadata.rb <ci|release> [--repo-root PATH] [--tag-repo-root PATH] [--tag vX.Y.Z]") unless %w[ci release].include?(mode)
+  Runewarp::ReleaseDocs.validate_metadata!(mode: mode, repo_root: repo_root, tag_repo_root: tag_repo_root, release_tag: release_tag)
+end

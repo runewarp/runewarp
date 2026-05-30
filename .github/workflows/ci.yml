@@ -23,24 +23,21 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Lint workflows
-        run: ./scripts/lint-workflows.sh
+        run: ruby ./scripts/lint-workflows.rb
 
-      - name: Test workflow lint script
-        run: ./scripts/test-lint-workflows.sh
-
-  release-metadata:
-    name: Release metadata
+  automation-contract:
+    name: Automation contract
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Validate release metadata
-        run: |
-          ./scripts/validate-release-metadata.sh ci
-          ./scripts/test-release-metadata.sh
-          ./scripts/test-docker-hub-tag.sh
+        run: ruby ./scripts/validate-release-metadata.rb ci
+
+      - name: Run Ruby automation tests
+        run: ruby ./scripts/test-automation.rb
 
   install-surface-linux:
     name: Install surface (Linux)
@@ -58,7 +55,7 @@ jobs:
 
       - name: Validate Linux cargo install surface
         run: |
-          ./scripts/validate-install-surfaces.sh cargo-install \
+          ruby ./scripts/validate-install-surfaces.rb cargo-install \
             --bin-name runewarp \
             --probe-arg --help \
             --expected-text "Usage: runewarp"
@@ -79,7 +76,7 @@ jobs:
 
       - name: Validate macOS cargo install surface
         run: |
-          ./scripts/validate-install-surfaces.sh cargo-install \
+          ruby ./scripts/validate-install-surfaces.rb cargo-install \
             --bin-name runewarp \
             --probe-arg --help \
             --expected-text "Usage: runewarp"
@@ -99,7 +96,7 @@ jobs:
           rustup default stable
 
       - name: Validate package readiness
-        run: ./scripts/validate-install-surfaces.sh package-readiness
+        run: ruby ./scripts/validate-install-surfaces.rb package-readiness
 
   rust-contract:
     name: Rust contract
@@ -151,13 +148,13 @@ jobs:
 
       - name: Validate Docker image surface
         run: |
-          ./scripts/validate-install-surfaces.sh docker-image \
+          ruby ./scripts/validate-install-surfaces.rb docker-image \
             --probe-arg --help \
             --expected-text "Usage: runewarp" \
             --image-tag runewarp:ci
 
       - name: Run Docker smoke test
-        run: ./examples/docker/smoke.sh
+        run: ruby ./examples/docker/smoke.rb
 
   ci:
     name: CI
@@ -166,7 +163,7 @@ jobs:
     timeout-minutes: 5
     needs:
       - workflow-lint
-      - release-metadata
+      - automation-contract
       - install-surface-linux
       - install-surface-macos
       - package-readiness
@@ -176,7 +173,7 @@ jobs:
       - name: Enforce aggregate success
         env:
           WORKFLOW_LINT_RESULT: ${{ needs.workflow-lint.result }}
-          RELEASE_METADATA_RESULT: ${{ needs.release-metadata.result }}
+          AUTOMATION_CONTRACT_RESULT: ${{ needs.automation-contract.result }}
           INSTALL_SURFACE_LINUX_RESULT: ${{ needs.install-surface-linux.result }}
           INSTALL_SURFACE_MACOS_RESULT: ${{ needs.install-surface-macos.result }}
           PACKAGE_READINESS_RESULT: ${{ needs.package-readiness.result }}
@@ -185,7 +182,7 @@ jobs:
         run: |
           for check in \
             "workflow-lint:$WORKFLOW_LINT_RESULT" \
-            "release-metadata:$RELEASE_METADATA_RESULT" \
+            "automation-contract:$AUTOMATION_CONTRACT_RESULT" \
             "install-surface-linux:$INSTALL_SURFACE_LINUX_RESULT" \
             "install-surface-macos:$INSTALL_SURFACE_MACOS_RESULT" \
             "package-readiness:$PACKAGE_READINESS_RESULT" \

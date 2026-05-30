@@ -1,28 +1,23 @@
 mod service;
 mod settings_resolution;
+mod termination_tls;
 mod tunnel_stream;
 
-use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use quinn::{Connection, Endpoint};
 
+pub(crate) use self::termination_tls::TerminationTlsConfigs;
 use self::tunnel_stream::TunnelConnectionStreamHandler;
 use crate::{
     ClientServiceSettings, ClientTlsMode, HANDSHAKE_TIMEOUT, quic::with_handshake_timeout,
     shutdown::GracefulShutdown,
 };
 
-type HostnameTlsConfigs = HashMap<String, Arc<rustls::ServerConfig>>;
-type RouteModeServicesAndConfigs = (
-    Vec<ClientServiceSettings>,
-    HostnameTlsConfigs,
-    HostnameTlsConfigs,
-);
+type RouteModeServicesAndConfigs = (Vec<ClientServiceSettings>, TerminationTlsConfigs);
 
 pub(crate) use service::validate_services;
 pub use settings_resolution::{
@@ -47,8 +42,7 @@ pub(crate) struct RoutedClientConfig {
     pub(crate) server_name: String,
     pub(crate) services: Vec<ClientServiceSettings>,
     pub(crate) quic_client_config: quinn::ClientConfig,
-    pub(crate) hostname_tls_configs: HostnameTlsConfigs,
-    pub(crate) hostname_acme_challenge_tls_configs: HostnameTlsConfigs,
+    pub(crate) termination_tls_configs: TerminationTlsConfigs,
 }
 
 enum ClientRouteMode {
@@ -57,8 +51,7 @@ enum ClientRouteMode {
     },
     Routed {
         services: Vec<ClientServiceSettings>,
-        hostname_tls_configs: HostnameTlsConfigs,
-        hostname_acme_challenge_tls_configs: HostnameTlsConfigs,
+        termination_tls_configs: TerminationTlsConfigs,
     },
 }
 
@@ -125,8 +118,7 @@ impl Client {
             config.quic_client_config,
             ClientRouteMode::Routed {
                 services: config.services,
-                hostname_tls_configs: config.hostname_tls_configs,
-                hostname_acme_challenge_tls_configs: config.hostname_acme_challenge_tls_configs,
+                termination_tls_configs: config.termination_tls_configs,
             },
         )
         .await
@@ -151,13 +143,9 @@ impl Client {
         )
         .await
         .map_err(ClientConnectError::Handshake)?;
-        let (services, hostname_tls_configs, hostname_acme_challenge_tls_configs) =
-            services_and_configs_for_route_mode(route_mode);
-        let tunnel_stream_handler = TunnelConnectionStreamHandler::new_with_acme_challenge_configs(
-            services,
-            hostname_tls_configs,
-            hostname_acme_challenge_tls_configs,
-        );
+        let (services, termination_tls_configs) = services_and_configs_for_route_mode(route_mode);
+        let tunnel_stream_handler =
+            TunnelConnectionStreamHandler::new(services, termination_tls_configs);
 
         Ok(Self {
             endpoint,
@@ -236,18 +224,12 @@ fn services_and_configs_for_route_mode(route_mode: ClientRouteMode) -> RouteMode
                 backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
             }],
-            HashMap::new(),
-            HashMap::new(),
+            TerminationTlsConfigs::empty(),
         ),
         ClientRouteMode::Routed {
             services,
-            hostname_tls_configs,
-            hostname_acme_challenge_tls_configs,
-        } => (
-            services,
-            hostname_tls_configs,
-            hostname_acme_challenge_tls_configs,
-        ),
+            termination_tls_configs,
+        } => (services, termination_tls_configs),
     }
 }
 

@@ -28,7 +28,7 @@ docker pull runewarp/runewarp
 
 ## Get started
 
-1. Install Ruby locally, then run the Docker example in [`examples/docker/README.md`](examples/docker/README.md) to verify the end-to-end path.
+1. Run the Docker example in [`examples/docker/README.md`](examples/docker/README.md) to verify the end-to-end path.
 2. Use [`docs/usage.md`](docs/usage.md) for the operator workflow.
 3. Use [`docs/configuration.md`](docs/configuration.md) for config keys, defaults, and examples.
 

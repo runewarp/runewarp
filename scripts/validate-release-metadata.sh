@@ -25,12 +25,27 @@ read_first_h2_heading() {
   ' "$1"
 }
 
+normalize_changelog_heading() {
+  case "$1" in
+    "Unreleased"|"[Unreleased]")
+      printf 'Unreleased\n'
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
+}
+
+has_unreleased_heading() {
+  grep -Eq '^## (\[Unreleased\]|Unreleased)$' "$1"
+}
+
 validate_version_headings() {
   local changelog_path="$1"
 
   awk '
     /^## / {
-      if ($0 == "## Unreleased") {
+      if ($0 == "## Unreleased" || $0 == "## [Unreleased]") {
         next
       }
 
@@ -117,10 +132,11 @@ validate_ci_mode() {
   local repo_root="$1"
   local cargo_version="$2"
   local changelog_path="$3"
-  local first_heading release_heading
+  local first_heading normalized_first_heading release_heading
 
   first_heading="$(read_first_h2_heading "$changelog_path")"
   [[ -n "$first_heading" ]] || die "CHANGELOG.md must contain at least one level-2 section heading"
+  normalized_first_heading="$(normalize_changelog_heading "$first_heading")"
 
   validate_version_headings "$changelog_path"
   validate_subsection_headings "$changelog_path"
@@ -128,14 +144,14 @@ validate_ci_mode() {
   if is_stable_version "$cargo_version"; then
     release_heading="$(find_release_heading "$changelog_path" "$cargo_version")"
     [[ -n "$release_heading" ]] || die "stable Cargo version $cargo_version requires a matching changelog release entry"
-    ! grep -qx '## Unreleased' "$changelog_path" || die "stable Cargo version $cargo_version must not keep an Unreleased section"
+    ! has_unreleased_heading "$changelog_path" || die "stable Cargo version $cargo_version must not keep an Unreleased section"
     [[ "$first_heading" == "[${cargo_version}]"* ]] || die "stable Cargo version $cargo_version requires the top changelog section to match that release"
     section_has_list_item "$changelog_path" "$release_heading" || die "release entry $cargo_version must contain at least one bullet item"
     return
   fi
 
-  [[ "$first_heading" == "Unreleased" ]] || die "pre-release Cargo version $cargo_version requires Unreleased to be the top changelog section"
-  grep -qx '## Unreleased' "$changelog_path" || die "pre-release Cargo version $cargo_version requires an Unreleased section"
+  [[ "$normalized_first_heading" == "Unreleased" ]] || die "pre-release Cargo version $cargo_version requires Unreleased to be the top changelog section"
+  has_unreleased_heading "$changelog_path" || die "pre-release Cargo version $cargo_version requires an Unreleased section"
 }
 
 validate_release_mode() {

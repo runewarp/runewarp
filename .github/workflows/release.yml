@@ -55,58 +55,8 @@ jobs:
           PUSH_TAG: ${{ github.ref_name }}
           WORKFLOW_MODE: ${{ inputs.mode }}
           WORKFLOW_TAG: ${{ inputs.release_tag }}
-        run: |
-          workflow_mode_input="${WORKFLOW_MODE:-}"
-
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            release_tag="$WORKFLOW_TAG"
-            if [[ "$workflow_mode_input" == "publish" ]]; then
-              workflow_mode="publish"
-              release_source_ref="$release_tag"
-            else
-              workflow_mode="rehearsal"
-              release_source_ref="refs/heads/main"
-            fi
-          else
-            release_tag="$PUSH_TAG"
-            workflow_mode="publish"
-            release_source_ref="$release_tag"
-          fi
-
-          [[ -n "$release_tag" ]] || {
-            printf 'error: release tag input is required\n' >&2
-            exit 1
-          }
-
-          release_version="${release_tag#v}"
-          image_repository="docker.io/runewarp/runewarp"
-          primary_image_ref="${image_repository}:${release_version}"
-          minor_series="${release_version%.*}"
-          major_series="${release_version%%.*}"
-
-          {
-            printf 'WORKFLOW_MODE=%s\n' "$workflow_mode"
-            printf 'RELEASE_TAG=%s\n' "$release_tag"
-            printf 'RELEASE_VERSION=%s\n' "$release_version"
-            printf 'RELEASE_SOURCE_REF=%s\n' "$release_source_ref"
-            printf 'IMAGE_REPOSITORY=%s\n' "$image_repository"
-            printf 'PRIMARY_IMAGE_REF=%s\n' "$primary_image_ref"
-          } >> "$GITHUB_ENV"
-
-          {
-            printf 'workflow_mode=%s\n' "$workflow_mode"
-            printf 'release_tag=%s\n' "$release_tag"
-            printf 'release_version=%s\n' "$release_version"
-            printf 'release_source_ref=%s\n' "$release_source_ref"
-            printf 'image_repository=%s\n' "$image_repository"
-            printf 'primary_image_ref=%s\n' "$primary_image_ref"
-            printf 'docker_tags<<EOF\n'
-            printf '%s:%s\n' "$image_repository" "$release_version"
-            printf '%s:%s\n' "$image_repository" "$minor_series"
-            printf '%s:%s\n' "$image_repository" "$major_series"
-            printf '%s:latest\n' "$image_repository"
-            printf 'EOF\n'
-          } >> "$GITHUB_OUTPUT"
+          IMAGE_REPOSITORY: docker.io/runewarp/runewarp
+        run: ./scripts/resolve-release-metadata.sh
 
       - name: Check out release source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -198,6 +148,8 @@ jobs:
         run: ./scripts/render-release-notes.sh --version "${RELEASE_TAG#v}" > /tmp/release-notes.md
 
       - name: Summarize release gate
+        env:
+          RELEASE_COMMIT: ${{ steps.release-source.outputs.release_commit }}
         run: |
           {
             printf '## Release workflow\n\n'
@@ -206,8 +158,16 @@ jobs:
             printf -- "- Release version: \`%s\`\n" "$RELEASE_VERSION"
             printf -- "- Workflow ref: \`%s\`\n" "$GITHUB_REF"
             printf -- "- Release source ref: \`%s\`\n" "$RELEASE_SOURCE_REF"
-            printf -- "- Release commit: \`%s\`\n" "${{ steps.release-source.outputs.release_commit }}"
-            printf -- "- Docker tags: \`%s\`, \`%s\`, \`%s\`, \`latest\`\n" "$RELEASE_VERSION" "${RELEASE_VERSION%.*}" "${RELEASE_VERSION%%.*}"
+            printf -- "- Release commit: \`%s\`\n" "$RELEASE_COMMIT"
+            printf -- '- Docker tags:'
+            separator=' '
+            while IFS= read -r tag; do
+              [[ -n "$tag" ]] || continue
+              stripped_tag="${tag#"${IMAGE_REPOSITORY}:"}"
+              printf -- "%s\`%s\`" "$separator" "$stripped_tag"
+              separator=', '
+            done <<< "$DOCKER_TAGS"
+            printf '\n'
             printf '\n## Release notes preview\n\n'
           } >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/release-notes.md >> "$GITHUB_STEP_SUMMARY"
@@ -345,28 +305,8 @@ jobs:
         id: docker-status
         if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'
         env:
-          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
-        run: |
-          status_code="$(
-            curl \
-              --silent \
-              --show-error \
-              --output /dev/null \
-              --write-out '%{http_code}' \
-              "https://hub.docker.com/v2/namespaces/runewarp/repositories/runewarp/tags/${RELEASE_VERSION}"
-          )"
-          case "$status_code" in
-            200)
-              printf 'exists=true\n' >> "$GITHUB_OUTPUT"
-              ;;
-            404)
-              printf 'exists=false\n' >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              printf 'error: failed to query Docker Hub tag %s: HTTP %s\n' "$RELEASE_VERSION" "$status_code" >&2
-              exit 1
-              ;;
-          esac
+          PRIMARY_IMAGE_REF: ${{ needs.gate.outputs.primary_image_ref }}
+        run: ./scripts/check-docker-hub-tag.sh --image-ref "$PRIMARY_IMAGE_REF"
 
       - name: Log in to Docker Hub
         if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.docker-status.outputs.exists != 'true'
@@ -432,28 +372,8 @@ jobs:
         id: docker-status
         if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'
         env:
-          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
-        run: |
-          status_code="$(
-            curl \
-              --silent \
-              --show-error \
-              --output /dev/null \
-              --write-out '%{http_code}' \
-              "https://hub.docker.com/v2/namespaces/runewarp/repositories/runewarp/tags/${RELEASE_VERSION}"
-          )"
-          case "$status_code" in
-            200)
-              printf 'exists=true\n' >> "$GITHUB_OUTPUT"
-              ;;
-            404)
-              printf 'exists=false\n' >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              printf 'error: failed to query Docker Hub tag %s: HTTP %s\n' "$RELEASE_VERSION" "$status_code" >&2
-              exit 1
-              ;;
-          esac
+          PRIMARY_IMAGE_REF: ${{ needs.gate.outputs.primary_image_ref }}
+        run: ./scripts/check-docker-hub-tag.sh --image-ref "$PRIMARY_IMAGE_REF"
 
       - name: Log in to Docker Hub
         if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.docker-status.outputs.exists != 'true'
@@ -572,7 +492,9 @@ jobs:
           ref: ${{ needs.gate.outputs.release_source_ref }}
 
       - name: Render release notes
-        run: ./scripts/render-release-notes.sh --version "${{ needs.gate.outputs.release_version }}" > /tmp/release-notes.md
+        env:
+          RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
+        run: ./scripts/render-release-notes.sh --version "$RELEASE_VERSION" > /tmp/release-notes.md
 
       - name: Check whether GitHub release already exists
         id: github-release-status
@@ -589,12 +511,13 @@ jobs:
 
       - name: Create GitHub release
         env:
+          GITHUB_RELEASE_EXISTS: ${{ steps.github-release-status.outputs.exists }}
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
           RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          if [[ "${{ steps.github-release-status.outputs.exists }}" == "true" ]]; then
+          if [[ "$GITHUB_RELEASE_EXISTS" == "true" ]]; then
             gh release edit "$RELEASE_TAG" \
               --repo "$REPOSITORY" \
               --latest \

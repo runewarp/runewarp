@@ -7,15 +7,19 @@ This document describes the repository automation for release preparation and pu
 The `CI` workflow is the required aggregate check for normal changes. It currently validates:
 
 - release metadata structure through `scripts/validate-release-metadata.sh ci`
+- release metadata resolution through `scripts/resolve-release-metadata.sh` and its shell contract in `scripts/test-release-metadata.sh`
+- Docker Hub tag lookup through `scripts/check-docker-hub-tag.sh` and its shell contract in `scripts/test-docker-hub-tag.sh`
 - Linux Cargo install from source through `scripts/validate-install-surfaces.sh cargo-install`
 - macOS Cargo install from source through the same install-surface script
 - crate packaging readiness through `scripts/validate-install-surfaces.sh package-readiness`
 - Rust formatting, Clippy, tests, and docs
 - Docker image build plus `--version` startup through `scripts/validate-install-surfaces.sh docker-image`
 - the end-to-end Docker example smoke test
-- workflow syntax with `actionlint`
+- workflow syntax plus embedded shell with `scripts/lint-workflows.sh` and its shell contract in `scripts/test-lint-workflows.sh`
 
 These checks run on both pull requests and `main` pushes and roll up into one required `CI` status.
+
+Local workflow edits can run `./scripts/lint-workflows.sh` directly. Running `./scripts/setup-git-hooks.sh` once per checkout configures `.githooks/pre-commit`, which reuses the same lint entry point against the staged workflow content before commit.
 
 ## Release workflow
 
@@ -34,7 +38,7 @@ For tag pushes and manual `publish`, the workflow:
 4. verifies that the tagged commit already has a successful aggregate `CI` check run
 5. renders the changelog-driven release notes preview
 6. checks whether the crates.io version already exists; if it does, the real publish step is skipped, otherwise it publishes the crate
-7. checks whether the bare Docker release tag `X.Y.Z` already exists; if it does, the Docker publish and signing steps are skipped, otherwise it builds native `amd64` and `arm64` images separately, pushes them by digest, then publishes the public Docker tags only after both architectures succeed
+7. checks whether the bare Docker release tag `X.Y.Z` already exists through the shared Docker Hub lookup seam; if it does, the Docker publish and signing steps are skipped, otherwise it builds native `amd64` and `arm64` images separately, pushes them by digest, then publishes the public Docker tags only after both architectures succeed
 8. signs a newly published Docker manifest list keylessly with Sigstore and publishes build provenance through the Docker release job
 9. checks whether the GitHub Release already exists and then upserts the release title plus notes after the crates.io and Docker jobs succeed
 
@@ -71,9 +75,11 @@ For manual `publish`, the workflow:
 The workflow keeps GitHub-specific orchestration and idempotent publish checks in YAML. Repo-owned scripts keep the release gates and release-notes rules:
 
 - `scripts/validate-release-gates.sh` owns rehearsal/tag gate validation
+- `scripts/lib-release-metadata.sh` owns stable release-tag parsing plus derived release metadata, and `scripts/resolve-release-metadata.sh` is the thin GitHub Actions adapter that writes those results into the gate job environment and outputs
+- `scripts/lib-docker-hub.sh` owns Docker Hub tag URL resolution plus HTTP status lookups, `scripts/check-docker-hub-tag.sh` is the thin GitHub Actions adapter for workflow outputs, and `scripts/validate-install-surfaces.sh docker-registry-tag-absent` reuses the same Docker Hub lookup seam for local install-surface validation
 - `scripts/validate-release-metadata.sh` owns changelog and version validation for both rehearsal and release mode
 - `scripts/render-release-notes.sh` owns changelog-driven release-body rendering, including exact release-entry selection, validation of the requested entry's changelog subsection headings, and promotion of those subsection headings to release-note H2 headings
-- release-time idempotency checks for crates.io, Docker Hub, and GitHub Releases live in the workflow because they are GitHub-hosted orchestration decisions rather than reusable local install-surface validation
+- release-time idempotency decisions for crates.io, Docker Hub, and GitHub Releases still live in the workflow because they are GitHub-hosted orchestration decisions rather than reusable local install-surface validation
 - per-architecture Docker builds and manifest publication live in the workflow because runner selection, registry login, and digest promotion are GitHub-hosted orchestration concerns
 - post-publish install-surface probes are enforced in `CI`, not repeated in the release workflow
 

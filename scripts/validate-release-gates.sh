@@ -6,14 +6,13 @@ tool_root="$(cd "$script_dir/.." && pwd)"
 repo_root="$tool_root"
 
 . "$tool_root/scripts/lib.sh"
+. "$script_dir/lib-release-metadata.sh"
 
 usage() {
   usage_error "$(basename "$0") <rehearsal|tag> [--repo-root PATH] [--metadata-repo-root PATH] --tag vX.Y.Z [--allowed-signers-file PATH]"
 }
 
-is_stable_version() {
-  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-}
+
 
 require_commit_reachable_from_main() {
   local repo_root="$1"
@@ -38,8 +37,9 @@ validate_rehearsal_mode() {
 
   [[ -n "$release_tag" ]] || die "rehearsal mode requires --tag vX.Y.Z"
   cargo_version="$(runewarp_version "$metadata_repo_root")" || die "failed to read version from Cargo.toml"
-  is_stable_version "$cargo_version" || die "rehearsal mode requires a stable Cargo version, found $cargo_version"
-  expected_tag="v$cargo_version"
+  runewarp_release_metadata_is_stable_version "$cargo_version" || die "rehearsal mode requires a stable Cargo version, found $cargo_version"
+  expected_tag="$(runewarp_release_metadata_tag_from_version "$cargo_version")" ||
+    die "rehearsal mode requires a stable Cargo version, found $cargo_version"
   [[ "$release_tag" == "$expected_tag" ]] || die "rehearsal tag $release_tag must match Cargo version $cargo_version as $expected_tag"
 
   require_commit_reachable_from_main "$repo_root" HEAD

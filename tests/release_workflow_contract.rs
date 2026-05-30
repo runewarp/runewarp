@@ -21,12 +21,22 @@ fn ci_workflow() -> String {
     .unwrap()
 }
 
+fn pre_commit_hook() -> String {
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".githooks")
+            .join("pre-commit"),
+    )
+    .unwrap()
+}
+
 #[test]
-fn release_workflow_defaults_dispatch_mode_before_branching() {
+fn release_workflow_uses_shared_release_metadata_resolver() {
     let workflow = release_workflow();
 
-    assert!(workflow.contains("workflow_mode_input=\"${WORKFLOW_MODE:-}\""));
-    assert!(workflow.contains("if [[ \"$workflow_mode_input\" == \"publish\" ]]; then"));
+    assert!(workflow.contains("IMAGE_REPOSITORY: docker.io/runewarp/runewarp"));
+    assert!(workflow.contains("run: ./scripts/resolve-release-metadata.sh"));
+    assert!(!workflow.contains("workflow_mode_input=\"${WORKFLOW_MODE:-}\""));
 }
 
 #[test]
@@ -41,6 +51,11 @@ fn release_workflow_checks_docker_release_status_before_arch_build_push() {
         .expect("docker publish step should be present");
 
     assert!(guard < publish);
+    assert!(
+        workflow
+            .contains("run: ./scripts/check-docker-hub-tag.sh --image-ref \"$PRIMARY_IMAGE_REF\"")
+    );
+    assert!(!workflow.contains("https://hub.docker.com/v2/namespaces/runewarp/repositories/runewarp/tags/${RELEASE_VERSION}"));
 }
 
 #[test]
@@ -68,6 +83,11 @@ fn release_workflow_upserts_github_release_notes_with_version_title() {
     assert!(workflow.contains("gh release view"));
     assert!(workflow.contains("gh release create"));
     assert!(workflow.contains("gh release edit"));
+    assert!(
+        workflow
+            .contains("GITHUB_RELEASE_EXISTS: ${{ steps.github-release-status.outputs.exists }}")
+    );
+    assert!(workflow.contains("if [[ \"$GITHUB_RELEASE_EXISTS\" == \"true\" ]]; then"));
     assert!(workflow.contains("--title \"$RELEASE_VERSION\""));
     assert!(!workflow.contains("--title \"Runewarp $RELEASE_VERSION\""));
 }
@@ -90,6 +110,23 @@ fn pinned_workflow_actions_include_inline_version_comments() {
 }
 
 #[test]
+fn ci_contract_runs_docker_hub_shell_seam() {
+    let workflow = ci_workflow();
+
+    assert!(workflow.contains("./scripts/test-docker-hub-tag.sh"));
+}
+
+#[test]
+fn ci_workflow_uses_shared_workflow_lint_script() {
+    let workflow = ci_workflow();
+
+    assert!(workflow.contains("run: ./scripts/lint-workflows.sh"));
+    assert!(workflow.contains("./scripts/test-lint-workflows.sh"));
+    assert!(!workflow.contains("run: actionlint -color"));
+    assert!(!workflow.contains("Install actionlint"));
+}
+
+#[test]
 fn release_workflow_uses_safe_printf_for_hyphen_prefixed_summary_lines() {
     let workflow = release_workflow();
 
@@ -105,7 +142,11 @@ fn release_workflow_summary_reports_workflow_and_release_source_details_and_note
         workflow
             .contains("printf -- \"- Release source ref: \\`%s\\`\\n\" \"$RELEASE_SOURCE_REF\"")
     );
-    assert!(workflow.contains("printf -- \"- Release commit: \\`%s\\`\\n\" \"${{ steps.release-source.outputs.release_commit }}\""));
+    assert!(
+        workflow.contains("RELEASE_COMMIT: ${{ steps.release-source.outputs.release_commit }}")
+    );
+    assert!(workflow.contains("printf -- \"- Release commit: \\`%s\\`\\n\" \"$RELEASE_COMMIT\""));
+    assert!(!workflow.contains("${tag#${IMAGE_REPOSITORY}:}"));
     assert!(workflow.contains("cat /tmp/release-notes.md >> \"$GITHUB_STEP_SUMMARY\""));
     assert!(!workflow.contains("Publish status:"));
 }
@@ -121,6 +162,12 @@ fn release_workflow_renders_release_notes_from_workflow_checkout() {
             >= 2
     );
     assert!(!workflow.contains("./scripts/render-release-notes.sh --repo-root release-source"));
+    assert!(
+        workflow.contains("run: ./scripts/render-release-notes.sh --version \"$RELEASE_VERSION\" > /tmp/release-notes.md")
+    );
+    assert!(!workflow.contains(
+        "run: ./scripts/render-release-notes.sh --version \"${{ needs.gate.outputs.release_version }}\" > /tmp/release-notes.md"
+    ));
 }
 
 #[test]
@@ -212,4 +259,11 @@ fn release_workflow_publishes_docker_tags_only_after_both_arch_builds_succeed() 
     ));
     assert!(workflow.contains("Sign released image"));
     assert!(workflow.contains("IMAGE_DIGEST: ${{ steps.merge-manifest.outputs.digest }}"));
+}
+
+#[test]
+fn pre_commit_hook_lints_staged_workflow_changes() {
+    let hook = pre_commit_hook();
+
+    assert!(hook.contains("./scripts/lint-workflows.sh --staged"));
 }

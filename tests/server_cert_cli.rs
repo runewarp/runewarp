@@ -668,6 +668,43 @@ fn server_cert_renew_reissues_the_leaf_without_changing_the_server_ca() {
 }
 
 #[test]
+fn server_cert_renew_reports_paths_and_utc_timestamps() -> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+
+    Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args(["server", "cert", "renew", "--dir", "server-cert"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+
+    assert!(stdout.contains("Server certificate renewed"));
+    assert!(stdout.contains("Server hostname: tunnel.example.test"));
+    assert!(stdout.contains("Certificate directory: server-cert"));
+    assert!(stdout.contains("Server certificate: server-cert/server.crt"));
+    assert!(stdout.contains("Server certificate authority: server-cert/server-ca.crt"));
+    assert!(stdout.contains("Issued at (UTC):"));
+    assert!(stdout.contains("Renew after (UTC):"));
+    assert!(stdout.contains("Expires at (UTC):"));
+    Ok(())
+}
+
+#[test]
 fn server_cert_rotate_ca_replaces_the_ca_and_updates_the_stored_hostname() {
     let temp_dir = tempdir().expect("create temporary directory");
     let cert_directory = temp_dir.path().join("server-cert");

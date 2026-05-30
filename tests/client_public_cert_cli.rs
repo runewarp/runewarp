@@ -691,6 +691,48 @@ fn client_public_cert_renew_with_hostname_replaces_leaf_but_keeps_ca() {
 }
 
 #[test]
+fn client_public_cert_renew_reports_hostnames_and_utc_timestamps()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+
+    Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "renew",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+
+    assert!(stdout.contains("Renewed leaf certificate(s) for: app.example.test"));
+    assert!(stdout.contains("Issued at (UTC):"));
+    assert!(stdout.contains("Renew after (UTC):"));
+    assert!(stdout.contains("Expires at (UTC):"));
+    Ok(())
+}
+
+#[test]
 fn client_public_cert_renew_requires_hostname_or_config() {
     let tempdir = tempdir().unwrap();
     let xdg_config_home = tempdir.path().join("xdg-config");
@@ -1002,6 +1044,61 @@ tls-mode = "terminate"
         original_api_leaf,
         "rotate-ca should reissue the api leaf certificate"
     );
+}
+
+#[test]
+fn client_public_cert_rotate_ca_reports_ca_path_reissued_hostnames_and_timestamps()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+public-cert-dir = "public-cert"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "127.0.0.1:3000"
+tls-mode = "terminate"
+"#,
+    )?;
+
+    Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "public-cert",
+            "init",
+            "--dir",
+            "public-cert",
+            "--hostname",
+            "app.example.test",
+        ])
+        .assert()
+        .success();
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "--config",
+            "client.toml",
+            "public-cert",
+            "rotate-ca",
+        ])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+
+    assert!(stdout.contains("Public hostname CA rotated: public-cert/public-ca.crt"));
+    assert!(stdout.contains("Reissued leaf certificate(s) for: app.example.test"));
+    assert!(stdout.contains("Issued at (UTC):"));
+    assert!(stdout.contains("Renew after (UTC):"));
+    assert!(stdout.contains("Expires at (UTC):"));
+    Ok(())
 }
 
 #[test]

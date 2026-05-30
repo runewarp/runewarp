@@ -1,4 +1,3 @@
-mod cert_commands;
 mod client_runtime;
 mod commands;
 mod config_hints;

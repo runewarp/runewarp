@@ -22,11 +22,12 @@ fn ci_workflow() -> String {
 }
 
 #[test]
-fn release_workflow_defaults_dispatch_mode_before_branching() {
+fn release_workflow_uses_shared_release_metadata_resolver() {
     let workflow = release_workflow();
 
-    assert!(workflow.contains("workflow_mode_input=\"${WORKFLOW_MODE:-}\""));
-    assert!(workflow.contains("if [[ \"$workflow_mode_input\" == \"publish\" ]]; then"));
+    assert!(workflow.contains("IMAGE_REPOSITORY: docker.io/runewarp/runewarp"));
+    assert!(workflow.contains("run: ./scripts/resolve-release-metadata.sh"));
+    assert!(!workflow.contains("workflow_mode_input=\"${WORKFLOW_MODE:-}\""));
 }
 
 #[test]

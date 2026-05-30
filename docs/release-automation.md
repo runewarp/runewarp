@@ -7,6 +7,7 @@ This document describes the current repository automation for release preparatio
 The `CI` workflow is the required aggregate check for normal changes. It currently validates:
 
 - release metadata structure through `scripts/validate-release-metadata.sh ci`
+- release metadata resolution through `scripts/resolve-release-metadata.sh` and its shell contract in `scripts/test-release-metadata.sh`
 - Linux Cargo install from source through `scripts/validate-install-surfaces.sh cargo-install`
 - macOS Cargo install from source through the same install-surface script
 - crate packaging readiness through `scripts/validate-install-surfaces.sh package-readiness`
@@ -71,6 +72,7 @@ For manual `publish`, the workflow:
 The workflow keeps GitHub-specific orchestration and idempotent publish checks in YAML, while repo-owned scripts keep the release gate and release-notes rules:
 
 - `scripts/validate-release-gates.sh` owns rehearsal/tag gate validation
+- `scripts/lib-release-metadata.sh` owns stable release-tag parsing plus derived release metadata, and `scripts/resolve-release-metadata.sh` is the thin GitHub Actions adapter that writes those results into the gate job environment and outputs
 - `scripts/validate-release-metadata.sh` owns changelog and version validation for both rehearsal and release mode
 - `scripts/render-release-notes.sh` owns changelog-driven release-body rendering, including exact release-entry selection, validation of the requested entry's changelog subsection headings, and promotion of those subsection headings to release-note H2 headings
 - release-time idempotency checks for crates.io, Docker Hub, and GitHub Releases live in the workflow because they are GitHub-hosted orchestration decisions rather than reusable local install-surface validation

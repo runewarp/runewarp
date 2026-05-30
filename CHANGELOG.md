@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Moved release metadata derivation behind a shared shell module plus GitHub Actions adapter, and added a shell contract test for the release workflow metadata surface.
+
 ## [0.1.0] - 2026-05-29
 
 ### Added

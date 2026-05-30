@@ -6,14 +6,11 @@ tool_root="$(cd "$script_dir/.." && pwd)"
 repo_root="$tool_root"
 
 . "$tool_root/scripts/lib.sh"
+. "$script_dir/lib-release-metadata.sh"
 . "$script_dir/lib-changelog.sh"
 
 usage() {
   usage_error "validate-release-metadata.sh <ci|release> [--repo-root PATH] [--tag-repo-root PATH] [--tag vX.Y.Z]"
-}
-
-is_stable_version() {
-  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 validate_ci_mode() {
@@ -29,7 +26,7 @@ validate_ci_mode() {
   runewarp_changelog_validate_release_headings "$changelog_path"
   runewarp_changelog_validate_subsection_headings "$changelog_path"
 
-  if is_stable_version "$cargo_version"; then
+  if runewarp_release_metadata_is_stable_version "$cargo_version"; then
     release_heading="$(runewarp_changelog_find_release_heading "$changelog_path" "$cargo_version")"
     [[ -n "$release_heading" ]] || die "stable Cargo version $cargo_version requires a matching changelog release entry"
     ! runewarp_changelog_has_unreleased_heading "$changelog_path" || die "stable Cargo version $cargo_version must not keep an Unreleased section"
@@ -49,9 +46,11 @@ validate_release_mode() {
   local release_tag="$4"
 
   [[ -n "$release_tag" ]] || die "release mode requires --tag vX.Y.Z"
-  is_stable_version "$cargo_version" || die "release mode requires a stable Cargo version, found $cargo_version"
+  runewarp_release_metadata_is_stable_version "$cargo_version" || die "release mode requires a stable Cargo version, found $cargo_version"
 
-  local expected_tag="v$cargo_version"
+  local expected_tag
+  expected_tag="$(runewarp_release_metadata_tag_from_version "$cargo_version")" ||
+    die "release mode requires a stable Cargo version, found $cargo_version"
   [[ "$release_tag" == "$expected_tag" ]] || die "release tag $release_tag must match Cargo version $cargo_version as $expected_tag"
 
   local tag_commit

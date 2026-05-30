@@ -11,6 +11,7 @@ main() {
  
   section "Validating release metadata"
   ./scripts/validate-release-metadata.sh ci
+  ./scripts/test-release-metadata.sh
 
   section "Checking source install surface"
   ./scripts/validate-install-surfaces.sh cargo-install --bin-name runewarp --probe-arg --help --expected-text "Usage: runewarp"

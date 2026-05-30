@@ -1,18 +1,13 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::ServiceConfig;
-use crate::hostname::{PublicHostnameError, validate_public_hostname};
+use crate::{PublicHostname, ServiceConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClientServiceValidationError {
     CatchAllRequiresSingleService,
     EmptyPublicHostnameList,
-    InvalidPublicHostname {
-        hostname: String,
-        source: PublicHostnameError,
-    },
-    DuplicatePublicHostname(String),
+    DuplicatePublicHostname(PublicHostname),
 }
 
 impl fmt::Display for ClientServiceValidationError {
@@ -24,10 +19,6 @@ impl fmt::Display for ClientServiceValidationError {
             Self::EmptyPublicHostnameList => {
                 formatter.write_str("client.services[].public-hostnames must not be empty")
             }
-            Self::InvalidPublicHostname { hostname, source } => write!(
-                formatter,
-                "client.services[].public-hostnames contains invalid hostname `{hostname}`: {source}"
-            ),
             Self::DuplicatePublicHostname(hostname) => write!(
                 formatter,
                 "client.services[].public-hostnames must be unique after normalization: {hostname}"
@@ -53,19 +44,12 @@ pub(crate) fn validate_services(
                 }
                 let mut normalized_hostnames = Vec::with_capacity(public_hostnames.len());
                 for hostname in public_hostnames {
-                    let normalized_hostname =
-                        validate_public_hostname(hostname).map_err(|source| {
-                            ClientServiceValidationError::InvalidPublicHostname {
-                                hostname: hostname.clone(),
-                                source,
-                            }
-                        })?;
-                    if !seen_hostnames.insert(normalized_hostname.clone()) {
+                    if !seen_hostnames.insert(hostname.clone()) {
                         return Err(ClientServiceValidationError::DuplicatePublicHostname(
-                            normalized_hostname,
+                            hostname.clone(),
                         ));
                     }
-                    normalized_hostnames.push(normalized_hostname);
+                    normalized_hostnames.push(hostname.clone());
                 }
                 Some(normalized_hostnames)
             }
@@ -89,9 +73,13 @@ pub(crate) fn validate_services(
 
 #[cfg(test)]
 mod tests {
-    use crate::{ClientTlsMode, ServiceConfig};
+    use crate::{ClientTlsMode, PublicHostname, ServiceConfig};
 
     use super::{ClientServiceValidationError, validate_services};
+
+    fn public_hostname(hostname: &str) -> PublicHostname {
+        PublicHostname::try_from(hostname).unwrap()
+    }
 
     #[test]
     fn rejects_multi_service_catch_all_shapes() {
@@ -102,7 +90,7 @@ mod tests {
                 tls_mode: ClientTlsMode::Passthrough,
             },
             ServiceConfig {
-                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
             },
@@ -118,12 +106,12 @@ mod tests {
     fn rejects_duplicate_hostnames_after_normalization() {
         let services = vec![
             ServiceConfig {
-                public_hostnames: Some(vec!["App.Example.Test.".to_owned()]),
+                public_hostnames: Some(vec![public_hostname("App.Example.Test.")]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
             },
             ServiceConfig {
-                public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
             },
@@ -131,7 +119,9 @@ mod tests {
 
         assert_eq!(
             validate_services(&services).unwrap_err(),
-            ClientServiceValidationError::DuplicatePublicHostname("app.example.test".to_owned())
+            ClientServiceValidationError::DuplicatePublicHostname(public_hostname(
+                "app.example.test",
+            ))
         );
     }
 }

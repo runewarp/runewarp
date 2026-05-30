@@ -7,8 +7,8 @@ use quinn::Connection;
 use rustls::pki_types::CertificateDer;
 
 use crate::{
-    ClientIdentity, ServerTunnelConfig, client_identity_from_certificate_der,
-    hostname::validate_public_hostname,
+    ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig,
+    client_identity_from_certificate_der,
 };
 
 use super::active_client::ActiveClientSlot;
@@ -22,34 +22,26 @@ pub(crate) enum TunnelRouteOutcome {
 #[derive(Clone)]
 pub(crate) struct TunnelRegistry {
     client_identity_to_tunnel: Arc<HashMap<ClientIdentity, usize>>,
-    public_hostname_to_tunnel: Arc<HashMap<String, usize>>,
+    public_hostname_to_tunnel: Arc<HashMap<PublicHostname, usize>>,
     tunnel_slots: Arc<Vec<ActiveClientSlot>>,
     accepting: Arc<AtomicBool>,
 }
 
 impl TunnelRegistry {
     #[cfg(test)]
-    pub(crate) fn single(public_hostnames: Vec<String>) -> io::Result<Self> {
+    pub(crate) fn single(public_hostnames: Vec<PublicHostname>) -> io::Result<Self> {
         let mut public_hostname_to_tunnel = HashMap::new();
         let mut seen_public_hostnames = HashSet::new();
         for hostname in public_hostnames {
-            let normalized_hostname = validate_public_hostname(&hostname).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "authorized_public_hostnames contains invalid hostname `{hostname}`: {error}"
-                    ),
-                )
-            })?;
-            if !seen_public_hostnames.insert(normalized_hostname.clone()) {
+            if !seen_public_hostnames.insert(hostname.clone()) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "authorized_public_hostnames must be unique after normalization: {normalized_hostname}"
+                        "authorized_public_hostnames must be unique after normalization: {hostname}"
                     ),
                 ));
             }
-            public_hostname_to_tunnel.insert(normalized_hostname, 0);
+            public_hostname_to_tunnel.insert(hostname, 0);
         }
         Ok(Self {
             client_identity_to_tunnel: Arc::new(HashMap::new()),
@@ -59,16 +51,9 @@ impl TunnelRegistry {
         })
     }
     pub(crate) fn configured(
-        server_hostname: &str,
+        server_hostname: &ServerHostname,
         tunnels: &[ServerTunnelConfig],
     ) -> io::Result<Self> {
-        let normalized_server_hostname =
-            validate_public_hostname(server_hostname).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("server.hostname is invalid: {error}"),
-                )
-            })?;
         let mut client_identity_to_tunnel = HashMap::new();
         let mut public_hostname_to_tunnel = HashMap::new();
         let mut seen_client_identities = HashSet::new();
@@ -92,31 +77,23 @@ impl TunnelRegistry {
             }
             client_identity_to_tunnel.insert(tunnel.client_identity.clone(), index);
             for hostname in &tunnel.public_hostnames {
-                let normalized_hostname = validate_public_hostname(hostname).map_err(|error| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "server.tunnels[].public-hostnames contains invalid hostname `{hostname}`: {error}"
-                        ),
-                    )
-                })?;
-                if normalized_hostname == normalized_server_hostname {
+                if hostname.as_str() == server_hostname.as_str() {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "server.tunnels[].public-hostnames must not include server.hostname `{normalized_server_hostname}`"
+                            "server.tunnels[].public-hostnames must not include server.hostname `{server_hostname}`"
                         ),
                     ));
                 }
-                if !seen_public_hostnames.insert(normalized_hostname.clone()) {
+                if !seen_public_hostnames.insert(hostname.clone()) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "server.tunnels[].public-hostnames must be unique after normalization: {normalized_hostname}"
+                            "server.tunnels[].public-hostnames must be unique after normalization: {hostname}"
                         ),
                     ));
                 }
-                public_hostname_to_tunnel.insert(normalized_hostname, index);
+                public_hostname_to_tunnel.insert(hostname.clone(), index);
             }
             tunnel_slots.push(ActiveClientSlot::new());
         }
@@ -130,7 +107,7 @@ impl TunnelRegistry {
 
     pub(crate) async fn route_tunnel_connection(
         &self,
-        public_hostname: &str,
+        public_hostname: &PublicHostname,
     ) -> TunnelRouteOutcome {
         let Some(tunnel_index) = self.public_hostname_to_tunnel.get(public_hostname).copied()
         else {
@@ -212,16 +189,27 @@ mod tests {
 
     use super::{TunnelRegistry, TunnelRouteOutcome};
     use crate::{
-        GeneratedClientIdentity, ServerTunnelConfig, generate_client_identity,
-        make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
+        GeneratedClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig,
+        generate_client_identity, make_client_quic_config_with_client_auth,
+        make_server_quic_config_with_client_auth,
     };
+
+    fn public_hostname(hostname: &str) -> PublicHostname {
+        PublicHostname::try_from(hostname).unwrap()
+    }
+
+    fn server_hostname(hostname: &str) -> ServerHostname {
+        ServerHostname::try_from(hostname).unwrap()
+    }
 
     #[tokio::test]
     async fn returns_unauthorized_when_public_hostname_is_not_authorized() -> io::Result<()> {
-        let registry = TunnelRegistry::single(vec!["app.example.test".to_owned()])?;
+        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
 
         assert!(matches!(
-            registry.route_tunnel_connection("other.example.test").await,
+            registry
+                .route_tunnel_connection(&public_hostname("other.example.test"))
+                .await,
             TunnelRouteOutcome::Unauthorized
         ));
         Ok(())
@@ -230,10 +218,12 @@ mod tests {
     #[tokio::test]
     async fn returns_no_active_tunnel_connection_for_authorized_public_hostname() -> io::Result<()>
     {
-        let registry = TunnelRegistry::single(vec!["app.example.test".to_owned()])?;
+        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
 
         assert!(matches!(
-            registry.route_tunnel_connection("app.example.test").await,
+            registry
+                .route_tunnel_connection(&public_hostname("app.example.test"))
+                .await,
             TunnelRouteOutcome::NoActiveTunnelConnection
         ));
         Ok(())
@@ -245,16 +235,18 @@ mod tests {
         let client_identity = generate_test_client_identity()?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         let registry = TunnelRegistry::configured(
-            "tunnel.example.test",
+            &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
-                public_hostnames: vec!["app.example.test".to_owned()],
+                public_hostnames: vec![public_hostname("app.example.test")],
                 client_identity: client_identity.client_identity.clone(),
             }],
         )?;
         registry.register(fixture.server_connection).await;
 
         assert!(matches!(
-            registry.route_tunnel_connection("app.example.test").await,
+            registry
+                .route_tunnel_connection(&public_hostname("app.example.test"))
+                .await,
             TunnelRouteOutcome::Connected(_)
         ));
         Ok(())
@@ -265,9 +257,9 @@ mod tests {
         let client_identity = generate_test_client_identity()?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         let registry = TunnelRegistry::configured(
-            "tunnel.example.test",
+            &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
-                public_hostnames: vec!["app.example.test".to_owned()],
+                public_hostnames: vec![public_hostname("app.example.test")],
                 client_identity: client_identity.client_identity.clone(),
             }],
         )?;
@@ -276,7 +268,9 @@ mod tests {
         registry.register(fixture.server_connection).await;
 
         assert!(matches!(
-            registry.route_tunnel_connection("app.example.test").await,
+            registry
+                .route_tunnel_connection(&public_hostname("app.example.test"))
+                .await,
             TunnelRouteOutcome::NoActiveTunnelConnection
         ));
         Ok(())

@@ -1,12 +1,9 @@
+use std::borrow::Borrow;
 use std::fmt;
 use std::net::IpAddr;
 
-pub(crate) fn normalize_public_hostname(hostname: &str) -> String {
-    hostname.trim_end_matches('.').to_ascii_lowercase()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PublicHostnameError {
+pub enum PublicHostnameError {
     Empty,
     TooLong,
     EmptyLabel,
@@ -16,6 +13,110 @@ pub(crate) enum PublicHostnameError {
     Wildcard,
     IpLiteral,
     RawUnicode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PublicHostname(String);
+
+impl PublicHostname {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for PublicHostname {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for PublicHostname {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for PublicHostname {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for PublicHostname {
+    type Error = PublicHostnameError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        validate_public_hostname(value).map(Self)
+    }
+}
+
+impl TryFrom<String> for PublicHostname {
+    type Error = PublicHostnameError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+impl From<PublicHostname> for String {
+    fn from(value: PublicHostname) -> Self {
+        value.0
+    }
+}
+
+pub type ServerHostnameError = PublicHostnameError;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ServerHostname(String);
+
+impl ServerHostname {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for ServerHostname {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for ServerHostname {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for ServerHostname {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for ServerHostname {
+    type Error = ServerHostnameError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        validate_public_hostname(value).map(Self)
+    }
+}
+
+impl TryFrom<String> for ServerHostname {
+    type Error = ServerHostnameError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+impl From<ServerHostname> for String {
+    fn from(value: ServerHostname) -> Self {
+        value.0
+    }
+}
+
+pub(crate) fn normalize_public_hostname(hostname: &str) -> String {
+    hostname.trim_end_matches('.').to_ascii_lowercase()
 }
 
 impl fmt::Display for PublicHostnameError {
@@ -83,7 +184,10 @@ pub(crate) fn validate_public_hostname(hostname: &str) -> Result<String, PublicH
 mod tests {
     use proptest::prelude::*;
 
-    use super::{PublicHostnameError, normalize_public_hostname, validate_public_hostname};
+    use super::{
+        PublicHostname, PublicHostnameError, ServerHostname, normalize_public_hostname,
+        validate_public_hostname,
+    };
 
     #[test]
     fn lowercases_public_hostnames() {
@@ -156,7 +260,16 @@ mod tests {
             if let Ok(validated) = validate_public_hostname(&hostname) {
                 prop_assert_eq!(normalize_public_hostname(&validated), validated.clone());
                 prop_assert_eq!(validate_public_hostname(&validated), Ok(validated.clone()));
+                let typed = PublicHostname::try_from(validated.as_str()).unwrap();
+                prop_assert_eq!(typed.as_str(), validated);
             }
         }
+    }
+
+    #[test]
+    fn server_hostnames_share_the_public_hostname_canonical_form() {
+        let hostname = ServerHostname::try_from("Tunnel.Example.Test.").unwrap();
+
+        assert_eq!(hostname.as_str(), "tunnel.example.test");
     }
 }

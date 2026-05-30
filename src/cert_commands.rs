@@ -252,7 +252,7 @@ fn resolve_client_public_cert_hostnames(
         )
         .into());
     }
-    Ok(hostnames)
+    Ok(hostnames.into_iter().map(String::from).collect())
 }
 
 fn resolve_client_public_cert_hostnames_from_config_required(
@@ -285,7 +285,7 @@ fn resolve_client_public_cert_hostnames_from_config_required(
         )
         .into());
     }
-    Ok(hostnames)
+    Ok(hostnames.into_iter().map(String::from).collect())
 }
 
 fn resolve_selected_client_config_path(
@@ -348,7 +348,7 @@ fn resolve_server_cert_hostname(
     match (hostname, configured_hostname) {
         (Some(hostname), Some(configured_hostname)) => {
             if normalized_hostname_for_match(&hostname)
-                != normalized_hostname_for_match(&configured_hostname)
+                != normalized_hostname_for_match(configured_hostname.as_str())
             {
                 return Err(format!(
                     "--hostname `{hostname}` does not match configured server.hostname `{configured_hostname}`"
@@ -358,7 +358,7 @@ fn resolve_server_cert_hostname(
             Ok(hostname)
         }
         (Some(hostname), None) => Ok(hostname),
-        (None, Some(configured_hostname)) => Ok(configured_hostname),
+        (None, Some(configured_hostname)) => Ok(configured_hostname.to_string()),
         (None, None) => {
             Err("server hostname is required via --hostname or server.hostname in config".into())
         }

@@ -4,14 +4,14 @@ use std::io::Cursor;
 use rustls::server::Acceptor;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::hostname::validate_public_hostname;
+use crate::hostname::PublicHostname;
 
 pub const CLIENT_HELLO_BUFFER_LIMIT: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedClientHello {
     buffered_bytes: Vec<u8>,
-    server_name: String,
+    public_hostname: PublicHostname,
     alpn_protocols: Vec<Vec<u8>>,
 }
 
@@ -24,8 +24,8 @@ impl ParsedClientHello {
         self.buffered_bytes
     }
 
-    pub fn server_name(&self) -> &str {
-        &self.server_name
+    pub fn public_hostname(&self) -> &PublicHostname {
+        &self.public_hostname
     }
 
     pub fn offers_alpn_protocol(&self, protocol: &[u8]) -> bool {
@@ -34,8 +34,8 @@ impl ParsedClientHello {
             .any(|offered| offered.as_slice() == protocol)
     }
 
-    pub fn into_parts(self) -> (String, Vec<u8>) {
-        (self.server_name, self.buffered_bytes)
+    pub fn into_parts(self) -> (PublicHostname, Vec<u8>) {
+        (self.public_hostname, self.buffered_bytes)
     }
 }
 
@@ -115,7 +115,7 @@ where
                     .server_name()
                     .ok_or(ClientHelloError::MissingSni)?
                     .to_owned();
-                let server_name = validate_public_hostname(&server_name)
+                let public_hostname = PublicHostname::try_from(server_name)
                     .map_err(|_| ClientHelloError::InvalidSni)?;
                 let alpn_protocols = accepted
                     .client_hello()
@@ -127,7 +127,7 @@ where
 
                 return Ok(ParsedClientHello {
                     buffered_bytes,
-                    server_name,
+                    public_hostname,
                     alpn_protocols,
                 });
             }
@@ -154,7 +154,7 @@ mod tests {
     use rustls::pki_types::{CertificateDer, ServerName};
     use tokio::io::{AsyncRead, ReadBuf};
 
-    use crate::hostname::validate_public_hostname;
+    use crate::hostname::PublicHostname;
 
     use super::{
         CLIENT_HELLO_BUFFER_LIMIT, ClientHelloError, ParsedClientHello, read_client_hello,
@@ -166,7 +166,10 @@ mod tests {
         let client_hello = build_client_hello(ServerName::try_from(server_name).unwrap());
         let parsed = parse_from_chunks(vec![client_hello.clone()]).await.unwrap();
 
-        assert_eq!(parsed.server_name(), server_name);
+        assert_eq!(
+            parsed.public_hostname(),
+            &PublicHostname::try_from(server_name).unwrap()
+        );
         assert_eq!(parsed.buffered_bytes(), client_hello.as_slice());
     }
 
@@ -178,7 +181,7 @@ mod tests {
 
         let parsed = parse_from_chunks(vec![buffered.clone()]).await.unwrap();
 
-        assert_eq!(parsed.server_name(), "app.example.test");
+        assert_eq!(parsed.public_hostname().as_str(), "app.example.test");
         assert_eq!(parsed.buffered_bytes(), buffered.as_slice());
     }
 
@@ -188,7 +191,7 @@ mod tests {
 
         let parsed = parse_from_chunks(vec![client_hello]).await.unwrap();
 
-        assert_eq!(parsed.server_name(), "app.example.test");
+        assert_eq!(parsed.public_hostname().as_str(), "app.example.test");
     }
 
     #[tokio::test]
@@ -203,7 +206,7 @@ mod tests {
 
         let parsed = parse_from_chunks(chunks).await.unwrap();
 
-        assert_eq!(parsed.server_name(), "app.example.test");
+        assert_eq!(parsed.public_hostname().as_str(), "app.example.test");
         assert_eq!(parsed.buffered_bytes(), split_client_hello.as_slice());
     }
 
@@ -360,21 +363,9 @@ mod tests {
 
             let parsed = parse_from_chunks_blocking(chunk_bytes(buffered.clone(), chunk_sizes)).unwrap();
 
-            prop_assert_eq!(parsed.server_name(), "app.example.test");
+            prop_assert_eq!(parsed.public_hostname().as_str(), "app.example.test");
             prop_assert!(buffered.starts_with(parsed.buffered_bytes()));
             prop_assert!(parsed.buffered_bytes().len() >= client_hello.len());
-        }
-
-        #[test]
-        fn arbitrary_client_hello_bytes_only_succeed_with_validated_server_names(
-            bytes in prop_vec(any::<u8>(), 0..(CLIENT_HELLO_BUFFER_LIMIT + 8)),
-        ) {
-            let result = parse_from_chunks_blocking(vec![bytes.clone()]);
-
-            if let Ok(parsed) = result {
-                prop_assert!(validate_public_hostname(parsed.server_name()).is_ok());
-                prop_assert_eq!(parsed.buffered_bytes(), bytes.as_slice());
-            }
         }
     }
 }

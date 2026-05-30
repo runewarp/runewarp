@@ -12,8 +12,8 @@ use tokio::net::TcpListener;
 use std::future::Future;
 
 use crate::{
-    HANDSHAKE_TIMEOUT, ServerTunnelConfig, quic::with_handshake_timeout, runtime_log,
-    shutdown::GracefulShutdown,
+    HANDSHAKE_TIMEOUT, ServerHostname, ServerTunnelConfig, quic::with_handshake_timeout,
+    runtime_log, shutdown::GracefulShutdown,
 };
 
 use self::tunnel_registry::TunnelRegistry;
@@ -22,7 +22,7 @@ use self::visitor_stream::VisitorStreamHandler;
 pub struct ServerBindConfig {
     pub public_bind_addr: SocketAddr,
     pub tunnel_connection_bind_addr: SocketAddr,
-    pub server_hostname: String,
+    pub server_hostname: ServerHostname,
     pub configured_tunnels: Vec<ServerTunnelConfig>,
     pub public_tls_config: Option<Arc<rustls::ServerConfig>>,
     pub quic_server_config: quinn::ServerConfig,

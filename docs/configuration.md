@@ -247,6 +247,7 @@ Runewarp supports two Client trust modes:
 
 ### Hostname rules
 
+- Runewarp validates and canonicalizes hostname-bearing config once at the config seam, then keeps the resulting typed **Server hostname** and **Public hostname** values through startup and routing
 - `server.tunnels[].public-hostnames` is always required
 - `client.services[].public-hostnames` may be omitted only when there is exactly one Service
 - `public-hostnames = []` is an error on either side

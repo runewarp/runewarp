@@ -1,12 +1,12 @@
 use std::fmt;
 
-use crate::hostname::validate_public_hostname;
+use crate::{ServerHostname, ServerHostnameError};
 
 pub(crate) const DEFAULT_SERVER_PORT: u16 = 443;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ServerAddress {
-    hostname: String,
+    hostname: ServerHostname,
     port: u16,
 }
 
@@ -27,11 +27,11 @@ impl ServerAddress {
         }
 
         let hostname =
-            validate_public_hostname(raw_hostname).map_err(ServerAddressError::InvalidHostname)?;
+            ServerHostname::try_from(raw_hostname).map_err(ServerAddressError::InvalidHostname)?;
         Ok(Self { hostname, port })
     }
 
-    pub(crate) fn hostname(&self) -> &str {
+    pub(crate) fn hostname(&self) -> &ServerHostname {
         &self.hostname
     }
 
@@ -44,7 +44,7 @@ impl ServerAddress {
 pub(crate) enum ServerAddressError {
     MissingHostname,
     InvalidPort,
-    InvalidHostname(crate::hostname::PublicHostnameError),
+    InvalidHostname(ServerHostnameError),
 }
 
 impl fmt::Display for ServerAddressError {

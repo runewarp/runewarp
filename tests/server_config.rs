@@ -6,6 +6,10 @@ use runewarp::{
 };
 use tempfile::tempdir;
 
+fn hostname_strings(hostnames: &[runewarp::PublicHostname]) -> Vec<&str> {
+    hostnames.iter().map(|hostname| hostname.as_str()).collect()
+}
+
 #[test]
 fn server_config_accept_exact_match_tunnels_and_default_logs_to_true() {
     let tempdir = tempdir().unwrap();
@@ -30,10 +34,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
     let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
 
-    assert_eq!(settings.hostname, "tunnel.example.test");
+    assert_eq!(settings.hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(
-        settings.tunnels[0].public_hostnames,
+        hostname_strings(&settings.tunnels[0].public_hostnames),
         vec!["app.example.test", "api.example.test"]
     );
 }
@@ -62,7 +66,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
     let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
 
-    assert_eq!(settings.hostname, "tunnel.example.test");
+    assert_eq!(settings.hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(
         settings.certificate,
@@ -76,7 +80,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         "0.0.0.0:443".parse().unwrap()
     );
     assert_eq!(
-        settings.tunnels[0].public_hostnames,
+        hostname_strings(&settings.tunnels[0].public_hostnames),
         vec!["app.example.test", "api.example.test"]
     );
 }

@@ -1,0 +1,72 @@
+use std::net::{Ipv4Addr, SocketAddr};
+
+use runewarp::{ClientRuntimeArgs, resolve_client_config_from_cli};
+
+use crate::cli;
+use crate::commands::CommandResult;
+use crate::config_hints::wrap_client_config_resolution_error;
+use crate::error_handling::logged_runtime_failure;
+
+mod identity;
+mod public_cert;
+
+pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
+    let cli::ClientArgs {
+        config,
+        server_address,
+        backend_address,
+        command,
+    } = command;
+
+    if let Some(cli::ClientSubcommand::Identity(command)) = command {
+        let forbidden_flags = client_identity_forbidden_runtime_flags(
+            server_address.as_deref(),
+            backend_address.as_deref(),
+        );
+        if !forbidden_flags.is_empty() {
+            return Err(format!(
+                "{} may be used only with `runewarp client`, not `runewarp client identity ...`",
+                forbidden_flags.join(" and ")
+            )
+            .into());
+        }
+        return identity::run(config, command);
+    }
+
+    if let Some(cli::ClientSubcommand::PublicCert(command)) = command {
+        return public_cert::run(config, command);
+    }
+
+    let runtime = ClientRuntimeArgs {
+        server_address,
+        backend_address,
+    };
+    let config = resolve_client_config_from_cli(config.clone(), runtime)
+        .map_err(wrap_client_config_resolution_error)?;
+    runewarp::runtime_log::install(config.log_level)?;
+    crate::client_runtime::run_until_orderly_shutdown(
+        &config,
+        wildcard(0),
+        super::wait_for_orderly_shutdown_signal(),
+    )
+    .await
+    .map_err(logged_runtime_failure)
+}
+
+fn client_identity_forbidden_runtime_flags(
+    server_address: Option<&str>,
+    backend_address: Option<&str>,
+) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    if server_address.is_some() {
+        flags.push("--server-address");
+    }
+    if backend_address.is_some() {
+        flags.push("--backend-address");
+    }
+    flags
+}
+
+fn wildcard(port: u16) -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))
+}

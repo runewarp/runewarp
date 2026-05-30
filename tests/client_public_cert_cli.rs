@@ -515,6 +515,37 @@ tls-mode = "terminate"
 }
 
 #[test]
+fn client_public_cert_init_accepts_config_after_the_management_subcommand() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/public-cert");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+public-cert-dir = "configured/public-cert"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+tls-mode = "terminate"
+backend-address = "127.0.0.1:443"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "public-cert", "--config", "client.toml", "init"])
+        .assert()
+        .success();
+
+    assert_exists(configured_dir.join("public-ca.crt").as_path());
+    assert_exists(configured_dir.join("app.example.test/public.crt").as_path());
+}
+
+#[test]
 fn client_public_cert_init_with_config_reports_existing_and_new_hostnames_in_one_run()
 -> Result<(), Box<dyn std::error::Error>> {
     let tempdir = tempdir()?;

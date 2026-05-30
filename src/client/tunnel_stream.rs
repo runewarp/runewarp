@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -10,6 +9,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
 use crate::acme::ACME_TLS_ALPN;
+use crate::client::TerminationTlsConfigs;
 use crate::client_hello::{ParsedClientHello, read_client_hello};
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
@@ -21,28 +21,17 @@ use crate::{
 #[derive(Clone)]
 pub(crate) struct TunnelConnectionStreamHandler {
     services: Arc<[ClientServiceSettings]>,
-    hostname_tls_configs: Arc<HashMap<String, Arc<rustls::ServerConfig>>>,
-    hostname_acme_challenge_tls_configs: Arc<HashMap<String, Arc<rustls::ServerConfig>>>,
+    termination_tls_configs: TerminationTlsConfigs,
 }
 
 impl TunnelConnectionStreamHandler {
-    #[cfg(test)]
     pub(crate) fn new(
         services: Vec<ClientServiceSettings>,
-        hostname_tls_configs: HashMap<String, Arc<rustls::ServerConfig>>,
-    ) -> Self {
-        Self::new_with_acme_challenge_configs(services, hostname_tls_configs, HashMap::new())
-    }
-
-    pub(crate) fn new_with_acme_challenge_configs(
-        services: Vec<ClientServiceSettings>,
-        hostname_tls_configs: HashMap<String, Arc<rustls::ServerConfig>>,
-        hostname_acme_challenge_tls_configs: HashMap<String, Arc<rustls::ServerConfig>>,
+        termination_tls_configs: TerminationTlsConfigs,
     ) -> Self {
         Self {
             services: services.into(),
-            hostname_tls_configs: Arc::new(hostname_tls_configs),
-            hostname_acme_challenge_tls_configs: Arc::new(hostname_acme_challenge_tls_configs),
+            termination_tls_configs,
         }
     }
 
@@ -116,8 +105,8 @@ impl TunnelConnectionStreamHandler {
         let public_hostname = parsed_client_hello.server_name().to_owned();
         if parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN)
             && let Some(challenge_tls_config) = self
-                .hostname_acme_challenge_tls_configs
-                .get(public_hostname.as_str())
+                .termination_tls_configs
+                .acme_challenge_server_config(public_hostname.as_str())
         {
             return self
                 .handle_acme_tls_alpn_challenge(
@@ -130,7 +119,10 @@ impl TunnelConnectionStreamHandler {
                 .await;
         }
 
-        let Some(tls_config) = self.hostname_tls_configs.get(public_hostname.as_str()) else {
+        let Some(tls_config) = self
+            .termination_tls_configs
+            .default_server_config(public_hostname.as_str())
+        else {
             runtime_log::client_route(
                 public_hostname.as_str(),
                 ClientRouteOutcome::MissingTlsConfig,
@@ -323,8 +315,8 @@ mod tests {
 
     use super::{ACME_TLS_ALPN, TunnelConnectionStreamHandler};
     use crate::{
-        ClientServiceSettings, ClientTlsMode, LogLevel, make_client_quic_config,
-        make_server_quic_config,
+        ClientServiceSettings, ClientTlsMode, LogLevel, client::TerminationTlsConfigs,
+        make_client_quic_config, make_server_quic_config,
     };
 
     static LOG_CAPTURE_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
@@ -533,7 +525,8 @@ mod tests {
             }
         }
 
-        let stream_handler = TunnelConnectionStreamHandler::new(services, HashMap::new());
+        let stream_handler =
+            TunnelConnectionStreamHandler::new(services, TerminationTlsConfigs::empty());
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -561,7 +554,8 @@ mod tests {
         requested_hostname: &str,
         assert_handler_result: impl FnOnce(io::Result<()>),
     ) -> io::Result<()> {
-        let stream_handler = TunnelConnectionStreamHandler::new(services, HashMap::new());
+        let stream_handler =
+            TunnelConnectionStreamHandler::new(services, TerminationTlsConfigs::empty());
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -614,7 +608,8 @@ mod tests {
             }
         }
 
-        let stream_handler = TunnelConnectionStreamHandler::new(services, HashMap::new());
+        let stream_handler =
+            TunnelConnectionStreamHandler::new(services, TerminationTlsConfigs::empty());
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -646,7 +641,8 @@ mod tests {
         requested_hostname: &str,
         assert_handler_result: impl FnOnce(io::Result<()>) + Send + 'static,
     ) -> io::Result<()> {
-        let stream_handler = TunnelConnectionStreamHandler::new(services, HashMap::new());
+        let stream_handler =
+            TunnelConnectionStreamHandler::new(services, TerminationTlsConfigs::empty());
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -1051,7 +1047,10 @@ mod tests {
         }];
         let mut tls_configs = HashMap::new();
         tls_configs.insert(hostname.to_owned(), tls_config.clone());
-        let stream_handler = TunnelConnectionStreamHandler::new(services, tls_configs);
+        let stream_handler = TunnelConnectionStreamHandler::new(
+            services,
+            TerminationTlsConfigs::new(tls_configs, HashMap::new()),
+        );
 
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
@@ -1135,10 +1134,9 @@ mod tests {
         tls_configs.insert(hostname.to_owned(), default_tls_config);
         let mut challenge_tls_configs = HashMap::new();
         challenge_tls_configs.insert(hostname.to_owned(), challenge_tls_config);
-        let stream_handler = TunnelConnectionStreamHandler::new_with_acme_challenge_configs(
+        let stream_handler = TunnelConnectionStreamHandler::new(
             services,
-            tls_configs,
-            challenge_tls_configs,
+            TerminationTlsConfigs::new(tls_configs, challenge_tls_configs),
         );
 
         let output = capture_logs_with_wait(
@@ -1320,7 +1318,10 @@ mod tests {
         ];
         let mut tls_configs = HashMap::new();
         tls_configs.insert(terminate_hostname.to_owned(), tls_config);
-        let stream_handler = TunnelConnectionStreamHandler::new(services, tls_configs);
+        let stream_handler = TunnelConnectionStreamHandler::new(
+            services,
+            TerminationTlsConfigs::new(tls_configs, HashMap::new()),
+        );
 
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_conn_for_term = fixture.server_connection.clone();

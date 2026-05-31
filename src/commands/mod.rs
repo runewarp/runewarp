@@ -6,6 +6,7 @@ use clap::{CommandFactory, Parser};
 use crate::cli;
 use crate::error_handling::{RunError, classify_runtime_error};
 
+mod certs;
 mod client;
 mod server;
 

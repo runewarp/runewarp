@@ -4,12 +4,14 @@ require_relative "support/test_helper"
 require_relative "../lib/runewarp"
 
 class DockerExampleTest < Minitest::Test
-  def test_readme_documents_the_manual_prepare_commands
+  def test_readme_describes_prepare_without_a_manual_reproduction_script
     readme = File.read(File.join(REPO_ROOT, "examples", "docker", "README.md"), encoding: "utf-8")
 
     assert_includes(readme, "runewarp server cert init --hostname tunnel.example.test")
     assert_includes(readme, "runewarp client identity init")
-    assert_includes(readme, "docker run --rm")
+    assert_includes(readme, "normal operator setup")
+    refute_includes(readme, "docker run --rm")
+    refute_includes(readme, "mkdir -p \\")
   end
 
   def test_entrypoint_shows_prepare_and_smoke_subcommands
@@ -50,22 +52,36 @@ class DockerExampleTest < Minitest::Test
         example_dir = ENV.fetch("TEST_EXAMPLE_DIR")
         args = ARGV.dup
 
-        def write_server_material(example_dir)
-          base = File.join(example_dir, "generated", "server", "source-data", "runewarp", "server", "cert")
-          FileUtils.mkdir_p(File.join(base, "state"))
-          File.write(File.join(base, "server.crt"), "server cert\\n", encoding: "utf-8")
-          File.write(File.join(base, "server.key"), "server key\\n", encoding: "utf-8")
-          File.write(File.join(base, "server-ca.crt"), "server ca\\n", encoding: "utf-8")
-          File.write(File.join(base, "state", "server-ca.key"), "server ca key\\n", encoding: "utf-8")
-          File.write(File.join(base, "state", "server-hostname.txt"), "tunnel.example.test\\n", encoding: "utf-8")
+        SERVER_FILES = {
+          "/tmp/runewarp-data/runewarp/server/cert/server.crt" => "server cert\\n",
+          "/tmp/runewarp-data/runewarp/server/cert/server.key" => "server key\\n",
+          "/tmp/runewarp-data/runewarp/server/cert/server-ca.crt" => "server ca\\n"
+        }.freeze
+
+        CLIENT_FILES = {
+          "/tmp/runewarp-data/runewarp/client/identity/client.crt" => "client cert\\n",
+          "/tmp/runewarp-data/runewarp/client/identity/client.key" => "client key\\n",
+          "/tmp/runewarp-data/runewarp/client/identity/client-identity.txt" => "client-identity\\n"
+        }.freeze
+
+        def container_state_path(example_dir)
+          File.join(example_dir, "fake-containers")
         end
 
-        def write_client_material(example_dir)
-          base = File.join(example_dir, "generated", "client", "source-data", "runewarp", "client", "identity")
-          FileUtils.mkdir_p(base)
-          File.write(File.join(base, "client.crt"), "client cert\\n", encoding: "utf-8")
-          File.write(File.join(base, "client.key"), "client key\\n", encoding: "utf-8")
-          File.write(File.join(base, "client-identity.txt"), "client-identity\\n", encoding: "utf-8")
+        def write_container_files(example_dir, container_id, files)
+          base = File.join(container_state_path(example_dir), container_id)
+          files.each do |path, content|
+            full_path = File.join(base, path.sub(%r{\\A/}, ""))
+            FileUtils.mkdir_p(File.dirname(full_path))
+            File.write(full_path, content, encoding: "utf-8")
+          end
+        end
+
+        def copy_from_container(example_dir, source, destination)
+          container_id, container_path = source.split(":", 2)
+          source_path = File.join(container_state_path(example_dir), container_id, container_path.sub(%r{\\A/}, ""))
+          FileUtils.mkdir_p(File.dirname(destination))
+          FileUtils.cp(source_path, destination)
         end
 
         case args[0]
@@ -86,15 +102,23 @@ class DockerExampleTest < Minitest::Test
           end
         when "build"
           exit 0
-        when "run"
+        when "create"
+          container_id = "container-\#{args.last.gsub(/[^a-z-]/, "-")}"
           if args.include?("server") && args.include?("cert") && args.include?("init")
-            write_server_material(example_dir)
+            write_container_files(example_dir, container_id, SERVER_FILES)
+            $stdout.puts(container_id)
             exit 0
           end
           if args.include?("client") && args.include?("identity") && args.include?("init")
-            write_client_material(example_dir)
+            write_container_files(example_dir, container_id, CLIENT_FILES)
+            $stdout.puts(container_id)
             exit 0
           end
+        when "start", "rm"
+          exit 0
+        when "cp"
+          copy_from_container(example_dir, args[1], args[2])
+          exit 0
         end
 
         abort("unexpected docker invocation: \#{args.inspect}")
@@ -136,6 +160,28 @@ class DockerExampleTest < Minitest::Test
       ensure
         ENV.delete("TEST_EXAMPLE_DIR")
       end
+    end
+  end
+
+  def test_prepare_stages_runtime_material_without_source_data_directories
+    Dir.mktmpdir do |temp_dir|
+      example_dir = File.join(temp_dir, "example")
+      bin_dir = File.join(temp_dir, "bin")
+      FileUtils.mkdir_p(bin_dir)
+      write_example_fixture(example_dir)
+      write_docker_stub(bin_dir, example_dir)
+
+      with_path(bin_dir) do
+        ENV["TEST_EXAMPLE_DIR"] = example_dir
+        Runewarp::DockerExample.prepare(example_dir: example_dir, repo_root: REPO_ROOT, reset_requested: false)
+      ensure
+        ENV.delete("TEST_EXAMPLE_DIR")
+      end
+
+      assert_path_exists(File.join(example_dir, "generated", "server", "data", "runewarp", "server", "cert", "server.crt"))
+      assert_path_exists(File.join(example_dir, "generated", "client", "data", "runewarp", "client", "identity", "client.crt"))
+      refute_path_exists(File.join(example_dir, "generated", "server", "source-data"))
+      refute_path_exists(File.join(example_dir, "generated", "client", "source-data"))
     end
   end
 end

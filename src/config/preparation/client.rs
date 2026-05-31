@@ -1,17 +1,17 @@
+use crate::config::client::{ClientConfigResolutionError, ClientRuntimeArgs, SelectedClientConfig};
+use crate::config::preparation::{
+    PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
+};
 use crate::config::{
     ConfigFileError, LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig,
     collect_client_unknown_field_messages, deserialize_selected_section, load_log_level_from_path,
     load_optional_selected_section_value,
 };
-use crate::config_preparation::{
-    PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
-};
 use crate::trust::{
     ClientServerTrust, ResolveClientServerTrustError, resolve_client_server_trust_with_default,
 };
 use crate::{
-    ClientConfigResolutionError, ClientRuntimeArgs, SelectedClientConfig, XdgPathError,
-    default_client_acme_state_dir, default_client_server_ca_path, default_config_path,
+    XdgPathError, default_client_acme_state_dir, default_client_server_ca_path, default_config_path,
 };
 use std::path::{Path, PathBuf};
 
@@ -433,8 +433,8 @@ mod tests {
         ClientPreparationDefaults, PreparedClientTlsMode, PreparedClientTrust, PreparedDirectory,
         PreparedValue, prepare_selected_client_config,
     };
+    use crate::config::client::{ClientRuntimeArgs, SelectedClientConfig};
     use crate::config::{LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig};
-    use crate::{ClientRuntimeArgs, SelectedClientConfig};
 
     #[test]
     fn client_config_selection_discovers_the_default_config_path()

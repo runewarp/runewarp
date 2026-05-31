@@ -1,4 +1,3 @@
-mod config_resolution;
 mod service;
 mod termination_tls;
 mod tunnel_stream;
@@ -19,7 +18,7 @@ use crate::{
 
 type RouteModeServicesAndConfigs = (Vec<ServiceConfig>, TerminationTlsConfigs);
 
-pub use config_resolution::{
+pub use crate::config::client::{
     ClientConfigResolutionDefaults, ClientConfigResolutionError, ClientRuntimeArgs,
     SelectedClientConfig, resolve_client_config_from_cli, resolve_selected_client_config,
     select_client_config,

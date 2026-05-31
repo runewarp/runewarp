@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use crate::config::preparation::{
+    PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
+};
 use crate::config::{
     ConfigFileError, LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig,
     collect_server_unknown_field_messages, deserialize_selected_section, load_log_level_from_path,
     load_optional_selected_section_value,
-};
-use crate::config_preparation::{
-    PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
 };
 use crate::{
     XdgPathError, default_config_path, default_server_acme_state_dir,

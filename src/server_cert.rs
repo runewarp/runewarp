@@ -1,10 +1,7 @@
 use std::fmt;
-use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::{self, ErrorKind, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -12,6 +9,7 @@ use rcgen::{
 };
 use time::{Duration, OffsetDateTime};
 
+use crate::cert_file_ops;
 use crate::hostname::normalize_public_hostname;
 use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
 
@@ -316,31 +314,17 @@ fn load_manual_server_ca_issuer(
     ))
 }
 
-fn create_directory(path: &Path, mode: u32) -> Result<(), ServerCertError> {
-    let mut builder = DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    builder.mode(mode);
-    builder
-        .create(path)
-        .map_err(|source| ServerCertError::CreateDirectory {
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
 fn write_new_file_with_mode(
     path: &Path,
     contents: &[u8],
     mode: u32,
 ) -> Result<(), ServerCertError> {
-    let mut file = open_new_file_with_mode(path, mode)?;
-    file.write_all(contents)
-        .map_err(|source| ServerCertError::WriteFile {
+    cert_file_ops::write_new_file_with_mode(path, contents, mode).map_err(|source| {
+        ServerCertError::WriteFile {
             path: path.to_path_buf(),
             source,
-        })?;
-    Ok(())
+        }
+    })
 }
 
 fn replace_file_atomically_with_mode(
@@ -348,71 +332,17 @@ fn replace_file_atomically_with_mode(
     contents: &[u8],
     mode: u32,
 ) -> Result<(), ServerCertError> {
-    let Some(parent) = path.parent() else {
-        return Err(ServerCertError::WriteFile {
+    cert_file_ops::replace_file_atomically_with_mode(path, contents, mode).map_err(|source| {
+        ServerCertError::WriteFile {
             path: path.to_path_buf(),
-            source: io::Error::new(ErrorKind::InvalidInput, "missing parent directory"),
-        });
-    };
-
-    let Some(filename) = path.file_name() else {
-        return Err(ServerCertError::WriteFile {
-            path: path.to_path_buf(),
-            source: io::Error::new(ErrorKind::InvalidInput, "missing filename"),
-        });
-    };
-
-    for attempt in 0..16 {
-        let temporary_path = parent.join(format!(
-            ".{}.runewarp-tmp-{}-{attempt}",
-            filename.to_string_lossy(),
-            std::process::id()
-        ));
-        let mut file = match open_new_file_with_mode(&temporary_path, mode) {
-            Ok(file) => file,
-            Err(ServerCertError::WriteFile { source, .. })
-                if source.kind() == ErrorKind::AlreadyExists =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if let Err(source) = file.write_all(contents) {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(ServerCertError::WriteFile {
-                path: path.to_path_buf(),
-                source,
-            });
+            source,
         }
-        drop(file);
-        if let Err(source) = fs::rename(&temporary_path, path) {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(ServerCertError::WriteFile {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-        return Ok(());
-    }
-
-    Err(ServerCertError::WriteFile {
-        path: path.to_path_buf(),
-        source: io::Error::new(
-            ErrorKind::AlreadyExists,
-            "failed to allocate a temporary file for atomic replacement",
-        ),
     })
 }
 
-fn open_new_file_with_mode(path: &Path, mode: u32) -> Result<std::fs::File, ServerCertError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(mode);
-    options
-        .open(path)
-        .map_err(|source| ServerCertError::WriteFile {
-            path: path.to_path_buf(),
-            source,
-        })
+fn create_directory(path: &Path, mode: u32) -> Result<(), ServerCertError> {
+    cert_file_ops::create_directory(path, mode).map_err(|source| ServerCertError::CreateDirectory {
+        path: path.to_path_buf(),
+        source,
+    })
 }

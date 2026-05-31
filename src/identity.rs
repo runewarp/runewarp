@@ -1,6 +1,6 @@
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Cursor, ErrorKind, Write};
+use std::fs;
+use std::io::{self, Cursor};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -10,8 +10,7 @@ use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 use x509_parser::parse_x509_certificate;
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use crate::cert_file_ops;
 
 pub const CLIENT_CERT_LIFETIME_DAYS: u64 = 90;
 pub const CLIENT_CERT_RENEW_AFTER_DAYS: u64 = 60;
@@ -386,64 +385,11 @@ fn replace_file_atomically_with_mode(
     contents: &[u8],
     mode: u32,
 ) -> Result<(), ClientIdentityMaterialError> {
-    let Some(parent) = path.parent() else {
-        return Err(ClientIdentityMaterialError::WriteFile {
+    cert_file_ops::replace_file_atomically_with_mode(path, contents, mode).map_err(|source| {
+        ClientIdentityMaterialError::WriteFile {
             path: path.to_path_buf(),
-            source: io::Error::new(ErrorKind::InvalidInput, "missing parent directory"),
-        });
-    };
-
-    let Some(filename) = path.file_name() else {
-        return Err(ClientIdentityMaterialError::WriteFile {
-            path: path.to_path_buf(),
-            source: io::Error::new(ErrorKind::InvalidInput, "missing filename"),
-        });
-    };
-
-    for attempt in 0..16 {
-        let temporary_path = parent.join(format!(
-            ".{}.runewarp-tmp-{}-{attempt}",
-            filename.to_string_lossy(),
-            std::process::id()
-        ));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(mode);
-        let mut file = match options.open(&temporary_path) {
-            Ok(file) => file,
-            Err(source) if source.kind() == ErrorKind::AlreadyExists => continue,
-            Err(source) => {
-                return Err(ClientIdentityMaterialError::WriteFile {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-        };
-        if let Err(source) = file.write_all(contents) {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(ClientIdentityMaterialError::WriteFile {
-                path: path.to_path_buf(),
-                source,
-            });
+            source,
         }
-        drop(file);
-        if let Err(source) = fs::rename(&temporary_path, path) {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(ClientIdentityMaterialError::WriteFile {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-        return Ok(());
-    }
-
-    Err(ClientIdentityMaterialError::WriteFile {
-        path: path.to_path_buf(),
-        source: io::Error::new(
-            ErrorKind::AlreadyExists,
-            "failed to allocate a temporary file for atomic replacement",
-        ),
     })
 }
 

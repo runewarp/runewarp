@@ -1,4 +1,5 @@
 mod acme;
+mod cert_file_ops;
 mod client;
 mod client_hello;
 mod client_public_cert;

@@ -1,6 +1,5 @@
 use std::fmt;
-use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use rcgen::{
@@ -9,6 +8,7 @@ use rcgen::{
 };
 use time::{Duration, OffsetDateTime};
 
+use crate::cert_file_ops;
 use crate::hostname::normalize_public_hostname;
 
 pub const CLIENT_PUBLIC_CA_FILENAME: &str = "public-ca.crt";
@@ -311,20 +311,12 @@ fn leaf_cert_params(
 }
 
 fn create_directory(path: &Path, mode: u32) -> Result<(), ClientPublicCertError> {
-    use std::fs::DirBuilder;
-    #[cfg(unix)]
-    use std::os::unix::fs::DirBuilderExt;
-
-    let mut builder = DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    builder.mode(mode);
-    builder
-        .create(path)
-        .map_err(|source| ClientPublicCertError::CreateDirectory {
+    cert_file_ops::create_directory(path, mode).map_err(|source| {
+        ClientPublicCertError::CreateDirectory {
             path: path.to_path_buf(),
             source,
-        })
+        }
+    })
 }
 
 fn write_new_file_with_mode(
@@ -332,42 +324,12 @@ fn write_new_file_with_mode(
     contents: &[u8],
     mode: u32,
 ) -> Result<(), ClientPublicCertError> {
-    use std::fs::OpenOptions;
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(mode);
-    let mut file = options
-        .open(path)
-        .map_err(|source| ClientPublicCertError::WriteFile {
+    cert_file_ops::write_new_file_with_mode(path, contents, mode).map_err(|source| {
+        ClientPublicCertError::WriteFile {
             path: path.to_path_buf(),
             source,
-        })?;
-    file.write_all(contents)
-        .map_err(|source| ClientPublicCertError::WriteFile {
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
-fn open_new_file_with_mode(path: &Path, mode: u32) -> Result<std::fs::File, ClientPublicCertError> {
-    use std::fs::OpenOptions;
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(mode);
-    options
-        .open(path)
-        .map_err(|source| ClientPublicCertError::WriteFile {
-            path: path.to_path_buf(),
-            source,
-        })
+        }
+    })
 }
 
 fn replace_file_atomically_with_mode(
@@ -375,58 +337,11 @@ fn replace_file_atomically_with_mode(
     contents: &[u8],
     mode: u32,
 ) -> Result<(), ClientPublicCertError> {
-    use std::io::ErrorKind;
-
-    let Some(parent) = path.parent() else {
-        return Err(ClientPublicCertError::WriteFile {
+    cert_file_ops::replace_file_atomically_with_mode(path, contents, mode).map_err(|source| {
+        ClientPublicCertError::WriteFile {
             path: path.to_path_buf(),
-            source: io::Error::new(ErrorKind::InvalidInput, "missing parent directory"),
-        });
-    };
-
-    let Some(filename) = path.file_name() else {
-        return Err(ClientPublicCertError::WriteFile {
-            path: path.to_path_buf(),
-            source: io::Error::new(ErrorKind::InvalidInput, "missing filename"),
-        });
-    };
-
-    for attempt in 0..16 {
-        let temporary_path = parent.join(format!(
-            ".{}.runewarp-tmp-{}-{attempt}",
-            filename.to_string_lossy(),
-            std::process::id()
-        ));
-        let mut file = match open_new_file_with_mode(&temporary_path, mode) {
-            Ok(file) => file,
-            Err(ClientPublicCertError::WriteFile { source, .. })
-                if source.kind() == ErrorKind::AlreadyExists =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        if let Err(source) = file.write_all(contents) {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(ClientPublicCertError::WriteFile {
-                path: path.to_path_buf(),
-                source,
-            });
+            source,
         }
-        drop(file);
-        if let Err(source) = fs::rename(&temporary_path, path) {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(ClientPublicCertError::WriteFile {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-        return Ok(());
-    }
-
-    Err(ClientPublicCertError::WriteFile {
-        path: path.to_path_buf(),
-        source: io::Error::other("failed to find a unique temporary path after 16 attempts"),
     })
 }
 

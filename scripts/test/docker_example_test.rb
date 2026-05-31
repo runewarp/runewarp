@@ -42,7 +42,7 @@ class DockerExampleTest < Minitest::Test
     File.write(File.join(example_dir, "client", "config.toml.template"), "client = true\n", encoding: "utf-8")
   end
 
-  def write_docker_stub(bin_dir, example_dir)
+  def write_docker_stub(bin_dir, example_dir, commands_file: nil)
     write_executable(
       File.join(bin_dir, "docker"),
       <<~RUBY
@@ -50,7 +50,9 @@ class DockerExampleTest < Minitest::Test
         require "fileutils"
 
         example_dir = ENV.fetch("TEST_EXAMPLE_DIR")
+        commands_file = #{commands_file.inspect}
         args = ARGV.dup
+        File.open(commands_file, "a", encoding: "utf-8") { |handle| handle.puts(args.join(" ")) } unless commands_file.nil?
 
         SERVER_FILES = {
           "/tmp/runewarp-data/runewarp/server/cert/server.crt" => "server cert\\n",
@@ -101,6 +103,8 @@ class DockerExampleTest < Minitest::Test
             end
           end
         when "build"
+          exit 0
+        when "buildx"
           exit 0
         when "create"
           container_id = "container-\#{args.last.gsub(/[^a-z-]/, "-")}"
@@ -182,6 +186,31 @@ class DockerExampleTest < Minitest::Test
       assert_path_exists(File.join(example_dir, "generated", "client", "data", "runewarp", "client", "identity", "client.crt"))
       refute_path_exists(File.join(example_dir, "generated", "server", "source-data"))
       refute_path_exists(File.join(example_dir, "generated", "client", "source-data"))
+    end
+  end
+
+  def test_prepare_uses_workflow_provided_build_cache_flags
+    Dir.mktmpdir do |temp_dir|
+      example_dir = File.join(temp_dir, "example")
+      bin_dir = File.join(temp_dir, "bin")
+      commands_file = File.join(temp_dir, "docker-commands.txt")
+      FileUtils.mkdir_p(bin_dir)
+      write_example_fixture(example_dir)
+      write_docker_stub(bin_dir, example_dir, commands_file: commands_file)
+
+      with_path(bin_dir) do
+        ENV["TEST_EXAMPLE_DIR"] = example_dir
+        ENV["RUNEWARP_DOCKER_BUILD_FLAGS"] = "--cache-from type=gha,scope=ci-docker --cache-to type=gha,scope=ci-docker,mode=max"
+        Runewarp::DockerExample.prepare(example_dir: example_dir, repo_root: REPO_ROOT, reset_requested: false)
+      ensure
+        ENV.delete("RUNEWARP_DOCKER_BUILD_FLAGS")
+        ENV.delete("TEST_EXAMPLE_DIR")
+      end
+
+      assert_includes(
+        File.read(commands_file, encoding: "utf-8"),
+        "buildx build --load --cache-from type=gha,scope=ci-docker --cache-to type=gha,scope=ci-docker,mode=max --file #{File.join(REPO_ROOT, 'Dockerfile')} --tag runewarp/runewarp:local #{REPO_ROOT}\n"
+      )
     end
   end
 end

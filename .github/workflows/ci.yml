@@ -43,9 +43,25 @@ jobs:
     name: Install path (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('trusted-{0}', github.ref_name) }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Restore Rust build cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
+            ~/.cargo/git/db/
+            ~/.cargo/git/checkouts/
+            target/
+          key: ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-
 
       - name: Install Rust toolchain
         run: |
@@ -64,9 +80,25 @@ jobs:
     name: Install path (macOS)
     runs-on: macos-latest
     timeout-minutes: 30
+    env:
+      RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('trusted-{0}', github.ref_name) }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Restore Rust build cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
+            ~/.cargo/git/db/
+            ~/.cargo/git/checkouts/
+            target/
+          key: ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-
 
       - name: Install Rust toolchain
         run: |
@@ -85,9 +117,25 @@ jobs:
     name: Package readiness
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('trusted-{0}', github.ref_name) }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Restore Rust build cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
+            ~/.cargo/git/db/
+            ~/.cargo/git/checkouts/
+            target/
+          key: ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-
 
       - name: Install Rust toolchain
         run: |
@@ -103,7 +151,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('trusted-{0}', github.ref_name) }}
+      RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('trusted-{0}', github.ref_name) }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -114,11 +162,13 @@ jobs:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
             ~/.cargo/git/db/
+            ~/.cargo/git/checkouts/
             target/
-          key: ${{ runner.os }}-rust-contract-${{ env.CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-contract-${{ env.CACHE_SCOPE }}-
+            ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-
 
       - name: Install Rust toolchain
         run: |
@@ -142,9 +192,14 @@ jobs:
     name: Docker contract
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      RUNEWARP_DOCKER_BUILD_FLAGS: ${{ github.event_name == 'pull_request' && format('--cache-from type=gha,scope=ci-docker-pr-{0} --cache-to type=gha,scope=ci-docker-pr-{0},mode=max', github.event.pull_request.number) || format('--cache-from type=gha,scope=ci-docker-trusted-{0} --cache-to type=gha,scope=ci-docker-trusted-{0},mode=max', github.ref_name) }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Check Docker image path
         run: |

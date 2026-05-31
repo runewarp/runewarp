@@ -104,6 +104,8 @@ jobs:
     environment: release
     permissions:
       contents: read
+    env:
+      RELEASE_RUST_CACHE_SCOPE: ${{ format('release-{0}', needs.gate.outputs.release_tag) }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -119,6 +121,20 @@ jobs:
           persist-credentials: false
           path: release-source
           ref: ${{ needs.gate.outputs.release_source_ref }}
+
+      - name: Restore Rust build cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/registry/src/
+            ~/.cargo/git/db/
+            ~/.cargo/git/checkouts/
+            release-source/target/
+          key: ${{ runner.os }}-rust-release-${{ env.RELEASE_RUST_CACHE_SCOPE }}-${{ hashFiles('release-source/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-release-${{ env.RELEASE_RUST_CACHE_SCOPE }}-
 
       - name: Install Rust toolchain
         run: |
@@ -161,6 +177,8 @@ jobs:
     environment: release
     permissions:
       contents: read
+    env:
+      RELEASE_DOCKER_CACHE_SCOPE: ${{ format('release-{0}-amd64', needs.gate.outputs.release_tag) }}
     outputs:
       docker_exists: ${{ steps.docker-status.outputs.exists }}
       image_digest: ${{ steps.build-image.outputs.digest }}
@@ -206,6 +224,8 @@ jobs:
           file: ./release-source/Dockerfile
           platforms: linux/amd64
           outputs: type=docker,dest=/tmp/runewarp-amd64.tar
+          cache-from: type=gha,scope=${{ env.RELEASE_DOCKER_CACHE_SCOPE }}
+          cache-to: type=gha,scope=${{ env.RELEASE_DOCKER_CACHE_SCOPE }},mode=max
           provenance: false
 
       - name: Build and push amd64 release image by digest
@@ -217,6 +237,8 @@ jobs:
           file: ./release-source/Dockerfile
           platforms: linux/amd64
           outputs: type=image,name=${{ needs.gate.outputs.image_repository }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ env.RELEASE_DOCKER_CACHE_SCOPE }}
+          cache-to: type=gha,scope=${{ env.RELEASE_DOCKER_CACHE_SCOPE }},mode=max
           provenance: mode=max
   docker-release-arm64:
     name: Publish Docker Hub arm64 release
@@ -228,6 +250,8 @@ jobs:
     environment: release
     permissions:
       contents: read
+    env:
+      RELEASE_DOCKER_CACHE_SCOPE: ${{ format('release-{0}-arm64', needs.gate.outputs.release_tag) }}
     outputs:
       docker_exists: ${{ steps.docker-status.outputs.exists }}
       image_digest: ${{ steps.build-image.outputs.digest }}
@@ -273,6 +297,8 @@ jobs:
           file: ./release-source/Dockerfile
           platforms: linux/arm64
           outputs: type=docker,dest=/tmp/runewarp-arm64.tar
+          cache-from: type=gha,scope=${{ env.RELEASE_DOCKER_CACHE_SCOPE }}
+          cache-to: type=gha,scope=${{ env.RELEASE_DOCKER_CACHE_SCOPE }},mode=max
           provenance: false
 
       - name: Build and push arm64 release image by digest
@@ -284,6 +310,8 @@ jobs:
           file: ./release-source/Dockerfile
           platforms: linux/arm64
           outputs: type=image,name=${{ needs.gate.outputs.image_repository }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ env.RELEASE_DOCKER_CACHE_SCOPE }}
+          cache-to: type=gha,scope=${{ env.RELEASE_DOCKER_CACHE_SCOPE }},mode=max
           provenance: mode=max
 
   docker-release-manifest:

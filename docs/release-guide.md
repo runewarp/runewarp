@@ -38,7 +38,7 @@ The release workflow is intentionally narrow about what can cross from untrusted
 | Fork and PR code | PR validation runs in `CI` on `pull_request`; it does not publish and does not unlock release secrets. | Untrusted contributions can exercise the normal contract without crossing into privileged automation. |
 | Secrets | Real publication secrets exist only in the GitHub `release` environment and are consumed only by the publish jobs. | Ordinary CI jobs do not need registry credentials. |
 | OIDC | Only the Docker publish job requests `id-token: write`, and only for the real tag-driven release path. | Sigstore signing stays scoped to the job that actually publishes images. |
-| Caches | Rust CI caches are split between PR runs and trusted branch runs, and the release workflow rebuilds from the trusted repository state instead of consuming PR artifacts. | Cache poisoning and artifact handoff do not bridge the untrusted-to-trusted boundary. |
+| Caches | Rust and Docker caches are split between PR CI, trusted branch CI, and trusted release scopes. Release rehearsal warms only the release-scoped caches for the selected tag, and release publish rebuilds from the trusted release source tree instead of consuming PR artifacts. | Cache poisoning and artifact handoff do not bridge the untrusted-to-trusted boundary. |
 | Allowed actions | Workflow dependencies stay intentionally curated and third-party actions are pinned to full commit SHAs. | The workflow dependency surface does not drift through mutable action tags. |
 | Release tags | Real publication starts only from an SSH-signed stable `vX.Y.Z` tag, and the workflow also verifies the tagged commit already passed `CI` and is reachable from `origin/main`. | A tag alone is not enough; it still has to point at a trusted, already-validated release commit. |
 | Token permissions | Each workflow declares minimal job permissions instead of inheriting broad defaults. | A compromised job gets the smallest GitHub API surface that still lets it do its work. |
@@ -65,7 +65,7 @@ Use the `Release` workflow's manual form when you want a non-publishing rehearsa
 4. Confirm the workflow summary shows rehearsal mode, the workflow ref, the release source ref, the release commit, the expected release version, the exact Docker tags, and the rendered release notes preview.
 5. Treat any rehearsal failure as a release-prep problem. Fix the candidate on `main`, let `CI` go green again, and rerun the rehearsal.
 
-Rehearsal validates release metadata and gates, runs `cargo publish --dry-run`, and rebuilds the native `amd64` and `arm64` Docker release images, but it does not push Docker images, publish the crate, sign images, or create the GitHub Release.
+Rehearsal validates release metadata and gates, runs `cargo publish --dry-run`, and rebuilds the native `amd64` and `arm64` Docker release images, but it does not push Docker images, publish the crate, sign images, or create the GitHub Release. Those rehearsal builds still warm the release-only Rust and Docker caches for the selected tag so the later real publish can reuse trusted build state.
 
 ## Real tag release
 

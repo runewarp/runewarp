@@ -91,7 +91,7 @@ module Runewarp
 
     def build_image(repo_root, image_tag)
       Core.section("Building local Runewarp image")
-      Shell.run!("docker", "build", "--file", File.join(repo_root, "Dockerfile"), "--tag", image_tag, repo_root)
+      Shell.run!(*DockerBuild.command(repo_root: repo_root, image_tag: image_tag))
     end
 
     def prepare_directories(paths)

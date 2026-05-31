@@ -47,7 +47,7 @@ docker pull runewarp/runewarp
 
 ## Compatibility
 
-Runewarp is a public pre-1.0 release line. Patch releases aim to stay low-risk, but minor releases may include breaking CLI or configuration changes.
+Runewarp is pre-1.0. Patch releases aim to stay low-risk, but minor releases may include breaking CLI or configuration changes.
 
 ## Architecture
 

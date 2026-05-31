@@ -16,7 +16,7 @@ Runewarp is an ingress tunneling platform for securely exposing local services o
 
 ## Install
 
-Available from [crates.io](https://crates.io/crates/runewarp):
+CLI from [crates.io](https://crates.io/crates/runewarp):
 ```bash
 cargo install runewarp
 ```
@@ -28,7 +28,7 @@ docker pull runewarp/runewarp
 
 ## Get started
 
-1. Run the Docker example in [`examples/docker/README.md`](examples/docker/README.md) to see the end-to-end path.
+1. See the Docker example in [`examples/docker/README.md`](examples/docker/README.md) for the end-to-end path.
 2. Use [`docs/usage.md`](docs/usage.md) for the operator workflow.
 3. Use [`docs/configuration.md`](docs/configuration.md) for config keys, defaults, and examples.
 

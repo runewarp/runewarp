@@ -34,7 +34,7 @@ docker pull runewarp/runewarp
 
 ## Goals
 
-- **TLS passthrough ingress tunneling** — Server routes traffic by SNI without terminating or inspecting TLS
+- **TLS passthrough ingress tunneling** — Server routes traffic by SNI without terminating TLS
 - **Privacy-respecting by design** — Server never sees HTTP headers or application plaintext
 - **Traverse NAT and firewalls** — Client uses outbound QUIC, so no port forwarding or public IP is required
 - **Self-hostable and operator-controlled** — single Rust binary for both Client and Server
@@ -83,14 +83,14 @@ How Runewarp compares to other tunnel tools:
 
 A managed cloud gateway focused on developer workflows, edge routing, and traffic policy.
 
-- **Runewarp Server only operates on TLS:** no edge traffic policy, header inspection, or request transformation on the public **Server**.
+- **Runewarp Server only operates on TLS:** no edge traffic policy, header inspection, or request transformation on the public Server.
 - **ngrok edge-side workflows:** managed policy, routing, and developer ergonomics are part of the platform.
 
 ### vs [Cloudflare Tunnel](https://developers.cloudflare.com/tunnel/)
 
 A managed connector into Cloudflare's edge, with routing and platform features built around that edge.
 
-- **Runewarp is fully operator-run:** open source on both the **Client** and **Server**, self-hosted public ingress.
+- **Runewarp is fully operator-run:** open source on both the Client and Server, self-hosted public ingress.
 - **Cloudflare fits managed-edge workflows:** CDN, WAF, Access, DDoS protection, and other platform features come with the service.
 
 ### vs [Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel)
@@ -104,7 +104,7 @@ A tailnet-based way to publish a local service publicly without exposing the dev
 
 A simple, open-source client/server tunneling tool whose config model and simple client/server architecture helped inspire Runewarp.
 
-- **Runewarp keeps routing explicit:** one QUIC/TLS **Tunnel connection** per **Client instance**, **Server-authoritative routing** by **Public hostname**, and no separate control channel.
+- **Runewarp keeps routing explicit:** one QUIC/TLS Tunnel connection per Client instance, Server-authoritative routing by Public hostname, and no separate control channel.
 - **rathole supports more protocols today:** service tokens, UDP forwarding, and more transport options.
 
 ## Documentation

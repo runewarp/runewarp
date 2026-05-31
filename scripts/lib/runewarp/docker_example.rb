@@ -16,8 +16,8 @@ module Runewarp
 
       Core.section("Preparing Docker example state")
       prepare_directories(paths)
-      assert_complete_or_empty("server certificate material", paths[:server_source_dir], SERVER_SOURCE_FILES)
-      assert_complete_or_empty("client identity material", paths[:client_source_dir], CLIENT_SOURCE_FILES)
+      assert_complete_or_empty("server certificate material", paths[:server_runtime_dir], SERVER_RUNTIME_FILES)
+      assert_complete_or_empty("client identity material", paths[:client_runtime_dir], CLIENT_RUNTIME_FILES)
       build_image(repo_root, IMAGE_TAG)
       prepare_server_certificate_material(example_dir, paths, IMAGE_TAG)
       prepare_client_identity_material(example_dir, paths, IMAGE_TAG)
@@ -25,7 +25,7 @@ module Runewarp
 
       Core.success("Docker example is ready")
       Core.note("Generated state: #{generated_dir}")
-      Core.note("Source material: generated/server/source-data and generated/client/source-data")
+      Core.note("Runtime material: generated/server/data and generated/client/data")
     end
 
     def smoke(example_dir:, repo_root:)
@@ -63,14 +63,13 @@ module Runewarp
     end
 
     IMAGE_TAG = "runewarp/runewarp:local"
-    SERVER_SOURCE_FILES = [
+    CONTAINER_XDG_DATA_HOME = "/tmp/runewarp-data"
+    SERVER_RUNTIME_FILES = [
       "server.crt",
       "server.key",
-      "server-ca.crt",
-      "state/server-ca.key",
-      "state/server-hostname.txt"
+      "server-ca.crt"
     ].freeze
-    CLIENT_SOURCE_FILES = ["client.crt", "client.key", "client-identity.txt"].freeze
+    CLIENT_RUNTIME_FILES = ["client.crt", "client.key", "client-identity.txt"].freeze
 
     def layout(example_dir)
       generated_dir = File.join(example_dir, "generated")
@@ -80,11 +79,8 @@ module Runewarp
 
       {
         generated_dir: generated_dir,
-        server_source_dir: File.join(server_service_dir, "source-data", "runewarp", "server", "cert"),
-        server_state_dir: File.join(server_service_dir, "source-data", "runewarp", "server", "cert", "state"),
         server_runtime_dir: File.join(server_service_dir, "data", "runewarp", "server", "cert"),
         server_config_path: File.join(server_service_dir, "config", "runewarp", "config.toml"),
-        client_source_dir: File.join(client_service_dir, "source-data", "runewarp", "client", "identity"),
         client_runtime_dir: File.join(client_service_dir, "data", "runewarp", "client", "identity"),
         client_trust_path: File.join(client_service_dir, "data", "runewarp", "client", "server-ca.crt"),
         client_config_path: File.join(client_service_dir, "config", "runewarp", "config.toml"),
@@ -100,11 +96,8 @@ module Runewarp
 
     def prepare_directories(paths)
       [
-        paths[:server_source_dir],
-        paths[:server_state_dir],
         paths[:server_runtime_dir],
         File.dirname(paths[:server_config_path]),
-        paths[:client_source_dir],
         paths[:client_runtime_dir],
         File.dirname(paths[:client_config_path]),
         File.dirname(paths[:client_trust_path]),
@@ -127,55 +120,74 @@ module Runewarp
       Core.die("found incomplete #{label} in #{base_dir}; rerun ./scripts/docker-example prepare --reset to rebuild it cleanly")
     end
 
-    def run_runewarp_with_xdg_data_home(example_dir, image_tag, xdg_data_home, *arguments)
-      Shell.run!(
+    def run_runewarp_in_temp_container(image_tag, *arguments)
+      container_id = Shell.capture!(
         "docker",
-        "run",
-        "--rm",
-        "--user",
-        "#{Process.uid}:#{Process.gid}",
-        "--volume",
-        "#{example_dir}:/workspace",
+        "create",
         "--env",
-        "XDG_DATA_HOME=#{xdg_data_home}",
+        "XDG_DATA_HOME=#{CONTAINER_XDG_DATA_HOME}",
         image_tag,
         *arguments
-      )
+      ).strip
+
+      begin
+        Shell.run!("docker", "start", "-a", container_id)
+        yield container_id
+      ensure
+        system("docker", "rm", "--force", container_id, out: File::NULL, err: File::NULL, exception: false)
+      end
+    end
+
+    def install_container_files(container_id, container_root, destination_dir, relative_paths)
+      relative_paths.each do |relative_path|
+        destination_path = File.join(destination_dir, relative_path)
+        FileUtils.mkdir_p(File.dirname(destination_path))
+        Shell.run!("docker", "cp", "#{container_id}:#{container_root}/#{relative_path}", destination_path)
+        File.chmod(0o444, destination_path)
+      end
     end
 
     def prepare_server_certificate_material(example_dir, paths, image_tag)
       Core.section("Preparing server certificate material")
-      if SERVER_SOURCE_FILES.all? { |relative_path| File.file?(File.join(paths[:server_source_dir], relative_path)) }
+      if SERVER_RUNTIME_FILES.all? { |relative_path| File.file?(File.join(paths[:server_runtime_dir], relative_path)) }
         Core.note("Reusing existing server certificate material")
         return
       end
 
       Core.note("Generating certificate material for tunnel.example.test")
-      run_runewarp_with_xdg_data_home(example_dir, image_tag, "/workspace/generated/server/source-data", "server", "cert", "init", "--hostname", "tunnel.example.test")
+      run_runewarp_in_temp_container(image_tag, "server", "cert", "init", "--hostname", "tunnel.example.test") do |container_id|
+        install_container_files(
+          container_id,
+          "#{CONTAINER_XDG_DATA_HOME}/runewarp/server/cert",
+          paths[:server_runtime_dir],
+          SERVER_RUNTIME_FILES
+        )
+      end
     end
 
     def prepare_client_identity_material(example_dir, paths, image_tag)
       Core.section("Preparing client identity material")
-      if CLIENT_SOURCE_FILES.all? { |relative_path| File.file?(File.join(paths[:client_source_dir], relative_path)) }
+      if CLIENT_RUNTIME_FILES.all? { |relative_path| File.file?(File.join(paths[:client_runtime_dir], relative_path)) }
         Core.note("Reusing existing client identity material")
         return
       end
 
       Core.note("Generating client identity material")
-      run_runewarp_with_xdg_data_home(example_dir, image_tag, "/workspace/generated/client/source-data", "client", "identity", "init")
+      run_runewarp_in_temp_container(image_tag, "client", "identity", "init") do |container_id|
+        install_container_files(
+          container_id,
+          "#{CONTAINER_XDG_DATA_HOME}/runewarp/client/identity",
+          paths[:client_runtime_dir],
+          CLIENT_RUNTIME_FILES
+        )
+      end
     end
 
     def render_runtime_configuration(paths, example_dir)
       Core.section("Rendering Docker example configuration")
-      Core.install_readonly_copy(File.join(paths[:server_source_dir], "server.crt"), File.join(paths[:server_runtime_dir], "server.crt"))
-      Core.install_readonly_copy(File.join(paths[:server_source_dir], "server.key"), File.join(paths[:server_runtime_dir], "server.key"))
-      Core.install_readonly_copy(File.join(paths[:server_source_dir], "server-ca.crt"), File.join(paths[:server_runtime_dir], "server-ca.crt"))
-      Core.install_readonly_copy(File.join(paths[:client_source_dir], "client.crt"), File.join(paths[:client_runtime_dir], "client.crt"))
-      Core.install_readonly_copy(File.join(paths[:client_source_dir], "client.key"), File.join(paths[:client_runtime_dir], "client.key"))
-      Core.install_readonly_copy(File.join(paths[:client_source_dir], "client-identity.txt"), File.join(paths[:client_runtime_dir], "client-identity.txt"))
-      Core.install_readonly_copy(File.join(paths[:server_source_dir], "server-ca.crt"), paths[:client_trust_path])
+      Core.install_readonly_copy(File.join(paths[:server_runtime_dir], "server-ca.crt"), paths[:client_trust_path])
 
-      client_identity = File.read(File.join(paths[:client_source_dir], "client-identity.txt"), encoding: "utf-8").delete(" \n\r\t")
+      client_identity = File.read(File.join(paths[:client_runtime_dir], "client-identity.txt"), encoding: "utf-8").delete(" \n\r\t")
       server_template = File.read(File.join(example_dir, "server", "config.toml.template"), encoding: "utf-8")
       File.write(paths[:server_config_path], server_template.gsub("__CLIENT_IDENTITY__", client_identity), encoding: "utf-8")
       FileUtils.cp(File.join(example_dir, "client", "config.toml.template"), paths[:client_config_path])

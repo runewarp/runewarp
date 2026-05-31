@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Replaced the repository-owned release, CI, workflow-lint, Docker example, and release publication helper scripts with Ruby entry points and Ruby automation tests, and removed the repo-owned git hooks.
 - Refactored the Ruby automation layout around executable kebab-case entrypoints, moved Ruby tests under `scripts/test`, and replaced the old Docker example wrappers with `./scripts/docker-example`.
 - Deepened hostname handling around distinct typed **Server hostname** and **Public hostname** values so config validation, ClientHello parsing, and routing all share one canonical normalization seam.
+- Simplified Docker example preparation so it stages only the runtime material needed by the read-only Compose mounts, avoiding the old `source-data` directories while keeping Linux CI-safe permissions for the distroless `nonroot` containers.
 
 ## [0.1.0] - 2026-05-29
 

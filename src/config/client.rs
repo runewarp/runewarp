@@ -1,14 +1,18 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::config::validate_prepared_client_config;
-use crate::config_preparation::client::{
+use super::preparation::client::{
     PreparedClientConfig, prepare_client_config_from_cli, prepare_selected_client_config,
 };
-use crate::{
-    ClientConfig, ConfigFileError, XdgPathError, default_client_identity_material_dir,
-    default_client_public_cert_material_dir,
+pub use super::{
+    ClientConfig, ClientPublicCertConfig, ClientTlsMode, ConfigFileError, ServiceConfig,
+    load_client_config as load_config,
+    resolve_client_identity_material_dir_from_config as resolve_identity_material_dir_from_config,
+    resolve_client_public_cert_material_dir_from_config as resolve_public_cert_material_dir_from_config,
+    resolve_terminating_hostnames_from_config as resolve_terminating_hostnames,
 };
+use crate::XdgPathError;
+use crate::{default_client_identity_material_dir, default_client_public_cert_material_dir};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClientRuntimeArgs {
@@ -112,11 +116,11 @@ impl std::error::Error for ClientConfigResolutionError {
     }
 }
 
-pub fn select_client_config(config: Option<PathBuf>) -> Result<SelectedClientConfig, XdgPathError> {
-    crate::config_preparation::client::select_client_config(config)
+pub fn select_config(config: Option<PathBuf>) -> Result<SelectedClientConfig, XdgPathError> {
+    super::preparation::client::select_client_config(config)
 }
 
-pub fn resolve_client_config_from_cli(
+pub fn resolve_config_from_cli(
     config: Option<PathBuf>,
     runtime: ClientRuntimeArgs,
 ) -> Result<ClientConfig, ClientConfigResolutionError> {
@@ -124,7 +128,7 @@ pub fn resolve_client_config_from_cli(
     validate_resolved_client_config(prepared)
 }
 
-pub fn resolve_selected_client_config(
+pub fn resolve_selected_config(
     selected_config: SelectedClientConfig,
     runtime: &ClientRuntimeArgs,
     defaults: &ClientConfigResolutionDefaults,
@@ -140,12 +144,31 @@ pub fn resolve_selected_client_config(
     validate_resolved_client_config(prepared)
 }
 
+pub fn select_client_config(config: Option<PathBuf>) -> Result<SelectedClientConfig, XdgPathError> {
+    select_config(config)
+}
+
+pub fn resolve_client_config_from_cli(
+    config: Option<PathBuf>,
+    runtime: ClientRuntimeArgs,
+) -> Result<ClientConfig, ClientConfigResolutionError> {
+    resolve_config_from_cli(config, runtime)
+}
+
+pub fn resolve_selected_client_config(
+    selected_config: SelectedClientConfig,
+    runtime: &ClientRuntimeArgs,
+    defaults: &ClientConfigResolutionDefaults,
+) -> Result<ClientConfig, ClientConfigResolutionError> {
+    resolve_selected_config(selected_config, runtime, defaults)
+}
+
 fn validate_resolved_client_config(
     prepared: PreparedClientConfig,
 ) -> Result<ClientConfig, ClientConfigResolutionError> {
     let selected_path = prepared.selected_path.clone();
     let validation_path = selected_path.as_deref().unwrap_or_else(|| Path::new("."));
-    validate_prepared_client_config(validation_path, prepared).map_err(|error| {
+    super::validate_prepared_client_config(validation_path, prepared).map_err(|error| {
         match (selected_path.as_deref(), error) {
             (
                 None,

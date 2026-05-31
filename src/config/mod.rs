@@ -7,12 +7,16 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::config_preparation::PreparedDirectory;
-use crate::config_preparation::client::{
+pub mod client;
+mod preparation;
+pub mod server;
+
+use self::preparation::PreparedDirectory;
+use self::preparation::client::{
     PreparedClientAcmeConfig, PreparedClientConfig, PreparedClientServiceConfig,
     PreparedClientTlsMode, PreparedClientTrust,
 };
-use crate::config_preparation::server::{
+use self::preparation::server::{
     PreparedServerAcmeConfig, PreparedServerConfig, PreparedServerTunnelConfig,
 };
 use crate::server_address::ServerAddress;
@@ -232,20 +236,20 @@ impl std::error::Error for ServerConfigResolutionError {
 }
 
 pub fn load_server_config(path: &Path) -> Result<ServerConfig, ConfigFileError> {
-    let prepared = crate::config_preparation::server::prepare_server_config_from_path(path)?;
+    let prepared = preparation::server::prepare_server_config_from_path(path)?;
     validate_prepared_server_config(path, prepared)
 }
 
 pub fn resolve_server_config_from_cli(
     config: Option<PathBuf>,
 ) -> Result<ServerConfig, ServerConfigResolutionError> {
-    let config_path = crate::config_preparation::server::select_server_config_path(config)
+    let config_path = preparation::server::select_server_config_path(config)
         .map_err(ServerConfigResolutionError::XdgPath)?;
     load_server_config(&config_path).map_err(ServerConfigResolutionError::ConfigFile)
 }
 
 pub fn load_client_config(path: &Path) -> Result<ClientConfig, ConfigFileError> {
-    let prepared = crate::config_preparation::client::prepare_client_config_from_path(path)?;
+    let prepared = preparation::client::prepare_client_config_from_path(path)?;
     validate_prepared_client_config(path, prepared)
 }
 

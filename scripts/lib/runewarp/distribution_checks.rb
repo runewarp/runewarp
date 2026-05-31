@@ -117,7 +117,7 @@ module Runewarp
       Core.section("Building Docker image")
       Core.note("Repository root: #{repo_root}")
       Core.note("Image tag: #{image_tag}")
-      Shell.run!("docker", "build", "--file", File.join(repo_root, "Dockerfile"), "--tag", image_tag, repo_root, out: File::NULL)
+      Shell.run!(*DockerBuild.command(repo_root: repo_root, image_tag: image_tag), out: File::NULL)
 
       Core.section("Checking Docker image startup")
       output = Shell.capture!("docker", "run", "--rm", image_tag, probe_arg)

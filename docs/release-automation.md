@@ -20,6 +20,12 @@ These checks run on both pull requests and `main` pushes and roll up into one re
 
 Local workflow edits can run `./scripts/lint-workflows` directly, and `./scripts/test-automation` exercises the repository-owned Ruby workflow helpers against the same public entry points used by CI.
 
+CI cache scope stays intentionally split by trust level:
+
+- pull request runs share Rust dependency and Docker Buildx layer caches only with later runs of that same pull request
+- trusted `main` pushes use their own Rust dependency and Docker Buildx layer caches
+- release jobs do not read from the CI cache namespace
+
 ## Release workflow
 
 The `Release` workflow has two entry paths:
@@ -58,6 +64,8 @@ For manual `rehearsal`, the workflow:
 7. summarizes the workflow ref, release source ref, release commit, exact Docker tags, and rendered release notes that the real release would use
 8. skips Docker Hub publication, Sigstore signing, and GitHub Release mutation
 
+Rehearsal still writes into the trusted release cache scope for the selected `release_tag`, so the later real publish for that same tag can reuse the warmed Rust and Docker build state.
+
 ### Manual publish mode
 
 For manual `publish`, the workflow:
@@ -80,6 +88,15 @@ The workflow keeps GitHub-specific orchestration and publish-job boundaries in Y
 - `scripts/lib/runewarp/workflow_helpers.rb` owns the GitHub API, crates.io API, Docker manifest merge, release-summary, and GitHub Release upsert helpers that the release workflow shells out to through Ruby entry points
 - per-architecture Docker builds and manifest publication still live in the workflow because runner selection, registry login, and digest promotion are GitHub-hosted orchestration concerns
 - post-publish distribution-path probes are enforced in `CI`, not repeated in the release workflow
+
+## Cache boundaries
+
+The repository uses cache scope as part of the automation trust boundary:
+
+- Rust CI caches are keyed separately for pull requests and trusted `main` pushes
+- CI Docker builds use Buildx GHA cache scopes that are likewise split between pull requests and trusted `main` pushes
+- release rehearsal and release publish share only the release-scoped caches for the selected stable tag, so rehearsal can warm the eventual publish without crossing into CI caches
+- release jobs still rebuild from the trusted release source tree; they do not consume PR artifacts
 
 ## Release environment and secrets
 

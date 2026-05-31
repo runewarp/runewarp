@@ -128,6 +128,52 @@ class DistributionChecksTest < Minitest::Test
     end
   end
 
+  def test_docker_image_mode_uses_workflow_provided_build_cache_flags
+    Dir.mktmpdir do |repo_root|
+      write_minimal_binary_crate(repo_root, version: "0.3.1")
+      fake_bin_dir = File.join(repo_root, "fake-bin")
+      FileUtils.mkdir_p(fake_bin_dir)
+      commands_file = File.join(repo_root, "docker-commands.txt")
+      write_executable(
+        File.join(fake_bin_dir, "docker"),
+        <<~RUBY
+          #!/usr/bin/env ruby
+          File.open(#{commands_file.inspect}, "a", encoding: "utf-8") { |handle| handle.puts(ARGV.join(" ")) }
+          if ARGV[0..3] == ["buildx", "build", "--load", "--cache-from"]
+            exit(0)
+          elsif ARGV.first == "run"
+            puts("Usage: runewarp")
+            exit(0)
+          end
+          abort("unexpected docker invocation: \#{ARGV.inspect}")
+        RUBY
+      )
+
+      result = run_command(
+        ruby_script("scripts", "check-distribution"),
+        "docker-image",
+        "--repo-root",
+        repo_root,
+        "--image-tag",
+        "runewarp:test",
+        "--expected-text",
+        "Usage: runewarp",
+        "--probe-arg",
+        "--help",
+        env: {
+          "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}",
+          "RUNEWARP_DOCKER_BUILD_FLAGS" => "--cache-from type=gha,scope=ci --cache-to type=gha,scope=ci,mode=max"
+        }
+      )
+
+      assert(result.success?, result.stderr)
+      assert_equal(
+        "buildx build --load --cache-from type=gha,scope=ci --cache-to type=gha,scope=ci,mode=max --file #{File.join(repo_root, 'Dockerfile')} --tag runewarp:test #{repo_root}\nrun --rm runewarp:test --help\n",
+        File.read(commands_file, encoding: "utf-8")
+      )
+    end
+  end
+
   def test_docker_registry_image_mode_retries_until_the_image_is_available
     Dir.mktmpdir do |repo_root|
       write_minimal_binary_crate(repo_root, version: "0.3.1")

@@ -2,7 +2,7 @@
 name = "runewarp"
 version = "0.2.0-dev"
 edition = "2024"
-description = "Runewarp is an ingress tunneling tool for exposing local services without moving TLS termination to the edge. Clients connect out over QUIC, so you can publish services without putting your backend directly on the Internet or leaking your public IP."
+description = "Runewarp is an ingress tunneling platform for securely exposing local services over outbound QUIC connections."
 readme = "README.md"
 homepage = "https://runewarp.com"
 repository = "https://github.com/runewarp/runewarp"

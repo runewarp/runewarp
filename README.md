@@ -12,7 +12,7 @@
   </p>
 </div>
 
-Runewarp is an ingress tunneling platform for securely exposing local services over outbound QUIC connections. Publish them without opening inbound ports or exposing your public IP, while preserving end-to-end TLS with local termination.
+Runewarp is an ingress tunneling platform for securely exposing local services over outbound QUIC connections. Publish them without opening inbound ports or exposing your public IP, while preserving end-to-end TLS.
 
 ## Install
 

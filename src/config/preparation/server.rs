@@ -37,6 +37,7 @@ pub(crate) struct PreparedServerAcmeConfig {
 pub(crate) struct PreparedServerTunnelConfig {
     pub(crate) public_hostnames: Option<Vec<String>>,
     pub(crate) client_identity: Option<String>,
+    pub(crate) client_identities: Option<Vec<String>>,
 }
 
 pub(crate) fn select_server_config_path(config: Option<PathBuf>) -> Result<PathBuf, XdgPathError> {
@@ -146,6 +147,7 @@ fn prepare_server_tunnel(raw: RawServerTunnelConfig) -> PreparedServerTunnelConf
     PreparedServerTunnelConfig {
         public_hostnames: raw.public_hostnames,
         client_identity: raw.client_identity,
+        client_identities: raw.client_identities,
     }
 }
 
@@ -253,6 +255,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                         "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
                             .to_owned(),
                     ),
+                    client_identities: None,
                 }],
             },
             Vec::new(),
@@ -285,6 +288,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                         "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
                             .to_owned(),
                     ),
+                    client_identities: None,
                 }],
             },
             Vec::new(),
@@ -328,6 +332,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                         "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
                             .to_owned(),
                     ),
+                    client_identities: None,
                 }],
             },
             Vec::new(),

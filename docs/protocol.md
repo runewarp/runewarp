@@ -57,7 +57,7 @@ Each **Client instance** establishes one long-lived QUIC connection per effectiv
 2. Dial the UDP port from that **Server address**, defaulting to `443` when the port is omitted.
 3. Negotiate QUIC with ALPN `runewarp/1`.
 4. Validate the Server certificate for that **Server address**'s **Server hostname**, using either system trust or `client.server-trust = "ca-file"` with an exclusive CA bundle.
-5. Present the Client certificate and authenticate the pinned `client-identity` from its public key.
+5. Present the Client certificate and authenticate one of the Tunnel's pinned `client-identity` values from its public key.
 
 Rules:
 
@@ -125,7 +125,7 @@ Failure and reconnect logs report the chosen next retry delay as `next-retry-del
 
 When the remote **Server** exits gracefully, the **Client instance** still treats the closed **Tunnel connection** as an ordinary disconnect and keeps the same reconnect model above. There is no shutdown-specific reconnect branch.
 
-If a new authenticated connection replaces an older connection for the same **Tunnel**, the older connection closes and any streams on it are lost.
+If a new authenticated connection replaces an older connection for the same **Tunnel**, including when it used a different authorized **Client identity**, the older connection closes and any streams on it are lost.
 
 ## Runtime invariants
 

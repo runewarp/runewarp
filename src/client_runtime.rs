@@ -486,7 +486,7 @@ mod tests {
             server_hostname: server_hostname("localhost"),
             configured_tunnels: vec![ServerTunnelConfig {
                 public_hostnames: vec![public_hostname("app.example.test")],
-                client_identity: client_identity.client_identity.clone(),
+                authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
             public_tls_config: None,
             quic_server_config: make_server_quic_config_with_client_auth(

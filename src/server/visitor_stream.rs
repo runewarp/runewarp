@@ -335,7 +335,7 @@ mod tests {
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 public_hostnames: vec![public_hostname("App.Example.Test.")],
-                client_identity: client_identity.client_identity.clone(),
+                authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
@@ -575,7 +575,7 @@ mod tests {
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 public_hostnames: vec![public_hostname("App.Example.Test.")],
-                client_identity: client_identity.client_identity.clone(),
+                authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
@@ -601,7 +601,7 @@ mod tests {
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 public_hostnames: vec![public_hostname("App.Example.Test.")],
-                client_identity: client_identity.client_identity.clone(),
+                authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;

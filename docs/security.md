@@ -60,7 +60,7 @@ The tunnel-connection trust model is:
 1. the Server presents a certificate for `server.hostname`
 2. the Client validates that certificate through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle
 3. the Client presents its own certificate
-4. the Server verifies the pinned `client-identity` from the Client public key
+4. the Server verifies one of the Tunnel's pinned `client-identity` values from the Client public key
 
 The pinned value is the client public key, not the certificate lifetime or serial number.
 

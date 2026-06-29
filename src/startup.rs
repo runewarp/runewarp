@@ -47,7 +47,7 @@ impl PreparedServer {
         let trusted_client_identities = config
             .tunnels
             .iter()
-            .map(|tunnel| tunnel.client_identity.clone())
+            .flat_map(|tunnel| tunnel.authorized_client_identities.iter().cloned())
             .collect::<Vec<_>>();
         let (quic_server_config, acme_runtime) = match &config.certificate {
             ServerCertificateConfig::Manual { directory } => {
@@ -1250,10 +1250,12 @@ mod tests {
             tunnel_connection_bind_address: "127.0.0.1:0".parse().unwrap(),
             tunnels: vec![ServerTunnelConfig {
                 public_hostnames: vec![public_hostname("app.example.test")],
-                client_identity: ClientIdentity::from_str(
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                )
-                .unwrap(),
+                authorized_client_identities: vec![
+                    ClientIdentity::from_str(
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .unwrap(),
+                ],
             }],
         }
     }

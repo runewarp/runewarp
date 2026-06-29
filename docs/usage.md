@@ -71,7 +71,7 @@ Create the Client keypair, certificate, and durable `client-identity`:
 runewarp client identity init
 ```
 
-Read the generated `client-identity.txt` value and place it into the matching Server `[[server.tunnels]]` entry as `client-identity`.
+Read the generated `client-identity.txt` value and place it into the matching Server `[[server.tunnels]]` entry as either `client-identity` or one entry in `client-identities`.
 
 To print only the fingerprint for scripts:
 

@@ -798,7 +798,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_client_identities() {
     assert!(
         error
             .to_string()
-            .contains("server.tunnels[].client-identity must be unique")
+            .contains("authorized Client identities must be unique across all Server Tunnels")
     );
 }
 
@@ -2183,7 +2183,7 @@ fn configured_tunnel(
             .iter()
             .map(|hostname| public_hostname(hostname))
             .collect(),
-        client_identity: client_identity.client_identity.clone(),
+        authorized_client_identities: vec![client_identity.client_identity.clone()],
     }
 }
 

@@ -9,7 +9,7 @@ Runewarp `0.1.x` is a public pre-1.0 release line. Minor releases may include br
 | Config area | Owns |
 | --- | --- |
 | `[server]` | Public routing, Server identity, and the Server certificate path |
-| `[[server.tunnels]]` | Explicit **Public hostname** authorization and the pinned **Client identity** for one **Tunnel** |
+| `[[server.tunnels]]` | Explicit **Public hostname** authorization and one or more pinned **Client identities** for one **Tunnel** |
 | `[client]` | Tunnel dialing, Server trust, Client identity material, and optional terminate-mode certificate management |
 | `[[client.services]]` | Local routing from one or more **Public hostnames** to one **Local backend**, with per-Service TLS mode |
 
@@ -74,7 +74,10 @@ hostname = "tunnel.example.com"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.com", "api.example.com"]
-client-identity = "4f7b6f7a9b0f0d2b..."
+client-identities = [
+  "4f7b6f7a9b0f0d2b...",
+  "91e92c8a5df6a44e...",
+]
 ```
 
 Add `[server.acme]` for the ACME path, or `server.cert-dir` for the manual/private-CA path.
@@ -163,7 +166,8 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `server.acme.email` | with ACME | Let's Encrypt ACME contact address. TLS-ALPN-01 only. |
 | `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp uses the XDG default state path and creates it during startup after validation succeeds. |
 | `server.tunnels[].public-hostnames` | yes | One or more exact **Public hostnames** routed through this Tunnel. |
-| `server.tunnels[].client-identity` | yes | Lowercase hex SHA-256 fingerprint of the Client public key's SubjectPublicKeyInfo. |
+| `server.tunnels[].client-identity` | with singular authorization | Lowercase hex SHA-256 fingerprint of one authorized Client public key's SubjectPublicKeyInfo. Mutually exclusive with `server.tunnels[].client-identities`. |
+| `server.tunnels[].client-identities` | with plural authorization | One or more lowercase hex SHA-256 fingerprints of authorized Client public keys' SubjectPublicKeyInfo values. Mutually exclusive with `server.tunnels[].client-identity`. |
 
 ### Client
 
@@ -246,8 +250,9 @@ Runewarp supports two Client trust modes:
 - `client.server-trust` must be either `system` or `ca-file`
 - `client.server-ca-file` may be set only when `client.server-trust = "ca-file"`
 - `--backend-address` may be used only when the selected config contributes no `[[client.services]]` blocks
-- all `client-identity` values must be lowercase hex without colons
-- all `client-identity` values must be unique across Server Tunnels
+- every `client-identity` value and every entry in `client-identities` must be lowercase hex without colons
+- `server.tunnels[].client-identity` and `server.tunnels[].client-identities` are mutually exclusive
+- every authorized Client identity must be unique across all Server Tunnels
 - `server.public-bind-address` and `server.tunnel-bind-address` must be literal socket addresses
 - the selected or defaulted material directories and files must exist and be readable, except that omitted ACME state directories are resolved during config preparation and created only during startup after validation succeeds
 - `backend-address` must parse as a TCP address or host:port pair

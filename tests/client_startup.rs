@@ -37,7 +37,7 @@ async fn prepared_client_connects_from_validated_settings() {
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],
-            client_identity: client_identity.client_identity.clone(),
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
@@ -104,12 +104,14 @@ async fn prepared_client_uses_the_configured_server_address_port() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
-        tunnel_connection_bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+        // Bind dual-stack wildcard listeners so `localhost` resolution order does not make
+        // this port-selection test flaky across environments.
+        public_bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        tunnel_connection_bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
         server_hostname: server_hostname("localhost"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],
-            client_identity: client_identity.client_identity.clone(),
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
@@ -193,7 +195,7 @@ async fn prepared_client_rejects_settings_without_services() {
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],
-            client_identity: client_identity.client_identity.clone(),
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
@@ -444,7 +446,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],
-            client_identity: client_identity.client_identity.clone(),
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
@@ -553,7 +555,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
                 public_hostname("app.example.test"),
                 public_hostname("api.example.test"),
             ],
-            client_identity: client_identity.client_identity.clone(),
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
@@ -646,7 +648,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],
-            client_identity: client_identity.client_identity.clone(),
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
@@ -744,7 +746,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
                 public_hostname("app.example.test"),
                 public_hostname("api.example.test"),
             ],
-            client_identity: client_identity.client_identity.clone(),
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(

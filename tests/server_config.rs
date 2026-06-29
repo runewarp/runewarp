@@ -40,6 +40,54 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         hostname_strings(&settings.tunnels[0].public_hostnames),
         vec!["app.example.test", "api.example.test"]
     );
+    assert_eq!(
+        settings.tunnels[0]
+            .authorized_client_identities
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"]
+    );
+}
+
+#[test]
+fn server_config_accept_plural_client_identities() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "Tunnel.Example.Test."
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["App.Example.Test.", "api.example.test"]
+client-identities = [
+  "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+  "111122223333444455556666777788889999aaaabbbbccccddddeeeeffff0000",
+]
+"#,
+    )
+    .unwrap();
+
+    let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(
+        settings.tunnels[0]
+            .authorized_client_identities
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec![
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            "111122223333444455556666777788889999aaaabbbbccccddddeeeeffff0000",
+        ]
+    );
 }
 
 #[test]
@@ -392,7 +440,9 @@ client-public-key-fingerprint = "00112233445566778899aabbccddeeff001122334455667
     assert!(message.contains("unknown field `key-file`"));
     assert!(message.contains("unknown field `client-public-key-fingerprint`"));
     assert!(message.contains("server.cert-dir directory not found"));
-    assert!(message.contains("server.tunnels[].client-identity is required"));
+    assert!(message.contains(
+        "one of server.tunnels[].client-identity or server.tunnels[].client-identities is required"
+    ));
 }
 
 #[test]
@@ -559,6 +609,64 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert!(
         error
             .to_string()
-            .contains("server.tunnels[].client-identity must be unique")
+            .contains("authorized Client identities must be unique across all Server Tunnels")
     );
+}
+
+#[test]
+fn server_config_requires_one_authorized_client_identity_shape() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_config(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(error.to_string().contains(
+        "one of server.tunnels[].client-identity or server.tunnels[].client-identities is required"
+    ));
+}
+
+#[test]
+fn server_config_reject_singular_and_plural_client_identity_keys_together() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+client-identities = ["111122223333444455556666777788889999aaaabbbbccccddddeeeeffff0000"]
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_config(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(error.to_string().contains(
+        "server.tunnels[].client-identity and server.tunnels[].client-identities are mutually exclusive"
+    ));
 }

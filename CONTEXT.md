@@ -97,7 +97,7 @@ The operator-run local endpoint that a **Client** connects to after it selects a
 _Avoid_: Service, tunnel
 
 **Client identity**:
-The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime; ordinary renewal preserves it, while rotation changes it.
+The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime; ordinary renewal preserves it, while rotation changes it. One **Tunnel** may authorize one or more **Client identities** without changing the Tunnel's single-active-connection runtime behavior.
 _Avoid_: Certificate, serial number
 
 **Tunnel pool**:
@@ -141,6 +141,7 @@ _Avoid_: CI environment, deploy target
 - A **Server** selects exactly one **Tunnel** for each routed **Public hostname**
 - A **Client** can run as one or more **Client instances**
 - A **Tunnel** can have zero or more live **Tunnel connections**
+- A **Tunnel** authorizes one or more **Client identities**
 - Each **Tunnel connection** belongs to exactly one **Tunnel**
 - Each **Tunnel connection** belongs to exactly one **Client instance**
 - A **Client instance** establishes one or more **Tunnel connections**
@@ -167,6 +168,7 @@ _Avoid_: CI environment, deploy target
 - A **Client instance** forwards proxied traffic from its **Tunnel connection** to a **Local backend** through a selected **Service**
 - A **Client instance** uses exactly one **Client identity** at a time
 - A **Client identity** can be used by one or more **Client instances**
+- A **Client identity** can be authorized by one or more **Tunnels**
 - A **Tunnel pool** belongs to exactly one **Tunnel**
 - **Server-authoritative routing** uses **Public hostname authorization** before **Service hostname matching**
 - A **Tunnel** owns one or more explicit **Public hostnames**

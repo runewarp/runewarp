@@ -2183,7 +2183,7 @@ fn configured_tunnel(
             .iter()
             .map(|hostname| public_hostname(hostname))
             .collect(),
-        client_identity: client_identity.client_identity.clone(),
+        authorized_client_identities: vec![client_identity.client_identity.clone()],
     }
 }
 

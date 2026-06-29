@@ -59,7 +59,7 @@ pub struct ServerConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerTunnelConfig {
     pub public_hostnames: Vec<PublicHostname>,
-    pub client_identity: ClientIdentity,
+    pub authorized_client_identities: Vec<ClientIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,7 +126,7 @@ struct ValidatedOptionalPublicHostnames {
 struct ValidatedServerTunnel {
     settings: Option<ServerTunnelConfig>,
     public_hostnames: Vec<PublicHostname>,
-    client_identity: Option<ClientIdentity>,
+    authorized_client_identities: Vec<ClientIdentity>,
 }
 
 struct ValidatedClientService {
@@ -906,35 +906,28 @@ fn validate_prepared_server_tunnel(
     raw: PreparedServerTunnelConfig,
     messages: &mut Vec<String>,
 ) -> ValidatedServerTunnel {
+    let PreparedServerTunnelConfig {
+        public_hostnames,
+        client_identity,
+        client_identities,
+    } = raw;
     let public_hostnames = validate_required_public_hostnames(
         "server.tunnels[].public-hostnames",
-        raw.public_hostnames,
+        public_hostnames,
         messages,
     );
 
-    let client_identity = match raw.client_identity {
-        Some(client_identity) => match client_identity.parse::<ClientIdentity>() {
-            Ok(client_identity) => Some(client_identity),
-            Err(error) => {
-                messages.push(format!(
-                    "server.tunnels[].client-identity is invalid: {error}"
-                ));
-                None
-            }
-        },
-        None => {
-            messages.push("server.tunnels[].client-identity is required".to_owned());
-            None
-        }
-    };
+    let authorized_client_identities = validate_server_tunnel_authorized_client_identities(
+        client_identity,
+        client_identities,
+        messages,
+    );
 
     let settings = if public_hostnames.is_valid {
-        client_identity
-            .clone()
-            .map(|client_identity| ServerTunnelConfig {
-                public_hostnames: public_hostnames.values.clone(),
-                client_identity,
-            })
+        (!authorized_client_identities.is_empty()).then(|| ServerTunnelConfig {
+            public_hostnames: public_hostnames.values.clone(),
+            authorized_client_identities: authorized_client_identities.clone(),
+        })
     } else {
         None
     };
@@ -942,8 +935,72 @@ fn validate_prepared_server_tunnel(
     ValidatedServerTunnel {
         settings,
         public_hostnames: public_hostnames.values,
-        client_identity,
+        authorized_client_identities,
     }
+}
+
+fn validate_server_tunnel_authorized_client_identities(
+    client_identity: Option<String>,
+    client_identities: Option<Vec<String>>,
+    messages: &mut Vec<String>,
+) -> Vec<ClientIdentity> {
+    if client_identity.is_some() && client_identities.is_some() {
+        messages.push(
+            "server.tunnels[].client-identity and server.tunnels[].client-identities are mutually exclusive"
+                .to_owned(),
+        );
+        return Vec::new();
+    }
+
+    if let Some(client_identities) = client_identities {
+        return validate_client_identity_list(
+            "server.tunnels[].client-identities",
+            client_identities,
+            messages,
+        );
+    }
+
+    match client_identity {
+        Some(client_identity) => match client_identity.parse::<ClientIdentity>() {
+            Ok(client_identity) => vec![client_identity],
+            Err(error) => {
+                messages.push(format!(
+                    "server.tunnels[].client-identity is invalid: {error}"
+                ));
+                Vec::new()
+            }
+        },
+        None => {
+            messages.push("server.tunnels[].client-identity is required".to_owned());
+            Vec::new()
+        }
+    }
+}
+
+fn validate_client_identity_list(
+    field_name: &str,
+    client_identities: Vec<String>,
+    messages: &mut Vec<String>,
+) -> Vec<ClientIdentity> {
+    if client_identities.is_empty() {
+        messages.push(format!("{field_name} must not be empty"));
+        return Vec::new();
+    }
+
+    client_identities
+        .into_iter()
+        .filter_map(
+            |client_identity| match client_identity.parse::<ClientIdentity>() {
+                Ok(client_identity) => Some(client_identity),
+                Err(error) => {
+                    messages.push(format!(
+                        "{field_name} contains invalid identity `{client_identity}`: {error}"
+                    ));
+                    None
+                }
+            },
+        )
+        .collect()
 }
 
 fn validate_prepared_client_service(
@@ -1147,7 +1204,7 @@ fn validate_unique_client_identities(
 ) {
     let mut seen = HashSet::new();
     for tunnel in tunnels {
-        if let Some(identity) = &tunnel.client_identity {
+        for identity in &tunnel.authorized_client_identities {
             let identity = identity.to_string();
             if !seen.insert(identity.clone()) {
                 messages.push(format!(
@@ -1252,7 +1309,7 @@ pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value)
             if let Some(tunnel) = tunnel.as_table() {
                 push_unknown_table_fields(
                     tunnel,
-                    &["public-hostnames", "client-identity"],
+                    &["public-hostnames", "client-identity", "client-identities"],
                     &mut messages,
                 );
             }
@@ -1338,6 +1395,7 @@ pub(crate) struct RawServerAcmeConfig {
 pub(crate) struct RawServerTunnelConfig {
     pub(crate) public_hostnames: Option<Vec<String>>,
     pub(crate) client_identity: Option<String>,
+    pub(crate) client_identities: Option<Vec<String>>,
 }
 
 #[derive(Clone, Deserialize)]

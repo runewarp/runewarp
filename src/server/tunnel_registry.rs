@@ -60,22 +60,24 @@ impl TunnelRegistry {
         let mut seen_public_hostnames = HashSet::new();
         let mut tunnel_slots = Vec::with_capacity(tunnels.len());
         for (index, tunnel) in tunnels.iter().enumerate() {
-            if !seen_client_identities.insert(tunnel.client_identity.clone()) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "server.tunnels[].client-identity must be unique: {}",
-                        tunnel.client_identity
-                    ),
-                ));
-            }
             if tunnel.public_hostnames.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "server.tunnels[].public-hostnames must not be empty",
                 ));
             }
-            client_identity_to_tunnel.insert(tunnel.client_identity.clone(), index);
+            for client_identity in &tunnel.authorized_client_identities {
+                if !seen_client_identities.insert(client_identity.clone()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "server.tunnels[].client-identity must be unique: {}",
+                            client_identity
+                        ),
+                    ));
+                }
+                client_identity_to_tunnel.insert(client_identity.clone(), index);
+            }
             for hostname in &tunnel.public_hostnames {
                 if hostname.as_str() == server_hostname.as_str() {
                     return Err(io::Error::new(
@@ -238,7 +240,7 @@ mod tests {
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 public_hostnames: vec![public_hostname("app.example.test")],
-                client_identity: client_identity.client_identity.clone(),
+                authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
         )?;
         registry.register(fixture.server_connection).await;
@@ -260,7 +262,7 @@ mod tests {
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 public_hostnames: vec![public_hostname("app.example.test")],
-                client_identity: client_identity.client_identity.clone(),
+                authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
         )?;
 

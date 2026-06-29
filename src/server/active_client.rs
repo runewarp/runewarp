@@ -162,11 +162,11 @@ mod tests {
         let first_remote_addr = first_fixture.server_connection.remote_address();
         let second_remote_addr = second_fixture.server_connection.remote_address();
         let expected_first_log = format!(
-            "server tunnel connection accepted: client-identity={} remote-address={first_remote_addr}",
+            "server tunnel connection accepted: client-identity={}",
             client_identity.client_identity
         );
         let expected_second_log = format!(
-            "server tunnel connection accepted: client-identity={} remote-address={second_remote_addr}",
+            "server tunnel connection accepted: client-identity={}",
             client_identity.client_identity
         );
         let pool_for_registration = pool.clone();
@@ -194,6 +194,8 @@ mod tests {
 
         assert!(output.contains(&expected_first_log));
         assert!(output.contains(&expected_second_log));
+        assert!(!output.contains(first_remote_addr.to_string().as_str()));
+        assert!(!output.contains(second_remote_addr.to_string().as_str()));
         assert_eq!(pool.connection_count().await, 2);
         Ok(())
     }
@@ -266,7 +268,7 @@ mod tests {
         let pool = ActiveClientPool::new();
         let remote_addr = fixture.server_connection.remote_address();
         let expected_closed_log = format!(
-            "server tunnel connection closed: client-identity={} remote-address={remote_addr}",
+            "server tunnel connection closed: client-identity={}",
             client_identity.client_identity
         );
         let pool_for_registration = pool.clone();
@@ -291,6 +293,7 @@ mod tests {
         .await;
 
         assert!(output.contains(&expected_closed_log));
+        assert!(!output.contains(remote_addr.to_string().as_str()));
         assert_eq!(pool.connection_count().await, 0);
         Ok(())
     }

@@ -34,6 +34,7 @@ Runtime diagnostics follow the same boundary.
 - effective Client `server-address` values plus resolved socket addresses on connection-attempt lines
 - rejected or authenticated **Client identity** values on tunnel-auth warnings
 - Client `backend-address` values in routing diagnostics
+- tunnel lifecycle `remote-address` values only on debug-detail lines, not on info or warn summaries
 - graceful-shutdown lifecycle lines
 - `server acme challenge handled` with `server-hostname=...` for `acme-tls/1` traffic on the **Server hostname**
 - distinct Client ACME challenge-handling lines for terminating **Public hostnames**

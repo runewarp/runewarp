@@ -803,20 +803,16 @@ fn warning_line(role: &str, message: &str) -> String {
 
 fn server_tunnel_connection_accepted_line(
     client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
+    _remote_addr: SocketAddr,
 ) -> String {
-    format!(
-        "server tunnel connection accepted: client-identity={client_identity} remote-address={remote_addr}"
-    )
+    format!("server tunnel connection accepted: client-identity={client_identity}")
 }
 
 fn server_tunnel_connection_closed_line(
     client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
+    _remote_addr: SocketAddr,
 ) -> String {
-    format!(
-        "server tunnel connection closed: client-identity={client_identity} remote-address={remote_addr}"
-    )
+    format!("server tunnel connection closed: client-identity={client_identity}")
 }
 
 fn server_tunnel_connection_unauthorized_line(client_identity: &ClientIdentity) -> String {
@@ -826,9 +822,9 @@ fn server_tunnel_connection_unauthorized_line(client_identity: &ClientIdentity) 
     )
 }
 
-fn server_tunnel_connection_failed_line(remote_addr: SocketAddr, error: &str) -> String {
+fn server_tunnel_connection_failed_line(_remote_addr: SocketAddr, error: &str) -> String {
     format!(
-        "server tunnel connection failed: remote-address={remote_addr}: {}",
+        "server tunnel connection failed: {}",
         summarize_live_connection_error(error)
     )
 }
@@ -848,11 +844,11 @@ fn emit_server_tunnel_connection_dropped(
 
 fn server_tunnel_connection_dropped_line(
     client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
+    _remote_addr: SocketAddr,
     error: &str,
 ) -> String {
     format!(
-        "server tunnel connection dropped: client-identity={client_identity} remote-address={remote_addr}: {}",
+        "server tunnel connection dropped: client-identity={client_identity}: {}",
         summarize_live_connection_error(error)
     )
 }
@@ -1677,8 +1673,9 @@ mod tests {
             "WARN client tunnel connection dropped: server-address=tunnel.example.test:443 next-retry-delay=5s: timed out"
         ));
         assert!(info_output.contains(format!(
-            "WARN server tunnel connection dropped: client-identity={client_identity} remote-address={remote_addr}: peer sent malformed frame"
+            "WARN server tunnel connection dropped: client-identity={client_identity}: peer sent malformed frame"
         ).as_str()));
+        assert!(!info_output.contains(remote_addr.to_string().as_str()));
         assert!(!info_output.contains("closed by peer: transport error: timed out"));
         assert!(
             !info_output.contains("aborted by peer: transport error: peer sent malformed frame")
@@ -1707,7 +1704,7 @@ mod tests {
     }
 
     #[test]
-    fn server_tunnel_lifecycle_logs_include_identity_addresses_and_levels() {
+    fn server_tunnel_lifecycle_logs_keep_remote_addresses_out_of_info_and_warn_lines() {
         let client_identity = ClientIdentity::from_str(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
@@ -1723,15 +1720,19 @@ mod tests {
             server_tunnel_connection_failed(first_remote_addr, "handshake timed out");
         });
 
+        assert!(
+            output.contains(
+                format!(
+                    "INFO server tunnel connection accepted: client-identity={client_identity}"
+                )
+                .as_str()
+            )
+        );
         assert!(output.contains(format!(
-            "INFO server tunnel connection accepted: client-identity={client_identity} remote-address={first_remote_addr}"
+            "WARN server tunnel connection dropped: client-identity={client_identity}: timed out"
         ).as_str()));
-        assert!(output.contains(format!(
-            "WARN server tunnel connection dropped: client-identity={client_identity} remote-address={first_remote_addr}: timed out"
-        ).as_str()));
-        assert!(output.contains(format!(
-            "WARN server tunnel connection failed: remote-address={first_remote_addr}: handshake timed out"
-        ).as_str()));
+        assert!(output.contains("WARN server tunnel connection failed: handshake timed out"));
+        assert!(!output.contains(first_remote_addr.to_string().as_str()));
     }
 
     #[test]

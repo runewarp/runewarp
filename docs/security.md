@@ -42,6 +42,7 @@ Runtime diagnostics follow the same boundary.
 - buffered ClientHello bytes
 - HTTP headers or bodies
 - decrypted application plaintext
+- remote socket addresses for Server tunnel lifecycle or forwarded-route events
 
 ## Public traffic invariants
 
@@ -142,6 +143,6 @@ The Client starts with a live ACME manager at startup and does not block on cert
 | Local backend health | There is no pre-flight Local backend health check |
 | Manual/private-CA convenience | The simple manual path may keep private Server CA material on the public Server |
 | Public hostname CA location | The manual path keeps the Public hostname CA private key on the Client machine alongside the running service |
-| Same-Tunnel availability | The runtime keeps one active connection per Tunnel rather than a load-balanced pool |
+| Same-Tunnel member policing | The runtime keeps a connected pool member in service even if that member rejects some placed streams; there is no automatic ejection or quarantine |
 
 These are current limits, not hidden guarantees.

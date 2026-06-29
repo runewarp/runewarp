@@ -11,19 +11,19 @@ use crate::{
     client_identity_from_certificate_der,
 };
 
-use super::active_client::ActiveClientSlot;
+use super::active_client::{ActiveClientPool, SelectedTunnelConnection};
 
 pub(crate) enum TunnelRouteOutcome {
     Unauthorized,
     NoActiveTunnelConnection,
-    Connected(Connection),
+    Connected(SelectedTunnelConnection),
 }
 
 #[derive(Clone)]
 pub(crate) struct TunnelRegistry {
     client_identity_to_tunnel: Arc<HashMap<ClientIdentity, usize>>,
     public_hostname_to_tunnel: Arc<HashMap<PublicHostname, usize>>,
-    tunnel_slots: Arc<Vec<ActiveClientSlot>>,
+    tunnel_pools: Arc<Vec<ActiveClientPool>>,
     accepting: Arc<AtomicBool>,
 }
 
@@ -46,7 +46,7 @@ impl TunnelRegistry {
         Ok(Self {
             client_identity_to_tunnel: Arc::new(HashMap::new()),
             public_hostname_to_tunnel: Arc::new(public_hostname_to_tunnel),
-            tunnel_slots: Arc::new(vec![ActiveClientSlot::new()]),
+            tunnel_pools: Arc::new(vec![ActiveClientPool::new()]),
             accepting: Arc::new(AtomicBool::new(true)),
         })
     }
@@ -58,7 +58,7 @@ impl TunnelRegistry {
         let mut public_hostname_to_tunnel = HashMap::new();
         let mut seen_client_identities = HashSet::new();
         let mut seen_public_hostnames = HashSet::new();
-        let mut tunnel_slots = Vec::with_capacity(tunnels.len());
+        let mut tunnel_pools = Vec::with_capacity(tunnels.len());
         for (index, tunnel) in tunnels.iter().enumerate() {
             if tunnel.public_hostnames.is_empty() {
                 return Err(io::Error::new(
@@ -97,12 +97,12 @@ impl TunnelRegistry {
                 }
                 public_hostname_to_tunnel.insert(hostname.clone(), index);
             }
-            tunnel_slots.push(ActiveClientSlot::new());
+            tunnel_pools.push(ActiveClientPool::new());
         }
         Ok(Self {
             client_identity_to_tunnel: Arc::new(client_identity_to_tunnel),
             public_hostname_to_tunnel: Arc::new(public_hostname_to_tunnel),
-            tunnel_slots: Arc::new(tunnel_slots),
+            tunnel_pools: Arc::new(tunnel_pools),
             accepting: Arc::new(AtomicBool::new(true)),
         })
     }
@@ -115,7 +115,7 @@ impl TunnelRegistry {
         else {
             return TunnelRouteOutcome::Unauthorized;
         };
-        let Some(connection) = self.tunnel_slots[tunnel_index].current_connection().await else {
+        let Some(connection) = self.tunnel_pools[tunnel_index].select_connection().await else {
             return TunnelRouteOutcome::NoActiveTunnelConnection;
         };
         TunnelRouteOutcome::Connected(connection)
@@ -131,27 +131,23 @@ impl TunnelRegistry {
             connection.close(0_u32.into(), b"unmapped client identity");
             return;
         };
-        self.tunnel_slots[tunnel_index]
+        self.tunnel_pools[tunnel_index]
             .register(connection, client_identity)
             .await;
     }
 
     pub(crate) async fn close_all(&self, reason: &'static [u8]) -> usize {
         let mut closed = 0;
-        for slot in self.tunnel_slots.iter() {
-            if slot.close_active_connection(reason).await {
-                closed += 1;
-            }
+        for pool in self.tunnel_pools.iter() {
+            closed += pool.close_all_connections(reason).await;
         }
         closed
     }
 
     pub(crate) async fn active_connection_count(&self) -> usize {
         let mut active = 0;
-        for slot in self.tunnel_slots.iter() {
-            if slot.current_connection().await.is_some() {
-                active += 1;
-            }
+        for pool in self.tunnel_pools.iter() {
+            active += pool.connection_count().await;
         }
         active
     }

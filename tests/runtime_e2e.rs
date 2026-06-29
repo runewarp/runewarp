@@ -1199,7 +1199,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
 }
 
 #[tokio::test]
-async fn replacing_a_tunnel_connection_drops_existing_streams() {
+async fn a_busier_tunnel_pool_member_stops_winning_new_stream_placement() {
     let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
     let (backend_one_addr, backend_one_started, backend_one_release, backend_one_task) =
         spawn_staged_tls_backend(
@@ -1282,25 +1282,22 @@ async fn replacing_a_tunnel_connection_drops_existing_streams() {
     .unwrap();
     let client_two_task = tokio::spawn(client_two.run());
 
-    let replacement_response =
-        wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
-            .await
-            .unwrap();
-    assert_eq!(replacement_response, *b"two!");
+    let pooled_response = wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(pooled_response, *b"two!");
 
     backend_one_release.notify_one();
 
     let mut remaining_bytes = [0_u8; 2];
-    let read_result = timeout(
+    timeout(
         Duration::from_secs(1),
         tls_stream.read_exact(&mut remaining_bytes),
     )
     .await
-    .expect("timed out waiting for the replaced stream to terminate");
-    assert!(
-        read_result.is_err(),
-        "replaced tunnel stream should not complete successfully"
-    );
+    .expect("timed out waiting for the original stream to finish")
+    .unwrap();
+    assert_eq!(&remaining_bytes, b"e!");
 
     backend_two.1.abort();
     server_task.abort();

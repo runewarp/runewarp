@@ -192,30 +192,15 @@ pub fn client_route(public_hostname: &str, outcome: ClientRouteOutcome<'_>) {
     emit(level, &message);
 }
 
-pub fn server_tunnel_connection_accepted(
-    client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
-) {
+pub fn server_tunnel_connection_accepted(client_identity: &ClientIdentity) {
     emit(
         EventLevel::Info,
-        &server_tunnel_connection_accepted_line(client_identity, remote_addr),
-    );
-}
-
-pub fn server_tunnel_connection_replaced(
-    client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
-    previous_remote_addr: SocketAddr,
-) {
-    emit(
-        EventLevel::Info,
-        &server_tunnel_connection_replaced_line(client_identity, remote_addr, previous_remote_addr),
+        &server_tunnel_connection_accepted_line(client_identity),
     );
 }
 
 pub fn server_tunnel_connection_terminated(
     client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
     error: &ConnectionError,
 ) {
     match error {
@@ -223,18 +208,16 @@ pub fn server_tunnel_connection_terminated(
         | ConnectionError::ConnectionClosed(_)
         | ConnectionError::LocallyClosed => emit(
             EventLevel::Info,
-            &server_tunnel_connection_closed_line(client_identity, remote_addr),
+            &server_tunnel_connection_closed_line(client_identity),
         ),
-        _ => {
-            emit_server_tunnel_connection_dropped(client_identity, remote_addr, &error.to_string())
-        }
+        _ => emit_server_tunnel_connection_dropped(client_identity, &error.to_string()),
     }
 }
 
-pub fn server_tunnel_connection_failed(remote_addr: SocketAddr, error: &str) {
+pub fn server_tunnel_connection_failed(error: &str) {
     emit(
         EventLevel::Warn,
-        &server_tunnel_connection_failed_line(remote_addr, error),
+        &server_tunnel_connection_failed_line(error),
     );
 }
 
@@ -802,32 +785,12 @@ fn warning_line(role: &str, message: &str) -> String {
     format!("{role} warning: {message}")
 }
 
-fn server_tunnel_connection_accepted_line(
-    client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
-) -> String {
-    format!(
-        "server tunnel connection accepted: client-identity={client_identity} remote-address={remote_addr}"
-    )
+fn server_tunnel_connection_accepted_line(client_identity: &ClientIdentity) -> String {
+    format!("server tunnel connection accepted: client-identity={client_identity}")
 }
 
-fn server_tunnel_connection_replaced_line(
-    client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
-    previous_remote_addr: SocketAddr,
-) -> String {
-    format!(
-        "server tunnel connection replaced: client-identity={client_identity} remote-address={remote_addr} previous-remote-address={previous_remote_addr}"
-    )
-}
-
-fn server_tunnel_connection_closed_line(
-    client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
-) -> String {
-    format!(
-        "server tunnel connection closed: client-identity={client_identity} remote-address={remote_addr}"
-    )
+fn server_tunnel_connection_closed_line(client_identity: &ClientIdentity) -> String {
+    format!("server tunnel connection closed: client-identity={client_identity}")
 }
 
 fn server_tunnel_connection_unauthorized_line(client_identity: &ClientIdentity) -> String {
@@ -837,45 +800,34 @@ fn server_tunnel_connection_unauthorized_line(client_identity: &ClientIdentity) 
     )
 }
 
-fn server_tunnel_connection_failed_line(remote_addr: SocketAddr, error: &str) -> String {
+fn server_tunnel_connection_failed_line(error: &str) -> String {
     format!(
-        "server tunnel connection failed: remote-address={remote_addr}: {}",
+        "server tunnel connection failed: {}",
         summarize_live_connection_error(error)
     )
 }
 
-fn emit_server_tunnel_connection_dropped(
-    client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
-    error: &str,
-) {
+fn emit_server_tunnel_connection_dropped(client_identity: &ClientIdentity, error: &str) {
     emit_runtime_failure_with_debug_detail(
         EventLevel::Warn,
-        &server_tunnel_connection_dropped_line(client_identity, remote_addr, error),
-        server_tunnel_connection_dropped_detail_line(client_identity, remote_addr, error),
+        &server_tunnel_connection_dropped_line(client_identity, error),
+        server_tunnel_connection_dropped_detail_line(client_identity, error),
         error,
     );
 }
 
-fn server_tunnel_connection_dropped_line(
-    client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
-    error: &str,
-) -> String {
+fn server_tunnel_connection_dropped_line(client_identity: &ClientIdentity, error: &str) -> String {
     format!(
-        "server tunnel connection dropped: client-identity={client_identity} remote-address={remote_addr}: {}",
+        "server tunnel connection dropped: client-identity={client_identity}: {}",
         summarize_live_connection_error(error)
     )
 }
 
 fn server_tunnel_connection_dropped_detail_line(
     client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
     error: &str,
 ) -> String {
-    format!(
-        "server tunnel connection dropped detail: client-identity={client_identity} remote-address={remote_addr}: {error}"
-    )
+    format!("server tunnel connection dropped detail: client-identity={client_identity}: {error}")
 }
 
 fn client_tunnel_connecting_line(
@@ -1170,8 +1122,8 @@ mod tests {
         server_graceful_shutdown_closing_tunnel_connections, server_graceful_shutdown_started,
         server_public_listener_ready, server_route, server_route_rejected_client_hello,
         server_tunnel_connection_accepted, server_tunnel_connection_failed,
-        server_tunnel_connection_replaced, server_tunnel_connection_terminated,
-        server_tunnel_connection_unauthorized, server_tunnel_listener_ready, warning,
+        server_tunnel_connection_terminated, server_tunnel_connection_unauthorized,
+        server_tunnel_listener_ready, warning,
     };
     use crate::{ClientHelloError, ClientIdentity, LogLevel};
 
@@ -1671,7 +1623,6 @@ mod tests {
             );
             emit_server_tunnel_connection_dropped(
                 &client_identity,
-                remote_addr,
                 "aborted by peer: transport error: peer sent malformed frame",
             );
         });
@@ -1680,7 +1631,7 @@ mod tests {
             "WARN client tunnel connection dropped: server-address=tunnel.example.test:443 next-retry-delay=5s: timed out"
         ));
         assert!(info_output.contains(format!(
-            "WARN server tunnel connection dropped: client-identity={client_identity} remote-address={remote_addr}: peer sent malformed frame"
+            "WARN server tunnel connection dropped: client-identity={client_identity}: peer sent malformed frame"
         ).as_str()));
         assert!(!info_output.contains("closed by peer: transport error: timed out"));
         assert!(
@@ -1696,7 +1647,6 @@ mod tests {
             );
             emit_server_tunnel_connection_dropped(
                 &client_identity,
-                remote_addr,
                 "aborted by peer: transport error: peer sent malformed frame",
             );
         });
@@ -1705,45 +1655,37 @@ mod tests {
             "DEBUG client tunnel connection dropped detail: server-address=tunnel.example.test:443: closed by peer: transport error: timed out"
         ));
         assert!(debug_output.contains(format!(
-            "DEBUG server tunnel connection dropped detail: client-identity={client_identity} remote-address={remote_addr}: aborted by peer: transport error: peer sent malformed frame"
+            "DEBUG server tunnel connection dropped detail: client-identity={client_identity}: aborted by peer: transport error: peer sent malformed frame"
         ).as_str()));
+        assert!(!debug_output.contains(remote_addr.to_string().as_str()));
     }
 
     #[test]
-    fn server_tunnel_lifecycle_logs_include_identity_addresses_and_levels() {
+    fn server_tunnel_lifecycle_logs_keep_remote_addresses_out_of_info_and_warn_lines() {
         let client_identity = ClientIdentity::from_str(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .unwrap();
         let first_remote_addr: SocketAddr = "203.0.113.10:443".parse().unwrap();
-        let second_remote_addr: SocketAddr = "203.0.113.11:443".parse().unwrap();
         let output = capture(LogLevel::Info, || {
-            server_tunnel_connection_accepted(&client_identity, first_remote_addr);
-            server_tunnel_connection_replaced(
-                &client_identity,
-                second_remote_addr,
-                first_remote_addr,
-            );
-            server_tunnel_connection_terminated(
-                &client_identity,
-                second_remote_addr,
-                &ConnectionError::TimedOut,
-            );
-            server_tunnel_connection_failed(first_remote_addr, "handshake timed out");
+            server_tunnel_connection_accepted(&client_identity);
+            server_tunnel_connection_terminated(&client_identity, &ConnectionError::TimedOut);
+            server_tunnel_connection_failed("handshake timed out");
         });
 
+        assert!(
+            output.contains(
+                format!(
+                    "INFO server tunnel connection accepted: client-identity={client_identity}"
+                )
+                .as_str()
+            )
+        );
         assert!(output.contains(format!(
-            "INFO server tunnel connection accepted: client-identity={client_identity} remote-address={first_remote_addr}"
+            "WARN server tunnel connection dropped: client-identity={client_identity}: timed out"
         ).as_str()));
-        assert!(output.contains(format!(
-            "INFO server tunnel connection replaced: client-identity={client_identity} remote-address={second_remote_addr} previous-remote-address={first_remote_addr}"
-        ).as_str()));
-        assert!(output.contains(format!(
-            "WARN server tunnel connection dropped: client-identity={client_identity} remote-address={second_remote_addr}: timed out"
-        ).as_str()));
-        assert!(output.contains(format!(
-            "WARN server tunnel connection failed: remote-address={first_remote_addr}: handshake timed out"
-        ).as_str()));
+        assert!(output.contains("WARN server tunnel connection failed: handshake timed out"));
+        assert!(!output.contains(first_remote_addr.to_string().as_str()));
     }
 
     #[test]

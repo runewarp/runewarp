@@ -168,7 +168,7 @@ _Avoid_: CI environment, deploy target
 - A **Client instance** forwards proxied traffic from its **Tunnel connection** to a **Local backend** through a selected **Service**
 - A **Client instance** uses exactly one **Client identity** at a time
 - A **Client identity** can be used by one or more **Client instances**
-- A **Client identity** can be authorized by one or more **Tunnels**
+- A **Client identity** is authorized by exactly one **Tunnel**
 - A **Tunnel pool** belongs to exactly one **Tunnel**
 - **Server-authoritative routing** uses **Public hostname authorization** before **Service hostname matching**
 - A **Tunnel** owns one or more explicit **Public hostnames**

@@ -116,7 +116,7 @@ email = "admin@example.com"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.com", "api.example.com"]
-client-identities = ["4f7b6f7a9b0f0d2b..."]
+client-identity = "4f7b6f7a9b0f0d2b..."
 ```
 
 ```toml

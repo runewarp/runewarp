@@ -104,8 +104,10 @@ async fn prepared_client_uses_the_configured_server_address_port() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
-        tunnel_connection_bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+        // Bind dual-stack wildcard listeners so `localhost` resolution order does not make
+        // this port-selection test flaky across environments.
+        public_bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        tunnel_connection_bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
         server_hostname: server_hostname("localhost"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],

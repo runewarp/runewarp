@@ -440,7 +440,9 @@ client-public-key-fingerprint = "00112233445566778899aabbccddeeff001122334455667
     assert!(message.contains("unknown field `key-file`"));
     assert!(message.contains("unknown field `client-public-key-fingerprint`"));
     assert!(message.contains("server.cert-dir directory not found"));
-    assert!(message.contains("server.tunnels[].client-identity is required"));
+    assert!(message.contains(
+        "one of server.tunnels[].client-identity or server.tunnels[].client-identities is required"
+    ));
 }
 
 #[test]
@@ -607,8 +609,36 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert!(
         error
             .to_string()
-            .contains("server.tunnels[].client-identity must be unique")
+            .contains("authorized Client identities must be unique across all Server Tunnels")
     );
+}
+
+#[test]
+fn server_config_requires_one_authorized_client_identity_shape() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_config(&tempdir.path().join("config.toml")).unwrap_err();
+
+    assert!(error.to_string().contains(
+        "one of server.tunnels[].client-identity or server.tunnels[].client-identities is required"
+    ));
 }
 
 #[test]

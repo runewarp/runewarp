@@ -71,7 +71,7 @@ impl TunnelRegistry {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         format!(
-                            "server.tunnels[].client-identity must be unique: {}",
+                            "authorized Client identities must be unique across all Server Tunnels: {}",
                             client_identity
                         ),
                     ));

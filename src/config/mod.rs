@@ -971,7 +971,10 @@ fn validate_server_tunnel_authorized_client_identities(
             }
         },
         None => {
-            messages.push("server.tunnels[].client-identity is required".to_owned());
+            messages.push(
+                "one of server.tunnels[].client-identity or server.tunnels[].client-identities is required"
+                    .to_owned(),
+            );
             Vec::new()
         }
     }
@@ -1208,7 +1211,7 @@ fn validate_unique_client_identities(
             let identity = identity.to_string();
             if !seen.insert(identity.clone()) {
                 messages.push(format!(
-                    "server.tunnels[].client-identity must be unique: {identity}"
+                    "authorized Client identities must be unique across all Server Tunnels: {identity}"
                 ));
             }
         }

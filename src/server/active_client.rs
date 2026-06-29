@@ -31,6 +31,7 @@ impl SelectedTunnelConnection {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn active_stream_count(&self) -> usize {
         self.active_streams.load(Ordering::Relaxed)
     }

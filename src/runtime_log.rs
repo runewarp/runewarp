@@ -55,7 +55,7 @@ pub enum InstallOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServerRouteOutcome {
-    Forwarded { active_streams: usize },
+    Forwarded,
     RejectedServerHostname,
     RejectedUnauthorized,
     NoActiveTunnelConnection,
@@ -528,14 +528,11 @@ where
 
 fn server_route_event(public_hostname: &str, outcome: ServerRouteOutcome) -> (EventLevel, String) {
     let (level, line) = match outcome {
-        ServerRouteOutcome::Forwarded { active_streams } => (
+        ServerRouteOutcome::Forwarded => (
             EventLevel::Debug,
             event_line(
                 "server route forwarded",
-                [
-                    ("public-hostname", Cow::Borrowed(public_hostname)),
-                    ("active-streams", Cow::Owned(active_streams.to_string())),
-                ],
+                [("public-hostname", Cow::Borrowed(public_hostname))],
             ),
         ),
         ServerRouteOutcome::RejectedServerHostname => (
@@ -1222,18 +1219,11 @@ mod tests {
     fn debug_level_keeps_debug_routing_events() {
         let output = capture(LogLevel::Debug, || {
             emit(EventLevel::Debug, "debug detail");
-            server_route(
-                "app.example.test",
-                ServerRouteOutcome::Forwarded { active_streams: 1 },
-            );
+            server_route("app.example.test", ServerRouteOutcome::Forwarded);
         });
 
         assert!(output.contains("debug detail"));
-        assert!(
-            output.contains(
-                "server route forwarded: public-hostname=app.example.test active-streams=1"
-            )
-        );
+        assert!(output.contains("server route forwarded: public-hostname=app.example.test"));
     }
 
     #[test]

@@ -30,7 +30,6 @@ Runtime diagnostics follow the same boundary.
 
 - normalized **Public hostname**
 - routing outcome, connection timing, and transport errors
-- forwarded-route `active-streams` count
 - effective Client `server-address` values plus resolved socket addresses on connection-attempt lines
 - rejected or authenticated **Client identity** values on tunnel-auth warnings
 - Client `backend-address` values in routing diagnostics

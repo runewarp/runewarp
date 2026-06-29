@@ -31,7 +31,6 @@ The buffered ClientHello must never be logged or echoed back in diagnostics.
 At `log-level = "debug"`, stderr may include:
 
 - the normalized **Public hostname**
-- forwarded-route `active-streams` counts
 - stable key=value fields such as `public-hostname`, `backend-address`, and `reason`
 - `server acme challenge handled` with `server-hostname=...` for `acme-tls/1` traffic on the **Server hostname**
 - separate Client ACME challenge handling lines for terminating **Public hostnames**

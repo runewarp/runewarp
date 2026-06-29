@@ -138,12 +138,7 @@ impl VisitorStreamHandler {
             }
         };
         let _active_stream_guard = tunnel_connection.record_open_stream();
-        runtime_log::server_route(
-            public_hostname.as_str(),
-            ServerRouteOutcome::Forwarded {
-                active_streams: tunnel_connection.active_stream_count(),
-            },
-        );
+        runtime_log::server_route(public_hostname.as_str(), ServerRouteOutcome::Forwarded);
 
         proxy_tcp_over_quic(visitor_stream, buffered_bytes, send, recv).await
     }
@@ -378,71 +373,6 @@ mod tests {
         router_task
             .await
             .map_err(|error| join_error("router task failed", error))??;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn forwarded_route_logs_include_active_stream_count_without_remote_address()
-    -> io::Result<()> {
-        let client_identity = generate_test_client_identity()?;
-        let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let output = capture_logs_with_wait(
-            LogLevel::Debug,
-            "DEBUG server route forwarded: public-hostname=app.example.test active-streams=1",
-            async {
-                let registry = TunnelRegistry::configured(
-                    &server_hostname("Tunnel.Example.Test."),
-                    &[ServerTunnelConfig {
-                        public_hostnames: vec![public_hostname("App.Example.Test.")],
-                        authorized_client_identities: vec![client_identity.client_identity.clone()],
-                    }],
-                )?;
-                registry.register(fixture.server_connection.clone()).await;
-                let router = VisitorStreamHandler::new(
-                    server_hostname("Tunnel.Example.Test."),
-                    registry,
-                    None,
-                )?;
-
-                let listener = TcpListener::bind(localhost(0)).await?;
-                let visitor_addr = listener.local_addr()?;
-                let router_task = spawn_router_task(listener, router);
-
-                let mut visitor = TcpStream::connect(visitor_addr).await?;
-                let client_hello = build_client_hello("app.example.test")?;
-                visitor.write_all(&client_hello).await?;
-                visitor.shutdown().await?;
-
-                let (mut tunnel_send, mut tunnel_recv) = timeout(
-                    Duration::from_secs(1),
-                    fixture.client_connection.accept_bi(),
-                )
-                .await
-                .map_err(|_| timeout_error("router should open a tunnel stream"))?
-                .map_err(io::Error::other)?;
-                tunnel_send.finish().map_err(io::Error::other)?;
-                let forwarded = timeout(
-                    Duration::from_secs(1),
-                    tunnel_recv.read_to_end(client_hello.len() + 1),
-                )
-                .await
-                .map_err(|_| timeout_error("tunnel should receive forwarded bytes"))?
-                .map_err(io::Error::other)?;
-
-                assert_eq!(forwarded, client_hello);
-
-                router_task
-                    .await
-                    .map_err(|error| join_error("router task failed", error))??;
-                Ok(())
-            },
-        )
-        .await?;
-
-        assert!(output.contains(
-            "DEBUG server route forwarded: public-hostname=app.example.test active-streams=1"
-        ));
-        assert!(!output.contains("remote-address="));
         Ok(())
     }
 

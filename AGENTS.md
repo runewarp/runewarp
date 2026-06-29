@@ -16,7 +16,7 @@
 - Always use TDD during implementation.
 - When release workflows, changelog discipline, or maintainer release expectations change, update `docs/release-guide.md` in the same change.
 - Keep Ruby automation simple with consistent plain-text section headers and polished manual-run output.
-- Any user facing changes should be added to the "Unreleased" section of `CHANGELOG.md` during implementation strictly following "Keep a Changelog" format.
+- Any user facing changes should be added to the "Unreleased" section of `CHANGELOG.md` during implementation strictly following "Keep a Changelog" format. Each new changelog item must reference the PR that introduced it, and refactor-only or other internal-only changes should be omitted.
 
 ## Agent skills
 

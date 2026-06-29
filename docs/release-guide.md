@@ -48,7 +48,7 @@ The release workflow is intentionally narrow about what can cross from untrusted
 The release-prep PR is where the release candidate becomes reviewable.
 
 1. Update `Cargo.toml` and `Cargo.lock` to the target stable version.
-2. Move curated notes out of `Unreleased` into the versioned `CHANGELOG.md` entry.
+2. Move curated, user-facing notes out of `Unreleased` into the versioned `CHANGELOG.md` entry, keeping "Keep a Changelog" categories and a PR reference on each retained bullet.
 3. Review the release-facing docs and examples so they match the release claims.
 4. Review `Dockerfile` base-image digests deliberately. Refresh them only when you intend to ship the newer base image in this release.
 5. Merge the PR to `main` only after the aggregate `CI` check is green.
@@ -133,6 +133,7 @@ After a stable release succeeds, move `main` forward explicitly:
 
 1. Open a follow-up PR that bumps the crate to the next minor `-dev` version.
 2. Reopen `CHANGELOG.md` with an `Unreleased` section at the top.
-3. Merge that PR so future work lands against post-release development state instead of the already-published version.
+3. Keep new `Unreleased` notes limited to user-facing changes, grouped under the appropriate "Keep a Changelog" headings, with one PR reference on each bullet.
+4. Merge that PR so future work lands against post-release development state instead of the already-published version.
 
 This keeps the release history clean and makes the next release-prep PR start from the same documented pattern.

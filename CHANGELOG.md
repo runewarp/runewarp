@@ -10,8 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Allowed one Server Tunnel to authorize one or more Client identities through `client-identities`, while keeping `client-identity` as the single-value shorthand.
 - Added automatic same-Tunnel Client pools on one Server node, with least-active new-stream placement and round-robin tie-breaking across equal-load pool members.
-- Added selected pool-member `remote-address` and `active-streams` context to forwarded Server route debug logs for same-Tunnel pools.
-- Removed remote socket addresses from info and warn Server tunnel lifecycle logs, keeping them only on debug-detail lines.
+- Added forwarded-route `active-streams` context to Server route debug logs for same-Tunnel pools.
+- Removed remote socket addresses from Server tunnel lifecycle and forwarded-route logs.
 - Rewrote the main documentation set for a tighter, more direct operator and maintainer voice.
 - Renamed the public validated configuration API around `config` terminology, including `load_client_config`, `load_server_config`, `ClientConfigResolutionDefaults`, and precise runtime types `ClientConnectConfig` and `ServerBindConfig`.
 - Exposed deep `config::client` and `config::server` module paths and moved config preparation under the shared `config` module so config-related code lives in one place.

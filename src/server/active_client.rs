@@ -24,10 +24,6 @@ impl SelectedTunnelConnection {
         self.connection.clone()
     }
 
-    pub(crate) fn remote_address(&self) -> std::net::SocketAddr {
-        self.connection.remote_address()
-    }
-
     pub(crate) fn record_open_stream(&self) -> ActiveStreamGuard {
         self.active_streams.fetch_add(1, Ordering::Relaxed);
         ActiveStreamGuard {
@@ -94,7 +90,6 @@ impl ActiveClientPool {
     }
 
     pub(crate) async fn register(&self, connection: Connection, client_identity: ClientIdentity) {
-        let remote_addr = connection.remote_address();
         let member_id = self.next_member_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut members = self.members.write().await;
@@ -104,7 +99,7 @@ impl ActiveClientPool {
                 active_streams: Arc::new(AtomicUsize::new(0)),
             });
         }
-        runtime_log::server_tunnel_connection_accepted(&client_identity, remote_addr);
+        runtime_log::server_tunnel_connection_accepted(&client_identity);
 
         let members = self.members.clone();
         let client_identity_for_close = client_identity.clone();
@@ -112,7 +107,6 @@ impl ActiveClientPool {
             let close_error = connection.closed().await;
             runtime_log::server_tunnel_connection_terminated(
                 &client_identity_for_close,
-                remote_addr,
                 &close_error,
             );
             let mut members_guard = members.write().await;
@@ -221,7 +215,7 @@ mod tests {
             .select_connection()
             .await
             .expect("first pool member should be selectable");
-        let first_selected_addr = first_selection.remote_address();
+        let first_selected_addr = first_selection.connection().remote_address();
         let first_stream_guard = first_selection.record_open_stream();
 
         let second_selection = pool
@@ -229,7 +223,7 @@ mod tests {
             .await
             .expect("second pool member should be selectable");
         assert_ne!(
-            second_selection.remote_address(),
+            second_selection.connection().remote_address(),
             first_selected_addr,
             "equal-load ties should rotate to the other member"
         );
@@ -242,7 +236,7 @@ mod tests {
             .select_connection()
             .await
             .expect("pool should still select a member after loads return to zero");
-        let third_selected_addr = third_selection.remote_address();
+        let third_selected_addr = third_selection.connection().remote_address();
         let third_stream_guard = third_selection.record_open_stream();
 
         let fourth_selection = pool
@@ -250,7 +244,7 @@ mod tests {
             .await
             .expect("pool should place onto the least-active member");
         assert_ne!(
-            fourth_selection.remote_address(),
+            fourth_selection.connection().remote_address(),
             third_selected_addr,
             "the zero-load member should win once the selected member becomes busier"
         );

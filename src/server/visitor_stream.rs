@@ -141,7 +141,6 @@ impl VisitorStreamHandler {
         runtime_log::server_route(
             public_hostname.as_str(),
             ServerRouteOutcome::Forwarded {
-                remote_addr: tunnel_connection.remote_address(),
                 active_streams: tunnel_connection.active_stream_count(),
             },
         );
@@ -383,24 +382,19 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn forwarded_route_logs_include_selected_pool_member_and_active_stream_count()
+    async fn forwarded_route_logs_include_active_stream_count_without_remote_address()
     -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let selected_remote_addr = fixture.server_connection.remote_address();
         let output = capture_logs_with_wait(
             LogLevel::Debug,
-            &format!(
-                "DEBUG server route forwarded: public-hostname=app.example.test remote-address={selected_remote_addr} active-streams=1"
-            ),
+            "DEBUG server route forwarded: public-hostname=app.example.test active-streams=1",
             async {
                 let registry = TunnelRegistry::configured(
                     &server_hostname("Tunnel.Example.Test."),
                     &[ServerTunnelConfig {
                         public_hostnames: vec![public_hostname("App.Example.Test.")],
-                        authorized_client_identities: vec![
-                            client_identity.client_identity.clone()
-                        ],
+                        authorized_client_identities: vec![client_identity.client_identity.clone()],
                     }],
                 )?;
                 registry.register(fixture.server_connection.clone()).await;
@@ -445,9 +439,10 @@ mod tests {
         )
         .await?;
 
-        assert!(output.contains(&format!(
-            "DEBUG server route forwarded: public-hostname=app.example.test remote-address={selected_remote_addr} active-streams=1"
-        )));
+        assert!(output.contains(
+            "DEBUG server route forwarded: public-hostname=app.example.test active-streams=1"
+        ));
+        assert!(!output.contains("remote-address="));
         Ok(())
     }
 

@@ -133,14 +133,10 @@ impl Server {
 
                     let tunnel_registry = self.tunnel_registry.clone();
                     tokio::spawn(async move {
-                        let remote_addr = incoming.remote_address();
                         let connecting = match incoming.accept() {
                             Ok(connecting) => connecting,
                             Err(error) => {
-                                runtime_log::server_tunnel_connection_failed(
-                                    remote_addr,
-                                    &error.to_string(),
-                                );
+                                runtime_log::server_tunnel_connection_failed(&error.to_string());
                                 return;
                             }
                         };
@@ -152,10 +148,7 @@ impl Server {
                         .await
                         {
                             Ok(connection) => tunnel_registry.register(connection).await,
-                            Err(error) => runtime_log::server_tunnel_connection_failed(
-                                remote_addr,
-                                &error.to_string(),
-                            ),
+                            Err(error) => runtime_log::server_tunnel_connection_failed(&error.to_string()),
                         }
                     });
                 }
@@ -206,14 +199,10 @@ impl Server {
 
                     let tunnel_registry = tunnel_registry.clone();
                     tokio::spawn(async move {
-                        let remote_addr = incoming.remote_address();
                         let connecting = match incoming.accept() {
                             Ok(connecting) => connecting,
                             Err(error) => {
-                                runtime_log::server_tunnel_connection_failed(
-                                    remote_addr,
-                                    &error.to_string(),
-                                );
+                                runtime_log::server_tunnel_connection_failed(&error.to_string());
                                 return;
                             }
                         };
@@ -223,10 +212,9 @@ impl Server {
                         .await
                         {
                             Ok(connection) => tunnel_registry.register(connection).await,
-                            Err(error) => runtime_log::server_tunnel_connection_failed(
-                                remote_addr,
-                                &error.to_string(),
-                            ),
+                            Err(error) => {
+                                runtime_log::server_tunnel_connection_failed(&error.to_string())
+                            }
                         }
                     });
                 }

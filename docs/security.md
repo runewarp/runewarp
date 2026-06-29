@@ -30,11 +30,10 @@ Runtime diagnostics follow the same boundary.
 
 - normalized **Public hostname**
 - routing outcome, connection timing, and transport errors
-- selected pool-member `remote-address` plus forwarded-route `active-streams` count
+- forwarded-route `active-streams` count
 - effective Client `server-address` values plus resolved socket addresses on connection-attempt lines
 - rejected or authenticated **Client identity** values on tunnel-auth warnings
 - Client `backend-address` values in routing diagnostics
-- tunnel lifecycle `remote-address` values only on debug-detail lines, not on info or warn summaries
 - graceful-shutdown lifecycle lines
 - `server acme challenge handled` with `server-hostname=...` for `acme-tls/1` traffic on the **Server hostname**
 - distinct Client ACME challenge-handling lines for terminating **Public hostnames**
@@ -44,6 +43,7 @@ Runtime diagnostics follow the same boundary.
 - buffered ClientHello bytes
 - HTTP headers or bodies
 - decrypted application plaintext
+- remote socket addresses for Server tunnel lifecycle or forwarded-route events
 
 ## Public traffic invariants
 

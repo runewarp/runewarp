@@ -148,6 +148,134 @@ backend-address = "localhost:8443"
 }
 
 #[test]
+fn client_config_accept_server_addresses_for_static_fanout() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-addresses = ["Tunnel.Example.Test.", "backup.example.test:9443"]
+identity-dir = "client-identity"
+
+[[client.services]]
+backend-address = "localhost:8443"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
+    assert_eq!(settings.server_port, 443);
+    assert_eq!(settings.server_addresses.len(), 2);
+    assert_eq!(
+        settings.server_addresses[0].hostname().as_str(),
+        "tunnel.example.test"
+    );
+    assert_eq!(settings.server_addresses[0].port(), 443);
+    assert_eq!(
+        settings.server_addresses[1].hostname().as_str(),
+        "backup.example.test"
+    );
+    assert_eq!(settings.server_addresses[1].port(), 9443);
+}
+
+#[test]
+fn client_config_rejects_mutually_exclusive_server_address_shapes() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+server-addresses = ["backup.example.test"]
+identity-dir = "client-identity"
+
+[[client.services]]
+backend-address = "localhost:8443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("client.server-address and client.server-addresses are mutually exclusive")
+    );
+}
+
+#[test]
+fn client_config_rejects_duplicate_server_addresses() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-addresses = ["Tunnel.Example.Test.", "tunnel.example.test:443"]
+identity-dir = "client-identity"
+
+[[client.services]]
+backend-address = "localhost:8443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
+    assert!(error.to_string().contains(
+        "client.server-addresses contains duplicate Server address `tunnel.example.test:443`"
+    ));
+}
+
+#[test]
 fn client_config_accept_top_level_log_level_values() {
     for (raw_level, expected_level) in [
         ("off", LogLevel::Off),
@@ -342,7 +470,7 @@ backend-address = "127.0.0.1:443"
     let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
     let message = error.to_string();
 
-    assert!(message.contains("client.server-address is required"));
+    assert!(message.contains("client.server-address or client.server-addresses is required"));
     assert!(message.contains("client.identity-dir directory not found"));
     assert!(message.contains("unknown field `reconnect-interval`"));
     assert!(message.contains(

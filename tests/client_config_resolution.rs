@@ -18,7 +18,7 @@ fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<
     let settings = resolve_selected_client_config(
         SelectedClientConfig::None,
         &ClientRuntimeArgs {
-            server_address: Some("Tunnel.Example.Test.".to_owned()),
+            server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("localhost:8443".to_owned()),
         },
         &ClientConfigResolutionDefaults {
@@ -48,7 +48,7 @@ fn cli_only_resolution_requires_backend_address_without_a_selected_config()
     let error = resolve_selected_client_config(
         SelectedClientConfig::None,
         &ClientRuntimeArgs {
-            server_address: Some("tunnel.example.test".to_owned()),
+            server_addresses: vec!["tunnel.example.test".to_owned()],
             backend_address: None,
         },
         &ClientConfigResolutionDefaults {
@@ -92,7 +92,7 @@ hostname = "tunnel.example.test"
     let settings = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs {
-            server_address: Some("tunnel.example.test:9443".to_owned()),
+            server_addresses: vec!["tunnel.example.test:9443".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
         },
         &ClientConfigResolutionDefaults {
@@ -128,7 +128,7 @@ log-level = "off"
     let settings = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs {
-            server_address: Some("Tunnel.Example.Test.".to_owned()),
+            server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
         },
         &ClientConfigResolutionDefaults {
@@ -165,7 +165,7 @@ server-address = "127.0.0.1:443"
     let settings = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs {
-            server_address: Some("Tunnel.Example.Test.".to_owned()),
+            server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
         },
         &ClientConfigResolutionDefaults {
@@ -180,6 +180,52 @@ server-address = "127.0.0.1:443"
     assert_eq!(settings.services.len(), 1);
     assert_eq!(settings.services[0].public_hostnames, None);
     assert_eq!(settings.services[0].backend_address, "backend.internal:443");
+    Ok(())
+}
+
+#[test]
+fn repeated_server_address_runtime_flags_replace_either_config_target_shape()
+-> Result<(), Box<dyn Error>> {
+    let tempdir = tempdir()?;
+    let identity_directory = tempdir.path().join("client-identity");
+    write_identity_material(&identity_directory)?;
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+
+[[client.services]]
+backend-address = "backend.internal:443"
+"#,
+    )?;
+
+    let settings = resolve_selected_client_config(
+        SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
+        &ClientRuntimeArgs {
+            server_addresses: vec![
+                "Tunnel.Example.Test.".to_owned(),
+                "backup.example.test:9443".to_owned(),
+            ],
+            backend_address: None,
+        },
+        &ClientConfigResolutionDefaults {
+            identity_directory,
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
+        },
+    )?;
+
+    assert_eq!(settings.server_addresses.len(), 2);
+    assert_eq!(
+        settings.server_addresses[0].hostname().as_str(),
+        "tunnel.example.test"
+    );
+    assert_eq!(settings.server_addresses[0].port(), 443);
+    assert_eq!(
+        settings.server_addresses[1].hostname().as_str(),
+        "backup.example.test"
+    );
+    assert_eq!(settings.server_addresses[1].port(), 9443);
     Ok(())
 }
 
@@ -203,7 +249,7 @@ backend-address = "backend.internal:443"
     let error = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs {
-            server_address: None,
+            server_addresses: Vec::new(),
             backend_address: Some("override.internal:8443".to_owned()),
         },
         &ClientConfigResolutionDefaults {
@@ -244,7 +290,7 @@ public-hostnames = ["app.example.test"]
     let error = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs {
-            server_address: None,
+            server_addresses: Vec::new(),
             backend_address: Some("override.internal:8443".to_owned()),
         },
         &ClientConfigResolutionDefaults {
@@ -274,7 +320,7 @@ fn cli_only_resolution_rejects_ip_literal_server_addresses() -> Result<(), Box<d
     let error = resolve_selected_client_config(
         SelectedClientConfig::None,
         &ClientRuntimeArgs {
-            server_address: Some("127.0.0.1:443".to_owned()),
+            server_addresses: vec!["127.0.0.1:443".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
         },
         &ClientConfigResolutionDefaults {

@@ -3,9 +3,13 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use runewarp::PreparedClient;
+use runewarp::ServerAddress;
 use time::OffsetDateTime;
 use tokio::net::lookup_host;
 use tokio::sync::watch;
@@ -53,18 +57,52 @@ async fn run_until_shutdown(
     local_bind_addr: SocketAddr,
     shutdown: &watch::Receiver<bool>,
 ) -> Result<(), Box<dyn Error>> {
+    let settings = Arc::new(settings.clone());
+    let ready_logged = Arc::new(AtomicBool::new(false));
+    let mut tasks = FuturesUnordered::new();
+
+    for server_address in settings.server_addresses.clone() {
+        tasks.push(run_server_address_until_shutdown(
+            Arc::clone(&settings),
+            server_address,
+            local_bind_addr,
+            shutdown.clone(),
+            Arc::clone(&ready_logged),
+        ));
+    }
+
+    while let Some(result) = tasks.next().await {
+        match result {
+            Ok(()) => {}
+            Err(error) => return Err(Box::new(io::Error::other(error))),
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_server_address_until_shutdown(
+    settings: Arc<runewarp::ClientConfig>,
+    server_address: ServerAddress,
+    local_bind_addr: SocketAddr,
+    shutdown: watch::Receiver<bool>,
+    ready_logged: Arc<AtomicBool>,
+) -> Result<(), String> {
     let mut connected_once = false;
     let mut reconnect_policy = ReconnectPolicy::new();
+    let configured_server_addr =
+        configured_server_addr(server_address.hostname().as_str(), server_address.port());
     loop {
-        if shutdown_requested(shutdown) {
+        if shutdown_requested(&shutdown) {
             return Ok(());
         }
-        ensure_client_identity_fresh(&settings.identity_directory)?;
+        ensure_client_identity_fresh(&settings.identity_directory)
+            .map_err(|error| error.to_string())?;
         let phase = client_tunnel_phase(connected_once);
         let attempt_kind = client_tunnel_attempt_kind(reconnect_policy.is_fresh());
         let dial_target = match tokio::select! {
             _ = wait_for_shutdown(shutdown.clone()) => return Ok(()),
-            result = resolve_client_tunnel_dial_target(settings) => result,
+            result = resolve_client_tunnel_dial_target(&server_address) => result,
         } {
             Ok(dial_target) => dial_target,
             Err(error) => {
@@ -76,19 +114,16 @@ async fn run_until_shutdown(
                     runewarp::runtime_log::client_tunnel_resolution_failed(
                         phase,
                         attempt_kind,
-                        &configured_server_addr(
-                            settings.server_hostname.as_str(),
-                            settings.server_port,
-                        ),
+                        &configured_server_addr,
                         retry.display_delay_secs,
                         &error.to_string(),
                     );
-                    if wait_for_retry_delay(retry.delay, shutdown).await {
+                    if wait_for_retry_delay(retry.delay, &shutdown).await {
                         continue;
                     }
                     return Ok(());
                 }
-                return Err(Box::new(error));
+                return Err(error.to_string());
             }
         };
 
@@ -101,7 +136,7 @@ async fn run_until_shutdown(
 
         let client = match tokio::select! {
             _ = wait_for_shutdown(shutdown.clone()) => return Ok(()),
-            result = PreparedClient::connect_to(settings, local_bind_addr, dial_target.resolved_server_addr) => result,
+            result = PreparedClient::connect_to_server_address(&settings, local_bind_addr, &server_address, dial_target.resolved_server_addr) => result,
         } {
             Ok(client) => client,
             Err(error) => {
@@ -131,12 +166,12 @@ async fn run_until_shutdown(
                             &error.to_string(),
                         );
                     }
-                    if wait_for_retry_delay(retry.delay, shutdown).await {
+                    if wait_for_retry_delay(retry.delay, &shutdown).await {
                         continue;
                     }
                     return Ok(());
                 }
-                return Err(Box::new(error));
+                return Err(error.to_string());
             }
         };
 
@@ -148,7 +183,7 @@ async fn run_until_shutdown(
             &dial_target.configured_server_addr,
             dial_target.resolved_server_addr,
         );
-        if first_connection {
+        if first_connection && !ready_logged.swap(true, Ordering::SeqCst) {
             runewarp::runtime_log::client_ready(&dial_target.configured_server_addr);
         }
 
@@ -184,7 +219,7 @@ async fn run_until_shutdown(
                     &error.to_string(),
                 );
             }
-            if wait_for_retry_delay(retry.delay, shutdown).await {
+            if wait_for_retry_delay(retry.delay, &shutdown).await {
                 continue;
             }
             return Ok(());
@@ -237,20 +272,20 @@ fn client_tunnel_attempt_kind(
 }
 
 async fn resolve_client_tunnel_dial_target(
-    settings: &runewarp::ClientConfig,
+    server_address: &ServerAddress,
 ) -> Result<ClientTunnelDialTarget, runewarp::ClientStartupError> {
-    let mut server_addrs = lookup_host((settings.server_hostname.as_str(), settings.server_port))
+    let mut server_addrs = lookup_host((server_address.hostname().as_str(), server_address.port()))
         .await
         .map_err(runewarp::ClientStartupError::Resolve)?;
     let Some(resolved_server_addr) = server_addrs.next() else {
         return Err(runewarp::ClientStartupError::MissingServerAddress {
-            server_hostname: settings.server_hostname.to_string(),
+            server_hostname: server_address.hostname().to_string(),
         });
     };
     Ok(ClientTunnelDialTarget {
         configured_server_addr: configured_server_addr(
-            settings.server_hostname.as_str(),
-            settings.server_port,
+            server_address.hostname().as_str(),
+            server_address.port(),
         ),
         resolved_server_addr,
     })
@@ -300,23 +335,34 @@ async fn wait_for_retry_delay(delay: Duration, shutdown: &watch::Receiver<bool>)
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io;
+    use std::net::{Ipv4Addr, SocketAddr};
     use std::path::Path;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use quinn::{ApplicationClose, ConnectionClose, TransportErrorCode, VarInt};
     use rcgen::{CertificateParams, KeyPair, PublicKeyData};
+    use rustls::RootCertStore;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
     use tempfile::tempdir;
     use time::{Duration as TimeDuration, OffsetDateTime};
-    use tokio::sync::watch;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::{oneshot, watch};
+    use tokio::time::{sleep, timeout};
+    use tokio_rustls::{TlsAcceptor, TlsConnector};
 
     use runewarp::{
         CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_IDENTITY_FILENAME,
-        CLIENT_KEY_FILENAME, ClientIdentity,
+        CLIENT_KEY_FILENAME, ClientConfig, ClientIdentity, ClientTlsMode, LogLevel, PublicHostname,
+        Server, ServerAddress, ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
+        generate_client_identity, make_server_quic_config_with_client_auth,
     };
 
     use super::{
         RetryDisposition, client_tunnel_attempt_kind, ensure_client_identity_fresh,
-        wait_for_retry_delay,
+        run_until_orderly_shutdown, wait_for_retry_delay,
     };
 
     #[test]
@@ -391,6 +437,164 @@ mod tests {
         assert!(!super::is_clean_client_tunnel_close(
             &quinn::ConnectionError::TimedOut
         ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local socket binding"]
+    async fn client_runtime_keeps_serving_through_a_healthy_server_address_when_another_fails()
+    -> io::Result<()> {
+        let (backend_cert, backend_key) = make_self_signed_cert("app.example.test")?;
+        let backend_listener = TcpListener::bind(localhost(0)).await?;
+        let backend_address = backend_listener.local_addr()?;
+        let backend_acceptor = TlsAcceptor::from(Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![backend_cert.clone()],
+                    private_key_from_der(&backend_key),
+                )
+                .map_err(io::Error::other)?,
+        ));
+        let backend_task = tokio::spawn(async move {
+            loop {
+                let (tcp_stream, _) = backend_listener.accept().await?;
+                let mut tls_stream = backend_acceptor.accept(tcp_stream).await?;
+                let mut request = [0_u8; 4];
+                tls_stream.read_exact(&mut request).await?;
+                if &request != b"ping" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unexpected backend request",
+                    ));
+                }
+                tls_stream.write_all(b"pong").await?;
+                tls_stream.shutdown().await?;
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), io::Error>(())
+        });
+
+        let certified_server = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .map_err(io::Error::other)?;
+        let server_cert_pem = certified_server.cert.pem();
+        let server_cert = CertificateDer::from(certified_server.cert);
+        let server_key = certified_server.signing_key.serialize_der();
+        let client_identity = generate_client_identity().map_err(io::Error::other)?;
+        let server = Server::bind(ServerBindConfig {
+            public_bind_addr: localhost(0),
+            tunnel_connection_bind_addr: localhost(0),
+            server_hostname: server_hostname("localhost"),
+            configured_tunnels: vec![ServerTunnelConfig {
+                public_hostnames: vec![public_hostname("app.example.test")],
+                client_identity: client_identity.client_identity.clone(),
+            }],
+            public_tls_config: None,
+            quic_server_config: make_server_quic_config_with_client_auth(
+                vec![server_cert.clone()],
+                private_key_from_der(&server_key),
+                std::slice::from_ref(&client_identity.client_identity),
+            )
+            .map_err(io::Error::other)?,
+        })
+        .await
+        .map_err(io::Error::other)?;
+        let public_addr = server.public_addr()?;
+        let tunnel_addr = server.tunnel_addr()?;
+        let server_task = tokio::spawn(server.run());
+
+        let tempdir = tempdir()?;
+        fs::write(tempdir.path().join("server-ca.pem"), server_cert_pem)?;
+        fs::create_dir(tempdir.path().join("client-identity"))?;
+        fs::write(
+            tempdir
+                .path()
+                .join("client-identity")
+                .join(CLIENT_CERT_FILENAME),
+            &client_identity.certificate_pem,
+        )?;
+        fs::write(
+            tempdir
+                .path()
+                .join("client-identity")
+                .join(CLIENT_KEY_FILENAME),
+            &client_identity.private_key_pem,
+        )?;
+        fs::write(
+            tempdir
+                .path()
+                .join("client-identity")
+                .join(CLIENT_IDENTITY_FILENAME),
+            client_identity.client_identity.to_string(),
+        )?;
+
+        let unused_udp = std::net::UdpSocket::bind(localhost(0))?;
+        let failing_port = unused_udp.local_addr()?.port();
+        drop(unused_udp);
+        let valid_server_address =
+            ServerAddress::parse(&format!("localhost:{}", tunnel_addr.port()))
+                .map_err(io::Error::other)?;
+        let failing_server_address =
+            ServerAddress::parse(&format!("localhost:{failing_port}")).map_err(io::Error::other)?;
+        let settings = ClientConfig {
+            server_addresses: vec![failing_server_address.clone(), valid_server_address.clone()],
+            server_hostname: failing_server_address.hostname().clone(),
+            server_port: failing_server_address.port(),
+            log_level: LogLevel::Off,
+            server_ca_file: Some(tempdir.path().join("server-ca.pem")),
+            identity_directory: tempdir.path().join("client-identity"),
+            services: vec![ServiceConfig {
+                public_hostnames: None,
+                backend_address: backend_address.to_string(),
+                tls_mode: ClientTlsMode::Passthrough,
+            }],
+            public_cert_config: None,
+        };
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let client_future = run_until_orderly_shutdown(&settings, localhost(0), async move {
+            let _ = shutdown_rx.await;
+            Ok(())
+        });
+        tokio::pin!(client_future);
+
+        for _ in 0..20 {
+            tokio::select! {
+                client_result = &mut client_future => {
+                    return Err(io::Error::other(format!(
+                        "client runtime exited before healthy address served traffic: {}",
+                        client_result.err().map(|error| error.to_string()).unwrap_or_else(|| "unexpected clean exit".to_owned())
+                    )));
+                }
+                _ = sleep(Duration::from_millis(100)) => {
+                    if let Ok(response) =
+                        wait_for_tls_response(public_addr, &backend_cert, "app.example.test").await
+                    {
+                        assert_eq!(response, *b"pong");
+                        shutdown_tx
+                            .send(())
+                            .map_err(|_| io::Error::other("failed to stop client runtime"))?;
+                        timeout(Duration::from_secs(5), &mut client_future)
+                            .await
+                            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "client shutdown timed out"))?
+                            .map_err(|error| io::Error::other(error.to_string()))?;
+                        backend_task.abort();
+                        server_task.abort();
+                        let _ = backend_task.await;
+                        let _ = server_task.await;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        backend_task.abort();
+        server_task.abort();
+        let _ = backend_task.await;
+        let _ = server_task.await;
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "healthy server address never became ready",
+        ))
     }
 
     #[test]
@@ -487,5 +691,59 @@ mod tests {
             client_identity.to_string(),
         )
         .expect("test client identity should be written");
+    }
+
+    fn localhost(port: u16) -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+    }
+
+    fn public_hostname(hostname: &str) -> PublicHostname {
+        PublicHostname::try_from(hostname).expect("test public hostname should parse")
+    }
+
+    fn server_hostname(hostname: &str) -> ServerHostname {
+        ServerHostname::try_from(hostname).expect("test server hostname should parse")
+    }
+
+    fn private_key_from_der(der: &[u8]) -> PrivateKeyDer<'static> {
+        PrivatePkcs8KeyDer::from(der.to_vec()).into()
+    }
+
+    fn make_self_signed_cert(hostname: &str) -> io::Result<(CertificateDer<'static>, Vec<u8>)> {
+        let certified = rcgen::generate_simple_self_signed(vec![hostname.to_owned()])
+            .map_err(io::Error::other)?;
+        Ok((
+            CertificateDer::from(certified.cert),
+            certified.signing_key.serialize_der(),
+        ))
+    }
+
+    fn root_store_with(certificate: &CertificateDer<'static>) -> io::Result<RootCertStore> {
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate.clone()).map_err(io::Error::other)?;
+        Ok(roots)
+    }
+
+    async fn wait_for_tls_response(
+        public_addr: SocketAddr,
+        backend_cert: &CertificateDer<'static>,
+        server_name: &str,
+    ) -> io::Result<[u8; 4]> {
+        let connector = TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store_with(backend_cert)?)
+                .with_no_client_auth(),
+        ));
+        let tcp_stream = TcpStream::connect(public_addr).await?;
+        let mut tls_stream = connector
+            .connect(
+                ServerName::try_from(server_name.to_owned()).map_err(io::Error::other)?,
+                tcp_stream,
+            )
+            .await?;
+        tls_stream.write_all(b"ping").await?;
+        let mut response = [0_u8; 4];
+        tls_stream.read_exact(&mut response).await?;
+        Ok(response)
     }
 }

@@ -1,7 +1,7 @@
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     ClientConfig, ClientPublicCertConfig, ClientTlsMode, LogLevel, PreparedClient, PublicHostname,
-    Server, ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
+    Server, ServerAddress, ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
     generate_client_identity, initialize_manual_client_public_cert, load_client_config,
     make_server_quic_config_with_client_auth,
 };
@@ -16,6 +16,10 @@ fn public_hostname(hostname: &str) -> PublicHostname {
 
 fn server_hostname(hostname: &str) -> ServerHostname {
     ServerHostname::try_from(hostname).unwrap()
+}
+
+fn server_address(value: &str) -> ServerAddress {
+    ServerAddress::parse(value).unwrap()
 }
 
 #[tokio::test]
@@ -222,6 +226,7 @@ async fn prepared_client_rejects_settings_without_services() {
     .unwrap();
 
     let settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Info,
@@ -280,6 +285,7 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
     .unwrap();
 
     let settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Info,
@@ -339,6 +345,7 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
     .unwrap();
 
     let settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Info,
@@ -395,6 +402,7 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
     fs::create_dir(&public_cert_dir).unwrap();
 
     let settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
@@ -472,6 +480,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
 
     let settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
@@ -581,6 +590,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
 
     let settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
@@ -679,6 +689,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
     fs::write(tempdir.path().join("server-ca.pem"), server_ca_pem).unwrap();
 
     let settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
@@ -776,6 +787,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
 
     // Two services: one terminating (ACME-managed), one passthrough (no cert needed).
     let settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,

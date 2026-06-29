@@ -130,6 +130,16 @@ backend-address = "localhost:8443"
 
 That client uses a **Catch-all Service**: the server still owns explicit **Public hostname** authorization, while the sole client service forwards every admitted hostname to one **Local backend**.
 
+For static fanout, switch only the dial side:
+
+```toml
+[client]
+server-addresses = ["tunnel-a.example.com", "tunnel-b.example.com"]
+
+[[client.services]]
+backend-address = "localhost:8443"
+```
+
 If you are using the manual/private-CA Server path, add:
 
 ```toml
@@ -158,6 +168,8 @@ runewarp client -c /etc/runewarp/client.toml
 ```
 
 If you omit `--config`, Runewarp looks for `$XDG_CONFIG_HOME/runewarp/config.toml`, then `~/.config/runewarp/config.toml` when `XDG_CONFIG_HOME` is unset. Use [`docs/configuration.md`](configuration.md) for the full config discovery and runtime override rules.
+
+For runtime-only startup, `--server-address` is repeatable. One occurrence gives the ordinary single-target shape; multiple occurrences make one Client reconcile those Server addresses concurrently.
 
 ### 8. Verify traffic
 

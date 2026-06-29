@@ -76,6 +76,7 @@ pub enum ServerCertificateConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientConfig {
+    pub server_addresses: Vec<ServerAddress>,
     pub server_hostname: ServerHostname,
     pub server_port: u16,
     pub log_level: LogLevel,
@@ -554,6 +555,7 @@ pub(crate) fn validate_prepared_client_config(
 ) -> Result<ClientConfig, ConfigFileError> {
     let PreparedClientConfig {
         server_address,
+        server_addresses,
         log_level,
         trust,
         identity_directory,
@@ -567,15 +569,59 @@ pub(crate) fn validate_prepared_client_config(
     } = prepared;
     let mut messages = unknown_field_messages;
 
-    let server_address = match server_address {
-        Some(server_address) => {
-            validate_server_address_field("client.server-address", server_address, &mut messages)
+    if server_address.is_some() && server_addresses.is_some() {
+        messages.push(
+            "client.server-address and client.server-addresses are mutually exclusive".to_owned(),
+        );
+    }
+
+    let mut validated_server_addresses = Vec::new();
+    match (server_address, server_addresses) {
+        (Some(server_address), None) => {
+            if let Some(server_address) = validate_server_address_field(
+                "client.server-address",
+                server_address,
+                &mut messages,
+            ) {
+                validated_server_addresses.push(server_address);
+            }
         }
-        None => {
-            messages.push("client.server-address is required".to_owned());
-            None
+        (None, Some(server_addresses)) => {
+            if server_addresses.is_empty() {
+                messages.push("client.server-addresses must contain at least one entry".to_owned());
+            }
+            for (index, server_address) in server_addresses.into_iter().enumerate() {
+                let field = format!("client.server-addresses[{index}]");
+                if let Some(server_address) =
+                    validate_server_address_field(&field, server_address, &mut messages)
+                {
+                    validated_server_addresses.push(server_address);
+                }
+            }
         }
-    };
+        (None, None) => {
+            messages
+                .push("client.server-address or client.server-addresses is required".to_owned());
+        }
+        (Some(server_address), Some(server_addresses)) => {
+            if let Some(server_address) = validate_server_address_field(
+                "client.server-address",
+                server_address,
+                &mut messages,
+            ) {
+                validated_server_addresses.push(server_address);
+            }
+            for (index, server_address) in server_addresses.into_iter().enumerate() {
+                let field = format!("client.server-addresses[{index}]");
+                if let Some(server_address) =
+                    validate_server_address_field(&field, server_address, &mut messages)
+                {
+                    validated_server_addresses.push(server_address);
+                }
+            }
+        }
+    }
+    validate_unique_server_addresses(&validated_server_addresses, &mut messages);
 
     let server_ca_file = match trust {
         PreparedClientTrust::System => None,
@@ -693,14 +739,15 @@ pub(crate) fn validate_prepared_client_config(
 
     if messages.is_empty() {
         Ok(ClientConfig {
-            server_hostname: server_address
-                .as_ref()
-                .expect("validated client.server-address")
+            server_addresses: validated_server_addresses.clone(),
+            server_hostname: validated_server_addresses
+                .first()
+                .expect("validated client Server address")
                 .hostname()
                 .clone(),
-            server_port: server_address
-                .as_ref()
-                .expect("validated client.server-address")
+            server_port: validated_server_addresses
+                .first()
+                .expect("validated client Server address")
                 .port(),
             log_level,
             server_ca_file,
@@ -990,6 +1037,25 @@ fn validate_server_address_field(
     }
 }
 
+fn validate_unique_server_addresses(
+    server_addresses: &[ServerAddress],
+    messages: &mut Vec<String>,
+) {
+    let mut seen = HashSet::new();
+    for server_address in server_addresses {
+        let rendered = format!(
+            "{}:{}",
+            server_address.hostname().as_str(),
+            server_address.port()
+        );
+        if !seen.insert(rendered.clone()) {
+            messages.push(format!(
+                "client.server-addresses contains duplicate Server address `{rendered}`"
+            ));
+        }
+    }
+}
+
 fn validate_socket_address_field(
     field_name: &str,
     socket_address: String,
@@ -1206,6 +1272,7 @@ pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value)
         client,
         &[
             "server-address",
+            "server-addresses",
             "server-trust",
             "server-ca-file",
             "identity-dir",
@@ -1277,6 +1344,7 @@ pub(crate) struct RawServerTunnelConfig {
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct RawClientConfig {
     pub(crate) server_address: Option<String>,
+    pub(crate) server_addresses: Option<Vec<String>>,
     pub(crate) server_trust: Option<String>,
     pub(crate) server_ca_file: Option<PathBuf>,
     pub(crate) identity_dir: Option<PathBuf>,

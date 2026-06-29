@@ -8,7 +8,7 @@ use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
     ClientConfigResolutionDefaults, ClientConnectConfig, ClientPublicCertConfig, ClientRuntimeArgs,
     ClientTlsMode, GeneratedClientIdentity, LogLevel, PreparedClient, PreparedServer,
-    PublicHostname, SelectedClientConfig, Server, ServerBindConfig, ServerHostname,
+    PublicHostname, SelectedClientConfig, Server, ServerAddress, ServerBindConfig, ServerHostname,
     ServerTunnelConfig, ServiceConfig, generate_client_identity,
     initialize_manual_server_certificate, load_client_config, load_server_config,
     make_client_quic_config, make_client_quic_config_with_client_auth, make_server_quic_config,
@@ -35,6 +35,10 @@ fn public_hostname(hostname: &str) -> PublicHostname {
 
 fn server_hostname(hostname: &str) -> ServerHostname {
     ServerHostname::try_from(hostname).unwrap()
+}
+
+fn server_address(value: &str) -> ServerAddress {
+    ServerAddress::parse(value).unwrap()
 }
 
 #[tokio::test]
@@ -298,7 +302,7 @@ identity-dir = "client-identity"
     let client_settings = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("client.toml")),
         &ClientRuntimeArgs {
-            server_address: Some("tunnel.example.test".to_owned()),
+            server_addresses: vec!["tunnel.example.test".to_owned()],
             backend_address: Some(backend.0.to_string()),
         },
         &ClientConfigResolutionDefaults {
@@ -1667,6 +1671,7 @@ client-identity = "{}"
     let server_task = tokio::spawn(server.run());
 
     let client_settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
@@ -1831,6 +1836,7 @@ client-identity = "{}"
     let server_task = tokio::spawn(server.run());
 
     let client_settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
@@ -1950,6 +1956,7 @@ client-identity = "{}"
     let server_task = tokio::spawn(server.run());
 
     let client_settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
@@ -2086,6 +2093,7 @@ client-identity = "{}"
     let server_task = tokio::spawn(server.run());
 
     let client_settings = ClientConfig {
+        server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,

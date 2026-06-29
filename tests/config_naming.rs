@@ -38,7 +38,7 @@ backend-address = "localhost:8443"
     let resolved = resolve_selected_client_config(
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &runewarp::ClientRuntimeArgs {
-            server_address: None,
+            server_addresses: Vec::new(),
             backend_address: None,
         },
         &ClientConfigResolutionDefaults {

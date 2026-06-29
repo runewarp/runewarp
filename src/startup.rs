@@ -24,7 +24,7 @@ use crate::tls_material::{
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig, ClientConnectError,
-    ClientIdentity, ClientPublicCertConfig, ClientTlsMode, QuicConfigError, Server,
+    ClientIdentity, ClientPublicCertConfig, ClientTlsMode, QuicConfigError, Server, ServerAddress,
     ServerBindConfig, ServerCertificateConfig, ServerConfig, ServiceConfig,
     client::TerminationTlsConfigs, client::validate_services,
     make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
@@ -190,20 +190,38 @@ impl PreparedClient {
         config: &ClientConfig,
         local_bind_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
-        let mut server_addrs = lookup_host((config.server_hostname.as_str(), config.server_port))
-            .await
-            .map_err(ClientStartupError::Resolve)?;
+        let server_address = config
+            .server_addresses
+            .first()
+            .expect("validated client config includes at least one Server address");
+        let mut server_addrs =
+            lookup_host((server_address.hostname().as_str(), server_address.port()))
+                .await
+                .map_err(ClientStartupError::Resolve)?;
         let Some(server_addr) = server_addrs.next() else {
             return Err(ClientStartupError::MissingServerAddress {
-                server_hostname: config.server_hostname.to_string(),
+                server_hostname: server_address.hostname().to_string(),
             });
         };
-        Self::connect_to(config, local_bind_addr, server_addr).await
+        Self::connect_to_server_address(config, local_bind_addr, server_address, server_addr).await
     }
 
     pub async fn connect_to(
         config: &ClientConfig,
         local_bind_addr: SocketAddr,
+        server_addr: SocketAddr,
+    ) -> Result<Self, ClientStartupError> {
+        let server_address = config
+            .server_addresses
+            .first()
+            .expect("validated client config includes at least one Server address");
+        Self::connect_to_server_address(config, local_bind_addr, server_address, server_addr).await
+    }
+
+    pub async fn connect_to_server_address(
+        config: &ClientConfig,
+        local_bind_addr: SocketAddr,
+        server_address: &ServerAddress,
         server_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
         if config.services.is_empty() {
@@ -232,7 +250,7 @@ impl PreparedClient {
         let client = Client::connect_with_services(crate::client::RoutedClientConnectConfig {
             local_bind_addr,
             server_addr,
-            server_name: config.server_hostname.to_string(),
+            server_name: server_address.hostname().to_string(),
             services,
             quic_client_config,
             termination_tls_configs,
@@ -731,8 +749,8 @@ mod tests {
     use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
     use crate::{
         ClientConfig, ClientIdentity, ClientPublicCertConfig, ClientTlsMode, LogLevel,
-        PublicHostname, ServerCertificateConfig, ServerConfig, ServerHostname, ServerTunnelConfig,
-        ServiceConfig,
+        PublicHostname, ServerAddress, ServerCertificateConfig, ServerConfig, ServerHostname,
+        ServerTunnelConfig, ServiceConfig,
     };
 
     fn public_hostname(hostname: &str) -> PublicHostname {
@@ -741,6 +759,10 @@ mod tests {
 
     fn server_hostname(hostname: &str) -> ServerHostname {
         ServerHostname::try_from(hostname).unwrap()
+    }
+
+    fn server_address(value: &str) -> ServerAddress {
+        ServerAddress::parse(value).unwrap()
     }
 
     #[test]
@@ -987,6 +1009,7 @@ mod tests {
     async fn client_acme_builds_one_runtime_per_terminating_hostname() {
         let tempdir = tempfile::tempdir().unwrap();
         let settings = ClientConfig {
+            server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
             log_level: LogLevel::Info,
@@ -1032,6 +1055,7 @@ mod tests {
         let tempdir = tempfile::tempdir()?;
         let state_directory = tempdir.path().join("client/acme");
         let settings = ClientConfig {
+            server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
             log_level: LogLevel::Info,
@@ -1099,6 +1123,7 @@ mod tests {
         fs::write(&blocked_parent, "not a directory")?;
         let state_directory = blocked_parent.join("acme");
         let settings = ClientConfig {
+            server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
             log_level: LogLevel::Info,

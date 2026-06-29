@@ -41,11 +41,11 @@ For `runewarp client`, config/runtime precedence is:
 
 1. an explicit `--config` path selects that file and a missing explicit path remains an error
 2. otherwise, a discovered default config file is selected when it exists
-3. otherwise, there is no selected Client config and `runewarp client` may start in the CLI-only shape when both `--server-address` and `--backend-address` are present
+3. otherwise, there is no selected Client config and `runewarp client` may start in the CLI-only shape when at least one `--server-address` and `--backend-address` are present
 
 When a selected config file is involved:
 
-- `--server-address` may replace `client.server-address` before validation
+- repeated `--server-address` flags replace either `client.server-address` or `client.server-addresses` before validation
 - `--backend-address` may supply the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks
 - any configured Service blocks `--backend-address`, even when that Service block is malformed
 - a selected file with no `[client]` section may still start the Client when both runtime flags are present
@@ -112,6 +112,21 @@ backend-address = "127.0.0.1:443"
 
 This shape is valid only when there is exactly one Service.
 
+### Client with static fanout
+
+```toml
+[client]
+server-addresses = ["tunnel-a.example.com", "tunnel-b.example.com"]
+server-trust = "ca-file"
+server-ca-file = "/etc/runewarp/server-ca.crt"
+identity-dir = "/etc/runewarp/client"
+
+[[client.services]]
+backend-address = "127.0.0.1:443"
+```
+
+Use `client.server-address` for the common one-target case. Use `client.server-addresses` when one Client instance should reconcile multiple Server addresses concurrently.
+
 ### Client terminate mode
 
 ```toml
@@ -154,7 +169,8 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 
 | Key | Required | Notes |
 | --- | --- | --- |
-| `client.server-address` | runtime or config | **Server address** the Client dials for its **Tunnel connection**, written as `hostname[:port]`. The host part must be a hostname, not a raw IP literal. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, `--server-address` may supply or replace this value before validation. |
+| `client.server-address` | runtime or config | Ergonomic single-target **Server address** shortcut, written as `hostname[:port]`. Mutually exclusive with `client.server-addresses`. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, one `--server-address` may supply or replace this value before validation. |
+| `client.server-addresses` | no | One or more explicit **Server addresses** for static fanout. Mutually exclusive with `client.server-address`. Each entry uses the same `hostname[:port]` rules as the singular field. Repeated `--server-address` flags replace this list before validation. |
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
 | `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG Client identity path. |
@@ -222,7 +238,9 @@ Runewarp supports two Client trust modes:
 - `runewarp client` requires either a selected `[client]` section or both runtime routing flags when no selected Client config exists or the selected file has no `[client]` section
 - `server.hostname` must be present
 - `[server.acme]` and `server.cert-dir` are mutually exclusive; when `[server.acme]` is absent, Runewarp uses the manual/private-CA path with `server.cert-dir` or its default XDG location
-- `runewarp client` must end up with a **Server address** after any allowed `--server-address` overlay
+- `runewarp client` must end up with at least one effective **Server address** after any allowed `--server-address` overlay
+- `client.server-address` and `client.server-addresses` are mutually exclusive
+- `client.server-addresses` must contain at least one entry when present
 - there must be at least one `[[server.tunnels]]` entry
 - `runewarp client` must end up with at least one **Service**, either from config or from the runtime `--backend-address` Catch-all overlay
 - `client.server-trust` must be either `system` or `ca-file`
@@ -253,7 +271,8 @@ Runewarp supports two Client trust modes:
 - `public-hostnames = []` is an error on either side
 - hostnames are normalized to lowercase and a trailing dot is stripped before comparison
 - `public-hostnames` must be DNS hostnames, including punycode A-labels; raw Unicode, IP literals, and wildcards are rejected
-- the host portion of `client.server-address` must be a DNS hostname; raw IP literals are rejected
+- the host portion of `client.server-address` and of each `client.server-addresses[]` entry must be a DNS hostname; raw IP literals are rejected
+- effective Client **Server addresses** must be unique after normalization
 - any exact hostname overlap across Tunnel entries after normalization is an error
 - any exact hostname overlap across Service entries after normalization is an error
 - `server.hostname` itself must not be reused as a routed **Public hostname**

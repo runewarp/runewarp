@@ -63,6 +63,7 @@ pub use quic::{
     make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
 };
 pub use server::{Server, ServerBindConfig};
+pub use server_address::{ServerAddress, ServerAddressError};
 pub use server_cert::{
     SERVER_CA_FILENAME, initialize_manual_server_certificate, inspect_manual_server_certificate,
     renew_manual_server_certificate, rotate_manual_server_certificate_authority,

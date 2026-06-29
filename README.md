@@ -73,7 +73,7 @@ flowchart TD
     C -->|"select Service and proxy"| B
 ```
 
-Visitors connect to the public server over TLS, and each client instance keeps one long-lived QUIC tunnel connection back to it. The server routes by SNI and forwards the encrypted stream to the selected client, which then proxies it to the local backend. A service can opt into terminate mode when the client, not the backend, should terminate TLS. See [`docs/architecture.md`](docs/architecture.md) for the detailed transport view.
+Visitors connect to the public server over TLS, and each client instance keeps one or more long-lived QUIC tunnel connections back to one or more configured server addresses. The server routes by SNI and forwards the encrypted stream to the selected client, which then proxies it to the local backend. A service can opt into terminate mode when the client, not the backend, should terminate TLS. See [`docs/architecture.md`](docs/architecture.md) for the detailed transport view.
 
 ## Comparison
 

@@ -18,7 +18,7 @@ Runewarp keeps public ingress simple: the server routes encrypted traffic to a c
 | --- | --- |
 | **Visitor** | Connects to a **Public hostname** over TLS |
 | **Server** | Accepts Visitor traffic, extracts SNI, selects a **Tunnel**, and forwards the original encrypted stream |
-| **Client instance** | Maintains one **Tunnel connection**, selects a **Service**, and forwards traffic to a **Local backend** |
+| **Client instance** | Maintains one or more **Tunnel connections**, selects a **Service**, and forwards traffic to a **Local backend** |
 | **Local backend** | Terminates TLS under **TLS passthrough** or receives plaintext in **Terminate mode** and serves the operator application |
 
 ## Config handling
@@ -35,7 +35,7 @@ This keeps config discovery and defaulting predictable without mixing them into 
 
 Runewarp turns hostname input into opaque canonical domain values at the first validation seam:
 
-- `server.hostname` and the host portion of `client.server-address` become **Server hostname** values
+- `server.hostname`, the host portion of `client.server-address`, and the host portion of each `client.server-addresses[]` entry become **Server hostname** values
 - `server.tunnels[].public-hostnames`, `client.services[].public-hostnames`, and parsed ClientHello SNI become **Public hostname** values
 - lowercase normalization and trailing-dot stripping happen before duplicate detection and route lookup
 
@@ -127,7 +127,9 @@ The client validates the server certificate either through system trust or throu
 
 ## Current runtime limits
 
-- each **Client instance** establishes exactly one **Tunnel connection**
+- each **Client instance** establishes one or more **Tunnel connections**
+- readiness means at least one configured **Server address** is connected
+- failure of one configured **Server address** does not tear down healthy **Tunnel connections** to other configured **Server addresses**
 - the runtime keeps one active connection per **Tunnel**
 - a newer authenticated connection replaces the older one only inside that same **Tunnel**
 - multiple Client instances across different Tunnels are supported

@@ -24,7 +24,6 @@ impl SelectedTunnelConnection {
         self.connection.clone()
     }
 
-    #[cfg(test)]
     pub(crate) fn remote_address(&self) -> std::net::SocketAddr {
         self.connection.remote_address()
     }
@@ -36,7 +35,6 @@ impl SelectedTunnelConnection {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn active_stream_count(&self) -> usize {
         self.active_streams.load(Ordering::Relaxed)
     }

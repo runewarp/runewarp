@@ -55,7 +55,10 @@ pub enum InstallOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServerRouteOutcome {
-    Forwarded,
+    Forwarded {
+        remote_addr: SocketAddr,
+        active_streams: usize,
+    },
     RejectedServerHostname,
     RejectedUnauthorized,
     NoActiveTunnelConnection,
@@ -534,11 +537,18 @@ where
 
 fn server_route_event(public_hostname: &str, outcome: ServerRouteOutcome) -> (EventLevel, String) {
     let (level, line) = match outcome {
-        ServerRouteOutcome::Forwarded => (
+        ServerRouteOutcome::Forwarded {
+            remote_addr,
+            active_streams,
+        } => (
             EventLevel::Debug,
             event_line(
                 "server route forwarded",
-                [("public-hostname", Cow::Borrowed(public_hostname))],
+                [
+                    ("public-hostname", Cow::Borrowed(public_hostname)),
+                    ("remote-address", Cow::Owned(remote_addr.to_string())),
+                    ("active-streams", Cow::Owned(active_streams.to_string())),
+                ],
             ),
         ),
         ServerRouteOutcome::RejectedServerHostname => (
@@ -1246,11 +1256,19 @@ mod tests {
     fn debug_level_keeps_debug_routing_events() {
         let output = capture(LogLevel::Debug, || {
             emit(EventLevel::Debug, "debug detail");
-            server_route("app.example.test", ServerRouteOutcome::Forwarded);
+            server_route(
+                "app.example.test",
+                ServerRouteOutcome::Forwarded {
+                    remote_addr: "203.0.113.10:443".parse().unwrap(),
+                    active_streams: 1,
+                },
+            );
         });
 
         assert!(output.contains("debug detail"));
-        assert!(output.contains("server route forwarded: public-hostname=app.example.test"));
+        assert!(output.contains(
+            "server route forwarded: public-hostname=app.example.test remote-address=203.0.113.10:443 active-streams=1"
+        ));
     }
 
     #[test]

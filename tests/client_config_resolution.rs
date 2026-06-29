@@ -76,6 +76,42 @@ fn cli_only_resolution_requires_backend_address_without_a_selected_config()
 }
 
 #[test]
+fn cli_only_resolution_accepts_repeated_server_address_flags_without_a_selected_config()
+-> Result<(), Box<dyn Error>> {
+    let tempdir = tempdir()?;
+    let identity_directory = tempdir.path().join("client-identity");
+    write_identity_material(&identity_directory)?;
+
+    let settings = resolve_selected_client_config(
+        SelectedClientConfig::None,
+        &ClientRuntimeArgs {
+            server_addresses: vec![
+                "Tunnel.Example.Test.".to_owned(),
+                "backup.example.test:9443".to_owned(),
+            ],
+            backend_address: Some("localhost:8443".to_owned()),
+        },
+        &ClientConfigResolutionDefaults {
+            identity_directory,
+            public_cert_directory: tempdir.path().join("unused-public-cert"),
+        },
+    )?;
+
+    assert_eq!(settings.server_addresses.len(), 2);
+    assert_eq!(
+        settings.server_addresses[0].hostname().as_str(),
+        "tunnel.example.test"
+    );
+    assert_eq!(settings.server_addresses[0].port(), 443);
+    assert_eq!(
+        settings.server_addresses[1].hostname().as_str(),
+        "backup.example.test"
+    );
+    assert_eq!(settings.server_addresses[1].port(), 9443);
+    Ok(())
+}
+
+#[test]
 fn selected_config_without_a_client_section_can_still_resolve_from_runtime_flags()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;

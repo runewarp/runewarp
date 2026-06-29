@@ -238,7 +238,8 @@ fn prepare_cli_only_client_config(
         selected_path.map(Path::to_path_buf),
         log_level,
         RawClientConfig {
-            server_address: runtime.server_addresses.first().cloned(),
+            server_address: (runtime.server_addresses.len() == 1)
+                .then(|| runtime.server_addresses[0].clone()),
             server_addresses: (runtime.server_addresses.len() > 1)
                 .then(|| runtime.server_addresses.clone()),
             server_trust: None,

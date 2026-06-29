@@ -202,17 +202,6 @@ pub fn server_tunnel_connection_accepted(
     );
 }
 
-pub fn server_tunnel_connection_replaced(
-    client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
-    previous_remote_addr: SocketAddr,
-) {
-    emit(
-        EventLevel::Info,
-        &server_tunnel_connection_replaced_line(client_identity, remote_addr, previous_remote_addr),
-    );
-}
-
 pub fn server_tunnel_connection_terminated(
     client_identity: &ClientIdentity,
     remote_addr: SocketAddr,
@@ -811,16 +800,6 @@ fn server_tunnel_connection_accepted_line(
     )
 }
 
-fn server_tunnel_connection_replaced_line(
-    client_identity: &ClientIdentity,
-    remote_addr: SocketAddr,
-    previous_remote_addr: SocketAddr,
-) -> String {
-    format!(
-        "server tunnel connection replaced: client-identity={client_identity} remote-address={remote_addr} previous-remote-address={previous_remote_addr}"
-    )
-}
-
 fn server_tunnel_connection_closed_line(
     client_identity: &ClientIdentity,
     remote_addr: SocketAddr,
@@ -1170,8 +1149,8 @@ mod tests {
         server_graceful_shutdown_closing_tunnel_connections, server_graceful_shutdown_started,
         server_public_listener_ready, server_route, server_route_rejected_client_hello,
         server_tunnel_connection_accepted, server_tunnel_connection_failed,
-        server_tunnel_connection_replaced, server_tunnel_connection_terminated,
-        server_tunnel_connection_unauthorized, server_tunnel_listener_ready, warning,
+        server_tunnel_connection_terminated, server_tunnel_connection_unauthorized,
+        server_tunnel_listener_ready, warning,
     };
     use crate::{ClientHelloError, ClientIdentity, LogLevel};
 
@@ -1716,17 +1695,11 @@ mod tests {
         )
         .unwrap();
         let first_remote_addr: SocketAddr = "203.0.113.10:443".parse().unwrap();
-        let second_remote_addr: SocketAddr = "203.0.113.11:443".parse().unwrap();
         let output = capture(LogLevel::Info, || {
             server_tunnel_connection_accepted(&client_identity, first_remote_addr);
-            server_tunnel_connection_replaced(
-                &client_identity,
-                second_remote_addr,
-                first_remote_addr,
-            );
             server_tunnel_connection_terminated(
                 &client_identity,
-                second_remote_addr,
+                first_remote_addr,
                 &ConnectionError::TimedOut,
             );
             server_tunnel_connection_failed(first_remote_addr, "handshake timed out");
@@ -1736,10 +1709,7 @@ mod tests {
             "INFO server tunnel connection accepted: client-identity={client_identity} remote-address={first_remote_addr}"
         ).as_str()));
         assert!(output.contains(format!(
-            "INFO server tunnel connection replaced: client-identity={client_identity} remote-address={second_remote_addr} previous-remote-address={first_remote_addr}"
-        ).as_str()));
-        assert!(output.contains(format!(
-            "WARN server tunnel connection dropped: client-identity={client_identity} remote-address={second_remote_addr}: timed out"
+            "WARN server tunnel connection dropped: client-identity={client_identity} remote-address={first_remote_addr}: timed out"
         ).as_str()));
         assert!(output.contains(format!(
             "WARN server tunnel connection failed: remote-address={first_remote_addr}: handshake timed out"

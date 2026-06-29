@@ -97,11 +97,11 @@ The operator-run local endpoint that a **Client** connects to after it selects a
 _Avoid_: Service, tunnel
 
 **Client identity**:
-The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime; ordinary renewal preserves it, while rotation changes it. One **Tunnel** may authorize one or more **Client identities** without changing the Tunnel's single-active-connection runtime behavior.
+The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime; ordinary renewal preserves it, while rotation changes it. One **Tunnel** may authorize one or more **Client identities**.
 _Avoid_: Certificate, serial number
 
 **Tunnel pool**:
-The set of live **Tunnel connections** and their serving **Client instances** currently available for one **Tunnel**.
+The set of live **Tunnel connections** and their serving **Client instances** currently available for one **Tunnel**, regardless of which authorized **Client identity** each member uses.
 _Avoid_: Tunnel, cluster
 
 **Server-authoritative routing**:
@@ -170,6 +170,7 @@ _Avoid_: CI environment, deploy target
 - A **Client identity** can be used by one or more **Client instances**
 - A **Client identity** is authorized by exactly one **Tunnel**
 - A **Tunnel pool** belongs to exactly one **Tunnel**
+- A **Tunnel pool** may contain members using different authorized **Client identities** of that **Tunnel**
 - **Server-authoritative routing** uses **Public hostname authorization** before **Service hostname matching**
 - A **Tunnel** owns one or more explicit **Public hostnames**
 - A **Catch-all Service** is valid only when there is exactly one configured **Service**

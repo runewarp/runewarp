@@ -17,19 +17,7 @@ Runewarp already ships:
 
 This track reduces avoidable downtime across client and server deployment shapes.
 
-### Same-Tunnel Client pools
-
-**Goal**
-
-- one **Tunnel** can be served by multiple concurrent Client instances so capacity and availability no longer hinge on one active connection
-
-**Planned work**
-
-- replace the single-active-connection rule with a **Tunnel pool**
-- keep pool membership scoped per Tunnel so unrelated hostname sets stay isolated
-- define how incoming streams pick a serving Client instance without changing the public TLS passthrough boundary
-
-### Pool selection policy
+### Tunnel-pool resilience
 
 **Goal**
 
@@ -37,9 +25,9 @@ This track reduces avoidable downtime across client and server deployment shapes
 
 **Planned work**
 
-- least-active balancing across the live connections in one Tunnel pool
-- round-robin tie-breaking when load is equal
-- explicit behavior when pool members disappear while traffic is in flight
+- add drain-aware withdrawal so planned shutdown can remove one pool member without dropping its active streams immediately
+- decide whether pre-establishment placement failures should retry on another live pool member
+- improve runtime visibility into which pool member served each stream during incidents
 
 ### Replica identity model
 
@@ -50,7 +38,7 @@ This track reduces avoidable downtime across client and server deployment shapes
 **Planned work**
 
 - keep one shared `client-identity` per Tunnel as the default pool model
-- define what happens when a replica presents the wrong identity or mismatched config
+- decide whether mismatched pool members should ever be auto-ejected instead of failing only the streams they receive
 - make replica failure modes easier for operators to diagnose
 
 ### Multi-node Server deployments

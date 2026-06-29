@@ -130,10 +130,11 @@ The client validates the server certificate either through system trust or throu
 - each **Client instance** establishes one or more **Tunnel connections**
 - readiness means at least one configured **Server address** is connected
 - failure of one configured **Server address** does not tear down healthy **Tunnel connections** to other configured **Server addresses**
-- the runtime keeps one active connection per **Tunnel**
-- a newer authenticated connection replaces the older one only inside that same **Tunnel**
+- a **Tunnel** stays available while at least one authenticated **Tunnel connection** is live
+- when a **Tunnel** has more than one live **Tunnel connection** on one **Server** node, the runtime treats them as a **Tunnel pool**
+- new Visitor streams are placed onto the least-busy **Tunnel pool** member, with round-robin tie-breaking when active-stream load is equal
+- once placed, a proxied stream stays on its chosen **Tunnel connection** until it closes or that connection dies
 - multiple Client instances across different Tunnels are supported
-- same-Tunnel load-balanced pools are not part of the current runtime shape
 - orderly local shutdown is runtime-owned: the **Server** stops accepting new Visitor traffic and new **Tunnel connections** before closing active **Tunnel connections**, and the **Client instance** stops reconnect work before closing its active **Tunnel connection**
 - graceful shutdown waits only a short fixed grace period after sending the QUIC close; it does not drain Visitor traffic or proxied streams
 - TLS passthrough is the default and lowest-privilege mode

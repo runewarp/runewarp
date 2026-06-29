@@ -4,7 +4,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use quinn::Connection;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
@@ -61,7 +60,7 @@ impl VisitorStreamHandler {
             };
         }
 
-        let tunnel_connection = match self
+        let selected_tunnel_connection = match self
             .tunnel_registry
             .route_tunnel_connection(&public_hostname)
             .await
@@ -87,7 +86,7 @@ impl VisitorStreamHandler {
             visitor_stream,
             public_hostname,
             buffered_bytes,
-            tunnel_connection,
+            selected_tunnel_connection,
         )
         .await
     }
@@ -126,9 +125,9 @@ impl VisitorStreamHandler {
         visitor_stream: TcpStream,
         public_hostname: PublicHostname,
         buffered_bytes: Vec<u8>,
-        tunnel_connection: Connection,
+        tunnel_connection: super::active_client::SelectedTunnelConnection,
     ) -> io::Result<()> {
-        let (send, recv) = match tunnel_connection.open_bi().await {
+        let (send, recv) = match tunnel_connection.connection().open_bi().await {
             Ok(stream) => stream,
             Err(_) => {
                 runtime_log::server_route(
@@ -138,6 +137,7 @@ impl VisitorStreamHandler {
                 return Ok(());
             }
         };
+        let _active_stream_guard = tunnel_connection.record_open_stream();
         runtime_log::server_route(public_hostname.as_str(), ServerRouteOutcome::Forwarded);
 
         proxy_tcp_over_quic(visitor_stream, buffered_bytes, send, recv).await

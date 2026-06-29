@@ -125,14 +125,17 @@ Failure and reconnect logs report the chosen next retry delay as `next-retry-del
 
 When the remote **Server** exits gracefully, the **Client instance** still treats the closed **Tunnel connection** as an ordinary disconnect and keeps the same reconnect model above. There is no shutdown-specific reconnect branch.
 
-If a new authenticated connection replaces an older connection for the same **Tunnel**, including when it used a different authorized **Client identity**, the older connection closes and any streams on it are lost.
+When more than one authenticated connection is live for the same **Tunnel** on one **Server** node, those connections form a **Tunnel pool**. Each new Visitor stream is placed onto the pool member with the fewest active proxied streams, with round-robin tie-breaking when load is equal. If the chosen member dies before the proxied stream is established, the Visitor connection fails immediately; the Server does not retry placement onto a different pool member.
 
 ## Runtime invariants
 
 - each **Client instance** has one or more **Tunnel connections**
 - readiness means at least one configured **Server address** has an authenticated live **Tunnel connection**
 - failure, retry, and recovery stay isolated per effective **Server address**
-- the runtime keeps one active connection per **Tunnel**
+- a **Tunnel** may have one or more authenticated live **Tunnel connections** on one **Server** node
+- a **Tunnel** stays available while at least one of those **Tunnel connections** remains live
+- active-stream placement within a same-**Tunnel** pool is least-active with round-robin tie-breaking
+- once placed, a proxied stream stays bound to its chosen **Tunnel connection**; there is no live stream migration
 - the runtime does not validate cross-side hostname coverage under **Hostname mirroring**
 - there is no pre-flight **Local backend** health check
 - multiple Client instances across different Tunnels are supported

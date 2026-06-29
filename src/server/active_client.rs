@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use quinn::Connection;
 use tokio::sync::RwLock;
@@ -7,68 +7,108 @@ use tokio::sync::RwLock;
 use crate::{ClientIdentity, runtime_log};
 
 #[derive(Clone)]
-struct ActiveClientInstance {
-    generation: u64,
+struct PoolMember {
+    member_id: u64,
     connection: Connection,
+    active_streams: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
-pub(crate) struct ActiveClientSlot {
-    active_client: Arc<RwLock<Option<ActiveClientInstance>>>,
-    next_generation: Arc<AtomicU64>,
+pub(crate) struct SelectedTunnelConnection {
+    connection: Connection,
+    active_streams: Arc<AtomicUsize>,
 }
 
-impl ActiveClientSlot {
-    pub(crate) fn new() -> Self {
-        Self {
-            active_client: Arc::new(RwLock::new(None)),
-            next_generation: Arc::new(AtomicU64::new(1)),
+impl SelectedTunnelConnection {
+    pub(crate) fn connection(&self) -> Connection {
+        self.connection.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remote_address(&self) -> std::net::SocketAddr {
+        self.connection.remote_address()
+    }
+
+    pub(crate) fn record_open_stream(&self) -> ActiveStreamGuard {
+        self.active_streams.fetch_add(1, Ordering::Relaxed);
+        ActiveStreamGuard {
+            active_streams: self.active_streams.clone(),
         }
     }
 
-    pub(crate) async fn current_connection(&self) -> Option<Connection> {
-        self.active_client
-            .read()
-            .await
-            .as_ref()
-            .map(|active_client| active_client.connection.clone())
+    #[cfg(test)]
+    pub(crate) fn active_stream_count(&self) -> usize {
+        self.active_streams.load(Ordering::Relaxed)
+    }
+}
+
+pub(crate) struct ActiveStreamGuard {
+    active_streams: Arc<AtomicUsize>,
+}
+
+impl Drop for ActiveStreamGuard {
+    fn drop(&mut self) {
+        self.active_streams.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ActiveClientPool {
+    members: Arc<RwLock<Vec<PoolMember>>>,
+    next_member_id: Arc<AtomicU64>,
+    next_round_robin_offset: Arc<AtomicU64>,
+}
+
+impl ActiveClientPool {
+    pub(crate) fn new() -> Self {
+        Self {
+            members: Arc::new(RwLock::new(Vec::new())),
+            next_member_id: Arc::new(AtomicU64::new(1)),
+            next_round_robin_offset: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub(crate) async fn select_connection(&self) -> Option<SelectedTunnelConnection> {
+        let members = self.members.read().await.clone();
+        let len = members.len();
+        if len == 0 {
+            return None;
+        }
+
+        let lowest_active_streams = members
+            .iter()
+            .map(|member| member.active_streams.load(Ordering::Relaxed))
+            .min()
+            .expect("members length checked above");
+        let start = (self.next_round_robin_offset.fetch_add(1, Ordering::Relaxed) as usize) % len;
+
+        (0..len)
+            .map(|offset| (start + offset) % len)
+            .find_map(|index| {
+                let member = &members[index];
+                (member.active_streams.load(Ordering::Relaxed) == lowest_active_streams).then(
+                    || SelectedTunnelConnection {
+                        connection: member.connection.clone(),
+                        active_streams: member.active_streams.clone(),
+                    },
+                )
+            })
     }
 
     pub(crate) async fn register(&self, connection: Connection, client_identity: ClientIdentity) {
         let remote_addr = connection.remote_address();
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-        let (installed, previous) = {
-            let mut active_client = self.active_client.write().await;
-            let current_generation = active_client.as_ref().map(|active| active.generation);
-            if !incoming_generation_supersedes(current_generation, generation) {
-                (false, None)
-            } else {
-                (
-                    true,
-                    active_client.replace(ActiveClientInstance {
-                        generation,
-                        connection: connection.clone(),
-                    }),
-                )
-            }
-        };
-        if !installed {
-            connection.close(0_u32.into(), b"replaced");
-            return;
+        let member_id = self.next_member_id.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut members = self.members.write().await;
+            members.push(PoolMember {
+                member_id,
+                connection: connection.clone(),
+                active_streams: Arc::new(AtomicUsize::new(0)),
+            });
         }
+        runtime_log::server_tunnel_connection_accepted(&client_identity, remote_addr);
 
-        if let Some(previous) = previous {
-            runtime_log::server_tunnel_connection_replaced(
-                &client_identity,
-                remote_addr,
-                previous.connection.remote_address(),
-            );
-            previous.connection.close(0_u32.into(), b"replaced");
-        } else {
-            runtime_log::server_tunnel_connection_accepted(&client_identity, remote_addr);
-        }
-
-        let active_client = self.active_client.clone();
+        let members = self.members.clone();
         let client_identity_for_close = client_identity.clone();
         tokio::spawn(async move {
             let close_error = connection.closed().await;
@@ -77,30 +117,22 @@ impl ActiveClientSlot {
                 remote_addr,
                 &close_error,
             );
-            let mut active_client_guard = active_client.write().await;
-            if active_client_guard
-                .as_ref()
-                .is_some_and(|active| active.generation == generation)
-            {
-                *active_client_guard = None;
-            }
+            let mut members_guard = members.write().await;
+            members_guard.retain(|member| member.member_id != member_id);
         });
     }
 
-    pub(crate) async fn close_active_connection(&self, reason: &'static [u8]) -> bool {
-        let Some(connection) = self.current_connection().await else {
-            return false;
-        };
-        connection.close(0_u32.into(), reason);
-        true
+    pub(crate) async fn close_all_connections(&self, reason: &'static [u8]) -> usize {
+        let members = self.members.read().await.clone();
+        for member in &members {
+            member.connection.close(0_u32.into(), reason);
+        }
+        members.len()
     }
-}
 
-fn incoming_generation_supersedes(
-    current_generation: Option<u64>,
-    incoming_generation: u64,
-) -> bool {
-    current_generation.is_none_or(|current_generation| incoming_generation > current_generation)
+    pub(crate) async fn connection_count(&self) -> usize {
+        self.members.read().await.len()
+    }
 }
 
 #[cfg(test)]
@@ -117,134 +149,151 @@ mod tests {
     use tracing_subscriber::fmt::writer::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
 
-    use super::{ActiveClientSlot, incoming_generation_supersedes};
+    use super::ActiveClientPool;
     use crate::{
         GeneratedClientIdentity, generate_client_identity,
         make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
     };
 
-    #[test]
-    fn newer_generations_supersede_older_active_connections() {
-        assert!(incoming_generation_supersedes(None, 1));
-        assert!(incoming_generation_supersedes(Some(1), 2));
-    }
-
-    #[test]
-    fn stale_generations_do_not_replace_newer_active_connections() {
-        assert!(!incoming_generation_supersedes(Some(2), 1));
-        assert!(!incoming_generation_supersedes(Some(2), 2));
-    }
-
     #[tokio::test(flavor = "current_thread")]
-    async fn registers_an_active_tunnel_connection_and_logs_acceptance() -> io::Result<()> {
-        let client_identity = generate_test_client_identity()?;
-        let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let slot = ActiveClientSlot::new();
-        let remote_addr = fixture.server_connection.remote_address();
-        let expected_log = format!(
-            "server tunnel connection accepted: client-identity={} remote-address={remote_addr}",
-            client_identity.client_identity
-        );
-        let slot_for_registration = slot.clone();
-        let expected_log_for_wait = expected_log.clone();
-
-        let output = capture_logs(|buffer| async move {
-            slot_for_registration
-                .register(
-                    fixture.server_connection.clone(),
-                    client_identity.client_identity.clone(),
-                )
-                .await;
-            wait_for_log(&buffer, expected_log_for_wait.as_str()).await;
-        })
-        .await;
-
-        assert!(output.contains(&expected_log));
-        assert!(slot.current_connection().await.is_some());
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn replaces_and_clears_active_tunnel_connections_with_lifecycle_logs() -> io::Result<()> {
+    async fn registers_multiple_same_tunnel_connections_without_replacement() -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let first_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         let second_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let slot = ActiveClientSlot::new();
+        let pool = ActiveClientPool::new();
         let first_remote_addr = first_fixture.server_connection.remote_address();
         let second_remote_addr = second_fixture.server_connection.remote_address();
-        let expected_replacement_log = format!(
-            "server tunnel connection replaced: client-identity={} remote-address={second_remote_addr} previous-remote-address={first_remote_addr}",
+        let expected_first_log = format!(
+            "server tunnel connection accepted: client-identity={} remote-address={first_remote_addr}",
             client_identity.client_identity
         );
-        let expected_closed_log = format!(
-            "server tunnel connection closed: client-identity={} remote-address={second_remote_addr}",
+        let expected_second_log = format!(
+            "server tunnel connection accepted: client-identity={} remote-address={second_remote_addr}",
             client_identity.client_identity
         );
-        let slot_for_registration = slot.clone();
+        let pool_for_registration = pool.clone();
         let client_identity_for_registration = client_identity.client_identity.clone();
-        let expected_replacement_log_for_wait = expected_replacement_log.clone();
-        let expected_closed_log_for_wait = expected_closed_log.clone();
+        let expected_first_log_for_wait = expected_first_log.clone();
+        let expected_second_log_for_wait = expected_second_log.clone();
 
         let output = capture_logs(|buffer| async move {
-            slot_for_registration
+            pool_for_registration
                 .register(
                     first_fixture.server_connection.clone(),
                     client_identity_for_registration.clone(),
                 )
                 .await;
-            slot_for_registration
+            wait_for_log(&buffer, expected_first_log_for_wait.as_str()).await;
+            pool_for_registration
                 .register(
                     second_fixture.server_connection.clone(),
                     client_identity_for_registration,
                 )
                 .await;
-            wait_for_log(&buffer, expected_replacement_log_for_wait.as_str()).await;
-
-            second_fixture
-                .client_connection
-                .close(0_u32.into(), b"test complete");
-            wait_for_log(&buffer, expected_closed_log_for_wait.as_str()).await;
+            wait_for_log(&buffer, expected_second_log_for_wait.as_str()).await;
         })
         .await;
 
-        assert!(output.contains(&expected_replacement_log));
-        assert!(output.contains(&expected_closed_log));
-        assert!(slot.current_connection().await.is_none());
+        assert!(output.contains(&expected_first_log));
+        assert!(output.contains(&expected_second_log));
+        assert_eq!(pool.connection_count().await, 2);
         Ok(())
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn closes_the_active_tunnel_connection_and_clears_the_slot() -> io::Result<()> {
+    async fn selects_least_active_connection_and_round_robins_equal_load_ties() -> io::Result<()> {
+        let client_identity = generate_test_client_identity()?;
+        let first_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        let second_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        let pool = ActiveClientPool::new();
+        pool.register(
+            first_fixture.server_connection.clone(),
+            client_identity.client_identity.clone(),
+        )
+        .await;
+        pool.register(
+            second_fixture.server_connection.clone(),
+            client_identity.client_identity.clone(),
+        )
+        .await;
+
+        let first_selection = pool
+            .select_connection()
+            .await
+            .expect("first pool member should be selectable");
+        let first_selected_addr = first_selection.remote_address();
+        let first_stream_guard = first_selection.record_open_stream();
+
+        let second_selection = pool
+            .select_connection()
+            .await
+            .expect("second pool member should be selectable");
+        assert_ne!(
+            second_selection.remote_address(),
+            first_selected_addr,
+            "equal-load ties should rotate to the other member"
+        );
+        let second_stream_guard = second_selection.record_open_stream();
+
+        drop(first_stream_guard);
+        drop(second_stream_guard);
+
+        let third_selection = pool
+            .select_connection()
+            .await
+            .expect("pool should still select a member after loads return to zero");
+        let third_selected_addr = third_selection.remote_address();
+        let third_stream_guard = third_selection.record_open_stream();
+
+        let fourth_selection = pool
+            .select_connection()
+            .await
+            .expect("pool should place onto the least-active member");
+        assert_ne!(
+            fourth_selection.remote_address(),
+            third_selected_addr,
+            "the zero-load member should win once the selected member becomes busier"
+        );
+        assert_eq!(third_selection.active_stream_count(), 1);
+        assert_eq!(fourth_selection.active_stream_count(), 0);
+
+        drop(third_stream_guard);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closes_all_connections_and_clears_the_pool() -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let slot = ActiveClientSlot::new();
+        let pool = ActiveClientPool::new();
         let remote_addr = fixture.server_connection.remote_address();
         let expected_closed_log = format!(
             "server tunnel connection closed: client-identity={} remote-address={remote_addr}",
             client_identity.client_identity
         );
-        let slot_for_registration = slot.clone();
+        let pool_for_registration = pool.clone();
         let client_identity_for_registration = client_identity.client_identity.clone();
         let expected_closed_log_for_wait = expected_closed_log.clone();
 
         let output = capture_logs(|buffer| async move {
-            slot_for_registration
+            pool_for_registration
                 .register(
                     fixture.server_connection.clone(),
                     client_identity_for_registration,
                 )
                 .await;
-            assert!(
-                slot_for_registration
-                    .close_active_connection(b"graceful shutdown")
-                    .await
+            assert_eq!(
+                pool_for_registration
+                    .close_all_connections(b"graceful shutdown")
+                    .await,
+                1
             );
             wait_for_log(&buffer, expected_closed_log_for_wait.as_str()).await;
         })
         .await;
 
         assert!(output.contains(&expected_closed_log));
-        assert!(slot.current_connection().await.is_none());
+        assert_eq!(pool.connection_count().await, 0);
         Ok(())
     }
 

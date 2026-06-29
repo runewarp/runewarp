@@ -654,7 +654,7 @@ backend-address = "{}"
 }
 
 #[tokio::test]
-async fn replacing_one_tunnel_connection_does_not_disrupt_other_tunnels() {
+async fn pooling_same_tunnel_clients_does_not_disrupt_other_tunnels() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
         tempdir.path().join("server-cert").as_path(),
@@ -816,7 +816,7 @@ backend-address = "{}"
             .unwrap();
     let app_client_two_task = tokio::spawn(app_client_two.run());
 
-    let replaced_app_response = timeout(Duration::from_secs(1), async {
+    let pooled_app_response = timeout(Duration::from_secs(1), async {
         loop {
             match request_tls_response(public_addr, &app_backend_two.1, "app.example.test").await {
                 Ok(response) => return response,
@@ -825,8 +825,14 @@ backend-address = "{}"
         }
     })
     .await
-    .expect("timed out waiting for the replacement app tunnel connection");
-    assert_eq!(replaced_app_response, *b"two!");
+    .expect("timed out waiting for the second app pool member to serve traffic");
+    assert_eq!(pooled_app_response, *b"two!");
+
+    let rotated_app_response =
+        request_tls_response(public_addr, &app_backend_one.1, "app.example.test")
+            .await
+            .unwrap();
+    assert_eq!(rotated_app_response, *b"one!");
 
     let second_api_response = request_tls_response(public_addr, &api_backend.1, "api.example.test")
         .await
@@ -850,7 +856,7 @@ backend-address = "{}"
 }
 
 #[tokio::test]
-async fn different_authorized_client_identity_can_replace_the_active_tunnel_connection() {
+async fn different_authorized_client_identities_can_share_the_same_tunnel_pool() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
         tempdir.path().join("server-cert").as_path(),
@@ -975,7 +981,7 @@ backend-address = "{}"
         .unwrap();
     let client_two_task = tokio::spawn(client_two.run());
 
-    let replaced_response = timeout(Duration::from_secs(1), async {
+    let pooled_response = timeout(Duration::from_secs(1), async {
         loop {
             match request_tls_response(public_addr, &app_backend_two.1, "app.example.test").await {
                 Ok(response) => return response,
@@ -984,8 +990,14 @@ backend-address = "{}"
         }
     })
     .await
-    .expect("timed out waiting for the replacement tunnel connection");
-    assert_eq!(replaced_response, *b"two!");
+    .expect("timed out waiting for the second authorized identity to join the tunnel pool");
+    assert_eq!(pooled_response, *b"two!");
+
+    let rotated_response =
+        request_tls_response(public_addr, &app_backend_one.1, "app.example.test")
+            .await
+            .unwrap();
+    assert_eq!(rotated_response, *b"one!");
 
     app_backend_one.2.abort();
     app_backend_two.2.abort();

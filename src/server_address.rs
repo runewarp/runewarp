@@ -4,14 +4,14 @@ use crate::{ServerHostname, ServerHostnameError};
 
 pub(crate) const DEFAULT_SERVER_PORT: u16 = 443;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ServerAddress {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ServerAddress {
     hostname: ServerHostname,
     port: u16,
 }
 
 impl ServerAddress {
-    pub(crate) fn parse(value: &str) -> Result<Self, ServerAddressError> {
+    pub fn parse(value: &str) -> Result<Self, ServerAddressError> {
         let (raw_hostname, port) = match value.rsplit_once(':') {
             Some((hostname, raw_port)) => {
                 let port = raw_port
@@ -31,17 +31,17 @@ impl ServerAddress {
         Ok(Self { hostname, port })
     }
 
-    pub(crate) fn hostname(&self) -> &ServerHostname {
+    pub fn hostname(&self) -> &ServerHostname {
         &self.hostname
     }
 
-    pub(crate) fn port(&self) -> u16 {
+    pub fn port(&self) -> u16 {
         self.port
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ServerAddressError {
+pub enum ServerAddressError {
     MissingHostname,
     InvalidPort,
     InvalidHostname(ServerHostnameError),
@@ -56,3 +56,5 @@ impl fmt::Display for ServerAddressError {
         }
     }
 }
+
+impl std::error::Error for ServerAddressError {}

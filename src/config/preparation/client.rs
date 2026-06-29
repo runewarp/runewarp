@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 pub(crate) struct PreparedClientConfig {
     pub(crate) selected_path: Option<PathBuf>,
     pub(crate) server_address: Option<String>,
+    pub(crate) server_addresses: Option<Vec<String>>,
     pub(crate) log_level: LogLevel,
     pub(crate) trust: PreparedClientTrust,
     pub(crate) identity_directory: PreparedValue<PathBuf>,
@@ -167,8 +168,16 @@ fn prepare_selected_config_client_config(
     let mut raw = deserialize_selected_section::<RawClientConfig>(&path, "client", &section_value)
         .map_err(ClientConfigResolutionError::ConfigFile)?;
 
-    if let Some(server_address) = &runtime.server_address {
-        raw.server_address = Some(server_address.clone());
+    match runtime.server_addresses.as_slice() {
+        [] => {}
+        [server_address] => {
+            raw.server_address = Some(server_address.clone());
+            raw.server_addresses = None;
+        }
+        _ => {
+            raw.server_address = None;
+            raw.server_addresses = Some(runtime.server_addresses.clone());
+        }
     }
 
     if let Some(backend_address) = &runtime.backend_address {
@@ -208,7 +217,7 @@ fn prepare_cli_only_client_config(
         Some(_) => "the selected config has no [client] section",
         None => "no selected client config is available",
     };
-    if runtime.server_address.is_none() {
+    if runtime.server_addresses.is_empty() {
         messages.push(format!(
             "--server-address is required when {missing_context}"
         ));
@@ -229,7 +238,10 @@ fn prepare_cli_only_client_config(
         selected_path.map(Path::to_path_buf),
         log_level,
         RawClientConfig {
-            server_address: runtime.server_address.clone(),
+            server_address: (runtime.server_addresses.len() == 1)
+                .then(|| runtime.server_addresses[0].clone()),
+            server_addresses: (runtime.server_addresses.len() > 1)
+                .then(|| runtime.server_addresses.clone()),
             server_trust: None,
             server_ca_file: None,
             identity_dir: None,
@@ -291,6 +303,7 @@ fn prepare_raw_client_config_with_defaults(
     PreparedClientConfig {
         selected_path,
         server_address: raw.server_address,
+        server_addresses: raw.server_addresses,
         log_level,
         trust: prepare_client_trust(
             raw.server_trust.as_deref(),
@@ -462,7 +475,7 @@ mod tests {
         let prepared = prepare_selected_client_config(
             SelectedClientConfig::None,
             &ClientRuntimeArgs {
-                server_address: Some("tunnel.example.test".to_owned()),
+                server_addresses: vec!["tunnel.example.test".to_owned()],
                 backend_address: Some("backend.internal:443".to_owned()),
             },
             &|| Ok(identity_directory.clone()),
@@ -474,6 +487,7 @@ mod tests {
             prepared.server_address,
             Some("tunnel.example.test".to_owned())
         );
+        assert_eq!(prepared.server_addresses, None);
         assert_eq!(prepared.log_level, LogLevel::Info);
         assert_eq!(prepared.trust, PreparedClientTrust::System);
         assert_eq!(
@@ -510,7 +524,7 @@ hostname = "tunnel.example.test"
         let prepared = prepare_selected_client_config(
             SelectedClientConfig::Explicit(config_path.clone()),
             &ClientRuntimeArgs {
-                server_address: Some("tunnel.example.test".to_owned()),
+                server_addresses: vec!["tunnel.example.test".to_owned()],
                 backend_address: Some("backend.internal:443".to_owned()),
             },
             &|| Ok(identity_directory.clone()),
@@ -546,6 +560,7 @@ hostname = "tunnel.example.test"
             LogLevel::Info,
             RawClientConfig {
                 server_address: Some("tunnel.example.test".to_owned()),
+                server_addresses: None,
                 server_trust: Some("ca-file".to_owned()),
                 server_ca_file: None,
                 identity_dir: None,
@@ -604,6 +619,7 @@ hostname = "tunnel.example.test"
             LogLevel::Off,
             RawClientConfig {
                 server_address: Some("tunnel.example.test".to_owned()),
+                server_addresses: None,
                 server_trust: Some("ca-file".to_owned()),
                 server_ca_file: Some(PathBuf::from("trust/server-ca.pem")),
                 identity_dir: Some(PathBuf::from("identity")),
@@ -662,7 +678,7 @@ log-level = "off"
         let prepared = prepare_selected_client_config(
             SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
             &ClientRuntimeArgs {
-                server_address: Some("Tunnel.Example.Test.".to_owned()),
+                server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
                 backend_address: Some("backend.internal:443".to_owned()),
             },
             &|| Ok(identity_directory.clone()),
@@ -677,6 +693,7 @@ log-level = "off"
             prepared.server_address,
             Some("Tunnel.Example.Test.".to_owned())
         );
+        assert_eq!(prepared.server_addresses, None);
         assert_eq!(prepared.log_level, LogLevel::Off);
         assert_eq!(prepared.services.len(), 1);
         assert_eq!(prepared.services[0].public_hostnames, None);

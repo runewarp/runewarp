@@ -19,10 +19,8 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
     } = command;
 
     if let Some(cli::ClientSubcommand::Identity(command)) = command {
-        let forbidden_flags = client_identity_forbidden_runtime_flags(
-            server_address.as_deref(),
-            backend_address.as_deref(),
-        );
+        let forbidden_flags =
+            client_identity_forbidden_runtime_flags(&server_address, backend_address.as_deref());
         if !forbidden_flags.is_empty() {
             return Err(format!(
                 "{} may be used only with `runewarp client`, not `runewarp client identity ...`",
@@ -38,7 +36,7 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
     }
 
     let runtime = ClientRuntimeArgs {
-        server_address,
+        server_addresses: server_address,
         backend_address,
     };
     let config = resolve_client_config_from_cli(config.clone(), runtime)
@@ -54,11 +52,11 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
 }
 
 fn client_identity_forbidden_runtime_flags(
-    server_address: Option<&str>,
+    server_addresses: &[String],
     backend_address: Option<&str>,
 ) -> Vec<&'static str> {
     let mut flags = Vec::new();
-    if server_address.is_some() {
+    if !server_addresses.is_empty() {
         flags.push("--server-address");
     }
     if backend_address.is_some() {

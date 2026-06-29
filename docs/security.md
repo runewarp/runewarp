@@ -30,7 +30,7 @@ Runtime diagnostics follow the same boundary.
 
 - normalized **Public hostname**
 - routing outcome, connection timing, and transport errors
-- Client `server-address` values plus resolved socket addresses on connection-attempt lines
+- effective Client `server-address` values plus resolved socket addresses on connection-attempt lines
 - rejected or authenticated **Client identity** values on tunnel-auth warnings
 - Client `backend-address` values in routing diagnostics
 - graceful-shutdown lifecycle lines
@@ -63,6 +63,8 @@ The tunnel-connection trust model is:
 4. the Server verifies the pinned `client-identity` from the Client public key
 
 The pinned value is the client public key, not the certificate lifetime or serial number.
+
+Static fanout does not change these trust boundaries. When a Client dials multiple **Server addresses**, each **Tunnel connection** still uses the same shared Client identity, Server-certificate validation mode, and local Service-routing config.
 
 ## Certificate and identity lifecycle
 

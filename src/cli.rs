@@ -20,7 +20,8 @@ Examples:
 const CLIENT_EXAMPLES: &str = "\
 Examples:
   runewarp client
-  runewarp client --server-address tunnel.example.com --backend-address 127.0.0.1:443";
+  runewarp client --server-address tunnel.example.com --backend-address 127.0.0.1:443
+  runewarp client --server-address tunnel-a.example.com --server-address tunnel-b.example.com --backend-address 127.0.0.1:443";
 
 const CLIENT_IDENTITY_EXAMPLES: &str = "\
 Examples:
@@ -145,7 +146,7 @@ pub struct ClientArgs {
     pub config: Option<PathBuf>,
     /// Override the configured Server address for the runtime Client command.
     #[arg(long, value_name = "HOSTNAME[:PORT]")]
-    pub server_address: Option<String>,
+    pub server_address: Vec<String>,
     /// Supply a catch-all backend address for the runtime Client command.
     #[arg(long, value_name = "ADDRESS")]
     pub backend_address: Option<String>,

@@ -16,7 +16,7 @@ use crate::{default_client_identity_material_dir, default_client_public_cert_mat
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClientRuntimeArgs {
-    pub server_address: Option<String>,
+    pub server_addresses: Vec<String>,
     pub backend_address: Option<String>,
 }
 

@@ -51,18 +51,18 @@ It must not include HTTP headers, bodies, decrypted application plaintext, or th
 
 ## Tunnel connection handshake
 
-Each **Client instance** establishes one long-lived QUIC connection to `client.server-address` over UDP:
+Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. Effective **Server addresses** come from either `client.server-address`, `client.server-addresses`, or repeated runtime `--server-address` flags:
 
-1. Resolve the hostname portion of `client.server-address`.
-2. Dial the UDP port from `client.server-address`, defaulting to `443` when the port is omitted.
+1. Resolve the hostname portion of one effective **Server address**.
+2. Dial the UDP port from that **Server address**, defaulting to `443` when the port is omitted.
 3. Negotiate QUIC with ALPN `runewarp/1`.
-4. Validate the Server certificate for the **Server hostname**, using either system trust or `client.server-trust = "ca-file"` with an exclusive CA bundle.
+4. Validate the Server certificate for that **Server address**'s **Server hostname**, using either system trust or `client.server-trust = "ca-file"` with an exclusive CA bundle.
 5. Present the Client certificate and authenticate the pinned `client-identity` from its public key.
 
 Rules:
 
 - QUIC **0-RTT is disabled**
-- reconnect attempts re-resolve the hostname portion of `client.server-address` every time, including the first jittered retry window
+- reconnect attempts re-resolve the hostname portion of each effective **Server address** every time, including the first jittered retry window
 - tunnel handshakes time out after **10 seconds** on both the Client and Server sides
 - idle timeout is **60 seconds**
 - keepalive pings are sent every **20 seconds**
@@ -129,7 +129,9 @@ If a new authenticated connection replaces an older connection for the same **Tu
 
 ## Runtime invariants
 
-- each **Client instance** has exactly one **Tunnel connection**
+- each **Client instance** has one or more **Tunnel connections**
+- readiness means at least one configured **Server address** has an authenticated live **Tunnel connection**
+- failure, retry, and recovery stay isolated per effective **Server address**
 - the runtime keeps one active connection per **Tunnel**
 - the runtime does not validate cross-side hostname coverage under **Hostname mirroring**
 - there is no pre-flight **Local backend** health check

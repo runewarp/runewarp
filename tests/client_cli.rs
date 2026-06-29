@@ -90,6 +90,30 @@ fn client_help_lists_runtime_only_routing_flags() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+fn client_runtime_accepts_repeated_server_address_flags() -> Result<(), Box<dyn std::error::Error>>
+{
+    let tempdir = tempdir()?;
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "--server-address",
+            "tunnel.example.test",
+            "--server-address",
+            "backup.example.test:9443",
+            "--backend-address",
+            "127.0.0.1:443",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
+    assert!(!stderr.contains("unexpected argument '--server-address'"));
+    assert!(stderr.contains("client identity"));
+    Ok(())
+}
+
+#[test]
 fn client_uses_the_xdg_default_config_path_and_ignores_server_side_errors() {
     let tempdir = tempdir().unwrap();
     let current_dir = tempdir.path().join("cwd");

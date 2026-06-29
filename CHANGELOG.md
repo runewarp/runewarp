@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Deepened hostname handling around distinct typed **Server hostname** and **Public hostname** values so config validation, ClientHello parsing, and routing all share one canonical normalization seam.
 - Simplified Docker example preparation so it stages only the runtime material needed by the read-only Compose mounts, avoiding the old `source-data` directories while keeping Linux CI-safe permissions for the distroless `nonroot` containers.
 - Added separate Rust and Docker build cache scopes for pull request CI, trusted `main` CI, and trusted release flows, with release rehearsal warming the same release caches used by publish.
+- Added OSS Client static fanout so one Client instance can reconcile one or more Server addresses through `client.server-addresses` or repeated `--server-address` flags while keeping the singular config shortcut for the common one-target case.
 
 ## [0.1.0] - 2026-05-29
 

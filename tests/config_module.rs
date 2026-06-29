@@ -22,7 +22,7 @@ fn client_config_can_be_resolved_through_the_deep_config_module() -> Result<(), 
     let settings = resolve_selected_config(
         SelectedClientConfig::None,
         &ClientRuntimeArgs {
-            server_address: Some("Tunnel.Example.Test.".to_owned()),
+            server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("localhost:8443".to_owned()),
         },
         &ClientConfigResolutionDefaults {

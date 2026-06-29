@@ -143,8 +143,8 @@ _Avoid_: CI environment, deploy target
 - A **Tunnel** can have zero or more live **Tunnel connections**
 - Each **Tunnel connection** belongs to exactly one **Tunnel**
 - Each **Tunnel connection** belongs to exactly one **Client instance**
-- A **Client instance** establishes exactly one **Tunnel connection**
-- A **Client instance** dials exactly one **Server address** for its **Tunnel connection**
+- A **Client instance** establishes one or more **Tunnel connections**
+- A **Client instance** dials one or more **Server addresses**, with one **Tunnel connection** per **Server address**
 - A **Visitor** reaches a **Local backend** only through a **Tunnel**
 - A **Server address** points at exactly one **Server**
 - A **Server hostname** identifies the public edge, not an operator application
@@ -180,7 +180,7 @@ _Avoid_: CI environment, deploy target
 ## Example dialogue
 
 > **Dev:** "I started a second **Client instance** — did that create a second **Tunnel connection**?"
-> **Domain expert:** "Yes. Each **Client instance** owns exactly one **Tunnel connection**."
+> **Domain expert:** "Yes. Each **Client instance** owns one **Tunnel connection** per configured **Server address**."
 >
 > **Dev:** "The **Visitor** hit the public hostname, but which **Client** served it?"
 > **Domain expert:** "Whichever **Client instance** owned the selected **Tunnel connection** for that **Tunnel**."

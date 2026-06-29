@@ -6,21 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added `server.tunnels[].client-identities` so one Tunnel can authorize multiple Client identities, while keeping `client-identity` as the single-value shorthand. (#128)
+- Added same-Tunnel Client pools on one Server node, with least-active new-stream placement and round-robin tie-breaking across equal-load pool members. (#129)
+- Added Client static fanout so one Client instance can connect to one or more Server addresses through `client.server-addresses` or repeated `--server-address` flags, while keeping the singular config shortcut for the common one-target case. (#127)
+
 ### Changed
 
-- Allowed one Server Tunnel to authorize one or more Client identities through `client-identities`, while keeping `client-identity` as the single-value shorthand.
-- Added automatic same-Tunnel Client pools on one Server node, with least-active new-stream placement and round-robin tie-breaking across equal-load pool members.
-- Simplified forwarded Server route debug logs to keep only the public hostname.
-- Removed remote socket addresses from Server tunnel lifecycle and forwarded-route logs.
-- Rewrote the main documentation set for a tighter, more direct operator and maintainer voice.
-- Renamed the public validated configuration API around `config` terminology, including `load_client_config`, `load_server_config`, `ClientConfigResolutionDefaults`, and precise runtime types `ClientConnectConfig` and `ServerBindConfig`.
-- Exposed deep `config::client` and `config::server` module paths and moved config preparation under the shared `config` module so config-related code lives in one place.
-- Replaced the repository-owned release, CI, workflow-lint, Docker example, and release publication helper scripts with Ruby entry points and Ruby automation tests, and removed the repo-owned git hooks.
-- Refactored the Ruby automation layout around executable kebab-case entrypoints, moved Ruby tests under `scripts/test`, and replaced the old Docker example wrappers with `./scripts/docker-example`.
-- Deepened hostname handling around distinct typed **Server hostname** and **Public hostname** values so config validation, ClientHello parsing, and routing all share one canonical normalization seam.
-- Simplified Docker example preparation so it stages only the runtime material needed by the read-only Compose mounts, avoiding the old `source-data` directories while keeping Linux CI-safe permissions for the distroless `nonroot` containers.
-- Added separate Rust and Docker build cache scopes for pull request CI, trusted `main` CI, and trusted release flows, with release rehearsal warming the same release caches used by publish.
-- Added OSS Client static fanout so one Client instance can reconcile one or more Server addresses through `client.server-addresses` or repeated `--server-address` flags while keeping the singular config shortcut for the common one-target case.
+- Renamed the public validated configuration API around `config` terminology, including `load_client_config`, `load_server_config`, `ClientConfigResolutionDefaults`, `ClientConnectConfig`, and `ServerBindConfig`. (#115)
+- Hostname-bearing config and routed SNI values now normalize to lowercase and strip a trailing dot before duplicate detection and route lookup. (#116)
+- Simplified Docker example preparation so it stages only the runtime material needed by the read-only Compose mounts, removing the old `source-data` directories while keeping Linux CI-safe permissions for the distroless `nonroot` containers. (#123)
+
+### Security
+
+- Removed remote socket addresses from Server tunnel lifecycle and forwarded-route logs, and reduced forwarded-route debug logging to the normalized public hostname plus stable key=value fields. (#129)
 
 ## [0.1.0] - 2026-05-29
 

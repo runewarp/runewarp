@@ -144,7 +144,6 @@ jobs:
 
       - name: Check whether crates.io version already exists
         id: crate-status
-        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'
         env:
           CRATE_NAME: runewarp
           RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}

@@ -29,6 +29,7 @@ module Runewarp
       uri = URI("https://crates.io/api/v1/crates/#{crate_name}/#{release_version}")
       request = Net::HTTP::Get.new(uri)
       request["Accept"] = "application/json"
+      request["User-Agent"] = "runewarp-release-check (+https://github.com/runewarp/runewarp)"
 
       response = http_response(uri, request, "crates.io for #{crate_name} #{release_version}")
       return true if response.code == "200"

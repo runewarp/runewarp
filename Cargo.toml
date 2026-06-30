@@ -1,6 +1,6 @@
 [package]
 name = "runewarp"
-version = "0.2.0-dev"
+version = "0.2.0"
 edition = "2024"
 description = "Runewarp is an ingress tunneling platform for securely exposing local services over outbound QUIC connections."
 readme = "README.md"

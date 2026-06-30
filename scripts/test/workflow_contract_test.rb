@@ -65,6 +65,8 @@ class WorkflowContractTest < Minitest::Test
   def test_release_workflow_preserves_publish_ordering
     assert_includes(release_workflow, "docker-release-amd64:\n    name: Publish Docker Hub amd64 release\n    needs:\n      - gate\n      - crate-release")
     assert_includes(release_workflow, "docker-release-arm64:\n    name: Publish Docker Hub arm64 release\n    needs:\n      - gate\n      - crate-release")
+    assert_includes(release_workflow, "docker-release-manifest:\n    name: Publish Docker Hub release manifest")
+    assert_includes(release_workflow, "steps:\n      - name: Check out the repository\n        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2")
     assert_includes(release_workflow, "github-release:\n    name: Finalize GitHub release\n    if: github.event_name == 'push' || inputs.mode == 'publish'\n    needs:\n      - gate\n      - crate-release\n      - docker-release-manifest")
   end
 

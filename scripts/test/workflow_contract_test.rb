@@ -36,6 +36,13 @@ class WorkflowContractTest < Minitest::Test
     refute_includes(release_workflow, "python - <<'PY'")
   end
 
+  def test_release_rehearsal_exercises_the_crates_io_release_probe
+    assert_includes(release_workflow, "- name: Check whether crates.io version already exists")
+    assert_includes(release_workflow, "id: crate-status")
+    assert_includes(release_workflow, "RELEASE_VERSION: ${{ needs.gate.outputs.release_version }}")
+    refute_includes(release_workflow, "if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'\n        env:\n          CRATE_NAME: runewarp")
+  end
+
   def test_public_script_entrypoints_are_kebab_case_without_extensions
     expected_entrypoints = %w[
       check-crates-io-release

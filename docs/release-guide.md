@@ -63,7 +63,8 @@ Use the `Release` workflow's manual form when you want a non-publishing rehearsa
 2. Run the `Release` workflow manually with `mode` set to `rehearsal`.
 3. Set `release_tag` to the stable tag you intend to cut, in `vX.Y.Z` form.
 4. Confirm the workflow summary shows rehearsal mode, the workflow ref, the release source ref, the release commit, the expected release version, the exact Docker tags, and the rendered release notes preview.
-5. Treat any rehearsal failure as a release-prep problem. Fix the candidate on `main`, let `CI` go green again, and rerun the rehearsal.
+5. Confirm the crates.io existence probe completed as part of the rehearsal run before the dry-run publish step.
+6. Treat any rehearsal failure as a release-prep problem. Fix the candidate on `main`, let `CI` go green again, and rerun the rehearsal.
 
 Rehearsal validates release metadata and gates, runs `cargo publish --dry-run`, and rebuilds the native `amd64` and `arm64` Docker release images, but it does not push Docker images, publish the crate, sign images, or create the GitHub Release. Those rehearsal builds still warm the release-only Rust and Docker caches for the selected tag so the later real publish can reuse trusted build state.
 

@@ -58,11 +58,12 @@ For manual `rehearsal`, the workflow:
 1. runs the current workflow definition and scripts from `main`
 2. requires a stable `release_tag` input that matches `Cargo.toml`
 3. validates release metadata and release-notes rendering
-4. skips signed-tag and protected-tag enforcement because rehearsal happens before the irreversible tag is created
-5. runs `cargo publish --dry-run` against the tagged release source tree
-6. builds native `amd64` and `arm64` Docker release images without pushing them
-7. summarizes the workflow ref, release source ref, release commit, exact Docker tags, and rendered release notes that the real release would use
-8. skips Docker Hub publication, Sigstore signing, and GitHub Release mutation
+4. checks whether the crates.io version already exists through the same repo-owned probe used by the real publish path
+5. skips signed-tag and protected-tag enforcement because rehearsal happens before the irreversible tag is created
+6. runs `cargo publish --dry-run` against the tagged release source tree
+7. builds native `amd64` and `arm64` Docker release images without pushing them
+8. summarizes the workflow ref, release source ref, release commit, exact Docker tags, and rendered release notes that the real release would use
+9. skips Docker Hub publication, Sigstore signing, and GitHub Release mutation
 
 Rehearsal still writes into the trusted release cache scope for the selected `release_tag`, so the later real publish for that same tag can reuse the warmed Rust and Docker build state.
 

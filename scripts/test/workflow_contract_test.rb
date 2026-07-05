@@ -15,6 +15,10 @@ class WorkflowContractTest < Minitest::Test
     @release_workflow ||= File.read(File.join(REPO_ROOT, ".github", "workflows", "release.yml"), encoding: "utf-8")
   end
 
+  def dockerfile
+    @dockerfile ||= File.read(File.join(REPO_ROOT, "Dockerfile"), encoding: "utf-8")
+  end
+
   def test_ci_workflow_uses_ruby_entry_points
     assert_includes(ci_workflow, "run: ./scripts/lint-workflows")
     assert_includes(ci_workflow, "run: ./scripts/validate-release-metadata ci")
@@ -119,6 +123,11 @@ class WorkflowContractTest < Minitest::Test
     assert_includes(release_workflow, "expected_commit_tag=\"$(printf '%s' \"$SOURCE_IMAGE_COMMIT\" | cut -c1-12)\"")
     assert_includes(release_workflow, "--expected-text \"$expected_commit_tag\"")
     assert_includes(release_workflow, "--probe-arg --version")
+  end
+
+  def test_dockerfile_copies_build_script_for_dev_source_builds
+    assert_includes(dockerfile, "COPY Cargo.toml Cargo.lock build.rs ./")
+    assert_includes(dockerfile, "COPY src ./src")
   end
 
   def test_workflows_keep_pinned_actions_with_inline_version_comments

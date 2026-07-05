@@ -5,7 +5,7 @@ WORKDIR /app
 ARG RUNEWARP_BUILD_COMMIT
 ENV RUNEWARP_BUILD_COMMIT=${RUNEWARP_BUILD_COMMIT}
 
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 
 RUN cargo build --release --locked --bin runewarp

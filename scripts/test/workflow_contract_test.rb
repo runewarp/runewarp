@@ -60,6 +60,13 @@ class WorkflowContractTest < Minitest::Test
     assert_includes(images_workflow, "if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'")
   end
 
+  def test_images_workflow_scopes_docker_publish_secrets_to_release_environment
+    assert_includes(images_workflow, "publish:\n    name: Publish Docker Hub images")
+    assert_includes(images_workflow, "timeout-minutes: 60\n    environment: release")
+    assert_includes(images_workflow, "username: ${{ secrets.DOCKER_USERNAME }}")
+    assert_includes(images_workflow, "password: ${{ secrets.DOCKER_TOKEN }}")
+  end
+
   def test_release_rehearsal_exercises_the_crates_io_release_probe
     assert_includes(release_workflow, "- name: Check whether crates.io version already exists")
     assert_includes(release_workflow, "id: crate-status")

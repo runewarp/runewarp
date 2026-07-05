@@ -121,7 +121,7 @@ The repository uses cache scope as part of the automation trust boundary:
 
 ## Release environment and secrets
 
-Real publish jobs run in the GitHub `release` environment. The current workflow expects:
+The trusted `Images` publish job and the real `Release` publish jobs run in the GitHub `release` environment. The current workflow expects:
 
 | Secret | Purpose |
 | --- | --- |

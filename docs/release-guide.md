@@ -24,7 +24,7 @@ Before cutting a stable release, make sure all of these are already true:
 | --- | --- |
 | Signing | Your local Git setup can create an SSH-signed release tag that verifies against `.github/release-allowed-signers`. |
 | Release environment | The GitHub environment is named `release`. |
-| Release secrets | The `release` environment contains `CARGO_REGISTRY_TOKEN`, `DOCKER_USERNAME`, and `DOCKER_TOKEN`. |
+| Release secrets | The `release` environment contains `CARGO_REGISTRY_TOKEN`, `DOCKER_USERNAME`, and `DOCKER_TOKEN`, and those secrets are consumed by the trusted `Images` publish job plus the `Release` publish jobs. |
 | Registry ownership | The maintainer account can publish `runewarp` on crates.io and `runewarp/runewarp` on Docker Hub. |
 | Candidate commit | The release commit is already reachable from `origin/main`. |
 | CI | The aggregate `CI` check is green on the release commit before the release tag is pushed. |

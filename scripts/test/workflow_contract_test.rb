@@ -116,8 +116,8 @@ class WorkflowContractTest < Minitest::Test
     assert_includes(release_workflow, "SOURCE_IMAGE_REF: ${{ needs.gate.outputs.source_image_ref }}")
     assert_includes(release_workflow, "SOURCE_IMAGE_COMMIT: ${{ needs.gate.outputs.release_commit }}")
     assert_includes(release_workflow, "./scripts/check-distribution docker-registry-image")
-    assert_includes(release_workflow, "source_image_commit=\"$(printf '%s' \"$SOURCE_IMAGE_COMMIT\" | cut -c1-12)\"")
-    assert_includes(release_workflow, "--expected-text \"$source_image_commit\"")
+    assert_includes(release_workflow, "expected_commit_tag=\"$(printf '%s' \"$SOURCE_IMAGE_COMMIT\" | cut -c1-12)\"")
+    assert_includes(release_workflow, "--expected-text \"$expected_commit_tag\"")
     assert_includes(release_workflow, "--probe-arg --version")
   end
 

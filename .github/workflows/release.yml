@@ -238,11 +238,11 @@ jobs:
           SOURCE_IMAGE_REF: ${{ needs.gate.outputs.source_image_ref }}
           SOURCE_IMAGE_COMMIT: ${{ needs.gate.outputs.release_commit }}
         run: |
-          source_image_commit="$(printf '%s' "$SOURCE_IMAGE_COMMIT" | cut -c1-12)"
+          expected_commit_tag="$(printf '%s' "$SOURCE_IMAGE_COMMIT" | cut -c1-12)"
           ./scripts/check-distribution docker-registry-image \
             --image-ref "$SOURCE_IMAGE_REF" \
             --platform linux/amd64 \
-            --expected-text "$source_image_commit" \
+            --expected-text "$expected_commit_tag" \
             --probe-arg --version
 
       - name: Log in to Docker Hub

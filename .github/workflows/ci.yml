@@ -44,6 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      RUNEWARP_BUILD_COMMIT: ${{ github.sha }}
       RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('trusted-{0}', github.ref_name) }}
     steps:
       - name: Check out the repository
@@ -81,6 +82,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     env:
+      RUNEWARP_BUILD_COMMIT: ${{ github.sha }}
       RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('trusted-{0}', github.ref_name) }}
     steps:
       - name: Check out the repository
@@ -118,6 +120,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      RUNEWARP_BUILD_COMMIT: ${{ github.sha }}
       RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('trusted-{0}', github.ref_name) }}
     steps:
       - name: Check out the repository
@@ -151,6 +154,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      RUNEWARP_BUILD_COMMIT: ${{ github.sha }}
       RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('trusted-{0}', github.ref_name) }}
     steps:
       - name: Check out the repository

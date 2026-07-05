@@ -1,6 +1,6 @@
 services:
   server:
-    image: runewarp/runewarp:local
+    image: ${RUNEWARP_IMAGE:-runewarp/runewarp:local}
     command: ["server"]
     environment:
       XDG_CONFIG_HOME: /runewarp/config
@@ -16,7 +16,7 @@ services:
           - tunnel.example.test
 
   client:
-    image: runewarp/runewarp:local
+    image: ${RUNEWARP_IMAGE:-runewarp/runewarp:local}
     command: ["client"]
     environment:
       XDG_CONFIG_HOME: /runewarp/config

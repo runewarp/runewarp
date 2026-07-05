@@ -128,6 +128,47 @@ class DistributionChecksTest < Minitest::Test
     end
   end
 
+  def test_docker_registry_image_mode_targets_an_explicit_platform
+    Dir.mktmpdir do |repo_root|
+      write_minimal_binary_crate(repo_root, version: "0.3.1")
+      fake_bin_dir = File.join(repo_root, "fake-bin")
+      FileUtils.mkdir_p(fake_bin_dir)
+      commands_file = File.join(repo_root, "docker-commands.txt")
+      write_executable(
+        File.join(fake_bin_dir, "docker"),
+        <<~RUBY
+          #!/usr/bin/env ruby
+          File.open(#{commands_file.inspect}, "a", encoding: "utf-8") { |handle| handle.puts(ARGV.join(" ")) }
+          if ARGV[0..2] == ["pull", "--platform", "linux/arm64"]
+            exit(0)
+          elsif ARGV[0..3] == ["run", "--rm", "--platform", "linux/arm64"]
+            puts("runewarp 0.1.0")
+            exit(0)
+          end
+          abort("unexpected docker invocation: \#{ARGV.inspect}")
+        RUBY
+      )
+
+      result = run_command(
+        ruby_script("scripts", "check-distribution"),
+        "docker-registry-image",
+        "--image-ref",
+        "docker.io/runewarp/runewarp:0.1.0",
+        "--platform",
+        "linux/arm64",
+        "--expected-version",
+        "0.1.0",
+        env: { "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}" }
+      )
+
+      assert(result.success?, result.stderr)
+      assert_equal(
+        "pull --platform linux/arm64 docker.io/runewarp/runewarp:0.1.0\nrun --rm --platform linux/arm64 docker.io/runewarp/runewarp:0.1.0 --version\n",
+        File.read(commands_file, encoding: "utf-8")
+      )
+    end
+  end
+
   def test_docker_image_mode_uses_workflow_provided_build_cache_flags
     Dir.mktmpdir do |repo_root|
       write_minimal_binary_crate(repo_root, version: "0.3.1")
@@ -167,10 +208,11 @@ class DistributionChecksTest < Minitest::Test
       )
 
       assert(result.success?, result.stderr)
-      assert_equal(
-        "buildx build --load --cache-from type=gha,scope=ci --cache-to type=gha,scope=ci,mode=max --file #{File.join(repo_root, 'Dockerfile')} --tag runewarp:test #{repo_root}\nrun --rm runewarp:test --help\n",
-        File.read(commands_file, encoding: "utf-8")
-      )
+      commands = File.read(commands_file, encoding: "utf-8")
+      assert_includes(commands, "buildx build --load --cache-from type=gha,scope=ci --cache-to type=gha,scope=ci,mode=max")
+      refute_includes(commands, "RUNEWARP_BUILD_COMMIT")
+      assert_includes(commands, "--file #{File.join(repo_root, 'Dockerfile')} --tag runewarp:test #{repo_root}\n")
+      assert_includes(commands, "run --rm runewarp:test --help\n")
     end
   end
 

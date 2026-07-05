@@ -2,7 +2,10 @@ FROM rust:1.95-trixie@sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517e
 
 WORKDIR /app
 
-COPY Cargo.toml Cargo.lock ./
+ARG RUNEWARP_BUILD_COMMIT
+ENV RUNEWARP_BUILD_COMMIT=${RUNEWARP_BUILD_COMMIT}
+
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 
 RUN cargo build --release --locked --bin runewarp

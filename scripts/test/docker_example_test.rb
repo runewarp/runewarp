@@ -18,7 +18,7 @@ class DockerExampleTest < Minitest::Test
     result = run_command(ruby_script("scripts", "docker-example"), "--help")
 
     refute(result.success?)
-    assert_includes(result.stderr, "usage: docker-example <prepare|smoke>")
+    assert_includes(result.stderr, "usage: docker-example <prepare|smoke> [--image-ref IMAGE_REF]")
   end
 
   def with_path(path)
@@ -209,8 +209,37 @@ class DockerExampleTest < Minitest::Test
 
       assert_includes(
         File.read(commands_file, encoding: "utf-8"),
-        "buildx build --load --cache-from type=gha,scope=ci-docker --cache-to type=gha,scope=ci-docker,mode=max --file #{File.join(REPO_ROOT, 'Dockerfile')} --tag runewarp/runewarp:local #{REPO_ROOT}\n"
+        "buildx build --load --cache-from type=gha,scope=ci-docker --cache-to type=gha,scope=ci-docker,mode=max --build-arg RUNEWARP_BUILD_COMMIT="
       )
+    end
+  end
+
+  def test_prepare_can_stage_a_published_image_without_building_local_image
+    Dir.mktmpdir do |temp_dir|
+      example_dir = File.join(temp_dir, "example")
+      bin_dir = File.join(temp_dir, "bin")
+      commands_file = File.join(temp_dir, "docker-commands.txt")
+      FileUtils.mkdir_p(bin_dir)
+      write_example_fixture(example_dir)
+      write_docker_stub(bin_dir, example_dir, commands_file: commands_file)
+
+      with_path(bin_dir) do
+        ENV["TEST_EXAMPLE_DIR"] = example_dir
+        Runewarp::DockerExample.prepare(
+          example_dir: example_dir,
+          repo_root: REPO_ROOT,
+          reset_requested: false,
+          image_ref: "docker.io/runewarp/runewarp:1234567890ab"
+        )
+      ensure
+        ENV.delete("TEST_EXAMPLE_DIR")
+      end
+
+      commands = File.read(commands_file, encoding: "utf-8")
+      refute_includes(commands, "buildx build")
+      assert_includes(commands, "create --env XDG_DATA_HOME=/tmp/runewarp-data docker.io/runewarp/runewarp:1234567890ab server cert init --hostname tunnel.example.test\n")
+      assert_includes(commands, "create --env XDG_DATA_HOME=/tmp/runewarp-data docker.io/runewarp/runewarp:1234567890ab client identity init\n")
+      assert_equal("RUNEWARP_IMAGE=docker.io/runewarp/runewarp:1234567890ab\n", File.read(File.join(example_dir, ".env"), encoding: "utf-8"))
     end
   end
 end

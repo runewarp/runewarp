@@ -10,7 +10,7 @@ Runewarp treats a stable release as one sequence:
 2. Merge that PR to `main` and wait for the aggregate `CI` check to finish green on the release commit.
 3. Optionally run a **Release rehearsal** through `workflow_dispatch` to prove the candidate release metadata and gates without publishing.
 4. Create and push an SSH-signed `vX.Y.Z` **Release tag** on that green `main` commit.
-5. Let the `Release` workflow run the repo-owned Ruby release helpers from `main`, publish crates.io first, then build both Docker architectures and publish the manifest tags, then finalize the GitHub Release.
+5. Let the `Release` workflow run the repo-owned Ruby release helpers from `main`, publish crates.io first, then promote the already-published trusted main-image lineage into the stable Docker tags, then finalize the GitHub Release.
 6. If a trusted existing release tag needs a recovery rerun, use manual **Release publish** through `workflow_dispatch` with the same tag; already-published surfaces are skipped instead of being mutated.
 7. Move `main` forward in a follow-up change to the next minor `-dev` version and reopen `CHANGELOG.md` with `Unreleased`.
 
@@ -28,6 +28,7 @@ Before cutting a stable release, make sure all of these are already true:
 | Registry ownership | The maintainer account can publish `runewarp` on crates.io and `runewarp/runewarp` on Docker Hub. |
 | Candidate commit | The release commit is already reachable from `origin/main`. |
 | CI | The aggregate `CI` check is green on the release commit before the release tag is pushed. |
+| Images | The `Images` workflow already published and smoke tested the immutable 12-character commit-tag image lineage for that release commit, and `Release` will re-check that lineage against the tagged commit before promotion. |
 
 ## Trust boundaries
 
@@ -62,11 +63,11 @@ Use the `Release` workflow's manual form when you want a non-publishing rehearsa
 1. Make sure the current `main` release candidate is green.
 2. Run the `Release` workflow manually with `mode` set to `rehearsal`.
 3. Set `release_tag` to the stable tag you intend to cut, in `vX.Y.Z` form.
-4. Confirm the workflow summary shows rehearsal mode, the workflow ref, the release source ref, the release commit, the expected release version, the exact Docker tags, and the rendered release notes preview.
+4. Confirm the workflow summary shows rehearsal mode, the workflow ref, the release source ref, the release commit, the trusted source image lineage, the exact stable Docker tags, and the rendered release notes preview.
 5. Confirm the crates.io existence probe completed as part of the rehearsal run before the dry-run publish step.
 6. Treat any rehearsal failure as a release-prep problem. Fix the candidate on `main`, let `CI` go green again, and rerun the rehearsal.
 
-Rehearsal validates release metadata and gates, runs `cargo publish --dry-run`, and rebuilds the native `amd64` and `arm64` Docker release images, but it does not push Docker images, publish the crate, sign images, or create the GitHub Release. Those rehearsal builds still warm the release-only Rust and Docker caches for the selected tag so the later real publish can reuse trusted build state.
+Rehearsal validates release metadata and gates, runs `cargo publish --dry-run`, and resolves the trusted source image lineage that real publish would promote, but it does not push Docker images, publish the crate, promote Docker tags, sign images, or create the GitHub Release.
 
 ## Real tag release
 
@@ -75,7 +76,7 @@ Once the candidate is green, cut the real stable release:
 1. Check out the exact green `main` commit you want to publish.
 2. Create an SSH-signed tag in `vX.Y.Z` form on that commit.
 3. Push the tag.
-4. Watch the `Release` workflow until the crates.io publish completes, the Docker publish follows, and all publish jobs finish.
+4. Watch the `Release` workflow until the crates.io publish completes, the Docker tag promotion follows, and all publish jobs finish.
 5. Confirm the public surfaces now agree on the released version:
    - Docker Hub has the released `X.Y.Z`, `X.Y`, `X`, and `latest` tags.
    - crates.io serves the released `runewarp` version.
@@ -93,7 +94,7 @@ Use manual publish when the tag already exists and you need the current release 
 4. Watch the workflow summary to confirm it is in publish mode and targeting the expected tag.
 5. Let the workflow skip any surface that is already published and complete any missing surface that is still absent.
 
-Manual publish applies the same signed-tag, trusted-commit, and prior-green-`CI` checks as the normal tag-driven release path. The workflow definition, Ruby release helpers, and release notes come from the current `main`, while crate and Docker artifacts still target the selected release tag's source tree. If the GitHub release already exists, the workflow updates its title and notes to match the current rendered changelog entry for that version.
+Manual publish applies the same signed-tag, trusted-commit, prior-green-`CI`, successful-`Images`, and trusted-image-lineage checks as the normal tag-driven release path. The workflow definition, Ruby release helpers, and release notes come from the current `main`, while crate publication still targets the selected release tag's source tree and Docker promotion still targets that tag's previously published commit-lineage image after re-verifying its baked-in 12-character commit SHA. If the GitHub release already exists, the workflow updates its title and notes to match the current rendered changelog entry for that version.
 
 ## Recovery playbooks
 

@@ -63,6 +63,33 @@ fn top_level_help_describes_the_main_entry_points() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn top_level_version_prints_the_cli_version_string() -> Result<(), Box<dyn std::error::Error>> {
+    let assert = Command::cargo_bin("runewarp")?
+        .arg("--version")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+
+    assert_eq!(
+        stdout,
+        format!("runewarp {}\n", env!("RUNEWARP_CLI_VERSION"))
+    );
+    Ok(())
+}
+
+#[test]
+fn short_version_flag_matches_the_long_form() -> Result<(), Box<dyn std::error::Error>> {
+    let assert = Command::cargo_bin("runewarp")?.arg("-V").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+
+    assert_eq!(
+        stdout,
+        format!("runewarp {}\n", env!("RUNEWARP_CLI_VERSION"))
+    );
+    Ok(())
+}
+
+#[test]
 fn unknown_command_is_rejected_with_cli_usage() {
     let assert = Command::cargo_bin("runewarp")
         .unwrap()

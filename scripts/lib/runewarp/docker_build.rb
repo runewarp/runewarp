@@ -17,6 +17,10 @@ module Runewarp
         command.concat(Shellwords.split(cache_flags))
       end
 
+      if Core.runewarp_version(repo_root)&.end_with?("-dev")
+        command.concat(["--build-arg", "RUNEWARP_BUILD_COMMIT=#{Core.runewarp_git_commit(repo_root)}"])
+      end
+
       command.concat(["--file", File.join(repo_root, "Dockerfile"), "--tag", image_tag, repo_root])
     end
   end

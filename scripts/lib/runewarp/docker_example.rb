@@ -7,9 +7,10 @@ module Runewarp
   module DockerExample
     module_function
 
-    def prepare(example_dir:, repo_root:, reset_requested:)
+    def prepare(example_dir:, repo_root:, reset_requested:, image_ref: nil)
       generated_dir = File.join(example_dir, "generated")
       paths = layout(example_dir)
+      effective_image_ref = image_ref || IMAGE_TAG
 
       Core.require_command("docker")
       reset_generated_state(example_dir, generated_dir) if reset_requested
@@ -18,17 +19,18 @@ module Runewarp
       prepare_directories(paths)
       assert_complete_or_empty("server certificate material", paths[:server_runtime_dir], SERVER_RUNTIME_FILES)
       assert_complete_or_empty("client identity material", paths[:client_runtime_dir], CLIENT_RUNTIME_FILES)
-      build_image(repo_root, IMAGE_TAG)
-      prepare_server_certificate_material(example_dir, paths, IMAGE_TAG)
-      prepare_client_identity_material(example_dir, paths, IMAGE_TAG)
+      build_image(repo_root, IMAGE_TAG) if image_ref.nil?
+      prepare_server_certificate_material(example_dir, paths, effective_image_ref)
+      prepare_client_identity_material(example_dir, paths, effective_image_ref)
       render_runtime_configuration(paths, example_dir)
+      write_compose_env(example_dir, effective_image_ref)
 
       Core.success("Docker example is ready")
       Core.note("Generated state: #{generated_dir}")
       Core.note("Runtime material: generated/server/data and generated/client/data")
     end
 
-    def smoke(example_dir:, repo_root:)
+    def smoke(example_dir:, repo_root:, image_ref: nil)
       generated_dir = File.join(example_dir, "generated")
       compose_file = File.join(example_dir, "docker-compose.yml")
       caddy_root_ca = File.join(generated_dir, "caddy", "root.crt")
@@ -41,7 +43,7 @@ module Runewarp
 
       begin
         reset_stack(compose_file)
-        prepare(example_dir: example_dir, repo_root: repo_root, reset_requested: true)
+        prepare(example_dir: example_dir, repo_root: repo_root, reset_requested: true, image_ref: image_ref)
 
         Core.section("Starting Docker example stack")
         Shell.run!("docker", "compose", "-f", compose_file, "up", "-d", out: File::NULL)
@@ -191,6 +193,10 @@ module Runewarp
       server_template = File.read(File.join(example_dir, "server", "config.toml.template"), encoding: "utf-8")
       File.write(paths[:server_config_path], server_template.gsub("__CLIENT_IDENTITY__", client_identity), encoding: "utf-8")
       FileUtils.cp(File.join(example_dir, "client", "config.toml.template"), paths[:client_config_path])
+    end
+
+    def write_compose_env(example_dir, image_ref)
+      File.write(File.join(example_dir, ".env"), "RUNEWARP_IMAGE=#{image_ref}\n", encoding: "utf-8")
     end
 
     def require_compose!(compose_file)

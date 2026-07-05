@@ -63,7 +63,15 @@ From the repository root:
 - normalizes those runtime files for the distroless `nonroot` containers used by the example, so the stack boots cleanly on Linux CI without keeping extra staging trees in the repository
 - renders XDG-style runtime config and data trees under `examples/docker/generated/server`, `examples/docker/generated/client`, and `examples/docker/generated/caddy`, so the containers use default config discovery plus default material and trust paths inside the example
 
-The Compose file uses that locally built `runewarp/runewarp:local` image for both the server and client. It does not pull a published image from Docker Hub.
+The Compose file defaults to the locally built `runewarp/runewarp:local` image for both the server and client.
+
+To smoke a published image instead, pass `--image-ref`:
+
+```bash
+./scripts/docker-example smoke --image-ref docker.io/runewarp/runewarp:<12-char-commit>
+```
+
+That path reuses the same generated runtime material and Compose stack, but points both Runewarp services at the published image instead of the local build.
 
 This helper is intentionally example-specific. For a normal operator setup, run `runewarp server cert init --hostname ...` on the machine that will run the Server and `runewarp client identity init` on the machine that will run the Client, then place the resulting material in the usual config and data locations described in [`docs/usage.md`](../../docs/usage.md) and [`docs/configuration.md`](../../docs/configuration.md). The example helper just stages those same artifacts into `examples/docker/generated` so Compose can mount them read-only.
 
@@ -91,7 +99,7 @@ The quickest end-to-end verification is:
 ./scripts/docker-example smoke
 ```
 
-`./scripts/docker-example smoke` resets the stack, prepares fresh state, starts the containers, waits for Caddy's local CA, verifies both hostnames over TLS, and then shuts the stack back down.
+`./scripts/docker-example smoke` resets the stack, prepares fresh state, starts the containers, waits for Caddy's local CA, verifies both hostnames over TLS, and then shuts the stack back down. Add `--image-ref docker.io/runewarp/runewarp:<tag>` when you want the same end-to-end proof against a published image lineage.
 
 If you want to keep the stack running and inspect it manually:
 

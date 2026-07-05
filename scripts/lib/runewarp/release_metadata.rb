@@ -4,6 +4,7 @@ module Runewarp
   module ReleaseMetadata
     STABLE_VERSION = /\A\d+\.\d+\.\d+\z/
     STABLE_TAG = /\Av\d+\.\d+\.\d+\z/
+    FULL_COMMIT_SHA = /\A[0-9a-f]{40}\z/
 
     module_function
 
@@ -27,7 +28,13 @@ module Runewarp
       release_tag.delete_prefix("v")
     end
 
-    def resolve(event_name:, push_tag:, workflow_mode_input:, workflow_tag:, image_repository:)
+    def main_commit_tag(commit_sha)
+      raise Error, "error: full commit SHA is required" unless commit_sha.match?(FULL_COMMIT_SHA)
+
+      commit_sha[0, 12]
+    end
+
+    def resolve(event_name:, push_tag:, workflow_mode_input:, workflow_tag:, image_repository:, release_commit: nil)
       if event_name == "workflow_dispatch"
         release_tag = workflow_tag
         if workflow_mode_input == "publish"
@@ -53,7 +60,11 @@ module Runewarp
         "release_source_ref" => release_source_ref,
         "image_repository" => image_repository,
         "primary_image_ref" => "#{image_repository}:#{release_version}"
-      }
+      }.tap do |resolved|
+        next if release_commit.nil? || release_commit.empty?
+
+        resolved["source_image_ref"] = "#{image_repository}:#{main_commit_tag(release_commit)}"
+      end
     end
 
     def docker_tags(image_repository, release_version)

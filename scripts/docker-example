@@ -3,7 +3,7 @@
 
 require_relative "lib/runewarp"
 
-def usage(message = "docker-example <prepare|smoke>")
+def usage(message = "docker-example <prepare|smoke> [--image-ref IMAGE_REF]")
   Runewarp::Core.usage_error(message)
 end
 
@@ -15,12 +15,19 @@ def repo_root
   File.expand_path("..", __dir__)
 end
 
-def prepare_example(reset_requested:)
-  Runewarp::DockerExample.prepare(example_dir: example_dir, repo_root: repo_root, reset_requested: reset_requested)
+def parse_optional_image_ref(arguments)
+  return [nil, arguments] if arguments.empty?
+
+  usage unless arguments.length == 2 && arguments.first == "--image-ref"
+  [arguments.last, []]
 end
 
-def smoke_example
-  Runewarp::DockerExample.smoke(example_dir: example_dir, repo_root: repo_root)
+def prepare_example(reset_requested:, image_ref:)
+  Runewarp::DockerExample.prepare(example_dir: example_dir, repo_root: repo_root, reset_requested: reset_requested, image_ref: image_ref)
+end
+
+def smoke_example(image_ref:)
+  Runewarp::DockerExample.smoke(example_dir: example_dir, repo_root: repo_root, image_ref: image_ref)
 end
 
 Runewarp::Core.run_cli do
@@ -28,12 +35,14 @@ Runewarp::Core.run_cli do
 
   case command
   when "prepare"
-    reset_requested = ARGV == ["--reset"]
-    usage("docker-example <prepare|smoke> [--reset]") unless ARGV.empty? || reset_requested
-    prepare_example(reset_requested: reset_requested)
+    reset_requested = ARGV.delete("--reset")
+    image_ref, remaining = parse_optional_image_ref(ARGV)
+    usage("docker-example <prepare|smoke> [--image-ref IMAGE_REF] [--reset]") unless remaining.empty?
+    prepare_example(reset_requested: !!reset_requested, image_ref: image_ref)
   when "smoke"
-    usage unless ARGV.empty?
-    smoke_example
+    image_ref, remaining = parse_optional_image_ref(ARGV)
+    usage unless remaining.empty?
+    smoke_example(image_ref: image_ref)
   else
     usage
   end

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "support/test_helper"
+require_relative "../lib/runewarp"
 
 class ReleaseMetadataTest < Minitest::Test
   def test_push_tag_publish_outputs
@@ -100,6 +101,32 @@ class ReleaseMetadataTest < Minitest::Test
       assert_file_has_line(step_output, "docker.io/runewarp/runewarp:10.20")
       assert_file_has_line(step_output, "docker.io/runewarp/runewarp:10")
     end
+  end
+
+  def test_main_commit_tag_uses_a_bare_twelve_character_sha
+    assert_equal("1234567890ab", Runewarp::ReleaseMetadata.main_commit_tag("1234567890abcdef1234567890abcdef12345678"))
+  end
+
+  def test_main_commit_tag_rejects_short_commit_shas
+    error = assert_raises(Runewarp::Error) do
+      Runewarp::ReleaseMetadata.main_commit_tag("1234567")
+    end
+
+    assert_includes(error.message, "full commit SHA is required")
+  end
+
+  def test_release_metadata_uses_the_main_commit_tag_as_the_release_source_image
+    resolved = Runewarp::ReleaseMetadata.resolve(
+      event_name: "push",
+      push_tag: "v1.2.3",
+      workflow_mode_input: "",
+      workflow_tag: "",
+      image_repository: "docker.io/runewarp/runewarp",
+      release_commit: "1234567890abcdef1234567890abcdef12345678"
+    )
+
+    assert_equal("docker.io/runewarp/runewarp:1.2.3", resolved.fetch("primary_image_ref"))
+    assert_equal("docker.io/runewarp/runewarp:1234567890ab", resolved.fetch("source_image_ref"))
   end
 
   def test_non_stable_release_tag_is_rejected

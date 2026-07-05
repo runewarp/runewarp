@@ -38,7 +38,7 @@ module Runewarp
       Core.die("failed to query crates.io for #{crate_name} #{release_version}: HTTP #{response.code} #{response.message}")
     end
 
-    def merge_docker_manifest!(amd64_digest:, arm64_digest:, docker_tags:, image_repository:, release_version:, github_output:)
+    def merge_docker_manifest!(docker_tags:, image_repository:, release_version:, source_image_ref:, github_output:)
       tag_args = docker_tags.lines(chomp: true).reject(&:empty?).flat_map { |tag| ["-t", tag] }
 
       Shell.run!(
@@ -47,8 +47,7 @@ module Runewarp
         "imagetools",
         "create",
         *tag_args,
-        "#{image_repository}@#{amd64_digest}",
-        "#{image_repository}@#{arm64_digest}"
+        source_image_ref
       )
 
       manifest_json = Shell.capture!("docker", "buildx", "imagetools", "inspect", "#{image_repository}:#{release_version}", "--raw")

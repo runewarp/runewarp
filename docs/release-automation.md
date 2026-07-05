@@ -4,6 +4,12 @@ This document describes the repository automation for release preparation and pu
 
 ## CI coverage
 
+The repository now uses three top-level workflows:
+
+- `CI` validates source changes on pull requests and `main` pushes without publishing trusted artifacts.
+- `Images` runs only after a successful `CI` workflow completion for a push to `main`, publishes the trusted `main` image lineage, and smoke tests that published lineage on both release architectures.
+- `Release` promotes one already-published trusted `main` image lineage into stable Docker tags for a signed stable tag.
+
 The `CI` workflow is the required aggregate check for normal changes. It currently validates:
 
 - release metadata structure through `./scripts/validate-release-metadata ci`
@@ -26,6 +32,19 @@ CI cache scope stays intentionally split by trust level:
 - trusted `main` pushes use their own Rust dependency and Docker Buildx layer caches
 - release jobs do not read from the CI cache namespace
 
+## Images workflow
+
+The `Images` workflow is the trusted mainline publication stage. It:
+
+1. triggers only from successful `CI` completion on a push to `main`
+2. validates release metadata in `images` mode from the trusted commit checkout
+3. publishes a multi-architecture Docker Hub lineage for that exact commit
+4. tags that lineage as mutable `main` plus immutable bare 12-character commit tag
+5. smoke tests the published lineage on `linux/amd64` and `linux/arm64`
+6. runs both startup/version smoke and the full Docker example smoke against the published image on each release architecture
+
+The immutable 12-character commit tag is the release handoff artifact. The later stable release does not rebuild Docker images; it promotes that exact already-smoke-tested lineage.
+
 ## Release workflow
 
 The `Release` workflow has two entry paths:
@@ -43,9 +62,10 @@ For tag pushes and manual `publish`, the workflow:
 4. verifies that the tagged commit already has a successful aggregate `CI` check run
 5. renders the changelog-driven release notes preview
 6. checks whether the crates.io version already exists; if it does, the real publish step is skipped, otherwise it publishes the crate
-7. checks whether the bare Docker release tag `X.Y.Z` already exists through the shared Docker Hub lookup seam; if it does, the Docker publish and signing steps are skipped, otherwise it builds native `amd64` and `arm64` images separately, pushes them by digest, then publishes the public Docker tags only after both architectures succeed
-8. signs a newly published Docker manifest list keylessly with Sigstore and publishes build provenance through the Docker release job
-9. checks whether the GitHub Release already exists and then upserts the release title plus notes after the crates.io and Docker jobs succeed
+7. resolves the immutable bare 12-character commit-tag image lineage for the tagged release commit, verifies that the stable `X.Y.Z` Docker tag does not already exist, and verifies that the trusted source lineage exists on Docker Hub
+8. promotes that exact already-published manifest to the public Docker tags `X.Y.Z`, `X.Y`, `X`, and `latest` without rebuilding either architecture
+9. signs a newly promoted Docker manifest list keylessly with Sigstore
+10. checks whether the GitHub Release already exists and then upserts the release title plus notes after the crates.io and Docker jobs succeed
 
 The GitHub Release title is the bare semantic version string (for example `0.1.0`), not a prefixed product name.
 
@@ -61,9 +81,8 @@ For manual `rehearsal`, the workflow:
 4. checks whether the crates.io version already exists through the same repo-owned probe used by the real publish path
 5. skips signed-tag and protected-tag enforcement because rehearsal happens before the irreversible tag is created
 6. runs `cargo publish --dry-run` against the tagged release source tree
-7. builds native `amd64` and `arm64` Docker release images without pushing them
-8. summarizes the workflow ref, release source ref, release commit, exact Docker tags, and rendered release notes that the real release would use
-9. skips Docker Hub publication, Sigstore signing, and GitHub Release mutation
+7. summarizes the workflow ref, release source ref, release commit, source image lineage, exact stable Docker tags, and rendered release notes that the real release would use
+8. skips Docker Hub publication, Sigstore signing, and GitHub Release mutation
 
 Rehearsal still writes into the trusted release cache scope for the selected `release_tag`, so the later real publish for that same tag can reuse the warmed Rust and Docker build state.
 
@@ -82,13 +101,13 @@ For manual `publish`, the workflow:
 
 The workflow keeps GitHub-specific orchestration and publish-job boundaries in YAML. Repo-owned Ruby entry points keep the rules and reusable adapters:
 
-- `scripts/lib/runewarp/release_metadata.rb` owns stable release-tag parsing plus derived release metadata, and `scripts/resolve-release-metadata` is the GitHub Actions adapter that writes those results into the gate job environment and outputs
+- `scripts/lib/runewarp/release_metadata.rb` owns stable release-tag parsing, main-image commit-tag derivation, and derived release metadata, and `scripts/resolve-release-metadata` is the GitHub Actions adapter that writes those results into the gate job environment and outputs
 - `scripts/lib/runewarp/docker_hub.rb` owns Docker Hub tag URL resolution plus HTTP status lookups, `scripts/check-docker-hub-tag` is the workflow adapter for outputs, and `scripts/check-distribution docker-registry-tag-absent` reuses the same lookup seam for local distribution checks
 - `scripts/lib/runewarp/release_docs.rb` owns changelog and version validation plus changelog-driven release-body rendering
 - `scripts/lib/runewarp/release_gates.rb` owns rehearsal/tag gate validation
-- `scripts/lib/runewarp/workflow_helpers.rb` owns the GitHub API, crates.io API, Docker manifest merge, release-summary, and GitHub Release upsert helpers that the release workflow shells out to through Ruby entry points
-- per-architecture Docker builds and manifest publication still live in the workflow because runner selection, registry login, and digest promotion are GitHub-hosted orchestration concerns
-- post-publish distribution-path probes are enforced in `CI`, not repeated in the release workflow
+- `scripts/lib/runewarp/workflow_helpers.rb` owns the GitHub API, crates.io API, Docker manifest promotion, release-summary, and GitHub Release upsert helpers that the workflows shell out to through Ruby entry points
+- multi-architecture Docker publication still lives in `Images` because runner selection, registry login, and trusted artifact publication are GitHub-hosted orchestration concerns
+- post-publish distribution-path probes now live in `Images`, not in `Release`
 
 ## Cache boundaries
 
@@ -96,8 +115,8 @@ The repository uses cache scope as part of the automation trust boundary:
 
 - Rust CI caches are keyed separately for pull requests and trusted `main` pushes
 - CI Docker builds use Buildx GHA cache scopes that are likewise split between pull requests and trusted `main` pushes
-- release rehearsal and release publish share only the release-scoped caches for the selected stable tag, so rehearsal can warm the eventual publish without crossing into CI caches
-- release jobs still rebuild from the trusted release source tree; they do not consume PR artifacts
+- release rehearsal and release publish share only the release-scoped caches for the selected stable tag
+- release jobs do not consume PR artifacts and do not rebuild Docker images
 
 ## Release environment and secrets
 
@@ -106,21 +125,21 @@ Real publish jobs run in the GitHub `release` environment. The current workflow 
 | Secret | Purpose |
 | --- | --- |
 | `CARGO_REGISTRY_TOKEN` | `cargo publish` authentication for crates.io |
-| `DOCKER_USERNAME` | Docker Hub login username |
-| `DOCKER_TOKEN` | Docker Hub access token |
+| `DOCKER_USERNAME` | Docker Hub login username for trusted main-image publication and stable-tag promotion |
+| `DOCKER_TOKEN` | Docker Hub access token for trusted main-image publication and stable-tag promotion |
 
-For dress rehearsals, the workflow still rebuilds the crate and both Docker release images, but it does not push to registries, sign images, or mutate the GitHub Release.
+For dress rehearsals, the workflow still rehearses the crate publish path, but it does not push to registries, promote Docker tags, sign images, or mutate the GitHub Release.
 
 Before the first real tag release, the `release` environment should allow rehearsal dispatches, manual publish dispatches, and stable `v*` tags. The repo-owned gate still keeps real publish paths constrained to commits already reachable from `origin/main`.
 
 ## Docker release contract
 
-- release images are built for `linux/amd64` and `linux/arm64`
-- the `linux/arm64` release build runs on GitHub's native `ubuntu-24.04-arm` runner instead of QEMU emulation
+- trusted main images are published for `linux/amd64` and `linux/arm64`
+- the `Images` workflow smoke tests the published lineage on both native architectures
 - published tags are `X.Y.Z`, `X.Y`, `X`, and `latest`
+- trusted main tags are mutable `main` plus immutable bare 12-character commit tag
 - the bare release tag `X.Y.Z` remains immutable; if it already exists, a manual publish rerun skips Docker publication instead of mutating that version
-- public Docker tags are created from a manifest-merge step only after both architecture builds succeed
+- stable public Docker tags are created by promoting the exact trusted commit-tag manifest
 - `latest` only moves on stable releases
 - the released manifest list is signed keylessly with Sigstore
-- provenance is published as part of the Docker release job
 - base images stay pinned by digest in `Dockerfile`; refreshing those digests is an intentional release-prep review step

@@ -7,6 +7,10 @@ class WorkflowContractTest < Minitest::Test
     @ci_workflow ||= File.read(File.join(REPO_ROOT, ".github", "workflows", "ci.yml"), encoding: "utf-8")
   end
 
+  def images_workflow
+    @images_workflow ||= File.read(File.join(REPO_ROOT, ".github", "workflows", "images.yml"), encoding: "utf-8")
+  end
+
   def release_workflow
     @release_workflow ||= File.read(File.join(REPO_ROOT, ".github", "workflows", "release.yml"), encoding: "utf-8")
   end
@@ -19,7 +23,7 @@ class WorkflowContractTest < Minitest::Test
     assert_includes(ci_workflow, "run: ./scripts/check-distribution package-readiness")
     assert_includes(ci_workflow, "./scripts/check-distribution docker-image")
     assert_includes(ci_workflow, "run: ./scripts/docker-example smoke")
-    refute_includes(ci_workflow, ".sh")
+    refute_match(/run:\s+\S+\.sh\b/, ci_workflow)
   end
 
   def test_release_workflow_uses_ruby_release_helpers
@@ -34,6 +38,22 @@ class WorkflowContractTest < Minitest::Test
     assert_includes(release_workflow, "run: ./scripts/merge-docker-manifest")
     assert_includes(release_workflow, "run: ./scripts/upsert-github-release")
     refute_includes(release_workflow, "python - <<'PY'")
+  end
+
+  def test_images_workflow_uses_repo_owned_entry_points
+    assert_includes(images_workflow, "name: Images")
+    assert_includes(images_workflow, "workflows:\n      - CI")
+    assert_includes(images_workflow, "run: ./scripts/validate-release-metadata images")
+    assert_includes(images_workflow, "./scripts/check-distribution docker-registry-image")
+    assert_includes(images_workflow, "run: ./scripts/docker-example smoke --image-ref")
+    refute_match(/run:\s+\S+\.sh\b/, images_workflow)
+  end
+
+  def test_images_workflow_only_runs_after_successful_main_ci_pushes
+    assert_includes(images_workflow, "workflow_run:")
+    assert_includes(images_workflow, "types:\n      - completed")
+    assert_includes(images_workflow, "branches:\n      - main")
+    assert_includes(images_workflow, "if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'")
   end
 
   def test_release_rehearsal_exercises_the_crates_io_release_probe
@@ -70,15 +90,22 @@ class WorkflowContractTest < Minitest::Test
   end
 
   def test_release_workflow_preserves_publish_ordering
-    assert_includes(release_workflow, "docker-release-amd64:\n    name: Publish Docker Hub amd64 release\n    needs:\n      - gate\n      - crate-release")
-    assert_includes(release_workflow, "docker-release-arm64:\n    name: Publish Docker Hub arm64 release\n    needs:\n      - gate\n      - crate-release")
-    assert_includes(release_workflow, "docker-release-manifest:\n    name: Publish Docker Hub release manifest")
     assert_includes(release_workflow, "steps:\n      - name: Check out the repository\n        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2")
-    assert_includes(release_workflow, "github-release:\n    name: Finalize GitHub release\n    if: github.event_name == 'push' || inputs.mode == 'publish'\n    needs:\n      - gate\n      - crate-release\n      - docker-release-manifest")
+    assert_includes(release_workflow, "crate-release:\n    name: Publish crates.io release\n    needs:\n      - gate")
+    assert_includes(release_workflow, "docker-release:\n    name: Promote Docker Hub release tags\n    if: github.event_name == 'push' || inputs.mode == 'publish'\n    needs:\n      - gate\n      - crate-release")
+    assert_includes(release_workflow, "github-release:\n    name: Finalize GitHub release\n    if: github.event_name == 'push' || inputs.mode == 'publish'\n    needs:\n      - gate\n      - crate-release\n      - docker-release")
+  end
+
+  def test_release_workflow_promotes_prebuilt_main_images_without_rebuilding
+    assert_includes(release_workflow, "run: ./scripts/check-docker-hub-tag --image-ref \"$SOURCE_IMAGE_REF\"")
+    assert_includes(release_workflow, "run: ./scripts/merge-docker-manifest")
+    refute_includes(release_workflow, "docker/build-push-action")
+    refute_includes(release_workflow, "Build amd64 release image")
+    refute_includes(release_workflow, "Build arm64 release image")
   end
 
   def test_workflows_keep_pinned_actions_with_inline_version_comments
-    { "ci.yml" => ci_workflow, "release.yml" => release_workflow }.each do |name, workflow|
+    { "ci.yml" => ci_workflow, "images.yml" => images_workflow, "release.yml" => release_workflow }.each do |name, workflow|
       workflow.lines.grep(/uses: /).each do |line|
         next unless line.include?("@")
 
@@ -90,6 +117,7 @@ class WorkflowContractTest < Minitest::Test
   def test_git_hooks_are_removed_from_repo_contracts
     refute(File.exist?(File.join(REPO_ROOT, ".githooks", "pre-commit")))
     refute_includes(ci_workflow, ".githooks")
+    refute_includes(images_workflow, ".githooks")
     refute_includes(release_workflow, ".githooks")
   end
 end

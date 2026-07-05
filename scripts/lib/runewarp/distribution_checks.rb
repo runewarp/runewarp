@@ -4,7 +4,7 @@ module Runewarp
   module DistributionChecks
     module_function
 
-    def validate!(mode:, repo_root:, bin_name: nil, crate_name: nil, expected_version: nil, expected_text: nil, probe_arg: nil, image_tag: nil, image_ref: nil, retry_attempts: 10, retry_delay_seconds: 30)
+    def validate!(mode:, repo_root:, bin_name: nil, crate_name: nil, expected_version: nil, expected_text: nil, probe_arg: nil, image_tag: nil, image_ref: nil, platform: nil, retry_attempts: 10, retry_delay_seconds: 30)
       case mode
       when "cargo-install"
         validate_cargo_install(repo_root: repo_root, bin_name: bin_name, expected_version: expected_version, expected_text: expected_text, probe_arg: probe_arg)
@@ -15,11 +15,11 @@ module Runewarp
       when "docker-image"
         validate_docker_image(repo_root: repo_root, expected_version: expected_version, expected_text: expected_text, probe_arg: probe_arg, image_tag: image_tag)
       when "docker-registry-image"
-        validate_docker_registry_image(image_ref: image_ref, expected_version: expected_version, expected_text: expected_text, probe_arg: probe_arg, retry_attempts: retry_attempts, retry_delay_seconds: retry_delay_seconds)
+        validate_docker_registry_image(image_ref: image_ref, expected_version: expected_version, expected_text: expected_text, probe_arg: probe_arg, platform: platform, retry_attempts: retry_attempts, retry_delay_seconds: retry_delay_seconds)
       when "docker-registry-tag-absent"
         validate_docker_registry_tag_absent(image_ref: image_ref)
       else
-        Core.usage_error("check-distribution <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]")
+        Core.usage_error("check-distribution <cargo-install|package-readiness|registry-install|docker-image|docker-registry-image|docker-registry-tag-absent> [--repo-root PATH] [--bin-name NAME] [--crate-name NAME] [--expected-version X.Y.Z] [--expected-text TEXT] [--probe-arg ARG] [--image-tag NAME] [--image-ref REF] [--platform PLATFORM] [--retry-attempts COUNT] [--retry-delay-seconds SECONDS]")
       end
     end
 
@@ -28,13 +28,26 @@ module Runewarp
       validate_expected_output!(mode: "cargo-install", expected_version: expected_version, expected_text: expected_text)
       probe_arg ||= expected_version ? "--version" : "--help"
 
+      build_env = {}
+      build_env["RUNEWARP_BUILD_COMMIT"] = Core.runewarp_git_commit(repo_root) if Core.runewarp_version(repo_root)&.end_with?("-dev")
+
       Core.require_command("cargo")
       Core.with_temp_dir("runewarp-distribution-check-") do |install_root|
         Core.section("Installing crate from source")
         Core.note("Repository root: #{repo_root}")
         Core.note("Binary: #{bin_name}")
 
-        Shell.run!("cargo", "install", "--locked", "--path", repo_root, "--root", install_root, out: File::NULL)
+        Shell.run!(
+          "cargo",
+          "install",
+          "--locked",
+          "--path",
+          repo_root,
+          "--root",
+          install_root,
+          env: build_env,
+          out: File::NULL
+        )
 
         Core.section("Checking installed binary")
         output = Shell.capture!(File.join(install_root, "bin", bin_name), probe_arg)
@@ -44,6 +57,13 @@ module Runewarp
     end
 
     def validate_package_readiness(repo_root:)
+      build_env = {
+        "CARGO_REGISTRIES_CRATES_IO_PROTOCOL" => "sparse",
+        "CARGO_HTTP_MULTIPLEXING" => "false",
+        "CARGO_NET_RETRY" => "5"
+      }
+      build_env["RUNEWARP_BUILD_COMMIT"] = Core.runewarp_git_commit(repo_root) if Core.runewarp_version(repo_root)&.end_with?("-dev")
+
       Core.require_command("cargo")
 
       Core.section("Checking package readiness")
@@ -57,11 +77,7 @@ module Runewarp
         "--locked",
         "--manifest-path",
         File.join(repo_root, "Cargo.toml"),
-        env: {
-          "CARGO_REGISTRIES_CRATES_IO_PROTOCOL" => "sparse",
-          "CARGO_HTTP_MULTIPLEXING" => "false",
-          "CARGO_NET_RETRY" => "5"
-        },
+        env: build_env,
         out: File::NULL
       )
 
@@ -125,7 +141,7 @@ module Runewarp
       Core.success("docker image path is valid")
     end
 
-    def validate_docker_registry_image(image_ref:, expected_version:, expected_text:, probe_arg:, retry_attempts:, retry_delay_seconds:)
+    def validate_docker_registry_image(image_ref:, expected_version:, expected_text:, probe_arg:, platform:, retry_attempts:, retry_delay_seconds:)
       Core.die("docker-registry-image mode requires --image-ref") if blank?(image_ref)
       validate_expected_output!(mode: "docker-registry-image", expected_version: expected_version, expected_text: expected_text)
       probe_arg ||= expected_version ? "--version" : "--help"
@@ -133,14 +149,21 @@ module Runewarp
       Core.require_command("docker")
       Core.section("Pulling Docker image")
       Core.note("Image ref: #{image_ref}")
+      Core.note("Platform: #{platform}") unless blank?(platform)
       Core.note("Retry attempts: #{retry_attempts}")
 
       Core.retry_command(retry_attempts, retry_delay_seconds, "docker pull", "docker registry image did not become available after #{retry_attempts} attempts") do
-        Shell.run!("docker", "pull", image_ref, out: File::NULL)
+        pull_command = ["docker", "pull"]
+        pull_command += ["--platform", platform] unless blank?(platform)
+        pull_command << image_ref
+        Shell.run!(*pull_command, out: File::NULL)
       end
 
       Core.section("Checking released Docker image startup")
-      output = Shell.capture!("docker", "run", "--rm", image_ref, probe_arg)
+      run_command = ["docker", "run", "--rm"]
+      run_command += ["--platform", platform] unless blank?(platform)
+      run_command += [image_ref, probe_arg]
+      output = Shell.capture!(*run_command)
       validate_version_output!("released docker image", output, expected_version || expected_text)
       Core.success("docker registry image path is valid")
     end

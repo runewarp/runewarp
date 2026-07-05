@@ -7,6 +7,7 @@ Runewarp::Core.run_cli do
   Runewarp::WorkflowHelpers.verify_prior_green_ci!(
     repository: ENV.fetch("REPOSITORY"),
     commit_sha: ENV.fetch("COMMIT_SHA"),
-    token: ENV.fetch("GITHUB_TOKEN")
+    token: ENV.fetch("GITHUB_TOKEN"),
+    check_name: ENV.fetch("CHECK_NAME", "CI")
   )
 end

@@ -60,12 +60,13 @@ For tag pushes and manual `publish`, the workflow:
 2. verifies that the tagged commit is already reachable from `origin/main`, so release tags cannot publish branch-only commits
 3. verifies the SSH-signed tag against `.github/release-allowed-signers`
 4. verifies that the tagged commit already has a successful aggregate `CI` check run
-5. renders the changelog-driven release notes preview
-6. checks whether the crates.io version already exists; if it does, the real publish step is skipped, otherwise it publishes the crate
-7. resolves the immutable bare 12-character commit-tag image lineage for the tagged release commit, verifies that the stable `X.Y.Z` Docker tag does not already exist, and verifies that the trusted source lineage exists on Docker Hub
-8. promotes that exact already-published manifest to the public Docker tags `X.Y.Z`, `X.Y`, `X`, and `latest` without rebuilding either architecture
-9. signs a newly promoted Docker manifest list keylessly with Sigstore
-10. checks whether the GitHub Release already exists and then upserts the release title plus notes after the crates.io and Docker jobs succeed
+5. verifies that the tagged commit already has a successful `Images` workflow run, so release cannot promote a lineage whose publish-time smoke failed or never completed
+6. renders the changelog-driven release notes preview
+7. checks whether the crates.io version already exists; if it does, the real publish step is skipped, otherwise it publishes the crate
+8. resolves the immutable bare 12-character commit-tag image lineage for the tagged release commit, verifies that the stable `X.Y.Z` Docker tag does not already exist, verifies that the trusted source lineage exists on Docker Hub, and probes that published image's `--version` output to confirm it still reports the tagged commit's baked-in 12-character SHA
+9. promotes that exact already-published manifest to the public Docker tags `X.Y.Z`, `X.Y`, `X`, and `latest` without rebuilding either architecture
+10. signs a newly promoted Docker manifest list keylessly with Sigstore
+11. checks whether the GitHub Release already exists and then upserts the release title plus notes after the crates.io and Docker jobs succeed
 
 The GitHub Release title is the bare semantic version string (for example `0.1.0`), not a prefixed product name.
 
@@ -107,7 +108,7 @@ The workflow keeps GitHub-specific orchestration and publish-job boundaries in Y
 - `scripts/lib/runewarp/release_gates.rb` owns rehearsal/tag gate validation
 - `scripts/lib/runewarp/workflow_helpers.rb` owns the GitHub API, crates.io API, Docker manifest promotion, release-summary, and GitHub Release upsert helpers that the workflows shell out to through Ruby entry points
 - multi-architecture Docker publication still lives in `Images` because runner selection, registry login, and trusted artifact publication are GitHub-hosted orchestration concerns
-- post-publish distribution-path probes now live in `Images`, not in `Release`
+- post-publish distribution-path probes live primarily in `Images`, while `Release` re-probes the source image's version metadata to confirm the promoted lineage still matches the tagged commit
 
 ## Cache boundaries
 

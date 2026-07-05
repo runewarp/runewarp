@@ -104,6 +104,23 @@ class WorkflowContractTest < Minitest::Test
     refute_includes(release_workflow, "Build arm64 release image")
   end
 
+  def test_release_workflow_requires_successful_images_proof_for_the_release_commit
+    assert_includes(release_workflow, "- name: Verify prior successful Images workflow")
+    assert_includes(release_workflow, "CHECK_NAME: Images")
+    assert_includes(release_workflow, "COMMIT_SHA: ${{ steps.release-source.outputs.release_commit }}")
+    assert_includes(release_workflow, "run: ./scripts/check-github-check-run")
+  end
+
+  def test_release_workflow_verifies_the_source_image_lineage_matches_the_release_commit
+    assert_includes(release_workflow, "- name: Verify source image lineage matches the release commit")
+    assert_includes(release_workflow, "SOURCE_IMAGE_REF: ${{ needs.gate.outputs.source_image_ref }}")
+    assert_includes(release_workflow, "SOURCE_IMAGE_COMMIT: ${{ needs.gate.outputs.release_commit }}")
+    assert_includes(release_workflow, "./scripts/check-distribution docker-registry-image")
+    assert_includes(release_workflow, "source_image_commit=\"$(printf '%s' \"$SOURCE_IMAGE_COMMIT\" | cut -c1-12)\"")
+    assert_includes(release_workflow, "--expected-text \"$source_image_commit\"")
+    assert_includes(release_workflow, "--probe-arg --version")
+  end
+
   def test_workflows_keep_pinned_actions_with_inline_version_comments
     { "ci.yml" => ci_workflow, "images.yml" => images_workflow, "release.yml" => release_workflow }.each do |name, workflow|
       workflow.lines.grep(/uses: /).each do |line|

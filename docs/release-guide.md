@@ -28,7 +28,7 @@ Before cutting a stable release, make sure all of these are already true:
 | Registry ownership | The maintainer account can publish `runewarp` on crates.io and `runewarp/runewarp` on Docker Hub. |
 | Candidate commit | The release commit is already reachable from `origin/main`. |
 | CI | The aggregate `CI` check is green on the release commit before the release tag is pushed. |
-| Images | The `Images` workflow already published and smoke tested the immutable 12-character commit-tag image lineage for that release commit. |
+| Images | The `Images` workflow already published and smoke tested the immutable 12-character commit-tag image lineage for that release commit, and `Release` will re-check that lineage against the tagged commit before promotion. |
 
 ## Trust boundaries
 
@@ -94,7 +94,7 @@ Use manual publish when the tag already exists and you need the current release 
 4. Watch the workflow summary to confirm it is in publish mode and targeting the expected tag.
 5. Let the workflow skip any surface that is already published and complete any missing surface that is still absent.
 
-Manual publish applies the same signed-tag, trusted-commit, prior-green-`CI`, and trusted-image-lineage checks as the normal tag-driven release path. The workflow definition, Ruby release helpers, and release notes come from the current `main`, while crate publication still targets the selected release tag's source tree and Docker promotion still targets that tag's previously published commit-lineage image. If the GitHub release already exists, the workflow updates its title and notes to match the current rendered changelog entry for that version.
+Manual publish applies the same signed-tag, trusted-commit, prior-green-`CI`, successful-`Images`, and trusted-image-lineage checks as the normal tag-driven release path. The workflow definition, Ruby release helpers, and release notes come from the current `main`, while crate publication still targets the selected release tag's source tree and Docker promotion still targets that tag's previously published commit-lineage image after re-verifying its baked-in 12-character commit SHA. If the GitHub release already exists, the workflow updates its title and notes to match the current rendered changelog entry for that version.
 
 ## Recovery playbooks
 

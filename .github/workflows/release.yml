@@ -98,6 +98,15 @@ jobs:
           COMMIT_SHA: ${{ steps.release-source.outputs.release_commit }}
         run: ./scripts/check-github-check-run
 
+      - name: Verify prior successful Images workflow
+        if: steps.release-metadata.outputs.workflow_mode == 'publish'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ steps.release-source.outputs.release_commit }}
+          CHECK_NAME: Images
+        run: ./scripts/check-github-check-run
+
       - name: Render release notes preview
         run: ./scripts/render-release-notes --version "$RELEASE_VERSION" > /tmp/release-notes.md
 
@@ -222,6 +231,19 @@ jobs:
         run: |
           printf 'error: source image lineage %s is missing\n' "$SOURCE_IMAGE_REF" >&2
           exit 1
+
+      - name: Verify source image lineage matches the release commit
+        if: steps.docker-status.outputs.exists != 'true'
+        env:
+          SOURCE_IMAGE_REF: ${{ needs.gate.outputs.source_image_ref }}
+          SOURCE_IMAGE_COMMIT: ${{ needs.gate.outputs.release_commit }}
+        run: |
+          source_image_commit="$(printf '%s' "$SOURCE_IMAGE_COMMIT" | cut -c1-12)"
+          ./scripts/check-distribution docker-registry-image \
+            --image-ref "$SOURCE_IMAGE_REF" \
+            --platform linux/amd64 \
+            --expected-text "$source_image_commit" \
+            --probe-arg --version
 
       - name: Log in to Docker Hub
         if: steps.docker-status.outputs.exists != 'true'

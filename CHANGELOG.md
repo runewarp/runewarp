@@ -5,10 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-
 ### Fixed
 
 - Fixed the amd64 runtime regression where a long-lived top-level stderr lock could stall background runtime logging and break idle tunnel registration. (#140)
+
+### Added
+
+- Added the runtime-only `runewarp server --hostname <HOSTNAME>` override so one shared Server config can inject the effective Server hostname before validation, Server certificate checks, and Server ACME setup. (#138)
 
 ### Changed
 

@@ -81,6 +81,9 @@ pub struct ServerArgs {
     /// Use an explicit config file instead of the default Runewarp config path.
     #[arg(short = 'c', long, value_name = "PATH", global = true)]
     pub config: Option<PathBuf>,
+    /// Override the configured Server hostname for the runtime Server command.
+    #[arg(long, value_name = "HOSTNAME")]
+    pub hostname: Option<String>,
     #[command(subcommand)]
     pub command: Option<ServerSubcommand>,
 }

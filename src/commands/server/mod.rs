@@ -1,4 +1,4 @@
-use runewarp::{PreparedServer, resolve_server_config_from_cli};
+use runewarp::{PreparedServer, ServerRuntimeArgs, resolve_server_config_from_cli};
 
 use crate::cli;
 use crate::commands::CommandResult;
@@ -8,13 +8,24 @@ use crate::error_handling::logged_runtime_failure;
 mod cert;
 
 pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
+    let runtime = ServerRuntimeArgs {
+        hostname: command.hostname,
+    };
     let config = command.config;
     if let Some(cli::ServerSubcommand::Cert(command)) = command.command {
+        if let Some(hostname) = runtime.hostname {
+            return Err(format!(
+                "--hostname is only supported for `runewarp server`, not `runewarp server cert ...` \
+                 (got `{hostname}`). Use `runewarp server cert init --hostname ...` or \
+                 `runewarp server cert rotate-ca --hostname ...` for certificate commands."
+            )
+            .into());
+        }
         return cert::run(config, command);
     }
 
-    let config =
-        resolve_server_config_from_cli(config).map_err(wrap_server_config_resolution_error)?;
+    let config = resolve_server_config_from_cli(config, runtime)
+        .map_err(wrap_server_config_resolution_error)?;
     runewarp::runtime_log::install(config.log_level)?;
     let server = match PreparedServer::bind(
         &config,

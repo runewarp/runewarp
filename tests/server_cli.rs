@@ -17,6 +17,7 @@ fn server_help_prints_usage_and_subcommands() {
     assert!(stdout.contains("runewarp server"));
     assert!(stdout.contains("cert"));
     assert!(stdout.contains("--config"));
+    assert!(stdout.contains("--hostname"));
 }
 
 #[test]
@@ -97,6 +98,141 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("missing-server"));
     assert!(stderr.contains("runewarp server cert init --config custom.toml"));
+}
+
+#[test]
+fn server_runtime_hostname_override_wins_over_config_before_startup() {
+    let tempdir = tempdir().unwrap();
+    fs::write(
+        tempdir.path().join("custom.toml"),
+        r#"
+[server]
+hostname = "configured.example.test"
+cert-dir = "missing-overridden-hostname"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "--config",
+            "custom.toml",
+            "--hostname",
+            "overridden.example.test",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("missing-overridden-hostname"));
+    assert!(!stderr.contains("unexpected argument '--hostname'"));
+}
+
+#[test]
+fn server_runtime_hostname_override_can_supply_a_missing_config_hostname() {
+    let tempdir = tempdir().unwrap();
+    fs::write(
+        tempdir.path().join("custom.toml"),
+        r#"
+[server]
+cert-dir = "missing-runtime-hostname"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let missing_hostname = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["server", "--config", "custom.toml"])
+        .assert()
+        .failure();
+
+    let missing_hostname_stderr =
+        String::from_utf8(missing_hostname.get_output().stderr.clone()).unwrap();
+    assert!(missing_hostname_stderr.contains("server.hostname is required"));
+
+    let overridden = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "--config",
+            "custom.toml",
+            "--hostname",
+            "runtime.example.test",
+        ])
+        .assert()
+        .failure();
+
+    let overridden_stderr = String::from_utf8(overridden.get_output().stderr.clone()).unwrap();
+    assert!(overridden_stderr.contains("missing-runtime-hostname"));
+    assert!(!overridden_stderr.contains("server.hostname is required"));
+}
+
+#[test]
+fn server_runtime_hostname_override_reuses_server_hostname_validation() {
+    let tempdir = tempdir().unwrap();
+    fs::write(
+        tempdir.path().join("custom.toml"),
+        r#"
+[server]
+hostname = "configured.example.test"
+cert-dir = "missing-server"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "--config",
+            "custom.toml",
+            "--hostname",
+            "bad_hostname.test",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains(
+        "server.hostname is invalid: hostname must contain only lowercase ASCII letters, digits, dots, and hyphens"
+    ));
+}
+
+#[test]
+fn server_runtime_hostname_override_is_rejected_for_cert_subcommands() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args([
+            "server",
+            "--hostname",
+            "runtime.example.test",
+            "cert",
+            "renew",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("--hostname is only supported for `runewarp server`"));
+    assert!(stderr.contains("runewarp server cert init --hostname"));
 }
 
 #[test]

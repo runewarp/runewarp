@@ -169,6 +169,8 @@ runewarp client -c /etc/runewarp/client.toml
 
 If you omit `--config`, Runewarp looks for `$XDG_CONFIG_HOME/runewarp/config.toml`, then `~/.config/runewarp/config.toml` when `XDG_CONFIG_HOME` is unset. Use [`docs/configuration.md`](configuration.md) for the full config discovery and runtime override rules.
 
+When one shared Server config needs a per-process **Server hostname**, `runewarp server --hostname <HOSTNAME>` overrides `server.hostname` before validation. This is a narrow runtime seam for the Server runtime only; ordinary operator workflows should keep `server.hostname` in config.
+
 For runtime-only startup, `--server-address` is repeatable. One occurrence gives the ordinary single-target shape; multiple occurrences make one Client reconcile those Server addresses concurrently.
 
 ### 8. Verify traffic

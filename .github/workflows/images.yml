@@ -21,10 +21,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Publish Docker Hub images
+  publish-amd64:
+    name: Publish Docker Hub amd64 image
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     environment: release
     steps:
@@ -48,7 +48,6 @@ jobs:
             printf 'IMAGE_REPOSITORY=%s\n' "$IMAGE_REPOSITORY"
             printf 'COMMIT_TAG=%s\n' "$commit_tag"
             printf 'COMMIT_IMAGE_REF=%s:%s\n' "$IMAGE_REPOSITORY" "$commit_tag"
-            printf 'MAIN_IMAGE_REF=%s:main\n' "$IMAGE_REPOSITORY"
           } >> "$GITHUB_ENV"
 
       - name: Log in to Docker Hub
@@ -61,7 +60,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - name: Publish trusted main image lineage
+      - name: Publish trusted amd64 image lineage
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
@@ -70,27 +69,72 @@ jobs:
             RUNEWARP_BUILD_COMMIT=${{ github.event.workflow_run.head_sha }}
           cache-from: ${{ env.TRUSTED_MAIN_DOCKER_CACHE_FROM }}
           cache-to: ${{ env.TRUSTED_MAIN_DOCKER_CACHE_TO }}
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.MAIN_IMAGE_REF }}
-            ${{ env.COMMIT_IMAGE_REF }}
+            ${{ env.COMMIT_IMAGE_REF }}-amd64
           provenance: mode=max
 
-      - name: Smoke published image startup
+  publish-arm64:
+    name: Publish Docker Hub arm64 image
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 60
+    environment: release
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Validate main-image metadata
+        run: ./scripts/validate-release-metadata images
+
+      - name: Derive main-image refs
+        env:
+          IMAGE_REPOSITORY: docker.io/runewarp/runewarp
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          ./scripts/check-distribution docker-registry-image \
-            --image-ref "$COMMIT_IMAGE_REF" \
-            --platform linux/amd64 \
-            --expected-text "runewarp" \
-            --probe-arg --version
+          commit_tag="$(printf '%s' "$HEAD_SHA" | cut -c1-12)"
+          {
+            printf 'IMAGE_REPOSITORY=%s\n' "$IMAGE_REPOSITORY"
+            printf 'COMMIT_TAG=%s\n' "$commit_tag"
+            printf 'COMMIT_IMAGE_REF=%s:%s\n' "$IMAGE_REPOSITORY" "$commit_tag"
+          } >> "$GITHUB_ENV"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: ${{ !cancelled() }}
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Publish trusted arm64 image lineage
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            RUNEWARP_BUILD_COMMIT=${{ github.event.workflow_run.head_sha }}
+          cache-from: ${{ env.TRUSTED_MAIN_DOCKER_CACHE_FROM }}
+          cache-to: ${{ env.TRUSTED_MAIN_DOCKER_CACHE_TO }}
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.COMMIT_IMAGE_REF }}-arm64
+          provenance: mode=max
 
   smoke-amd64:
     name: Smoke published amd64 image
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     needs:
-      - publish
-    runs-on: ubuntu-latest
+      - publish-amd64
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - name: Check out the repository
@@ -107,7 +151,7 @@ jobs:
         run: |
           commit_tag="$(printf '%s' "$HEAD_SHA" | cut -c1-12)"
           {
-            printf 'COMMIT_IMAGE_REF=%s:%s\n' "$IMAGE_REPOSITORY" "$commit_tag"
+            printf 'COMMIT_IMAGE_REF=%s:%s-amd64\n' "$IMAGE_REPOSITORY" "$commit_tag"
           } >> "$GITHUB_ENV"
 
       - name: Smoke published image startup
@@ -125,8 +169,8 @@ jobs:
     name: Smoke published arm64 image
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     needs:
-      - publish
-    runs-on: ubuntu-24.04-arm
+      - publish-arm64
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 45
     steps:
       - name: Check out the repository
@@ -143,7 +187,7 @@ jobs:
         run: |
           commit_tag="$(printf '%s' "$HEAD_SHA" | cut -c1-12)"
           {
-            printf 'COMMIT_IMAGE_REF=%s:%s\n' "$IMAGE_REPOSITORY" "$commit_tag"
+            printf 'COMMIT_IMAGE_REF=%s:%s-arm64\n' "$IMAGE_REPOSITORY" "$commit_tag"
           } >> "$GITHUB_ENV"
 
       - name: Smoke published image startup
@@ -156,3 +200,56 @@ jobs:
 
       - name: Smoke published Docker example
         run: ./scripts/docker-example smoke --image-ref "$COMMIT_IMAGE_REF"
+
+  merge:
+    name: Merge trusted Docker Hub image lineage
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    needs:
+      - smoke-amd64
+      - smoke-arm64
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    environment: release
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Derive main-image refs
+        env:
+          IMAGE_REPOSITORY: docker.io/runewarp/runewarp
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          commit_tag="$(printf '%s' "$HEAD_SHA" | cut -c1-12)"
+          commit_image_ref="${IMAGE_REPOSITORY}:${commit_tag}"
+          main_image_ref="${IMAGE_REPOSITORY}:main"
+          {
+            printf 'IMAGE_REPOSITORY=%s\n' "$IMAGE_REPOSITORY"
+            printf 'COMMIT_TAG=%s\n' "$commit_tag"
+            printf 'COMMIT_IMAGE_REF=%s\n' "$commit_image_ref"
+            printf 'MAIN_IMAGE_REF=%s\n' "$main_image_ref"
+            printf 'RELEASE_VERSION=main\n'
+            printf 'DOCKER_TAGS<<EOF\n%s\n%s\nEOF\n' "$main_image_ref" "$commit_image_ref"
+            printf 'SOURCE_IMAGE_REF<<EOF\n%s-amd64\n%s-arm64\nEOF\n' "$commit_image_ref" "$commit_image_ref"
+          } >> "$GITHUB_ENV"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Set up Docker Buildx
+        if: ${{ !cancelled() }}
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Merge trusted main image lineage
+        env:
+          DOCKER_TAGS: ${{ env.DOCKER_TAGS }}
+          IMAGE_REPOSITORY: ${{ env.IMAGE_REPOSITORY }}
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+          SOURCE_IMAGE_REF: ${{ env.SOURCE_IMAGE_REF }}
+        run: ./scripts/merge-docker-manifest

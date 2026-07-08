@@ -19,6 +19,10 @@ class WorkflowContractTest < Minitest::Test
     @dockerfile ||= File.read(File.join(REPO_ROOT, "Dockerfile"), encoding: "utf-8")
   end
 
+  def adr_files
+    @adr_files ||= Dir.glob(File.join(REPO_ROOT, "docs", "adr", "*.md")).sort
+  end
+
   def test_ci_workflow_uses_ruby_entry_points
     assert_includes(ci_workflow, "run: ./scripts/lint-workflows")
     assert_includes(ci_workflow, "run: ./scripts/validate-release-metadata ci")
@@ -61,10 +65,38 @@ class WorkflowContractTest < Minitest::Test
   end
 
   def test_images_workflow_scopes_docker_publish_secrets_to_release_environment
-    assert_includes(images_workflow, "publish:\n    name: Publish Docker Hub images")
+    assert_includes(images_workflow, "publish-amd64:\n    name: Publish Docker Hub amd64 image")
+    assert_includes(images_workflow, "publish-arm64:\n    name: Publish Docker Hub arm64 image")
+    assert_includes(images_workflow, "merge:\n    name: Merge trusted Docker Hub image lineage")
     assert_includes(images_workflow, "timeout-minutes: 60\n    environment: release")
+    assert_includes(images_workflow, "timeout-minutes: 30\n    environment: release")
     assert_includes(images_workflow, "username: ${{ secrets.DOCKER_USERNAME }}")
     assert_includes(images_workflow, "password: ${{ secrets.DOCKER_TOKEN }}")
+  end
+
+  def test_images_workflow_splits_native_publish_by_architecture_before_merge
+    assert_includes(images_workflow, "publish-amd64:\n    name: Publish Docker Hub amd64 image")
+    assert_includes(images_workflow, "publish-arm64:\n    name: Publish Docker Hub arm64 image")
+    assert_includes(images_workflow, "merge:\n    name: Merge trusted Docker Hub image lineage")
+    assert_includes(images_workflow, "publish-amd64:\n    name: Publish Docker Hub amd64 image\n    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n    runs-on: ubuntu-26.04")
+    assert_includes(images_workflow, "publish-arm64:\n    name: Publish Docker Hub arm64 image\n    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n    runs-on: ubuntu-26.04-arm")
+    assert_includes(images_workflow, "tags: |\n            ${{ env.COMMIT_IMAGE_REF }}-amd64")
+    assert_includes(images_workflow, "tags: |\n            ${{ env.COMMIT_IMAGE_REF }}-arm64")
+    assert_includes(images_workflow, "smoke-amd64:\n    name: Smoke published amd64 image\n    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n    needs:\n      - publish-amd64")
+    assert_includes(images_workflow, "smoke-arm64:\n    name: Smoke published arm64 image\n    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n    needs:\n      - publish-arm64")
+    assert_includes(images_workflow, "merge:\n    name: Merge trusted Docker Hub image lineage\n    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n    needs:\n      - smoke-amd64\n      - smoke-arm64")
+    assert_includes(images_workflow, "run: ./scripts/merge-docker-manifest")
+  end
+
+  def test_linux_workflows_use_ubuntu_26_04_runner_labels
+    assert_includes(ci_workflow, "runs-on: ubuntu-26.04")
+    refute_includes(ci_workflow, "runs-on: ubuntu-latest")
+    assert_includes(images_workflow, "runs-on: ubuntu-26.04")
+    assert_includes(images_workflow, "runs-on: ubuntu-26.04-arm")
+    refute_includes(images_workflow, "runs-on: ubuntu-latest")
+    refute_includes(images_workflow, "runs-on: ubuntu-24.04-arm")
+    assert_includes(release_workflow, "runs-on: ubuntu-26.04")
+    refute_includes(release_workflow, "runs-on: ubuntu-latest")
   end
 
   def test_ci_and_images_share_the_trusted_main_docker_cache_scope
@@ -161,6 +193,14 @@ class WorkflowContractTest < Minitest::Test
   def test_dockerfile_copies_build_script_for_dev_source_builds
     assert_includes(dockerfile, "COPY Cargo.toml Cargo.lock build.rs ./")
     assert_includes(dockerfile, "COPY src ./src")
+  end
+
+  def test_adrs_use_plain_markdown_without_front_matter
+    adr_files.each do |path|
+      first_line = File.open(path, "r:utf-8", &:readline)
+
+      assert_equal("#", first_line[0], "expected #{File.basename(path)} to start with a Markdown heading")
+    end
   end
 
   def test_workflows_keep_pinned_actions_with_inline_version_comments

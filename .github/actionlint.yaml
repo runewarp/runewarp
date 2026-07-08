@@ -1,0 +1,5 @@
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      - 'label "ubuntu-26\.04" is unknown\.'
+      - 'label "ubuntu-26\.04-arm" is unknown\.'

@@ -26,7 +26,7 @@ concurrency:
 jobs:
   workflow-lint:
     name: Workflow lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - name: Check out the repository
@@ -37,7 +37,7 @@ jobs:
 
   automation-contract:
     name: Automation contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Check out the repository
@@ -51,7 +51,7 @@ jobs:
 
   install-path-linux:
     name: Install path (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       RUNEWARP_BUILD_COMMIT: ${{ github.sha }}
@@ -119,7 +119,7 @@ jobs:
 
   package-readiness:
     name: Package readiness
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     env:
       RUNEWARP_BUILD_COMMIT: ${{ github.sha }}
@@ -149,7 +149,7 @@ jobs:
 
   rust-contract:
     name: Rust contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       RUNEWARP_BUILD_COMMIT: ${{ github.sha }}
@@ -188,7 +188,7 @@ jobs:
 
   docker-contract:
     name: Docker contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - name: Check out the repository
@@ -224,7 +224,7 @@ jobs:
   ci:
     name: CI
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     needs:
       - workflow-lint

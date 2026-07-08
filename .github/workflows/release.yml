@@ -37,7 +37,7 @@ concurrency:
 jobs:
   gate:
     name: Release gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     outputs:
       workflow_mode: ${{ steps.release-metadata.outputs.workflow_mode }}
@@ -128,7 +128,7 @@ jobs:
     name: Publish crates.io release
     needs:
       - gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     environment: release
     permissions:
@@ -197,7 +197,7 @@ jobs:
     needs:
       - gate
       - crate-release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     environment: release
     permissions:
@@ -285,7 +285,7 @@ jobs:
       - gate
       - crate-release
       - docker-release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: write

@@ -13,6 +13,11 @@ use crate::{
     default_server_cert_material_dir,
 };
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ServerRuntimeArgs {
+    pub hostname: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreparedServerConfig {
     pub(crate) hostname: Option<String>,
@@ -47,6 +52,13 @@ pub(crate) fn select_server_config_path(config: Option<PathBuf>) -> Result<PathB
 pub(crate) fn prepare_server_config_from_path(
     path: &Path,
 ) -> Result<PreparedServerConfig, ConfigFileError> {
+    prepare_server_config_from_cli(path, ServerRuntimeArgs::default())
+}
+
+pub(crate) fn prepare_server_config_from_cli(
+    path: &Path,
+    runtime: ServerRuntimeArgs,
+) -> Result<PreparedServerConfig, ConfigFileError> {
     let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
         return Err(ConfigFileError::Validation {
             path: path.to_path_buf(),
@@ -55,7 +67,10 @@ pub(crate) fn prepare_server_config_from_path(
         });
     };
     let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
-    let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
+    let mut raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
+    if runtime.hostname.is_some() {
+        raw.hostname = runtime.hostname;
+    }
     let log_level = load_log_level_from_path(path)?;
     Ok(prepare_raw_server_config(
         path,
@@ -168,7 +183,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{PreparedDirectory, PreparedValue, prepare_server_config_from_path};
+    use super::{
+        PreparedDirectory, PreparedValue, ServerRuntimeArgs, prepare_server_config_from_cli,
+        prepare_server_config_from_path,
+    };
     use crate::config::{LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig};
 
     #[test]
@@ -228,6 +246,36 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         assert_eq!(
             prepared.tunnels[0].public_hostnames,
             Some(vec!["app.example.test".to_owned()])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_preparation_overrides_hostname_from_runtime() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let tempdir = tempdir()?;
+        fs::write(
+            tempdir.path().join("config.toml"),
+            r#"
+[server]
+hostname = "configured.example.test"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+        )?;
+
+        let prepared = prepare_server_config_from_cli(
+            &tempdir.path().join("config.toml"),
+            ServerRuntimeArgs {
+                hostname: Some("overridden.example.test".to_owned()),
+            },
+        )?;
+
+        assert_eq!(
+            prepared.hostname,
+            Some("overridden.example.test".to_owned())
         );
         Ok(())
     }

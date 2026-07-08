@@ -28,6 +28,8 @@ use crate::{
     PublicHostname, SERVER_CA_FILENAME, ServerHostname, XdgPathError,
 };
 
+pub use self::preparation::server::ServerRuntimeArgs;
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum LogLevel {
@@ -243,10 +245,14 @@ pub fn load_server_config(path: &Path) -> Result<ServerConfig, ConfigFileError> 
 
 pub fn resolve_server_config_from_cli(
     config: Option<PathBuf>,
+    runtime: ServerRuntimeArgs,
 ) -> Result<ServerConfig, ServerConfigResolutionError> {
     let config_path = preparation::server::select_server_config_path(config)
         .map_err(ServerConfigResolutionError::XdgPath)?;
-    load_server_config(&config_path).map_err(ServerConfigResolutionError::ConfigFile)
+    let prepared = preparation::server::prepare_server_config_from_cli(&config_path, runtime)
+        .map_err(ServerConfigResolutionError::ConfigFile)?;
+    validate_prepared_server_config(&config_path, prepared)
+        .map_err(ServerConfigResolutionError::ConfigFile)
 }
 
 pub fn load_client_config(path: &Path) -> Result<ClientConfig, ConfigFileError> {

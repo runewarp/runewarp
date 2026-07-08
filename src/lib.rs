@@ -34,8 +34,8 @@ pub use client_public_cert::{
 };
 pub use config::{
     ClientConfig, ClientPublicCertConfig, ClientTlsMode, ConfigFileError, LogLevel,
-    ServerCertificateConfig, ServerConfig, ServerConfigResolutionError, ServerTunnelConfig,
-    ServiceConfig, load_client_config, load_server_config,
+    ServerCertificateConfig, ServerConfig, ServerConfigResolutionError, ServerRuntimeArgs,
+    ServerTunnelConfig, ServiceConfig, load_client_config, load_server_config,
     resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config,
     resolve_server_cert_material_dir_from_config, resolve_server_config_from_cli,

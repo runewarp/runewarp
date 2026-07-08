@@ -56,9 +56,15 @@ where
     StderrFactory: FnOnce() -> Stderr,
     Stderr: Write,
 {
-    let result = run.await;
-    let mut stderr = stderr_factory();
-    finish_run(result, &mut stderr)
+    match run.await {
+        Ok(()) => RunTermination::Exit(ExitCode::SUCCESS),
+        Err(RunError::Cli(error)) => RunTermination::Clap(error),
+        Err(RunError::Logged) => RunTermination::Exit(ExitCode::FAILURE),
+        Err(RunError::Other(error)) => {
+            let mut stderr = stderr_factory();
+            finish_run(Err(RunError::Other(error)), &mut stderr)
+        }
+    }
 }
 
 pub(crate) fn logged_runtime_failure(error: Box<dyn Error>) -> Box<dyn Error> {
@@ -70,6 +76,7 @@ pub(crate) fn logged_runtime_failure(error: Box<dyn Error>) -> Box<dyn Error> {
 mod tests {
     use std::io::{self, Write};
     use std::process::ExitCode;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
 
     use clap::{Command, error::ErrorKind};
@@ -242,5 +249,20 @@ mod tests {
 
         assert_exit_code(termination, ExitCode::SUCCESS);
         assert_eq!(stderr.read(), "background runtime log\n");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn finish_run_after_skips_stderr_factory_when_no_write_is_needed() {
+        let stderr_factory_called = Arc::new(AtomicBool::new(false));
+        let stderr_factory_called_for_run = stderr_factory_called.clone();
+
+        let termination = finish_run_after(async { Ok(()) }, move || {
+            stderr_factory_called_for_run.store(true, Ordering::Relaxed);
+            Vec::<u8>::new()
+        })
+        .await;
+
+        assert_exit_code(termination, ExitCode::SUCCESS);
+        assert!(!stderr_factory_called.load(Ordering::Relaxed));
     }
 }

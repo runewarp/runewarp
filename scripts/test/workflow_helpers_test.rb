@@ -5,7 +5,6 @@ require_relative "../lib/runewarp"
 
 class WorkflowHelpersTest < Minitest::Test
   def test_merge_docker_manifest_accepts_multiple_source_refs
-    helper_singleton = Runewarp::WorkflowHelpers.singleton_class
     shell_singleton = Runewarp::Shell.singleton_class
     original_run = shell_singleton.instance_method(:run!)
     original_capture = shell_singleton.instance_method(:capture!)

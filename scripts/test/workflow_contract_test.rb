@@ -19,6 +19,10 @@ class WorkflowContractTest < Minitest::Test
     @dockerfile ||= File.read(File.join(REPO_ROOT, "Dockerfile"), encoding: "utf-8")
   end
 
+  def adr_files
+    @adr_files ||= Dir.glob(File.join(REPO_ROOT, "docs", "adr", "*.md")).sort
+  end
+
   def test_ci_workflow_uses_ruby_entry_points
     assert_includes(ci_workflow, "run: ./scripts/lint-workflows")
     assert_includes(ci_workflow, "run: ./scripts/validate-release-metadata ci")
@@ -189,6 +193,14 @@ class WorkflowContractTest < Minitest::Test
   def test_dockerfile_copies_build_script_for_dev_source_builds
     assert_includes(dockerfile, "COPY Cargo.toml Cargo.lock build.rs ./")
     assert_includes(dockerfile, "COPY src ./src")
+  end
+
+  def test_adrs_use_plain_markdown_without_front_matter
+    adr_files.each do |path|
+      first_line = File.open(path, "r:utf-8", &:readline)
+
+      assert_equal("#", first_line[0], "expected #{File.basename(path)} to start with a Markdown heading")
+    end
   end
 
   def test_workflows_keep_pinned_actions_with_inline_version_comments

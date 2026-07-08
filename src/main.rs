@@ -8,14 +8,13 @@ use std::env;
 use std::io;
 use std::process::ExitCode;
 
-use error_handling::{RunTermination, finish_run};
+use error_handling::{RunTermination, finish_run_after};
 
 mod cli;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let mut stderr = io::stderr().lock();
-    match finish_run(commands::run(env::args().skip(1)).await, &mut stderr) {
+    match finish_run_after(commands::run(env::args().skip(1)), || io::stderr().lock()).await {
         RunTermination::Exit(code) => code,
         RunTermination::Clap(error) => error.exit(),
     }

@@ -38,14 +38,14 @@ The `Images` workflow is the trusted mainline publication stage. It:
 
 1. triggers only from successful `CI` completion on a push to `main`
 2. validates release metadata in `images` mode from the trusted commit checkout
-3. publishes a multi-architecture Docker Hub lineage for that exact commit
-4. tags that lineage as mutable `main` plus immutable bare 12-character commit tag
-5. smoke tests the published lineage on `linux/amd64` and `linux/arm64`
-6. runs both startup/version smoke and the full Docker example smoke against the published image on each release architecture
+3. publishes immutable per-architecture commit tags for that exact commit from native `ubuntu-26.04` and `ubuntu-26.04-arm` runners
+4. smoke tests each published per-architecture image on its native release architecture before any manifest merge
+5. merges the verified per-architecture images into the mutable `main` tag plus the immutable bare 12-character commit tag
+6. keeps the merged bare 12-character commit tag as the release handoff artifact that `Release` later promotes without rebuilding
 
 The immutable 12-character commit tag is the release handoff artifact. The later stable release does not rebuild Docker images; it promotes that exact already-smoke-tested lineage.
 
-For warm trusted-`main` repeats, `Images` reads and refreshes the same GitHub Actions Buildx cache namespace that the trusted-`main` CI Docker contract job warms first. Pull request Docker caches stay isolated per pull request and never cross into trusted publish jobs.
+For warm trusted-`main` repeats, `Images` reads and refreshes the same trusted-`main` GitHub Actions Buildx cache namespace that the x64 `CI` Docker contract job warms first. Pull request Docker caches stay isolated per pull request and never cross into trusted publish jobs.
 
 ## Release workflow
 
@@ -109,7 +109,7 @@ The workflow keeps GitHub-specific orchestration and publish-job boundaries in Y
 - `scripts/lib/runewarp/release_docs.rb` owns changelog and version validation plus changelog-driven release-body rendering
 - `scripts/lib/runewarp/release_gates.rb` owns rehearsal/tag gate validation
 - `scripts/lib/runewarp/workflow_helpers.rb` owns the GitHub API, crates.io API, Docker manifest promotion, release-summary, and GitHub Release upsert helpers that the workflows shell out to through Ruby entry points
-- multi-architecture Docker publication still lives in `Images` because runner selection, registry login, and trusted artifact publication are GitHub-hosted orchestration concerns
+- native per-architecture Docker publication and the final manifest merge still live in `Images` because runner selection, registry login, smoke ordering, and trusted artifact publication are GitHub-hosted orchestration concerns
 - post-publish distribution-path probes live primarily in `Images`, while `Release` re-probes the source image's version metadata to confirm the promoted lineage still matches the tagged commit
 
 ## Cache boundaries
@@ -118,7 +118,7 @@ The repository uses cache scope as part of the automation trust boundary:
 
 - Rust CI caches are keyed separately for pull requests and trusted `main` pushes
 - CI Docker builds use Buildx GHA cache scopes that are likewise split between pull requests and trusted `main` pushes
-- the trusted `main` Images publish job reads and refreshes the same trusted-`main` Docker cache namespace that trusted `main` CI warms
+- the trusted `main` Images publish jobs read and refresh the same trusted-`main` Docker cache namespace that trusted `main` CI warms
 - release rehearsal and release publish share only the release-scoped caches for the selected stable tag
 - release jobs do not consume PR artifacts and do not rebuild Docker images
 
@@ -139,9 +139,10 @@ Before the first real tag release, the `release` environment should allow rehear
 ## Docker release contract
 
 - trusted main images are published for `linux/amd64` and `linux/arm64`
-- the `Images` workflow smoke tests the published lineage on both native architectures
+- the `Images` workflow first publishes immutable per-architecture commit tags, smoke tests each one on its native architecture, then merges them into the trusted `main` and bare commit-tag lineage
 - published tags are `X.Y.Z`, `X.Y`, `X`, and `latest`
 - trusted main tags are mutable `main` plus immutable bare 12-character commit tag
+- trusted per-architecture tags are immutable bare 12-character commit tags with `-amd64` and `-arm64` suffixes
 - the bare release tag `X.Y.Z` remains immutable; if it already exists, a manual publish rerun skips Docker publication instead of mutating that version
 - stable public Docker tags are created by promoting the exact trusted commit-tag manifest
 - `latest` only moves on stable releases

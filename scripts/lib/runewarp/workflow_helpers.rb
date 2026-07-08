@@ -40,6 +40,7 @@ module Runewarp
 
     def merge_docker_manifest!(docker_tags:, image_repository:, release_version:, source_image_ref:, github_output:)
       tag_args = docker_tags.lines(chomp: true).reject(&:empty?).flat_map { |tag| ["-t", tag] }
+      source_image_refs = source_image_ref.lines(chomp: true).reject(&:empty?)
 
       Shell.run!(
         "docker",
@@ -47,7 +48,7 @@ module Runewarp
         "imagetools",
         "create",
         *tag_args,
-        source_image_ref
+        *source_image_refs
       )
 
       manifest_json = Shell.capture!("docker", "buildx", "imagetools", "inspect", "#{image_repository}:#{release_version}", "--raw")

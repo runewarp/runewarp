@@ -61,10 +61,38 @@ class WorkflowContractTest < Minitest::Test
   end
 
   def test_images_workflow_scopes_docker_publish_secrets_to_release_environment
-    assert_includes(images_workflow, "publish:\n    name: Publish Docker Hub images")
+    assert_includes(images_workflow, "publish-amd64:\n    name: Publish Docker Hub amd64 image")
+    assert_includes(images_workflow, "publish-arm64:\n    name: Publish Docker Hub arm64 image")
+    assert_includes(images_workflow, "merge:\n    name: Merge trusted Docker Hub image lineage")
     assert_includes(images_workflow, "timeout-minutes: 60\n    environment: release")
+    assert_includes(images_workflow, "timeout-minutes: 30\n    environment: release")
     assert_includes(images_workflow, "username: ${{ secrets.DOCKER_USERNAME }}")
     assert_includes(images_workflow, "password: ${{ secrets.DOCKER_TOKEN }}")
+  end
+
+  def test_images_workflow_splits_native_publish_by_architecture_before_merge
+    assert_includes(images_workflow, "publish-amd64:\n    name: Publish Docker Hub amd64 image")
+    assert_includes(images_workflow, "publish-arm64:\n    name: Publish Docker Hub arm64 image")
+    assert_includes(images_workflow, "merge:\n    name: Merge trusted Docker Hub image lineage")
+    assert_includes(images_workflow, "publish-amd64:\n    name: Publish Docker Hub amd64 image\n    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n    runs-on: ubuntu-26.04")
+    assert_includes(images_workflow, "publish-arm64:\n    name: Publish Docker Hub arm64 image\n    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n    runs-on: ubuntu-26.04-arm")
+    assert_includes(images_workflow, "tags: |\n            ${{ env.COMMIT_IMAGE_REF }}-amd64")
+    assert_includes(images_workflow, "tags: |\n            ${{ env.COMMIT_IMAGE_REF }}-arm64")
+    assert_includes(images_workflow, "smoke-amd64:\n    name: Smoke published amd64 image\n    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n    needs:\n      - publish-amd64")
+    assert_includes(images_workflow, "smoke-arm64:\n    name: Smoke published arm64 image\n    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n    needs:\n      - publish-arm64")
+    assert_includes(images_workflow, "merge:\n    name: Merge trusted Docker Hub image lineage\n    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'\n    needs:\n      - smoke-amd64\n      - smoke-arm64")
+    assert_includes(images_workflow, "run: ./scripts/merge-docker-manifest")
+  end
+
+  def test_linux_workflows_use_ubuntu_26_04_runner_labels
+    assert_includes(ci_workflow, "runs-on: ubuntu-26.04")
+    refute_includes(ci_workflow, "runs-on: ubuntu-latest")
+    assert_includes(images_workflow, "runs-on: ubuntu-26.04")
+    assert_includes(images_workflow, "runs-on: ubuntu-26.04-arm")
+    refute_includes(images_workflow, "runs-on: ubuntu-latest")
+    refute_includes(images_workflow, "runs-on: ubuntu-24.04-arm")
+    assert_includes(release_workflow, "runs-on: ubuntu-26.04")
+    refute_includes(release_workflow, "runs-on: ubuntu-latest")
   end
 
   def test_ci_and_images_share_the_trusted_main_docker_cache_scope

@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+env:
+  TRUSTED_MAIN_DOCKER_CACHE_FROM: type=gha,scope=main-docker
+  TRUSTED_MAIN_DOCKER_CACHE_TO: type=gha,scope=main-docker,mode=max
+
 concurrency:
   group: images-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false
@@ -64,6 +68,8 @@ jobs:
           file: ./Dockerfile
           build-args: |
             RUNEWARP_BUILD_COMMIT=${{ github.event.workflow_run.head_sha }}
+          cache-from: ${{ env.TRUSTED_MAIN_DOCKER_CACHE_FROM }}
+          cache-to: ${{ env.TRUSTED_MAIN_DOCKER_CACHE_TO }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |

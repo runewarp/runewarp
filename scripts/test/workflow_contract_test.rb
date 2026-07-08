@@ -67,6 +67,32 @@ class WorkflowContractTest < Minitest::Test
     assert_includes(images_workflow, "password: ${{ secrets.DOCKER_TOKEN }}")
   end
 
+  def test_ci_and_images_share_the_trusted_main_docker_cache_scope
+    assert_includes(ci_workflow, "TRUSTED_MAIN_DOCKER_CACHE_FROM: type=gha,scope=main-docker")
+    assert_includes(ci_workflow, "TRUSTED_MAIN_DOCKER_CACHE_TO: type=gha,scope=main-docker,mode=max")
+    assert_includes(ci_workflow, "- name: Derive Docker cache flags")
+    assert_includes(ci_workflow, "printf 'RUNEWARP_DOCKER_BUILD_FLAGS=--cache-from type=gha,scope=pr-%s-docker --cache-to type=gha,scope=pr-%s-docker,mode=max\\n'")
+    assert_includes(ci_workflow, "printf 'RUNEWARP_DOCKER_BUILD_FLAGS=--cache-from %s --cache-to %s\\n'")
+    assert_includes(ci_workflow, "\"$TRUSTED_MAIN_DOCKER_CACHE_FROM\"")
+    assert_includes(ci_workflow, "\"$TRUSTED_MAIN_DOCKER_CACHE_TO\"")
+
+    assert_includes(images_workflow, "cache-from: ${{ env.TRUSTED_MAIN_DOCKER_CACHE_FROM }}")
+    assert_includes(images_workflow, "cache-to: ${{ env.TRUSTED_MAIN_DOCKER_CACHE_TO }}")
+  end
+
+  def test_ci_rust_caches_stay_split_between_pull_requests_and_trusted_main
+    assert_includes(ci_workflow, "RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'trusted-main' }}")
+    assert_includes(ci_workflow, "key: ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}")
+    assert_includes(ci_workflow, "${{ env.RUST_DEPENDENCY_CACHE_PATHS }}")
+  end
+
+  def test_release_rust_cache_stays_in_the_separate_release_scope
+    assert_includes(release_workflow, "RUST_CACHE_SCOPE: ${{ format('release-{0}', needs.gate.outputs.release_tag) }}")
+    assert_includes(release_workflow, "key: ${{ runner.os }}-rust-release-${{ env.RUST_CACHE_SCOPE }}-${{ hashFiles('release-source/Cargo.lock') }}")
+    assert_includes(release_workflow, "${{ env.RUST_DEPENDENCY_CACHE_PATHS }}")
+    refute_includes(release_workflow, "TRUSTED_MAIN_DOCKER_CACHE_FROM")
+  end
+
   def test_release_rehearsal_exercises_the_crates_io_release_probe
     assert_includes(release_workflow, "- name: Check whether crates.io version already exists")
     assert_includes(release_workflow, "id: crate-status")

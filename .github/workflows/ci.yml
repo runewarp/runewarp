@@ -190,11 +190,23 @@ jobs:
     name: Docker contract
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      RUNEWARP_DOCKER_BUILD_FLAGS: ${{ github.event_name == 'pull_request' && format('--cache-from type=gha,scope=pr-{0}-docker --cache-to type=gha,scope=pr-{0}-docker,mode=max', github.event.pull_request.number) || '--cache-from type=gha,scope=main-docker --cache-to type=gha,scope=main-docker,mode=max' }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Derive Docker cache flags
+        env:
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            printf 'RUNEWARP_DOCKER_BUILD_FLAGS=--cache-from type=gha,scope=pr-%s-docker --cache-to type=gha,scope=pr-%s-docker,mode=max\n' \
+              "$PULL_REQUEST_NUMBER" \
+              "$PULL_REQUEST_NUMBER" >> "$GITHUB_ENV"
+          else
+            printf 'RUNEWARP_DOCKER_BUILD_FLAGS=--cache-from %s --cache-to %s\n' \
+              "$TRUSTED_MAIN_DOCKER_CACHE_FROM" \
+              "$TRUSTED_MAIN_DOCKER_CACHE_TO" >> "$GITHUB_ENV"
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0

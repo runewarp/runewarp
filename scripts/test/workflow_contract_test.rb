@@ -70,8 +70,11 @@ class WorkflowContractTest < Minitest::Test
   def test_ci_and_images_share_the_trusted_main_docker_cache_scope
     assert_includes(ci_workflow, "TRUSTED_MAIN_DOCKER_CACHE_FROM: type=gha,scope=main-docker")
     assert_includes(ci_workflow, "TRUSTED_MAIN_DOCKER_CACHE_TO: type=gha,scope=main-docker,mode=max")
-    assert_includes(ci_workflow, "format('--cache-from type=gha,scope=pr-{0}-docker --cache-to type=gha,scope=pr-{0}-docker,mode=max', github.event.pull_request.number)")
-    assert_includes(ci_workflow, "'--cache-from type=gha,scope=main-docker --cache-to type=gha,scope=main-docker,mode=max'")
+    assert_includes(ci_workflow, "- name: Derive Docker cache flags")
+    assert_includes(ci_workflow, "printf 'RUNEWARP_DOCKER_BUILD_FLAGS=--cache-from type=gha,scope=pr-%s-docker --cache-to type=gha,scope=pr-%s-docker,mode=max\\n'")
+    assert_includes(ci_workflow, "printf 'RUNEWARP_DOCKER_BUILD_FLAGS=--cache-from %s --cache-to %s\\n'")
+    assert_includes(ci_workflow, "\"$TRUSTED_MAIN_DOCKER_CACHE_FROM\"")
+    assert_includes(ci_workflow, "\"$TRUSTED_MAIN_DOCKER_CACHE_TO\"")
 
     assert_includes(images_workflow, "cache-from: ${{ env.TRUSTED_MAIN_DOCKER_CACHE_FROM }}")
     assert_includes(images_workflow, "cache-to: ${{ env.TRUSTED_MAIN_DOCKER_CACHE_TO }}")

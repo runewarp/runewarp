@@ -29,7 +29,7 @@ Local workflow edits can run `./scripts/lint-workflows` directly, and `./scripts
 CI cache scope stays intentionally split by trust level:
 
 - pull request runs share Rust dependency and Docker Buildx layer caches only with later runs of that same pull request
-- trusted `main` pushes use their own Rust dependency and Docker Buildx layer caches
+- trusted `main` pushes use their own Rust dependency caches and one shared trusted-`main` Docker Buildx cache namespace
 - release jobs do not read from the CI cache namespace
 
 ## Images workflow
@@ -44,6 +44,8 @@ The `Images` workflow is the trusted mainline publication stage. It:
 6. runs both startup/version smoke and the full Docker example smoke against the published image on each release architecture
 
 The immutable 12-character commit tag is the release handoff artifact. The later stable release does not rebuild Docker images; it promotes that exact already-smoke-tested lineage.
+
+For warm trusted-`main` repeats, `Images` reads and refreshes the same GitHub Actions Buildx cache namespace that the trusted-`main` CI Docker contract job warms first. Pull request Docker caches stay isolated per pull request and never cross into trusted publish jobs.
 
 ## Release workflow
 
@@ -85,7 +87,7 @@ For manual `rehearsal`, the workflow:
 7. summarizes the workflow ref, release source ref, release commit, source image lineage, exact stable Docker tags, and rendered release notes that the real release would use
 8. skips Docker Hub publication, Sigstore signing, and GitHub Release mutation
 
-Rehearsal still writes into the trusted release cache scope for the selected `release_tag`, so the later real publish for that same tag can reuse the warmed Rust and Docker build state.
+Rehearsal still writes into the trusted release Rust cache scope for the selected `release_tag`, so the later real publish for that same tag can reuse the warmed crate build state.
 
 ### Manual publish mode
 
@@ -116,6 +118,7 @@ The repository uses cache scope as part of the automation trust boundary:
 
 - Rust CI caches are keyed separately for pull requests and trusted `main` pushes
 - CI Docker builds use Buildx GHA cache scopes that are likewise split between pull requests and trusted `main` pushes
+- the trusted `main` Images publish job reads and refreshes the same trusted-`main` Docker cache namespace that trusted `main` CI warms
 - release rehearsal and release publish share only the release-scoped caches for the selected stable tag
 - release jobs do not consume PR artifacts and do not rebuild Docker images
 

@@ -22,6 +22,14 @@ permissions:
   contents: read
   checks: read
 
+env:
+  RUST_DEPENDENCY_CACHE_PATHS: |
+    ~/.cargo/registry/index/
+    ~/.cargo/registry/cache/
+    ~/.cargo/registry/src/
+    ~/.cargo/git/db/
+    ~/.cargo/git/checkouts/
+
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
   cancel-in-progress: false
@@ -126,7 +134,7 @@ jobs:
     permissions:
       contents: read
     env:
-      RELEASE_RUST_CACHE_SCOPE: ${{ format('release-{0}', needs.gate.outputs.release_tag) }}
+      RUST_CACHE_SCOPE: ${{ format('release-{0}', needs.gate.outputs.release_tag) }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -147,15 +155,11 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/registry/src/
-            ~/.cargo/git/db/
-            ~/.cargo/git/checkouts/
+            ${{ env.RUST_DEPENDENCY_CACHE_PATHS }}
             release-source/target/
-          key: ${{ runner.os }}-rust-release-${{ env.RELEASE_RUST_CACHE_SCOPE }}-${{ hashFiles('release-source/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-release-${{ env.RUST_CACHE_SCOPE }}-${{ hashFiles('release-source/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-release-${{ env.RELEASE_RUST_CACHE_SCOPE }}-
+            ${{ runner.os }}-rust-release-${{ env.RUST_CACHE_SCOPE }}-
 
       - name: Install Rust toolchain
         run: |

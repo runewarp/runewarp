@@ -93,8 +93,13 @@ fn client_help_lists_runtime_only_routing_flags() -> Result<(), Box<dyn std::err
 fn client_runtime_accepts_repeated_server_address_flags() -> Result<(), Box<dyn std::error::Error>>
 {
     let tempdir = tempdir()?;
+    let xdg_config_home = tempdir.path().join("xdg-config");
+    let xdg_data_home = tempdir.path().join("xdg-data");
     let assert = Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
+        .env("HOME", tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config_home)
+        .env("XDG_DATA_HOME", &xdg_data_home)
         .args([
             "client",
             "--server-address",

@@ -61,7 +61,7 @@ Manual/private-CA initialization:
 runewarp server cert init --hostname tunnel.example.com
 ```
 
-When `server.hostname` is already set in config, `runewarp server cert init` and `runewarp server cert rotate-ca` can omit `--hostname`.
+When `server.hostname` is already set in config, or when `RUNEWARP_SERVER_HOSTNAME` is set in the environment, `runewarp server cert init` and `runewarp server cert rotate-ca` can omit `--hostname`. `runewarp server cert renew` does not read `RUNEWARP_SERVER_HOSTNAME`; it reuses the existing certificate state.
 
 ### 3. Create the Client identity
 
@@ -169,7 +169,7 @@ runewarp client -c /etc/runewarp/client.toml
 
 If you omit `--config`, Runewarp looks for `$XDG_CONFIG_HOME/runewarp/config.toml`, then `~/.config/runewarp/config.toml` when `XDG_CONFIG_HOME` is unset. Use [`docs/configuration.md`](configuration.md) for the full config discovery and runtime override rules.
 
-When one shared Server config needs a per-process **Server hostname**, `runewarp server --hostname <HOSTNAME>` overrides `server.hostname` before validation. This is a narrow runtime seam for the Server runtime only; ordinary operator workflows should keep `server.hostname` in config.
+When one shared Server config needs a per-process **Server hostname**, `runewarp server --hostname <HOSTNAME>` or `RUNEWARP_SERVER_HOSTNAME=<HOSTNAME>` overrides `server.hostname` before validation, with precedence `--hostname` > `RUNEWARP_SERVER_HOSTNAME` > `server.hostname`. This is a narrow runtime seam for the Server runtime only; ordinary operator workflows should keep `server.hostname` in config.
 
 For runtime-only startup, `--server-address` is repeatable. One occurrence gives the ordinary single-target shape; multiple occurrences make one Client reconcile those Server addresses concurrently.
 

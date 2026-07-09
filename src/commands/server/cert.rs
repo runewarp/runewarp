@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use runewarp::{
-    SERVER_CA_FILENAME, default_server_cert_material_dir, initialize_manual_server_certificate,
-    inspect_manual_server_certificate, renew_manual_server_certificate,
-    resolve_server_cert_material_dir_from_config, resolve_server_hostname_from_config,
+    SERVER_CA_FILENAME, ServerHostname, default_server_cert_material_dir,
+    initialize_manual_server_certificate, inspect_manual_server_certificate,
+    renew_manual_server_certificate, resolve_server_cert_material_dir_from_config,
+    resolve_server_hostname_from_config, resolve_server_hostname_runtime_override,
     rotate_manual_server_certificate_authority,
 };
 
@@ -93,6 +94,8 @@ fn resolve_server_cert_hostname(
     config: Option<PathBuf>,
     hostname: Option<String>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let cli_hostname = hostname;
+    let runtime_hostname = resolve_server_hostname_runtime_override(cli_hostname.clone());
     let configured_hostname =
         if let Some(config_path) = certs::candidate_config_path(config.clone()) {
             resolve_server_hostname_from_config(&config_path)
@@ -101,8 +104,8 @@ fn resolve_server_cert_hostname(
             None
         };
 
-    match (hostname, configured_hostname) {
-        (Some(hostname), Some(configured_hostname)) => {
+    let hostname = match (cli_hostname, runtime_hostname, configured_hostname) {
+        (Some(hostname), _, Some(configured_hostname)) => {
             if normalized_hostname_for_match(&hostname)
                 != normalized_hostname_for_match(configured_hostname.as_str())
             {
@@ -111,14 +114,22 @@ fn resolve_server_cert_hostname(
                 )
                 .into());
             }
-            Ok(hostname)
+            hostname
         }
-        (Some(hostname), None) => Ok(hostname),
-        (None, Some(configured_hostname)) => Ok(configured_hostname.to_string()),
-        (None, None) => {
-            Err("server hostname is required via --hostname or server.hostname in config".into())
+        (Some(hostname), _, None) => hostname,
+        (None, Some(hostname), _) => hostname,
+        (None, None, Some(configured_hostname)) => configured_hostname.to_string(),
+        (None, None, None) => {
+            return Err(
+                "server hostname is required via --hostname, RUNEWARP_SERVER_HOSTNAME, or server.hostname in config"
+                    .into(),
+            )
         }
-    }
+    };
+
+    ServerHostname::try_from(hostname.as_str())
+        .map_err(|error| format!("server.hostname is invalid: {error}"))?;
+    Ok(hostname)
 }
 
 fn normalized_hostname_for_match(hostname: &str) -> String {

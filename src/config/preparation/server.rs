@@ -6,7 +6,7 @@ use crate::config::preparation::{
 use crate::config::{
     ConfigFileError, LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig,
     collect_server_unknown_field_messages, deserialize_selected_section, load_log_level_from_path,
-    load_optional_selected_section_value,
+    load_optional_selected_section_value, resolve_server_hostname_runtime_override,
 };
 use crate::{
     XdgPathError, default_config_path, default_server_acme_state_dir,
@@ -68,8 +68,8 @@ pub(crate) fn prepare_server_config_from_cli(
     };
     let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
     let mut raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
-    if runtime.hostname.is_some() {
-        raw.hostname = runtime.hostname;
+    if let Some(hostname) = resolve_server_hostname_runtime_override(runtime.hostname) {
+        raw.hostname = Some(hostname);
     }
     let log_level = load_log_level_from_path(path)?;
     Ok(prepare_raw_server_config(

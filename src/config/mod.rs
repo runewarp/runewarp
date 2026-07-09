@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::env;
 use std::fmt;
 use std::fs;
 use std::net::SocketAddr;
@@ -29,6 +30,8 @@ use crate::{
 };
 
 pub use self::preparation::server::ServerRuntimeArgs;
+
+pub const SERVER_HOSTNAME_ENV_VAR: &str = "RUNEWARP_SERVER_HOSTNAME";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -307,6 +310,10 @@ pub fn resolve_server_hostname_from_config(
             messages,
         })
     }
+}
+
+pub fn resolve_server_hostname_runtime_override(hostname: Option<String>) -> Option<String> {
+    hostname.or_else(|| env::var(SERVER_HOSTNAME_ENV_VAR).ok())
 }
 
 pub fn resolve_client_public_cert_material_dir_from_config(

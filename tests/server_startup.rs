@@ -89,6 +89,87 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert!(server.tunnel_addr().unwrap().ip().is_loopback());
 }
 
+#[tokio::test]
+async fn prepared_server_binds_readiness_listener_when_enabled() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+public-bind-address = "127.0.0.1:0"
+tunnel-bind-address = "127.0.0.1:0"
+readiness-bind-address = "127.0.0.1:0"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
+    let server = PreparedServer::bind(
+        &settings,
+        settings.public_bind_address,
+        settings.tunnel_connection_bind_address,
+    )
+    .await
+    .unwrap();
+
+    let readiness_addr = server
+        .readiness_addr()
+        .expect("readiness listener should bind");
+    assert!(readiness_addr.ip().is_loopback());
+    TcpStream::connect(readiness_addr).await.unwrap();
+}
+
+#[tokio::test]
+async fn prepared_server_fails_startup_when_readiness_bind_address_is_in_use() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    let readiness_listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let readiness_addr = readiness_listener.local_addr().unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+readiness-bind-address = "{readiness_addr}"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#
+        ),
+    )
+    .unwrap();
+
+    let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
+    let error = match PreparedServer::bind(&settings, localhost(0), localhost(0)).await {
+        Ok(_) => panic!("expected readiness bind failure"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to bind server.readiness-bind-address")
+    );
+}
+
 fn localhost(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
@@ -1219,7 +1300,7 @@ backend-address = "127.0.0.1:1"
     let server_task = tokio::spawn(server.run());
 
     let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
-    let client = timeout(Duration::from_secs(1), async {
+    let client = timeout(Duration::from_secs(3), async {
         loop {
             match PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr).await {
                 Ok(client) => return client,

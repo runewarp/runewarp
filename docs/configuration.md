@@ -172,6 +172,8 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `server.cert-dir` | no | Directory containing manual/private-CA Server material. Defaults to the XDG Server material path when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
 | `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
 | `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** **Tunnel connections**. Defaults to `0.0.0.0:443`. |
+| `server.readiness-bind-address` | no | Optional literal TCP socket address for a probe-only **Server readiness** listener. When configured, TCP accept success means the Server is ready for new ingress admission. There is no default listener. |
+| `server.graceful-shutdown-duration` | no | Operator-facing graceful drain window for the Server role. Defaults to `"60s"`. Supports non-negative integer durations with `ms`, `s`, `m`, or `h` suffixes. `"0s"` disables the longer drain window and makes graceful Server shutdown converge to fast Server behavior. |
 | `server.acme.email` | with ACME | Let's Encrypt ACME contact address. TLS-ALPN-01 only. |
 | `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp uses the XDG default state path and creates it during startup after validation succeeds. |
 | `server.tunnels[].public-hostnames` | yes | One or more exact **Public hostnames** routed through this Tunnel. |
@@ -262,7 +264,8 @@ Runewarp supports two Client trust modes:
 - every `client-identity` value and every entry in `client-identities` must be lowercase hex without colons
 - `server.tunnels[].client-identity` and `server.tunnels[].client-identities` are mutually exclusive
 - every authorized Client identity must be unique across all Server Tunnels
-- `server.public-bind-address` and `server.tunnel-bind-address` must be literal socket addresses
+- `server.public-bind-address`, `server.tunnel-bind-address`, and `server.readiness-bind-address` when present must be literal socket addresses
+- `server.graceful-shutdown-duration` must be a non-negative duration string such as `"0s"`, `"60s"`, `"5m"`, or `"250ms"`
 - the selected or defaulted material directories and files must exist and be readable, except that omitted ACME state directories are resolved during config preparation and created only during startup after validation succeeds
 - `backend-address` must parse as a TCP address or host:port pair
 

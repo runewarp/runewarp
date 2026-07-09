@@ -24,6 +24,8 @@ pub(crate) struct PreparedServerConfig {
     pub(crate) log_level: LogLevel,
     pub(crate) public_bind_address: String,
     pub(crate) tunnel_bind_address: String,
+    pub(crate) readiness_bind_address: Option<String>,
+    pub(crate) graceful_shutdown_duration: String,
     pub(crate) manual_cert_present: bool,
     pub(crate) acme_present: bool,
     pub(crate) manual_certificate_directory: Option<PreparedValue<PathBuf>>,
@@ -117,6 +119,10 @@ fn prepare_raw_server_config_with_defaults(
         tunnel_bind_address: raw
             .tunnel_bind_address
             .unwrap_or_else(|| "0.0.0.0:443".to_owned()),
+        readiness_bind_address: raw.readiness_bind_address,
+        graceful_shutdown_duration: raw
+            .graceful_shutdown_duration
+            .unwrap_or_else(|| "60s".to_owned()),
         manual_cert_present,
         acme_present,
         manual_certificate_directory: if !acme_present {
@@ -237,6 +243,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         assert_eq!(prepared.log_level, LogLevel::Info);
         assert_eq!(prepared.public_bind_address, "0.0.0.0:443");
         assert_eq!(prepared.tunnel_bind_address, "0.0.0.0:443");
+        assert_eq!(prepared.readiness_bind_address, None);
+        assert_eq!(prepared.graceful_shutdown_duration, "60s");
         assert!(prepared.manual_cert_present);
         assert!(!prepared.acme_present);
         assert_eq!(
@@ -297,6 +305,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 acme: None,
                 public_bind_address: None,
                 tunnel_bind_address: None,
+                readiness_bind_address: None,
+                graceful_shutdown_duration: None,
                 tunnels: vec![RawServerTunnelConfig {
                     public_hostnames: Some(vec!["app.example.test".to_owned()]),
                     client_identity: Some(
@@ -317,6 +327,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         );
         assert_eq!(manual.public_bind_address, "0.0.0.0:443");
         assert_eq!(manual.tunnel_bind_address, "0.0.0.0:443");
+        assert_eq!(manual.readiness_bind_address, None);
+        assert_eq!(manual.graceful_shutdown_duration, "60s");
 
         let acme = super::prepare_raw_server_config_with_defaults(
             &config_path,
@@ -330,6 +342,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 }),
                 public_bind_address: None,
                 tunnel_bind_address: None,
+                readiness_bind_address: None,
+                graceful_shutdown_duration: None,
                 tunnels: vec![RawServerTunnelConfig {
                     public_hostnames: Some(vec!["app.example.test".to_owned()]),
                     client_identity: Some(
@@ -374,6 +388,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 }),
                 public_bind_address: Some("127.0.0.1:8443".to_owned()),
                 tunnel_bind_address: Some("127.0.0.1:9443".to_owned()),
+                readiness_bind_address: Some("127.0.0.1:9000".to_owned()),
+                graceful_shutdown_duration: Some("45s".to_owned()),
                 tunnels: vec![RawServerTunnelConfig {
                     public_hostnames: Some(vec!["app.example.test".to_owned()]),
                     client_identity: Some(
@@ -391,6 +407,11 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         assert_eq!(prepared.log_level, LogLevel::Off);
         assert_eq!(prepared.public_bind_address, "127.0.0.1:8443");
         assert_eq!(prepared.tunnel_bind_address, "127.0.0.1:9443");
+        assert_eq!(
+            prepared.readiness_bind_address,
+            Some("127.0.0.1:9000".to_owned())
+        );
+        assert_eq!(prepared.graceful_shutdown_duration, "45s");
         let prepared_acme = match prepared.acme {
             Some(prepared_acme) => prepared_acme,
             None => panic!("expected prepared server acme config"),

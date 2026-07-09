@@ -104,6 +104,22 @@ _Avoid_: Certificate, serial number
 The set of live **Tunnel connections** and their serving **Client instances** currently available for one **Tunnel**, regardless of which authorized **Client identity** each member uses.
 _Avoid_: Tunnel, cluster
 
+**Server readiness**:
+The externally observable ingress-admission signal for a **Server**. When **Server readiness** succeeds, new load-balanced visitor traffic may be admitted. When it fails, no new load-balanced visitor traffic should land there.
+_Avoid_: Graceful shutdown, tunnel coverage, health
+
+**Graceful shutdown**:
+The bounded orderly-shutdown lifecycle for a Runewarp component where shutdown behavior is deliberate rather than abrupt. For a **Server**, this includes leaving readiness immediately and allowing already-landed visitor work a bounded wind-down before exit. For a **Client**, this includes orderly tunnel-connection shutdown behavior before exit.
+_Avoid_: Crash, readiness, Fast shutdown
+
+**Fast shutdown**:
+The orderly-shutdown lifecycle for a Runewarp component that skips the longer graceful-drain window but still sends the normal QUIC close and keeps the short **QUIC close flush duration** before exit.
+_Avoid_: Crash, Graceful shutdown
+
+**QUIC close flush duration**:
+The short fixed time after Runewarp sends a normal QUIC connection close during orderly shutdown, giving that close a chance to flush before process exit. It is separate from any longer graceful-drain duration.
+_Avoid_: Graceful shutdown duration, stream drain timeout
+
 **Server-authoritative routing**:
 The routing rule where the **Server** chooses the **Tunnel** from **Public hostname authorization**, and the **Client** only performs **Service hostname matching** after that selection.
 _Avoid_: Client registration, Client-authoritative routing
@@ -171,6 +187,9 @@ _Avoid_: CI environment, deploy target
 - A **Client identity** is authorized by exactly one **Tunnel**
 - A **Tunnel pool** belongs to exactly one **Tunnel**
 - A **Tunnel pool** may contain members using different authorized **Client identities** of that **Tunnel**
+- A **Server readiness** signal belongs to exactly one **Server**
+- A **Graceful shutdown** applies to exactly one running Runewarp component at a time
+- A **Fast shutdown** applies to exactly one running Runewarp component at a time
 - **Server-authoritative routing** uses **Public hostname authorization** before **Service hostname matching**
 - A **Tunnel** owns one or more explicit **Public hostnames**
 - A **Catch-all Service** is valid only when there is exactly one configured **Service**
@@ -218,6 +237,15 @@ _Avoid_: CI environment, deploy target
 > **Dev:** "Why do both sides list `app.example.com`?"
 > **Domain expert:** "That's **Hostname mirroring**. The **Server** uses it to choose the **Tunnel** and the **Client** uses it to choose the **Service**."
 >
+> **Dev:** "If readiness fails, does that mean the Server crashed?"
+> **Domain expert:** "No. **Server readiness** is only the ingress-admission signal. It can fail during **Graceful shutdown** without implying an abrupt crash."
+>
+> **Dev:** "Is fast shutdown just a crash with a nicer name?"
+> **Domain expert:** "No. **Fast shutdown** is still orderly. It sends the normal QUIC close and keeps the short **QUIC close flush duration**, but it skips the longer graceful-drain window."
+>
+> **Dev:** "Is a graceful Ctrl-C window the same thing as ingress readiness?"
+> **Domain expert:** "No. Core calls that **Graceful shutdown**. **Server readiness** is the separate ingress-admission signal."
+>
 > **Dev:** "So who actually owns ingress routing?"
 > **Domain expert:** "**Server-authoritative routing** means the **Server** chooses the **Tunnel** first. The **Client** only matches the traffic to a **Service** after that."
 >
@@ -258,6 +286,8 @@ _Avoid_: CI environment, deploy target
 - "server certificate" and the trust anchor behind it were easy to conflate — resolved: **Server certificate** is the presented leaf; **Server CA** is the private issuer in the manual Server path.
 - "ca-file trust" sounded like a file-path detail instead of a trust model — resolved: **Exclusive CA trust** means the **Client** trusts only the configured CA bundle for the **Server certificate**.
 - "public CA" was too vague once Client-side TLS termination existed — resolved: **Public hostname CA** is the issuer for manual **Public hostname certificates**, distinct from the **Server CA**.
+- "readiness" and orderly exit were easy to blur — resolved: **Server readiness** is the ingress-admission signal, while **Graceful shutdown** is the bounded orderly-exit lifecycle.
+- "graceful" and "fast" shutdown were easy to blur — resolved: both are orderly shutdown modes, but **Fast shutdown** skips the longer graceful-drain window while keeping the short **QUIC close flush duration**.
 - "ACME" was too broad once both sides could obtain certificates automatically — resolved: **Server ACME** covers the **Server hostname** only, while **Client ACME** covers terminating **Public hostnames** only.
 - "authorized hostname" was being described ad hoc — resolved: **Public hostname authorization** is the Server-owned rule that binds explicit **Public hostnames** to a **Tunnel**.
 - "hostnames on Services" looked like the same mechanism as the Server side — resolved: **Service hostname matching** is a Client-side routing decision after Server admission, not a second authorization layer.

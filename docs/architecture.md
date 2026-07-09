@@ -135,8 +135,11 @@ The client validates the server certificate either through system trust or throu
 - new Visitor streams are placed onto the least-busy **Tunnel pool** member, with round-robin tie-breaking when active-stream load is equal
 - once placed, a proxied stream stays on its chosen **Tunnel connection** until it closes or that connection dies
 - multiple Client instances across different Tunnels are supported
-- orderly local shutdown is runtime-owned: the **Server** stops accepting new Visitor traffic and new **Tunnel connections** before closing active **Tunnel connections**, and the **Client instance** stops reconnect work before closing its active **Tunnel connection**
-- graceful shutdown waits only a short fixed grace period after sending the QUIC close; it does not drain Visitor traffic or proxied streams
+- optional **Server readiness** is ingress-admission-only: when `server.readiness-bind-address` is configured, a probe-only TCP listener stays up only while the Server should admit new ingress traffic
+- orderly local shutdown is runtime-owned: the **Server** drops **Server readiness** immediately, stops accepting new Visitor traffic, new **Tunnel connections**, and new streams on already-open **Tunnel connections**, while the **Client instance** stops reconnect work before closing its active **Tunnel connection**
+- **Graceful shutdown** on the **Server** keeps already-landed Visitor streams alive only up to `server.graceful-shutdown-duration`, then force-closes remaining work
+- **Fast shutdown** on the **Server** skips that longer drain window
+- the short **QUIC close flush duration** remains a fixed runtime-owned courtesy window after the close frame is sent; it is not an operator-facing drain knob
 - TLS passthrough is the default and lowest-privilege mode
 - customer TLS is terminated either on the **Local backend** (passthrough) or on the **Client instance** (terminate)
 - plain HTTP backends require `tls-mode = "terminate"` on the matching Service

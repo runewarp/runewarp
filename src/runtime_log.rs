@@ -5,6 +5,7 @@ use std::io;
 use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use time::format_description::{self, OwnedFormatItem};
 use tracing::Subscriber;
 use tracing_subscriber::filter::LevelFilter;
@@ -14,6 +15,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt as tracing_fmt, reload};
 
 use crate::client_hello::ClientHelloError;
+use crate::shutdown::ShutdownMode;
 use crate::{ClientIdentity, LogLevel};
 
 static LOGGER: OnceLock<InstalledLogger> = OnceLock::new();
@@ -398,19 +400,90 @@ pub fn server_tunnel_listener_ready(bind_address: SocketAddr) {
     );
 }
 
-pub fn server_graceful_shutdown_started() {
-    emit(EventLevel::Info, "server graceful shutdown started");
-}
-
-pub fn server_graceful_shutdown_closing_tunnel_connections(active_connections: usize) {
+pub fn server_readiness_listener_enabled(bind_address: SocketAddr) {
     emit(
         EventLevel::Info,
         &event_line(
-            "server graceful shutdown closing tunnel connections",
+            "server readiness listener enabled",
+            [
+                ("bind-address", Cow::Owned(bind_address.to_string())),
+                ("kind", Cow::Borrowed("tcp-probe-only")),
+            ],
+        ),
+    );
+}
+
+pub fn server_readiness_gained(bind_address: SocketAddr) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "server readiness gained",
+            [("bind-address", Cow::Owned(bind_address.to_string()))],
+        ),
+    );
+}
+
+pub fn server_readiness_lost(bind_address: SocketAddr) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "server readiness lost",
+            [("bind-address", Cow::Owned(bind_address.to_string()))],
+        ),
+    );
+}
+
+pub fn server_orderly_shutdown_started(mode: ShutdownMode, effective_graceful_duration: Duration) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "server orderly shutdown started",
+            [
+                ("mode", Cow::Borrowed(shutdown_mode_label(mode))),
+                (
+                    "effective-graceful-duration",
+                    Cow::Owned(format_duration(effective_graceful_duration)),
+                ),
+            ],
+        ),
+    );
+}
+
+pub fn server_orderly_shutdown_escalated() {
+    emit(
+        EventLevel::Warn,
+        "server orderly shutdown escalated: mode=fast",
+    );
+}
+
+pub fn server_graceful_shutdown_deadline_expired(active_connections: usize) {
+    emit(
+        EventLevel::Warn,
+        &event_line(
+            "server graceful shutdown deadline expired",
             [(
                 "active-tunnel-connections",
                 Cow::Owned(active_connections.to_string()),
             )],
+        ),
+    );
+}
+
+pub fn server_orderly_shutdown_closing_tunnel_connections(
+    mode: ShutdownMode,
+    active_connections: usize,
+) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "server orderly shutdown closing tunnel connections",
+            [
+                ("mode", Cow::Borrowed(shutdown_mode_label(mode))),
+                (
+                    "active-tunnel-connections",
+                    Cow::Owned(active_connections.to_string()),
+                ),
+            ],
         ),
     );
 }
@@ -427,6 +500,21 @@ pub fn client_graceful_shutdown_closing_tunnel_connection() {
         EventLevel::Info,
         "client instance graceful shutdown closing tunnel connection",
     );
+}
+
+fn shutdown_mode_label(mode: ShutdownMode) -> &'static str {
+    match mode {
+        ShutdownMode::Graceful => "graceful",
+        ShutdownMode::Fast => "fast",
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.subsec_nanos() == 0 {
+        format!("{}s", duration.as_secs())
+    } else {
+        format!("{}ms", duration.as_millis())
+    }
 }
 
 pub fn server_tunnel_connection_unauthorized(client_identity: &ClientIdentity) {
@@ -1105,6 +1193,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use quinn::ConnectionError;
     use time::OffsetDateTime;
@@ -1119,13 +1208,15 @@ mod tests {
         client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
         client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_unauthorized,
         emit, emit_server_tunnel_connection_dropped, install, installed_level,
-        server_graceful_shutdown_closing_tunnel_connections, server_graceful_shutdown_started,
-        server_public_listener_ready, server_route, server_route_rejected_client_hello,
-        server_tunnel_connection_accepted, server_tunnel_connection_failed,
-        server_tunnel_connection_terminated, server_tunnel_connection_unauthorized,
-        server_tunnel_listener_ready, warning,
+        server_graceful_shutdown_deadline_expired,
+        server_orderly_shutdown_closing_tunnel_connections, server_orderly_shutdown_escalated,
+        server_orderly_shutdown_started, server_public_listener_ready, server_readiness_gained,
+        server_readiness_listener_enabled, server_readiness_lost, server_route,
+        server_route_rejected_client_hello, server_tunnel_connection_accepted,
+        server_tunnel_connection_failed, server_tunnel_connection_terminated,
+        server_tunnel_connection_unauthorized, server_tunnel_listener_ready, warning,
     };
-    use crate::{ClientHelloError, ClientIdentity, LogLevel};
+    use crate::{ClientHelloError, ClientIdentity, LogLevel, ShutdownMode};
 
     static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1425,17 +1516,33 @@ mod tests {
     }
 
     #[test]
-    fn graceful_shutdown_logs_render_explicit_runtime_lines() {
+    fn orderly_shutdown_and_readiness_logs_render_explicit_runtime_lines() {
         let output = capture(LogLevel::Info, || {
-            server_graceful_shutdown_started();
-            server_graceful_shutdown_closing_tunnel_connections(2);
+            server_readiness_listener_enabled("127.0.0.1:9000".parse().unwrap());
+            server_readiness_gained("127.0.0.1:9000".parse().unwrap());
+            server_orderly_shutdown_started(ShutdownMode::Graceful, Duration::from_secs(60));
+            server_orderly_shutdown_escalated();
+            server_readiness_lost("127.0.0.1:9000".parse().unwrap());
+            server_graceful_shutdown_deadline_expired(2);
+            server_orderly_shutdown_closing_tunnel_connections(ShutdownMode::Fast, 2);
             client_graceful_shutdown_started();
             client_graceful_shutdown_closing_tunnel_connection();
         });
 
-        assert!(output.contains("INFO server graceful shutdown started"));
         assert!(output.contains(
-            "INFO server graceful shutdown closing tunnel connections: active-tunnel-connections=2"
+            "INFO server readiness listener enabled: bind-address=127.0.0.1:9000 kind=tcp-probe-only"
+        ));
+        assert!(output.contains("INFO server readiness gained: bind-address=127.0.0.1:9000"));
+        assert!(output.contains(
+            "INFO server orderly shutdown started: mode=graceful effective-graceful-duration=60s"
+        ));
+        assert!(output.contains("WARN server orderly shutdown escalated: mode=fast"));
+        assert!(output.contains("INFO server readiness lost: bind-address=127.0.0.1:9000"));
+        assert!(output.contains(
+            "WARN server graceful shutdown deadline expired: active-tunnel-connections=2"
+        ));
+        assert!(output.contains(
+            "INFO server orderly shutdown closing tunnel connections: mode=fast active-tunnel-connections=2"
         ));
         assert!(output.contains("INFO client instance graceful shutdown started"));
         assert!(

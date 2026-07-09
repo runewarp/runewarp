@@ -8,8 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use runewarp::PreparedClient;
-use runewarp::ServerAddress;
+use runewarp::{PreparedClient, ServerAddress, ShutdownMode};
 use time::OffsetDateTime;
 use tokio::net::lookup_host;
 use tokio::sync::watch;
@@ -34,7 +33,7 @@ pub(crate) async fn run_until_orderly_shutdown<F>(
     shutdown_signal: F,
 ) -> Result<(), Box<dyn Error>>
 where
-    F: Future<Output = io::Result<()>>,
+    F: Future<Output = io::Result<ShutdownMode>>,
 {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let runtime = run_until_shutdown(settings, local_bind_addr, &shutdown_rx);
@@ -43,7 +42,7 @@ where
     let client_result = tokio::select! {
         result = &mut runtime => result,
         signal_result = &mut shutdown_signal => {
-            signal_result?;
+            let _mode = signal_result?;
             runewarp::runtime_log::client_graceful_shutdown_started();
             let _ = shutdown_tx.send(true);
             runtime.await
@@ -192,6 +191,7 @@ async fn run_server_address_until_shutdown(
                 let shutdown = shutdown.clone();
                 async move {
                     wait_for_shutdown(shutdown).await;
+                    ShutdownMode::Graceful
                 }
             })
             .await
@@ -357,7 +357,7 @@ mod tests {
         CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_IDENTITY_FILENAME,
         CLIENT_KEY_FILENAME, ClientConfig, ClientIdentity, ClientTlsMode, LogLevel, PublicHostname,
         Server, ServerAddress, ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
-        generate_client_identity, make_server_quic_config_with_client_auth,
+        ShutdownMode, generate_client_identity, make_server_quic_config_with_client_auth,
     };
 
     use super::{
@@ -483,6 +483,7 @@ mod tests {
         let server = Server::bind(ServerBindConfig {
             public_bind_addr: localhost(0),
             tunnel_connection_bind_addr: localhost(0),
+            readiness_bind_addr: None,
             server_hostname: server_hostname("localhost"),
             configured_tunnels: vec![ServerTunnelConfig {
                 public_hostnames: vec![public_hostname("app.example.test")],
@@ -553,7 +554,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let client_future = run_until_orderly_shutdown(&settings, localhost(0), async move {
             let _ = shutdown_rx.await;
-            Ok(())
+            Ok(ShutdownMode::Graceful)
         });
         tokio::pin!(client_future);
 

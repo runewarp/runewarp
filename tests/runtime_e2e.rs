@@ -7,11 +7,12 @@ use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
     ClientConfigResolutionDefaults, ClientConnectConfig, ClientPublicCertConfig, ClientRuntimeArgs,
-    ClientTlsMode, GeneratedClientIdentity, LogLevel, PreparedClient, PreparedServer,
-    PublicHostname, SelectedClientConfig, Server, ServerAddress, ServerBindConfig, ServerHostname,
-    ServerTunnelConfig, ServiceConfig, generate_client_identity,
-    initialize_manual_server_certificate, load_client_config, load_server_config,
-    make_client_quic_config, make_client_quic_config_with_client_auth, make_server_quic_config,
+    ClientTlsMode, GeneratedClientIdentity, LogLevel, OrderlyShutdown, PreparedClient,
+    PreparedServer, PublicHostname, QUIC_CLOSE_FLUSH_DURATION, SelectedClientConfig, Server,
+    ServerAddress, ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
+    ShutdownMode, generate_client_identity, initialize_manual_server_certificate,
+    load_client_config, load_server_config, make_client_quic_config,
+    make_client_quic_config_with_client_auth, make_server_quic_config,
     make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
     resolve_selected_client_config,
 };
@@ -71,6 +72,7 @@ async fn forwards_tls_passthrough_end_to_end() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         public_tls_config: None,
@@ -338,6 +340,7 @@ async fn drops_public_tls_when_no_client_is_connected() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         quic_server_config: make_authenticated_server_quic_config(
@@ -389,6 +392,7 @@ async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         quic_server_config: make_authenticated_server_quic_config(
@@ -458,6 +462,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         quic_server_config: make_authenticated_server_quic_config(
@@ -551,6 +556,7 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         public_tls_config: None,
@@ -644,6 +650,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         quic_server_config: make_server_quic_config_with_client_auth(
@@ -699,6 +706,7 @@ async fn library_constructors_expose_addresses_before_running() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
         public_tls_config: None,
@@ -746,6 +754,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_hostnames() {
     let error = match Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![
             configured_tunnel(&["App.Example.Test."], &first_client),
@@ -777,6 +786,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_client_identities() {
     let error = match Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![
             configured_tunnel(&["app.example.test"], &shared_client),
@@ -809,6 +819,7 @@ async fn server_bind_rejects_empty_configured_tunnels() {
     let error = match Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: Vec::new(),
         public_tls_config: None,
@@ -852,6 +863,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         public_tls_config: None,
@@ -932,6 +944,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         public_tls_config: None,
@@ -995,6 +1008,7 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         public_tls_config: None,
@@ -1025,6 +1039,7 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
             client
                 .run_until_shutdown(async move {
                     let _ = shutdown_rx.await;
+                    ShutdownMode::Graceful
                 })
                 .await
         }
@@ -1069,6 +1084,7 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         public_tls_config: None,
@@ -1087,14 +1103,16 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
         .tunnel_addr()
         .expect("tunnel listener should have an address");
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let server_task = tokio::spawn({
-        async move {
-            server
-                .run_until_shutdown(async move {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-        }
+    let shutdown = OrderlyShutdown::new(Duration::ZERO, QUIC_CLOSE_FLUSH_DURATION);
+    let shutdown_trigger = shutdown.clone();
+    let server_task = tokio::spawn(async move {
+        let signal_task = tokio::spawn(async move {
+            let _ = shutdown_rx.await;
+            let _ = shutdown_trigger.begin_graceful();
+        });
+        let result = server.run_with_shutdown(&shutdown).await;
+        let _ = signal_task.await;
+        result
     });
 
     let client_config = ClientConnectConfig {
@@ -1148,6 +1166,99 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
 }
 
 #[tokio::test]
+async fn graceful_server_shutdown_keeps_already_landed_streams_until_they_finish() {
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let (backend_addr, backend_started, backend_release, backend_task) = spawn_staged_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"on",
+        *b"e!",
+    )
+    .await;
+    let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+    let shared_client = generate_client_identity().unwrap();
+
+    let server = Server::bind(ServerBindConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
+        server_hostname: server_hostname("tunnel.example.test"),
+        configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        public_tls_config: None,
+        quic_server_config: make_authenticated_server_quic_config(
+            &tunnel_cert,
+            &tunnel_key,
+            &[&shared_client],
+        ),
+    })
+    .await
+    .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let shutdown = OrderlyShutdown::new(Duration::from_millis(250), QUIC_CLOSE_FLUSH_DURATION);
+    let shutdown_trigger = shutdown.clone();
+    let mut server_task = tokio::spawn(async move { server.run_with_shutdown(&shutdown).await });
+
+    let client = Client::connect(ClientConnectConfig {
+        local_bind_addr: localhost(0),
+        server_addr: tunnel_addr,
+        server_name: "tunnel.example.test".to_owned(),
+        backend_address: backend_addr.to_string(),
+        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+    })
+    .await
+    .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    let connector = TlsConnector::from(Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store_with(&backend_cert))
+            .with_no_client_auth(),
+    ));
+    let tcp_stream = TcpStream::connect(public_addr).await.unwrap();
+    let mut tls_stream = connector
+        .connect(
+            ServerName::try_from("app.example.test").unwrap(),
+            tcp_stream,
+        )
+        .await
+        .unwrap();
+    tls_stream.write_all(b"ping").await.unwrap();
+
+    timeout(Duration::from_secs(1), backend_started)
+        .await
+        .expect("timed out waiting for the first backend response chunk")
+        .expect("staged backend should signal once the first response chunk is sent");
+
+    let mut initial_bytes = [0_u8; 2];
+    tls_stream.read_exact(&mut initial_bytes).await.unwrap();
+    assert_eq!(&initial_bytes, b"on");
+
+    shutdown_trigger.begin_graceful();
+    assert!(
+        timeout(Duration::from_millis(100), &mut server_task)
+            .await
+            .is_err(),
+        "graceful shutdown should stay alive while the landed stream is still active"
+    );
+
+    backend_release.notify_one();
+    timeout(Duration::from_secs(1), backend_task)
+        .await
+        .expect("backend should finish once the landed stream is released")
+        .expect("backend task should join cleanly");
+
+    timeout(Duration::from_secs(2), server_task)
+        .await
+        .expect("server should complete graceful shutdown")
+        .expect("server task should join cleanly")
+        .expect("server shutdown should succeed");
+
+    client_task.abort();
+    let _ = client_task.await;
+}
+
+#[tokio::test]
 async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
     let closed_backend_address = available_local_addr().await;
     let (backend_cert, _) = make_self_signed_cert("app.example.test");
@@ -1157,6 +1268,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         public_tls_config: None,
@@ -1221,6 +1333,7 @@ async fn a_busier_tunnel_pool_member_stops_winning_new_stream_placement() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
         public_tls_config: None,

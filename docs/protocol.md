@@ -103,10 +103,14 @@ When a QUIC connection drops, all streams on that connection are lost. They are 
 
 For orderly local shutdown that the runtime controls:
 
-- the **Server** stops accepting new Visitor TCP traffic and new **Tunnel connections** before it closes active **Tunnel connections**
+- when `server.readiness-bind-address` is configured, **Server readiness** is a probe-only TCP listener whose accept success means the Server is eligible for new ingress admission
+- the **Server** drops **Server readiness** immediately when orderly shutdown begins
+- the **Server** stops accepting new Visitor TCP traffic, new **Tunnel connections**, and new streams on already-open **Tunnel connections** before it closes active **Tunnel connections**
+- **Graceful shutdown** lets only already-landed Visitor streams continue, up to `server.graceful-shutdown-duration`
+- when that graceful deadline expires, the **Server** force-closes remaining active **Tunnel connections**
+- **Fast shutdown** skips the longer graceful-drain window
 - the **Client instance** stops new dial and retry work before it closes its active **Tunnel connection**
-- graceful shutdown sends the normal QUIC connection close and then waits a short fixed runtime-owned grace period before exit
-- active Visitor traffic and proxied streams are not drained; they may terminate when the **Tunnel connection** closes
+- both orderly shutdown modes still send the normal QUIC connection close and then wait the short fixed runtime-owned **QUIC close flush duration** before exit
 
 ## Retry behavior
 

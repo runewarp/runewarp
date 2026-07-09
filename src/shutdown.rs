@@ -68,19 +68,21 @@ impl OrderlyShutdown {
 
     pub async fn wait_started(&self) -> ShutdownMode {
         loop {
+            let notified = self.inner.notify.notified();
             if let Some(mode) = self.mode() {
                 return mode;
             }
-            self.inner.notify.notified().await;
+            notified.await;
         }
     }
 
     pub async fn wait_for_fast(&self) {
         loop {
+            let notified = self.inner.notify.notified();
             if matches!(self.mode(), Some(ShutdownMode::Fast)) {
                 return;
             }
-            self.inner.notify.notified().await;
+            notified.await;
         }
     }
 
@@ -159,6 +161,18 @@ mod tests {
             .await
             .expect("wait task should complete after escalation")
             .expect("wait task should not panic");
+    }
+
+    #[tokio::test]
+    async fn wait_started_returns_immediately_after_shutdown_already_began() {
+        let shutdown = OrderlyShutdown::new(Duration::from_millis(25), Duration::from_millis(5));
+
+        shutdown.begin_fast();
+
+        let mode = timeout(Duration::from_secs(1), shutdown.wait_started())
+            .await
+            .expect("wait should not block after shutdown already began");
+        assert_eq!(mode, ShutdownMode::Fast);
     }
 
     #[test]

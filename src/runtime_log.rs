@@ -469,15 +469,21 @@ pub fn server_graceful_shutdown_deadline_expired(active_connections: usize) {
     );
 }
 
-pub fn server_graceful_shutdown_closing_tunnel_connections(active_connections: usize) {
+pub fn server_orderly_shutdown_closing_tunnel_connections(
+    mode: ShutdownMode,
+    active_connections: usize,
+) {
     emit(
         EventLevel::Info,
         &event_line(
-            "server graceful shutdown closing tunnel connections",
-            [(
-                "active-tunnel-connections",
-                Cow::Owned(active_connections.to_string()),
-            )],
+            "server orderly shutdown closing tunnel connections",
+            [
+                ("mode", Cow::Borrowed(shutdown_mode_label(mode))),
+                (
+                    "active-tunnel-connections",
+                    Cow::Owned(active_connections.to_string()),
+                ),
+            ],
         ),
     );
 }
@@ -1202,8 +1208,8 @@ mod tests {
         client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
         client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_unauthorized,
         emit, emit_server_tunnel_connection_dropped, install, installed_level,
-        server_graceful_shutdown_closing_tunnel_connections,
-        server_graceful_shutdown_deadline_expired, server_orderly_shutdown_escalated,
+        server_graceful_shutdown_deadline_expired,
+        server_orderly_shutdown_closing_tunnel_connections, server_orderly_shutdown_escalated,
         server_orderly_shutdown_started, server_public_listener_ready, server_readiness_gained,
         server_readiness_listener_enabled, server_readiness_lost, server_route,
         server_route_rejected_client_hello, server_tunnel_connection_accepted,
@@ -1518,7 +1524,7 @@ mod tests {
             server_orderly_shutdown_escalated();
             server_readiness_lost("127.0.0.1:9000".parse().unwrap());
             server_graceful_shutdown_deadline_expired(2);
-            server_graceful_shutdown_closing_tunnel_connections(2);
+            server_orderly_shutdown_closing_tunnel_connections(ShutdownMode::Fast, 2);
             client_graceful_shutdown_started();
             client_graceful_shutdown_closing_tunnel_connection();
         });
@@ -1536,7 +1542,7 @@ mod tests {
             "WARN server graceful shutdown deadline expired: active-tunnel-connections=2"
         ));
         assert!(output.contains(
-            "INFO server graceful shutdown closing tunnel connections: active-tunnel-connections=2"
+            "INFO server orderly shutdown closing tunnel connections: mode=fast active-tunnel-connections=2"
         ));
         assert!(output.contains("INFO client instance graceful shutdown started"));
         assert!(

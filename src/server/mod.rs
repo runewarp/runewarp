@@ -281,7 +281,7 @@ impl Server {
         }
 
         let active_connections = tunnel_registry.active_connection_count().await;
-        runtime_log::server_graceful_shutdown_closing_tunnel_connections(active_connections);
+        runtime_log::server_orderly_shutdown_closing_tunnel_connections(mode, active_connections);
         let _ = tunnel_registry.close_all(b"graceful shutdown").await;
         tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
         Ok(())

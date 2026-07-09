@@ -46,9 +46,19 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
         OrderlyShutdown::new(config.graceful_shutdown_duration, QUIC_CLOSE_FLUSH_DURATION);
     let shutdown_signal = shutdown.clone();
     tokio::spawn(async move {
-        let first_signal = super::wait_for_initial_shutdown_signal()
-            .await
-            .expect("shutdown signal setup should succeed");
+        let first_signal = match super::wait_for_initial_shutdown_signal().await {
+            Ok(signal) => signal,
+            Err(error) => {
+                runewarp::runtime_log::emit(
+                    runewarp::runtime_log::EventLevel::Error,
+                    &format!(
+                        "server shutdown signal handling unavailable; forcing fast shutdown: {error}"
+                    ),
+                );
+                let _ = shutdown_signal.begin_fast();
+                return;
+            }
+        };
         let mode = super::shutdown_mode_for_first_signal(first_signal);
         let effective_graceful_duration = match mode {
             ShutdownMode::Graceful => config.graceful_shutdown_duration,
@@ -59,14 +69,23 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
             ShutdownMode::Graceful => {
                 let _ = shutdown_signal.begin_graceful();
                 if super::should_escalate_to_fast(first_signal) {
-                    let signal = super::wait_for_fast_shutdown_signal()
-                        .await
-                        .expect("shutdown escalation signal setup should succeed");
-                    if super::should_escalate_to_fast(signal)
-                        && shutdown_signal.begin_fast()
-                            == runewarp::ShutdownTransition::EscalatedToFast
-                    {
-                        runewarp::runtime_log::server_orderly_shutdown_escalated();
+                    match super::wait_for_fast_shutdown_signal().await {
+                        Ok(signal) => {
+                            if super::should_escalate_to_fast(signal)
+                                && shutdown_signal.begin_fast()
+                                    == runewarp::ShutdownTransition::EscalatedToFast
+                            {
+                                runewarp::runtime_log::server_orderly_shutdown_escalated();
+                            }
+                        }
+                        Err(error) => {
+                            runewarp::runtime_log::warning(
+                                "server",
+                                &format!(
+                                    "fast shutdown escalation signal handling unavailable; continuing graceful shutdown: {error}"
+                                ),
+                            );
+                        }
                     }
                 }
             }

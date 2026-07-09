@@ -34,6 +34,7 @@ async fn prepared_client_connects_from_validated_settings() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],
@@ -108,6 +109,7 @@ async fn prepared_client_uses_the_configured_server_address_port() {
         // this port-selection test flaky across environments.
         public_bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
         tunnel_connection_bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("localhost"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],
@@ -192,6 +194,7 @@ async fn prepared_client_rejects_settings_without_services() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],
@@ -443,6 +446,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],
@@ -549,6 +553,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![
@@ -645,6 +650,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![public_hostname("app.example.test")],
@@ -740,6 +746,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![ServerTunnelConfig {
             public_hostnames: vec![

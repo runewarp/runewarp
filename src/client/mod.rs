@@ -12,8 +12,9 @@ use quinn::{Connection, Endpoint};
 pub(crate) use self::termination_tls::TerminationTlsConfigs;
 use self::tunnel_stream::TunnelConnectionStreamHandler;
 use crate::{
-    ClientTlsMode, HANDSHAKE_TIMEOUT, ServiceConfig, quic::with_handshake_timeout,
-    shutdown::GracefulShutdown,
+    ClientTlsMode, HANDSHAKE_TIMEOUT, ServiceConfig,
+    quic::with_handshake_timeout,
+    shutdown::{OrderlyShutdown, ShutdownMode},
 };
 
 type RouteModeServicesAndConfigs = (Vec<ServiceConfig>, TerminationTlsConfigs);
@@ -177,27 +178,36 @@ impl Client {
         shutdown_signal: Shutdown,
     ) -> Result<(), quinn::ConnectionError>
     where
-        Shutdown: Future<Output = ()> + Send + 'static,
+        Shutdown: Future<Output = ShutdownMode> + Send + 'static,
     {
-        let shutdown = GracefulShutdown::new(std::time::Duration::from_millis(100));
+        let shutdown = OrderlyShutdown::new(
+            std::time::Duration::from_secs(0),
+            crate::server::QUIC_CLOSE_FLUSH_DURATION,
+        );
         let shutdown_trigger = shutdown.clone();
         tokio::spawn(async move {
-            shutdown_signal.await;
-            shutdown_trigger.begin();
+            match shutdown_signal.await {
+                ShutdownMode::Graceful => {
+                    let _ = shutdown_trigger.begin_graceful();
+                }
+                ShutdownMode::Fast => {
+                    let _ = shutdown_trigger.begin_fast();
+                }
+            }
         });
         self.run_with_shutdown(&shutdown).await
     }
 
     pub(crate) async fn run_with_shutdown(
         self,
-        shutdown: &GracefulShutdown,
+        shutdown: &OrderlyShutdown,
     ) -> Result<(), quinn::ConnectionError> {
         loop {
             tokio::select! {
-                _ = shutdown.wait() => {
+                _ = shutdown.wait_started() => {
                     crate::runtime_log::client_graceful_shutdown_closing_tunnel_connection();
                     self.connection.close(0_u32.into(), b"graceful shutdown");
-                    tokio::time::sleep(shutdown.grace_period()).await;
+                    tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
                     return Ok(());
                 }
                 accept_result = self.connection.accept_bi() => match accept_result {

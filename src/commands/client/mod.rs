@@ -42,11 +42,10 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
     let config = resolve_client_config_from_cli(config.clone(), runtime)
         .map_err(wrap_client_config_resolution_error)?;
     runewarp::runtime_log::install(config.log_level)?;
-    crate::client_runtime::run_until_orderly_shutdown(
-        &config,
-        wildcard(0),
-        super::wait_for_orderly_shutdown_signal(),
-    )
+    crate::client_runtime::run_until_orderly_shutdown(&config, wildcard(0), async {
+        let signal = super::wait_for_initial_shutdown_signal().await?;
+        Ok::<runewarp::ShutdownMode, std::io::Error>(super::shutdown_mode_for_first_signal(signal))
+    })
     .await
     .map_err(logged_runtime_failure)
 }

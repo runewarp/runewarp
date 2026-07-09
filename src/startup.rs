@@ -26,13 +26,16 @@ use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig, ClientConnectError,
     ClientIdentity, ClientPublicCertConfig, ClientTlsMode, QuicConfigError, Server, ServerAddress,
     ServerBindConfig, ServerCertificateConfig, ServerConfig, ServiceConfig,
-    client::TerminationTlsConfigs, client::validate_services,
+    client::TerminationTlsConfigs,
+    client::validate_services,
     make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
-    make_server_quic_config_with_client_auth_resolver, shutdown::GracefulShutdown,
+    make_server_quic_config_with_client_auth_resolver,
+    shutdown::{OrderlyShutdown, ShutdownMode},
 };
 
 pub struct PreparedServer {
     server: Server,
+    graceful_shutdown_duration: std::time::Duration,
     trusted_client_identities: Vec<ClientIdentity>,
     acme_runtime: Option<ManagedAcmeRuntime>,
 }
@@ -96,6 +99,7 @@ impl PreparedServer {
         let server = Server::bind(ServerBindConfig {
             public_bind_addr,
             tunnel_connection_bind_addr,
+            readiness_bind_addr: config.readiness_bind_address,
             server_hostname: config.hostname.clone(),
             configured_tunnels: config.tunnels.clone(),
             public_tls_config: acme_runtime
@@ -108,6 +112,7 @@ impl PreparedServer {
 
         Ok(Self {
             server,
+            graceful_shutdown_duration: config.graceful_shutdown_duration,
             trusted_client_identities,
             acme_runtime,
         })
@@ -119,6 +124,10 @@ impl PreparedServer {
 
     pub fn tunnel_addr(&self) -> io::Result<SocketAddr> {
         self.server.tunnel_addr()
+    }
+
+    pub fn readiness_addr(&self) -> Option<SocketAddr> {
+        self.server.readiness_addr()
     }
 
     pub fn trusted_client_identities(&self) -> &[ClientIdentity] {
@@ -146,18 +155,27 @@ impl PreparedServer {
 
     pub async fn run_until_shutdown<Shutdown>(self, shutdown_signal: Shutdown) -> io::Result<()>
     where
-        Shutdown: Future<Output = ()> + Send + 'static,
+        Shutdown: Future<Output = ShutdownMode> + Send + 'static,
     {
-        let shutdown = GracefulShutdown::new(std::time::Duration::from_millis(100));
+        let shutdown = OrderlyShutdown::new(
+            self.graceful_shutdown_duration,
+            crate::server::QUIC_CLOSE_FLUSH_DURATION,
+        );
         let shutdown_trigger = shutdown.clone();
         tokio::spawn(async move {
-            shutdown_signal.await;
-            shutdown_trigger.begin();
+            match shutdown_signal.await {
+                ShutdownMode::Graceful => {
+                    let _ = shutdown_trigger.begin_graceful();
+                }
+                ShutdownMode::Fast => {
+                    let _ = shutdown_trigger.begin_fast();
+                }
+            }
         });
         self.run_with_shutdown(&shutdown).await
     }
 
-    async fn run_with_shutdown(self, shutdown: &GracefulShutdown) -> io::Result<()> {
+    pub async fn run_with_shutdown(self, shutdown: &OrderlyShutdown) -> io::Result<()> {
         let Self {
             server,
             acme_runtime,
@@ -292,20 +310,29 @@ impl PreparedClient {
         shutdown_signal: Shutdown,
     ) -> Result<(), quinn::ConnectionError>
     where
-        Shutdown: Future<Output = ()> + Send + 'static,
+        Shutdown: Future<Output = ShutdownMode> + Send + 'static,
     {
-        let shutdown = GracefulShutdown::new(std::time::Duration::from_millis(100));
+        let shutdown = OrderlyShutdown::new(
+            std::time::Duration::from_secs(0),
+            crate::server::QUIC_CLOSE_FLUSH_DURATION,
+        );
         let shutdown_trigger = shutdown.clone();
         tokio::spawn(async move {
-            shutdown_signal.await;
-            shutdown_trigger.begin();
+            match shutdown_signal.await {
+                ShutdownMode::Graceful => {
+                    let _ = shutdown_trigger.begin_graceful();
+                }
+                ShutdownMode::Fast => {
+                    let _ = shutdown_trigger.begin_fast();
+                }
+            }
         });
         self.run_with_shutdown(&shutdown).await
     }
 
-    async fn run_with_shutdown(
+    pub async fn run_with_shutdown(
         self,
-        shutdown: &GracefulShutdown,
+        shutdown: &OrderlyShutdown,
     ) -> Result<(), quinn::ConnectionError> {
         let Self {
             client,
@@ -961,6 +988,8 @@ mod tests {
             },
             public_bind_address: "127.0.0.1:443".parse()?,
             tunnel_connection_bind_address: "127.0.0.1:443".parse()?,
+            readiness_bind_address: None,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: Vec::new(),
         };
 
@@ -982,6 +1011,8 @@ mod tests {
             },
             public_bind_address: "127.0.0.1:443".parse().unwrap(),
             tunnel_connection_bind_address: "127.0.0.1:443".parse().unwrap(),
+            readiness_bind_address: None,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: Vec::new(),
         };
         let manual_settings = ServerConfig {
@@ -1096,6 +1127,8 @@ mod tests {
             },
             public_bind_address: "127.0.0.1:443".parse()?,
             tunnel_connection_bind_address: "127.0.0.1:443".parse()?,
+            readiness_bind_address: None,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: Vec::new(),
         };
 
@@ -1248,6 +1281,8 @@ mod tests {
             },
             public_bind_address: "127.0.0.1:0".parse().unwrap(),
             tunnel_connection_bind_address: "127.0.0.1:0".parse().unwrap(),
+            readiness_bind_address: None,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: vec![ServerTunnelConfig {
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![

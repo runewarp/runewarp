@@ -126,6 +126,15 @@ impl ActiveClientPool {
     pub(crate) async fn connection_count(&self) -> usize {
         self.members.read().await.len()
     }
+
+    pub(crate) async fn active_stream_count(&self) -> usize {
+        self.members
+            .read()
+            .await
+            .iter()
+            .map(|member| member.active_streams.load(Ordering::Relaxed))
+            .sum()
+    }
 }
 
 #[cfg(test)]

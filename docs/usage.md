@@ -110,6 +110,8 @@ The smallest practical setup is a server with explicit **Public hostnames** and 
 # /etc/runewarp/server.toml
 [server]
 hostname = "tunnel.example.com"
+readiness-bind-address = "127.0.0.1:9000"
+graceful-shutdown-duration = "60s"
 
 [server.acme]
 email = "admin@example.com"
@@ -182,6 +184,8 @@ For runtime-only startup, `--server-address` is repeatable. One occurrence gives
 Under **TLS passthrough**, the backend's own certificate should appear. In **Terminate mode**, the client-presented **Public hostname certificate** should appear and the backend should receive plaintext.
 
 At the default `log-level = "info"`, Runewarp logs readiness, tunnel connection lifecycle, warnings, and errors to stderr. Set `log-level = "debug"` when you need per-connection routing detail.
+
+If you enable `server.readiness-bind-address`, probe that TCP listener for ingress admission instead of probing the public TLS port. Runewarp drops readiness immediately when Server shutdown begins. `SIGTERM` and the first `Ctrl-C` use graceful Server shutdown; `SIGQUIT` on Unix or a second `Ctrl-C` escalates to fast Server shutdown.
 
 ## Troubleshooting
 

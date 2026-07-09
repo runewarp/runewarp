@@ -167,6 +167,47 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         settings.tunnel_connection_bind_address,
         "127.0.0.1:9443".parse().unwrap()
     );
+    assert_eq!(settings.readiness_bind_address, None);
+    assert_eq!(
+        settings.graceful_shutdown_duration,
+        std::time::Duration::from_secs(60)
+    );
+}
+
+#[test]
+fn server_config_accepts_readiness_bind_address_and_graceful_shutdown_duration() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+readiness-bind-address = "127.0.0.1:9000"
+graceful-shutdown-duration = "45s"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
+
+    assert_eq!(
+        settings.readiness_bind_address,
+        Some("127.0.0.1:9000".parse().unwrap())
+    );
+    assert_eq!(
+        settings.graceful_shutdown_duration,
+        std::time::Duration::from_secs(45)
+    );
 }
 
 #[test]
@@ -258,6 +299,37 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert!(message.contains("server.public-bind-address is invalid"));
     assert!(message.contains("server.tunnel-bind-address is invalid"));
     assert!(!message.contains("failed to parse [server]"));
+}
+
+#[test]
+fn server_config_rejects_invalid_readiness_bind_address_and_shutdown_duration() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+readiness-bind-address = "readiness.example.test:9000"
+graceful-shutdown-duration = "abc"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let error = load_server_config(&tempdir.path().join("config.toml")).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("server.readiness-bind-address is invalid"));
+    assert!(message.contains("server.graceful-shutdown-duration is invalid"));
 }
 
 #[test]

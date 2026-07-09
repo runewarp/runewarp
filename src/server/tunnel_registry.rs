@@ -24,7 +24,8 @@ pub(crate) struct TunnelRegistry {
     client_identity_to_tunnel: Arc<HashMap<ClientIdentity, usize>>,
     public_hostname_to_tunnel: Arc<HashMap<PublicHostname, usize>>,
     tunnel_pools: Arc<Vec<ActiveClientPool>>,
-    accepting: Arc<AtomicBool>,
+    accepting_tunnel_connections: Arc<AtomicBool>,
+    admitting_streams: Arc<AtomicBool>,
 }
 
 impl TunnelRegistry {
@@ -47,7 +48,8 @@ impl TunnelRegistry {
             client_identity_to_tunnel: Arc::new(HashMap::new()),
             public_hostname_to_tunnel: Arc::new(public_hostname_to_tunnel),
             tunnel_pools: Arc::new(vec![ActiveClientPool::new()]),
-            accepting: Arc::new(AtomicBool::new(true)),
+            accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
+            admitting_streams: Arc::new(AtomicBool::new(true)),
         })
     }
     pub(crate) fn configured(
@@ -103,7 +105,8 @@ impl TunnelRegistry {
             client_identity_to_tunnel: Arc::new(client_identity_to_tunnel),
             public_hostname_to_tunnel: Arc::new(public_hostname_to_tunnel),
             tunnel_pools: Arc::new(tunnel_pools),
-            accepting: Arc::new(AtomicBool::new(true)),
+            accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
+            admitting_streams: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -111,6 +114,9 @@ impl TunnelRegistry {
         &self,
         public_hostname: &PublicHostname,
     ) -> TunnelRouteOutcome {
+        if !self.admitting_streams.load(Ordering::SeqCst) {
+            return TunnelRouteOutcome::NoActiveTunnelConnection;
+        }
         let Some(tunnel_index) = self.public_hostname_to_tunnel.get(public_hostname).copied()
         else {
             return TunnelRouteOutcome::Unauthorized;
@@ -122,7 +128,7 @@ impl TunnelRegistry {
     }
 
     pub(crate) async fn register(&self, connection: Connection) {
-        if !self.accepting.load(Ordering::SeqCst) {
+        if !self.accepting_tunnel_connections.load(Ordering::SeqCst) {
             connection.close(0_u32.into(), b"server shutting down");
             return;
         }
@@ -152,8 +158,18 @@ impl TunnelRegistry {
         active
     }
 
-    pub(crate) fn stop_accepting(&self) {
-        self.accepting.store(false, Ordering::SeqCst);
+    pub(crate) async fn active_stream_count(&self) -> usize {
+        let mut active = 0;
+        for pool in self.tunnel_pools.iter() {
+            active += pool.active_stream_count().await;
+        }
+        active
+    }
+
+    pub(crate) fn stop_accepting_new_work(&self) {
+        self.accepting_tunnel_connections
+            .store(false, Ordering::SeqCst);
+        self.admitting_streams.store(false, Ordering::SeqCst);
     }
 
     fn tunnel_registration_context(
@@ -262,7 +278,7 @@ mod tests {
             }],
         )?;
 
-        registry.stop_accepting();
+        registry.stop_accepting_new_work();
         registry.register(fixture.server_connection).await;
 
         assert!(matches!(

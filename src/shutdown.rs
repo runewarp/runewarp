@@ -1,66 +1,118 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Notify;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShutdownMode {
+    Graceful,
+    Fast,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShutdownTransition {
+    Started(ShutdownMode),
+    EscalatedToFast,
+    AlreadyStarted(ShutdownMode),
+}
+
 #[derive(Clone, Debug)]
-pub(crate) struct GracefulShutdown {
-    inner: Arc<GracefulShutdownInner>,
+pub struct OrderlyShutdown {
+    inner: Arc<OrderlyShutdownInner>,
 }
 
 #[derive(Debug)]
-struct GracefulShutdownInner {
-    started: AtomicBool,
+struct OrderlyShutdownInner {
+    state: AtomicU8,
     notify: Notify,
-    grace_period: Duration,
+    graceful_shutdown_duration: Duration,
+    quic_close_flush_duration: Duration,
 }
 
-impl GracefulShutdown {
-    pub(crate) fn new(grace_period: Duration) -> Self {
+impl OrderlyShutdown {
+    pub fn new(graceful_shutdown_duration: Duration, quic_close_flush_duration: Duration) -> Self {
         Self {
-            inner: Arc::new(GracefulShutdownInner {
-                started: AtomicBool::new(false),
+            inner: Arc::new(OrderlyShutdownInner {
+                state: AtomicU8::new(0),
                 notify: Notify::new(),
-                grace_period,
+                graceful_shutdown_duration,
+                quic_close_flush_duration,
             }),
         }
     }
 
-    pub(crate) fn begin(&self) -> bool {
-        let began = self
-            .inner
-            .started
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
-        if began {
-            self.inner.notify.notify_waiters();
+    pub fn begin_graceful(&self) -> ShutdownTransition {
+        self.transition_to(1)
+    }
+
+    pub fn begin_fast(&self) -> ShutdownTransition {
+        self.transition_to(2)
+    }
+
+    pub fn mode(&self) -> Option<ShutdownMode> {
+        match self.inner.state.load(Ordering::SeqCst) {
+            1 => Some(ShutdownMode::Graceful),
+            2 => Some(ShutdownMode::Fast),
+            _ => None,
         }
-        began
     }
 
-    pub(crate) fn is_started(&self) -> bool {
-        self.inner.started.load(Ordering::SeqCst)
+    pub fn graceful_shutdown_duration(&self) -> Duration {
+        self.inner.graceful_shutdown_duration
     }
 
-    pub(crate) fn grace_period(&self) -> Duration {
-        self.inner.grace_period
+    pub fn quic_close_flush_duration(&self) -> Duration {
+        self.inner.quic_close_flush_duration
     }
 
-    pub(crate) async fn wait(&self) {
-        if self.is_started() {
-            return;
-        }
+    pub async fn wait_started(&self) -> ShutdownMode {
         loop {
-            let notified = self.inner.notify.notified();
-            if self.is_started() {
+            if let Some(mode) = self.mode() {
+                return mode;
+            }
+            self.inner.notify.notified().await;
+        }
+    }
+
+    pub async fn wait_for_fast(&self) {
+        loop {
+            if matches!(self.mode(), Some(ShutdownMode::Fast)) {
                 return;
             }
-            notified.await;
-            if self.is_started() {
-                return;
+            self.inner.notify.notified().await;
+        }
+    }
+
+    fn transition_to(&self, new_state: u8) -> ShutdownTransition {
+        loop {
+            let current = self.inner.state.load(Ordering::SeqCst);
+            if current >= new_state {
+                return ShutdownTransition::AlreadyStarted(mode_from_state(current));
+            }
+            if self
+                .inner
+                .state
+                .compare_exchange(current, new_state, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.inner.notify.notify_waiters();
+                return match (current, new_state) {
+                    (0, 1) => ShutdownTransition::Started(ShutdownMode::Graceful),
+                    (0, 2) => ShutdownTransition::Started(ShutdownMode::Fast),
+                    (1, 2) => ShutdownTransition::EscalatedToFast,
+                    _ => unreachable!("only ordered shutdown transitions are valid"),
+                };
             }
         }
+    }
+}
+
+fn mode_from_state(state: u8) -> ShutdownMode {
+    match state {
+        1 => ShutdownMode::Graceful,
+        2 => ShutdownMode::Fast,
+        _ => unreachable!("shutdown mode requested before shutdown started"),
     }
 }
 
@@ -70,32 +122,69 @@ mod tests {
 
     use tokio::time::timeout;
 
-    use super::GracefulShutdown;
+    use super::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
 
     #[tokio::test]
-    async fn wait_returns_after_shutdown_begins() {
-        let shutdown = GracefulShutdown::new(Duration::from_millis(25));
+    async fn wait_started_returns_after_graceful_shutdown_begins() {
+        let shutdown = OrderlyShutdown::new(Duration::from_millis(25), Duration::from_millis(5));
         let waiter = shutdown.clone();
 
+        let wait_task = tokio::spawn(async move { waiter.wait_started().await });
+
+        assert_eq!(
+            shutdown.begin_graceful(),
+            ShutdownTransition::Started(ShutdownMode::Graceful)
+        );
+
+        let mode = timeout(Duration::from_secs(1), wait_task)
+            .await
+            .expect("wait task should complete after shutdown begins")
+            .expect("wait task should not panic");
+        assert_eq!(mode, ShutdownMode::Graceful);
+    }
+
+    #[tokio::test]
+    async fn wait_for_fast_returns_after_escalation() {
+        let shutdown = OrderlyShutdown::new(Duration::from_millis(25), Duration::from_millis(5));
+        let waiter = shutdown.clone();
+
+        shutdown.begin_graceful();
         let wait_task = tokio::spawn(async move {
-            waiter.wait().await;
+            waiter.wait_for_fast().await;
         });
 
-        shutdown.begin();
+        assert_eq!(shutdown.begin_fast(), ShutdownTransition::EscalatedToFast);
 
         timeout(Duration::from_secs(1), wait_task)
             .await
-            .expect("wait task should complete after shutdown begins")
+            .expect("wait task should complete after escalation")
             .expect("wait task should not panic");
     }
 
     #[test]
-    fn begin_is_idempotent_and_keeps_grace_period() {
-        let shutdown = GracefulShutdown::new(Duration::from_millis(25));
+    fn transitions_are_idempotent_and_keep_configured_durations() {
+        let shutdown = OrderlyShutdown::new(Duration::from_secs(60), Duration::from_millis(100));
 
-        assert_eq!(shutdown.grace_period(), Duration::from_millis(25));
-        assert!(shutdown.begin());
-        assert!(!shutdown.begin());
-        assert!(shutdown.is_started());
+        assert_eq!(
+            shutdown.graceful_shutdown_duration(),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            shutdown.quic_close_flush_duration(),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            shutdown.begin_graceful(),
+            ShutdownTransition::Started(ShutdownMode::Graceful)
+        );
+        assert_eq!(
+            shutdown.begin_graceful(),
+            ShutdownTransition::AlreadyStarted(ShutdownMode::Graceful)
+        );
+        assert_eq!(shutdown.begin_fast(), ShutdownTransition::EscalatedToFast);
+        assert_eq!(
+            shutdown.begin_fast(),
+            ShutdownTransition::AlreadyStarted(ShutdownMode::Fast)
+        );
     }
 }

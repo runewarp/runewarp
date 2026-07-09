@@ -58,6 +58,8 @@ pub struct ServerConfig {
     pub certificate: ServerCertificateConfig,
     pub public_bind_address: SocketAddr,
     pub tunnel_connection_bind_address: SocketAddr,
+    pub readiness_bind_address: Option<SocketAddr>,
+    pub graceful_shutdown_duration: std::time::Duration,
     pub tunnels: Vec<ServerTunnelConfig>,
 }
 
@@ -468,6 +470,8 @@ fn validate_prepared_server_config(
         log_level,
         public_bind_address,
         tunnel_bind_address,
+        readiness_bind_address,
+        graceful_shutdown_duration,
         manual_cert_present,
         acme_present,
         manual_certificate_directory,
@@ -527,6 +531,14 @@ fn validate_prepared_server_config(
         tunnel_bind_address,
         &mut messages,
     );
+    let readiness_bind_address = readiness_bind_address.and_then(|address| {
+        validate_socket_address_field("server.readiness-bind-address", address, &mut messages)
+    });
+    let graceful_shutdown_duration = validate_duration_field(
+        "server.graceful-shutdown-duration",
+        graceful_shutdown_duration.as_str(),
+        &mut messages,
+    );
     if tunnels.is_empty() {
         messages.push("at least one [[server.tunnels]] entry is required".to_owned());
     }
@@ -551,6 +563,9 @@ fn validate_prepared_server_config(
             public_bind_address: public_bind_address.expect("validated server.public-bind-address"),
             tunnel_connection_bind_address: tunnel_connection_bind_address
                 .expect("validated server.tunnel-bind-address"),
+            readiness_bind_address,
+            graceful_shutdown_duration: graceful_shutdown_duration
+                .expect("validated server.graceful-shutdown-duration"),
             tunnels,
         })
     } else {
@@ -1289,6 +1304,50 @@ pub(crate) fn is_valid_backend_address(backend_address: &str) -> bool {
             .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
 }
 
+fn validate_duration_field(
+    field_name: &str,
+    value: &str,
+    messages: &mut Vec<String>,
+) -> Option<std::time::Duration> {
+    match parse_duration(value) {
+        Ok(duration) => Some(duration),
+        Err(error) => {
+            messages.push(format!("{field_name} is invalid: {error}"));
+            None
+        }
+    }
+}
+
+fn parse_duration(value: &str) -> Result<std::time::Duration, String> {
+    let (numeric, unit) = if let Some(stripped) = value.strip_suffix("ms") {
+        (stripped, "ms")
+    } else if let Some(stripped) = value.strip_suffix('s') {
+        (stripped, "s")
+    } else if let Some(stripped) = value.strip_suffix('m') {
+        (stripped, "m")
+    } else if let Some(stripped) = value.strip_suffix('h') {
+        (stripped, "h")
+    } else {
+        return Err(
+            "expected a non-negative duration like \"60s\", \"5m\", \"1h\", or \"250ms\""
+                .to_string(),
+        );
+    };
+
+    let quantity = numeric
+        .parse::<u64>()
+        .map_err(|_| format!("expected a non-negative integer before `{unit}`"))?;
+    match unit {
+        "ms" => Ok(std::time::Duration::from_millis(quantity)),
+        "s" => Ok(std::time::Duration::from_secs(quantity)),
+        "m" => Ok(std::time::Duration::from_secs(quantity.saturating_mul(60))),
+        "h" => Ok(std::time::Duration::from_secs(
+            quantity.saturating_mul(60 * 60),
+        )),
+        _ => unreachable!("validated duration suffix"),
+    }
+}
+
 fn resolve_path(config_dir: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -1311,6 +1370,8 @@ pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value)
             "acme",
             "public-bind-address",
             "tunnel-bind-address",
+            "readiness-bind-address",
+            "graceful-shutdown-duration",
             "tunnels",
         ],
         &mut messages,
@@ -1395,6 +1456,8 @@ pub(crate) struct RawServerConfig {
     pub(crate) acme: Option<RawServerAcmeConfig>,
     pub(crate) public_bind_address: Option<String>,
     pub(crate) tunnel_bind_address: Option<String>,
+    pub(crate) readiness_bind_address: Option<String>,
+    pub(crate) graceful_shutdown_duration: Option<String>,
     #[serde(default)]
     pub(crate) tunnels: Vec<RawServerTunnelConfig>,
 }
@@ -1453,8 +1516,9 @@ struct RawGlobalConfig {
 mod tests {
     use std::io;
     use std::path::PathBuf;
+    use std::time::Duration;
 
-    use super::{ConfigFileError, is_valid_backend_address, resolve_path};
+    use super::{ConfigFileError, is_valid_backend_address, parse_duration, resolve_path};
 
     #[test]
     fn resolves_relative_paths_against_the_config_directory() {
@@ -1465,6 +1529,21 @@ mod tests {
             ),
             PathBuf::from("/tmp/runewarp/server.crt")
         );
+    }
+
+    #[test]
+    fn parses_human_duration_strings() {
+        assert_eq!(parse_duration("0s").unwrap(), Duration::from_secs(0));
+        assert_eq!(parse_duration("60s").unwrap(), Duration::from_secs(60));
+        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
+        assert_eq!(parse_duration("250ms").unwrap(), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn rejects_invalid_duration_strings() {
+        assert!(parse_duration("60").is_err());
+        assert!(parse_duration("-1s").is_err());
+        assert!(parse_duration("abc").is_err());
     }
 
     #[test]

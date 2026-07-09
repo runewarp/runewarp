@@ -39,7 +39,8 @@ pub use config::{
     resolve_client_identity_material_dir_from_config,
     resolve_client_public_cert_material_dir_from_config,
     resolve_server_cert_material_dir_from_config, resolve_server_config_from_cli,
-    resolve_server_hostname_from_config, resolve_terminating_hostnames_from_config,
+    resolve_server_hostname_from_config, resolve_server_hostname_runtime_override,
+    resolve_terminating_hostnames_from_config,
 };
 pub use hostname::{PublicHostname, PublicHostnameError, ServerHostname, ServerHostnameError};
 pub use identity::{

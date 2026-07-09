@@ -42,8 +42,9 @@ For `runewarp server`, config/runtime precedence is:
 1. an explicit `--config` path selects that file and a missing explicit path remains an error
 2. otherwise, the discovered default config file is selected
 3. `runewarp server --hostname <HOSTNAME>` replaces `server.hostname` from the selected config before validation
+4. when `--hostname` is omitted, `RUNEWARP_SERVER_HOSTNAME` replaces `server.hostname` from the selected config before validation
 
-The Server runtime stays config-file-first: only `server.hostname` is overridable at runtime, and the flag belongs only to the runtime `runewarp server` command.
+The Server runtime stays config-file-first: only `server.hostname` is overridable at runtime, with precedence `--hostname` > `RUNEWARP_SERVER_HOSTNAME` > `server.hostname`, and the flag belongs only to the runtime `runewarp server` command.
 
 For `runewarp client`, config/runtime precedence is:
 
@@ -167,7 +168,7 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 
 | Key | Required | Notes |
 | --- | --- | --- |
-| `server.hostname` | yes | **Server hostname** for the Runewarp edge itself. Used for TLS validation and ACME. On the runtime `runewarp server` command only, `--hostname` may replace this value before validation. |
+| `server.hostname` | yes | **Server hostname** for the Runewarp edge itself. Used for TLS validation and ACME. On the runtime `runewarp server` command only, `--hostname` or `RUNEWARP_SERVER_HOSTNAME` may replace this value before validation, with `--hostname` taking precedence. |
 | `server.cert-dir` | no | Directory containing manual/private-CA Server material. Defaults to the XDG Server material path when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
 | `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
 | `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** **Tunnel connections**. Defaults to `0.0.0.0:443`. |
@@ -248,7 +249,7 @@ Runewarp supports two Client trust modes:
 
 - `runewarp server` requires a `[server]` section
 - `runewarp client` requires either a selected `[client]` section or both runtime routing flags when no selected Client config exists or the selected file has no `[client]` section
-- `server.hostname` must be present unless the runtime `runewarp server --hostname` flag supplies it
+- `server.hostname` must be present unless the runtime `runewarp server --hostname` flag or `RUNEWARP_SERVER_HOSTNAME` supplies it
 - `[server.acme]` and `server.cert-dir` are mutually exclusive; when `[server.acme]` is absent, Runewarp uses the manual/private-CA path with `server.cert-dir` or its default XDG location
 - `runewarp client` must end up with at least one effective **Server address** after any allowed `--server-address` overlay
 - `client.server-address` and `client.server-addresses` are mutually exclusive

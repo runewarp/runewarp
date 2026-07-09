@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Added the runtime-only `runewarp server --hostname <HOSTNAME>` override so one shared Server config can inject the effective Server hostname before validation, Server certificate checks, and Server ACME setup. (#138)
+- Added the narrow `RUNEWARP_SERVER_HOSTNAME` override for `runewarp server`, `runewarp server cert init`, and `runewarp server cert rotate-ca`, with precedence between `--hostname` and `server.hostname`. (#144)
 
 ### Changed
 

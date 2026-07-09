@@ -192,6 +192,59 @@ cert-dir = "configured/server-cert"
 }
 
 #[test]
+fn server_cert_init_uses_the_environment_hostname_when_hostname_is_omitted() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/server-cert");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[server]
+hostname = "configured.example.test"
+cert-dir = "configured/server-cert"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("RUNEWARP_SERVER_HOSTNAME", "env.example.test")
+        .args(["server", "cert", "init", "--config", "server.toml"])
+        .assert()
+        .success();
+
+    let stored_hostname =
+        fs::read_to_string(configured_dir.join("state/server-hostname.txt")).unwrap();
+    assert_eq!(stored_hostname.trim(), "env.example.test");
+}
+
+#[test]
+fn server_cert_init_hostname_flag_wins_over_the_environment_override() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("RUNEWARP_SERVER_HOSTNAME", "env.example.test")
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "server-cert",
+            "--hostname",
+            "cli.example.test",
+        ])
+        .assert()
+        .success();
+
+    let stored_hostname =
+        fs::read_to_string(tempdir.path().join("server-cert/state/server-hostname.txt")).unwrap();
+    assert_eq!(stored_hostname.trim(), "cli.example.test");
+}
+
+#[test]
 fn server_cert_init_rejects_a_hostname_that_conflicts_with_config() {
     let tempdir = tempdir().unwrap();
     fs::create_dir_all(tempdir.path().join("configured")).unwrap();
@@ -378,6 +431,49 @@ cert-dir = "configured/server-cert"
 }
 
 #[test]
+fn server_cert_rotate_ca_uses_the_environment_hostname_when_hostname_is_omitted() {
+    let tempdir = tempdir().unwrap();
+    let configured_dir = tempdir.path().join("configured/server-cert");
+    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[server]
+hostname = "configured.example.test"
+cert-dir = "configured/server-cert"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "configured/server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("RUNEWARP_SERVER_HOSTNAME", "env-rotated.example.test")
+        .args(["server", "cert", "rotate-ca", "--config", "server.toml"])
+        .assert()
+        .success();
+
+    let stored_hostname =
+        fs::read_to_string(configured_dir.join("state/server-hostname.txt")).unwrap();
+    assert_eq!(stored_hostname.trim(), "env-rotated.example.test");
+}
+
+#[test]
 fn server_cert_rotate_ca_rejects_a_hostname_that_conflicts_with_config() {
     let tempdir = tempdir().unwrap();
     let configured_dir = tempdir.path().join("configured/server-cert");
@@ -472,6 +568,38 @@ cert-dir = "configured/server-cert"
         original_server_certificate,
         "renew should use the configured material directory",
     );
+}
+
+#[test]
+fn server_cert_renew_is_unaffected_by_the_environment_hostname_override() {
+    let tempdir = tempdir().unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "cert",
+            "init",
+            "--dir",
+            "server-cert",
+            "--hostname",
+            "tunnel.example.test",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .env("RUNEWARP_SERVER_HOSTNAME", "bad_hostname.test")
+        .args(["server", "cert", "renew", "--dir", "server-cert"])
+        .assert()
+        .success();
+
+    let stored_hostname =
+        fs::read_to_string(tempdir.path().join("server-cert/state/server-hostname.txt")).unwrap();
+    assert_eq!(stored_hostname.trim(), "tunnel.example.test");
 }
 
 #[test]

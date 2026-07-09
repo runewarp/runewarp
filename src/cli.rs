@@ -81,7 +81,8 @@ pub struct ServerArgs {
     /// Use an explicit config file instead of the default Runewarp config path.
     #[arg(short = 'c', long, value_name = "PATH", global = true)]
     pub config: Option<PathBuf>,
-    /// Override the configured Server hostname for the runtime Server command.
+    /// Override the Server hostname for the runtime Server command. Beats
+    /// RUNEWARP_SERVER_HOSTNAME and server.hostname from config.
     #[arg(long, value_name = "HOSTNAME")]
     pub hostname: Option<String>,
     #[command(subcommand)]
@@ -124,7 +125,8 @@ pub struct ServerCertInitArgs {
     /// Write certificate material into this directory.
     #[arg(long = "dir", value_name = "DIR")]
     pub dir: Option<PathBuf>,
-    /// Use this Server hostname instead of reading it from config.
+    /// Use this Server hostname instead of reading
+    /// RUNEWARP_SERVER_HOSTNAME or server.hostname from config.
     #[arg(long, value_name = "HOSTNAME")]
     pub hostname: Option<String>,
 }

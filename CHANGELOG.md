@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Added managed Server authorization apply: the Managed-session Server adapter atomically commits Control-published Tunnel authorization, defers **Server readiness** until the first successful apply, retains prior authorization on rejected candidates, and reports applied revisions over the Control session. (#155)
+- Added managed Server authorization apply: the Managed-session Server adapter atomically commits Control-published Tunnel authorization, defers **Server readiness** until the first successful apply, retains prior authorization on rejected candidates, and reports applied revisions over the Control session. (#185)
 - Added the role-neutral Managed-session engine that validates Server/Client snapshot inputs, applies them through a role-adapter seam, and reports the last successfully applied opaque revision on the same authenticated HTTP/2 connection as the SSE downlink. (#184)
 - Added the role-neutral Managed-session Control downlink: mutually authenticated HTTP/2, exact role-specific SSE paths, snapshot envelope validation, 60-second first-snapshot and silence windows, and full-jitter reconnect that replaces the whole connection on failure. (#166)
 - Added managed-mode `[control]` configuration with `control.address`, `control.trust`, and `control.ca-file`, runtime `--control-address` on `runewarp server` and `runewarp client`, and managed-only `server.identity-dir` for Server identity material. (#165)

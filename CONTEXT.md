@@ -145,7 +145,7 @@ The externally observable ingress-admission signal for a **Server**. When **Serv
 _Avoid_: Graceful shutdown, tunnel coverage, health
 
 **Graceful shutdown**:
-The bounded orderly-shutdown lifecycle for a Runewarp component where shutdown behavior is deliberate rather than abrupt. For a **Server**, this includes leaving readiness immediately and allowing already-landed visitor work a bounded wind-down before exit. For a **Client**, this includes orderly tunnel-connection shutdown behavior before exit.
+The bounded orderly-shutdown lifecycle for a Runewarp component where shutdown behavior is deliberate rather than abrupt. For a **Server**, this includes leaving readiness immediately and allowing already-landed visitor work a bounded wind-down before exit; in **Managed mode**, the **Managed session** stays active through that drain so Authorization changes still apply, and the session ends only when the HTTP/2 connection closes at final process exit. For a **Client**, this includes orderly tunnel-connection shutdown behavior before exit.
 _Avoid_: Crash, readiness, Fast shutdown
 
 **Fast shutdown**:

@@ -119,7 +119,6 @@ impl TunnelRegistry {
     ) -> LiveWorkDispatch {
         let previous = self.authorization.current();
         let next = self.authorization.commit(prepared);
-        self.ensure_pool_capacity(next.tunnel_count()).await;
 
         let removed_identities = previous
             .trusted_client_identities()
@@ -133,6 +132,11 @@ impl TunnelRegistry {
                 .await
         };
 
+        // Continuity is by Client identity, not Tunnel index. Take members from
+        // every existing pool before resizing, then adopt survivors into the
+        // pool that matches their identity under the new snapshot.
+        self.realign_pools_to_snapshot(&next).await;
+
         let streams_reset = self.reset_streams_not_authorized_by(&next);
 
         LiveWorkDispatch {
@@ -141,11 +145,28 @@ impl TunnelRegistry {
         }
     }
 
-    #[allow(dead_code)] // called from commit_authorization
-    async fn ensure_pool_capacity(&self, tunnel_count: usize) {
+    async fn realign_pools_to_snapshot(&self, snapshot: &AuthorizationSnapshot) {
         let mut pools = self.tunnel_pools.write().await;
-        while pools.len() < tunnel_count {
+        let mut taken = Vec::new();
+        for pool in pools.iter() {
+            taken.extend(pool.take_members().await);
+        }
+        while pools.len() < snapshot.tunnel_count() {
             pools.push(ActiveClientPool::new());
+        }
+        pools.truncate(snapshot.tunnel_count());
+
+        for member in taken {
+            let Some(tunnel_index) =
+                snapshot.tunnel_index_for_client_identity(&member.client_identity)
+            else {
+                // Identity was revoked; close_connections_for_identities already
+                // closed the QUIC connection. Drop the detached member.
+                continue;
+            };
+            if let Some(pool) = pools.get(tunnel_index) {
+                pool.adopt_member(member).await;
+            }
         }
     }
 
@@ -199,7 +220,6 @@ impl TunnelRegistry {
         closed
     }
 
-    #[allow(dead_code)] // called from commit_authorization
     pub(crate) async fn close_connections_for_identities(
         &self,
         identities: &HashSet<ClientIdentity>,
@@ -464,6 +484,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_authorization_rehomes_surviving_connection_when_tunnel_index_shifts()
+    -> io::Result<()> {
+        let first_identity = generate_test_client_identity()?;
+        let second_identity = generate_test_client_identity()?;
+        let registry = TunnelRegistry::configured(
+            &server_hostname("tunnel.example.test"),
+            &[
+                ServerTunnelConfig {
+                    public_hostnames: vec![public_hostname("app.example.test")],
+                    authorized_client_identities: vec![first_identity.client_identity.clone()],
+                },
+                ServerTunnelConfig {
+                    public_hostnames: vec![public_hostname("api.example.test")],
+                    authorized_client_identities: vec![second_identity.client_identity.clone()],
+                },
+            ],
+        )?;
+
+        let first_fixture = TunnelConnectionFixture::connect(&first_identity).await?;
+        let second_fixture = TunnelConnectionFixture::connect(&second_identity).await?;
+        registry.register(first_fixture.server_connection).await;
+        registry
+            .register(second_fixture.server_connection.clone())
+            .await;
+        assert!(matches!(
+            registry
+                .route_tunnel_connection(&public_hostname("api.example.test"))
+                .await,
+            TunnelRouteOutcome::Connected(_)
+        ));
+
+        let revoke_first = registry.authorization().prepare(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                public_hostnames: vec![public_hostname("api.example.test")],
+                authorized_client_identities: vec![second_identity.client_identity.clone()],
+            }],
+        )?;
+        let dispatch = registry.commit_authorization(revoke_first).await;
+        assert_eq!(dispatch.connections_closed, 1);
+        assert_eq!(registry.pool_count().await, 1);
+        assert_eq!(
+            registry
+                .authorization()
+                .current()
+                .tunnel_index_for_client_identity(&second_identity.client_identity),
+            Some(0)
+        );
+
+        let routed = registry
+            .route_tunnel_connection(&public_hostname("api.example.test"))
+            .await;
+        assert!(
+            matches!(routed, TunnelRouteOutcome::Connected(_)),
+            "surviving Client identity must remain routable after lower Tunnel index is removed"
+        );
+        assert!(matches!(
+            registry
+                .route_tunnel_connection(&public_hostname("app.example.test"))
+                .await,
+            TunnelRouteOutcome::Unauthorized
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn commit_authorization_grows_pools_and_revokes_removed_identities() -> io::Result<()> {
         let first_identity = generate_test_client_identity()?;
         let second_identity = generate_test_client_identity()?;
@@ -696,6 +782,136 @@ mod tests {
         assert_eq!(registry.tracked_visitor_stream_count(), 0);
 
         keep_running.store(false, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_authorization_resets_only_removed_hostname_streams() -> io::Result<()> {
+        let identity = generate_test_client_identity()?;
+        let registry = TunnelRegistry::configured(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                public_hostnames: vec![
+                    public_hostname("app.example.test"),
+                    public_hostname("api.example.test"),
+                ],
+                authorized_client_identities: vec![identity.client_identity.clone()],
+            }],
+        )?;
+
+        let keep_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let app_keep = keep_running.clone();
+        let api_keep = keep_running.clone();
+        let app_task = tokio::spawn(async move {
+            while app_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        });
+        let api_task = tokio::spawn(async move {
+            while api_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        });
+
+        registry.track_visitor_stream(
+            public_hostname("app.example.test"),
+            1,
+            identity.client_identity.clone(),
+            app_task.abort_handle(),
+        );
+        registry.track_visitor_stream(
+            public_hostname("api.example.test"),
+            1,
+            identity.client_identity.clone(),
+            api_task.abort_handle(),
+        );
+
+        let hostname_only = registry.authorization().prepare(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                public_hostnames: vec![public_hostname("app.example.test")],
+                authorized_client_identities: vec![identity.client_identity.clone()],
+            }],
+        )?;
+        let dispatch = registry.commit_authorization(hostname_only).await;
+        assert_eq!(dispatch.connections_closed, 0);
+        assert_eq!(dispatch.streams_reset, 1);
+        assert!(
+            api_task
+                .await
+                .expect_err("removed Public hostname stream should abort")
+                .is_cancelled()
+        );
+        assert_eq!(
+            registry.tracked_visitor_hostnames(),
+            vec![public_hostname("app.example.test")]
+        );
+        assert!(
+            registry
+                .authorization()
+                .current()
+                .authorizes_client_identity(&identity.client_identity)
+        );
+
+        keep_running.store(false, std::sync::atomic::Ordering::Relaxed);
+        app_task
+            .await
+            .expect("surviving Public hostname stream should finish normally");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_commit_prepare_failure_does_not_restore_revoked_authorization() -> io::Result<()>
+    {
+        let first = generate_test_client_identity()?;
+        let second = generate_test_client_identity()?;
+        let registry = TunnelRegistry::configured(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                public_hostnames: vec![public_hostname("app.example.test")],
+                authorized_client_identities: vec![first.client_identity.clone()],
+            }],
+        )?;
+
+        let revoke = registry.authorization().prepare(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                public_hostnames: vec![public_hostname("app.example.test")],
+                authorized_client_identities: vec![second.client_identity.clone()],
+            }],
+        )?;
+        let _ = registry.commit_authorization(revoke).await;
+        assert!(
+            !registry
+                .authorization()
+                .current()
+                .authorizes_client_identity(&first.client_identity)
+        );
+
+        let invalid = registry.authorization().prepare(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                public_hostnames: vec![],
+                authorized_client_identities: vec![first.client_identity.clone()],
+            }],
+        );
+        assert!(
+            invalid.is_err(),
+            "invalid candidate must fail before commit"
+        );
+        assert!(
+            !registry
+                .authorization()
+                .current()
+                .authorizes_client_identity(&first.client_identity),
+            "failed prepare must never restore a revoked Client identity"
+        );
+        assert!(
+            registry
+                .authorization()
+                .current()
+                .authorizes_client_identity(&second.client_identity)
+        );
         Ok(())
     }
 

@@ -79,7 +79,7 @@ Managed mode introduces a separate trust boundary for the Control endpoint:
 3. the Client and Server validate the Control endpoint through `control.trust = "system"` or through `control.trust = "ca-file"` with an exclusive CA bundle
 4. Control sessions require mutually authenticated TLS with mandatory HTTP/2 ALPN; Core does not follow Control redirects and does not fall back to HTTP/1.1
 5. Applied-state reports share that same authenticated connection after the role-specific SSE downlink is active and carry only the last successfully applied opaque revision
-6. Managed Server authorization replaces Public-hostname routing and Client-identity handshake admission together from one immutable snapshot. Invalid candidates are rejected as a whole; the prior snapshot and readiness remain. A valid empty Tunnel collection may stay Ingress-ready while authorizing no work.
+6. Managed Server authorization replaces Public-hostname routing and Client-identity handshake admission together from one immutable snapshot. Invalid candidates are rejected as a whole; the prior snapshot and readiness remain. A valid empty Tunnel collection may stay Ingress-ready while authorizing no work. Removing a Client identity immediately denies new QUIC handshakes and closes that identity's live Tunnel connections and streams; removing only a Public hostname resets matching Visitor streams. Continuity does not use a Cloud Tunnel ID. Unrecoverable failure after an authorization commit begins never restores revoked authorization: readiness drops and the process exits nonzero.
 
 **Server identity** is not the **Server certificate**. The Server certificate still identifies the tunnel endpoint to Clients. Server identity is a pinned public-key identity presented only to Control.
 

@@ -1,9 +1,11 @@
 use std::io;
+use std::time::Duration;
 
 use runewarp::{
     OrderlyShutdown, PreparedServer, QUIC_CLOSE_FLUSH_DURATION, ServerRuntimeArgs, ShutdownMode,
     resolve_server_config_from_cli,
 };
+use tokio::sync::oneshot;
 
 use crate::cli;
 use crate::commands::CommandResult;
@@ -127,6 +129,10 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
         let mut adapter = server
             .authorization_adapter()
             .expect("managed Server config includes an authorization adapter");
+        // Keep the Managed session alive through bounded graceful drain so
+        // Authorization changes still apply. Close it only at final process exit
+        // (no offline/delete request); fast shutdown may close immediately.
+        let (session_stop_tx, session_stop_rx) = oneshot::channel::<()>();
         let session_runtime = session.run(
             &mut adapter,
             |event| async move {
@@ -135,19 +141,26 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
                     &event,
                 );
             },
-            std::future::pending::<()>(),
+            async {
+                let _ = session_stop_rx.await;
+            },
         );
         let server_runtime = server.run_with_shutdown(&shutdown);
         tokio::pin!(session_runtime);
         tokio::pin!(server_runtime);
-        tokio::select! {
+        let server_result = tokio::select! {
             server_result = &mut server_runtime => server_result,
             _ = &mut session_runtime => {
                 return Err(logged_runtime_failure(Box::new(io::Error::other(
                     "managed session stopped unexpectedly",
                 ))));
             }
-        }
+        };
+        // Final process exit: end the ephemeral Managed session with the HTTP/2
+        // connection rather than sending a special offline/delete request.
+        let _ = session_stop_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_millis(500), &mut session_runtime).await;
+        server_result
     } else {
         server.run_with_shutdown(&shutdown).await
     };

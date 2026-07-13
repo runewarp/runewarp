@@ -65,6 +65,13 @@ pub(crate) struct ActiveClientPool {
     next_round_robin_offset: Arc<AtomicU64>,
 }
 
+/// A pool member detached from its previous Tunnel pool without closing the connection.
+pub(crate) struct TakenPoolMember {
+    pub(crate) client_identity: ClientIdentity,
+    connection: Connection,
+    active_streams: Arc<AtomicUsize>,
+}
+
 impl ActiveClientPool {
     pub(crate) fn new() -> Self {
         Self {
@@ -137,7 +144,6 @@ impl ActiveClientPool {
         members.len()
     }
 
-    #[allow(dead_code)] // called from TunnelRegistry::close_connections_for_identities
     pub(crate) async fn close_connections_for_identities(
         &self,
         identities: &std::collections::HashSet<ClientIdentity>,
@@ -152,6 +158,58 @@ impl ActiveClientPool {
             }
         }
         closed
+    }
+
+    /// Remove every live member without closing their connections.
+    ///
+    /// Used when Tunnel indices change across an authorization commit so
+    /// surviving connections can be adopted into the pool that matches their
+    /// Client identity under the new snapshot.
+    pub(crate) async fn take_members(&self) -> Vec<TakenPoolMember> {
+        let members = std::mem::take(&mut *self.members.write().await);
+        members
+            .into_iter()
+            .map(|member| TakenPoolMember {
+                client_identity: member.client_identity,
+                connection: member.connection,
+                active_streams: member.active_streams,
+            })
+            .collect()
+    }
+
+    /// Place a previously taken member into this pool and watch it for close.
+    ///
+    /// Allocates a fresh `member_id` in this pool so a close watcher from the
+    /// member's previous pool cannot remove an unrelated connection that
+    /// happened to share the same per-pool id.
+    pub(crate) async fn adopt_member(&self, member: TakenPoolMember) {
+        let TakenPoolMember {
+            client_identity,
+            connection,
+            active_streams,
+        } = member;
+        let member_id = self.next_member_id.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut members = self.members.write().await;
+            members.push(PoolMember {
+                member_id,
+                client_identity: client_identity.clone(),
+                connection: connection.clone(),
+                active_streams,
+            });
+        }
+
+        let members = self.members.clone();
+        let client_identity_for_close = client_identity;
+        tokio::spawn(async move {
+            let close_error = connection.closed().await;
+            runtime_log::server_tunnel_connection_terminated(
+                &client_identity_for_close,
+                &close_error,
+            );
+            let mut members_guard = members.write().await;
+            members_guard.retain(|member| member.member_id != member_id);
+        });
     }
 
     #[cfg(test)]

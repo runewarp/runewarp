@@ -11,10 +11,12 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use quinn::Endpoint;
 use tokio::net::{TcpListener, TcpSocket};
+use tokio::sync::Notify;
 
 use crate::{
     HANDSHAKE_TIMEOUT, ServerHostname,
@@ -28,6 +30,38 @@ use self::tunnel_registry::TunnelRegistry;
 use self::visitor_stream::VisitorStreamHandler;
 
 pub const QUIC_CLOSE_FLUSH_DURATION: Duration = Duration::from_millis(100);
+
+/// Signals an unrecoverable Server failure that must exit nonzero.
+///
+/// After an authorization commit begins, Core never restores revoked
+/// authorization. Fatal local failures drop readiness and stop the runtime so
+/// an external supervisor can restart into a clean Unready state.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FatalSignal {
+    fired: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl FatalSignal {
+    fn fire(&self) {
+        self.fired.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    fn has_fired(&self) -> bool {
+        self.fired.load(Ordering::SeqCst)
+    }
+
+    async fn wait(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self.has_fired() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
 
 /// How the Server admits authorization and readiness at bind time.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -60,6 +94,7 @@ pub struct Server {
     tunnel_registry: TunnelRegistry,
     visitor_stream_handler: VisitorStreamHandler,
     authorization_adapter: ServerAuthorizationAdapter,
+    fatal: FatalSignal,
 }
 
 struct ReadinessProbe {
@@ -69,23 +104,27 @@ struct ReadinessProbe {
 }
 
 enum NextServerEvent<VisitorAccept, TunnelAccept> {
+    Fatal,
     Shutdown,
     Visitor(VisitorAccept),
     Tunnel(TunnelAccept),
 }
 
-async fn next_server_event<Shutdown, VisitorAccept, TunnelAccept>(
+async fn next_server_event<Fatal, Shutdown, VisitorAccept, TunnelAccept>(
+    fatal: Fatal,
     shutdown: Shutdown,
     public_accept: VisitorAccept,
     tunnel_accept: TunnelAccept,
 ) -> NextServerEvent<VisitorAccept::Output, TunnelAccept::Output>
 where
+    Fatal: Future<Output = ()>,
     Shutdown: Future<Output = ()>,
     VisitorAccept: Future,
     TunnelAccept: Future,
 {
     tokio::select! {
         biased;
+        _ = fatal => NextServerEvent::Fatal,
         _ = shutdown => NextServerEvent::Shutdown,
         accept_result = public_accept => NextServerEvent::Visitor(accept_result),
         incoming = tunnel_accept => NextServerEvent::Tunnel(incoming),
@@ -93,7 +132,11 @@ where
 }
 
 impl ReadinessProbe {
-    async fn bind(bind_addr: SocketAddr, initially_ready: bool) -> io::Result<Self> {
+    async fn bind(
+        bind_addr: SocketAddr,
+        initially_ready: bool,
+        fatal: FatalSignal,
+    ) -> io::Result<Self> {
         // Reserve the readiness port at startup. For managed admission, keep the
         // socket bound without listen() so probes stay Unready and no other
         // process can claim the port, then listen only after the first apply.
@@ -134,12 +177,17 @@ impl ReadinessProbe {
                         accept_readiness_connections(listener).await;
                     }
                     Err(error) => {
+                        // Authorization already committed when mark_ready ran.
+                        // Never restore revoked authorization: drop readiness
+                        // intent and fail the process for supervisor restart.
                         runtime_log::emit(
                             runtime_log::EventLevel::Error,
                             &format!(
                                 "failed to listen on server readiness address {bind_address}: {error}"
                             ),
                         );
+                        accept_gate.mark_not_ready();
+                        fatal.fire();
                     }
                 }
             })
@@ -219,8 +267,11 @@ impl Server {
             )
         })?;
         let initially_ready = config.admission == ServerAdmission::Static;
+        let fatal = FatalSignal::default();
         let readiness_probe = match config.readiness_bind_addr {
-            Some(bind_addr) => Some(ReadinessProbe::bind(bind_addr, initially_ready).await?),
+            Some(bind_addr) => {
+                Some(ReadinessProbe::bind(bind_addr, initially_ready, fatal.clone()).await?)
+            }
             None => None,
         };
         if let Some(readiness_probe) = readiness_probe.as_ref() {
@@ -243,6 +294,7 @@ impl Server {
             tunnel_registry,
             visitor_stream_handler,
             authorization_adapter,
+            fatal,
         })
     }
 
@@ -266,21 +318,49 @@ impl Server {
     }
 
     pub async fn run(self) -> io::Result<()> {
+        let Self {
+            public_listener,
+            tunnel_endpoint,
+            readiness_probe,
+            tunnel_registry,
+            visitor_stream_handler,
+            authorization_adapter: _,
+            fatal,
+        } = self;
         loop {
-            tokio::select! {
-                accept_result = self.public_listener.accept() => {
+            match next_server_event(
+                async {
+                    fatal.wait().await;
+                },
+                std::future::pending::<()>(),
+                public_listener.accept(),
+                tunnel_endpoint.accept(),
+            )
+            .await
+            {
+                NextServerEvent::Fatal => {
+                    if let Some(readiness_probe) = readiness_probe {
+                        runtime_log::server_readiness_lost(readiness_probe.bind_address());
+                        readiness_probe.close();
+                    }
+                    return Err(io::Error::other(
+                        "unrecoverable server failure after authorization commit",
+                    ));
+                }
+                NextServerEvent::Shutdown => return Ok(()),
+                NextServerEvent::Visitor(accept_result) => {
                     let (visitor_stream, _) = accept_result?;
-                    let visitor_stream_handler = self.visitor_stream_handler.clone();
+                    let visitor_stream_handler = visitor_stream_handler.clone();
                     tokio::spawn(async move {
                         let _ = visitor_stream_handler.handle(visitor_stream).await;
                     });
                 }
-                incoming = self.tunnel_endpoint.accept() => {
+                NextServerEvent::Tunnel(incoming) => {
                     let Some(incoming) = incoming else {
                         return Ok(());
                     };
 
-                    let tunnel_registry = self.tunnel_registry.clone();
+                    let tunnel_registry = tunnel_registry.clone();
                     tokio::spawn(async move {
                         register_tunnel_connection(tunnel_registry, incoming).await;
                     });
@@ -316,9 +396,13 @@ impl Server {
             tunnel_registry,
             visitor_stream_handler,
             authorization_adapter: _,
+            fatal,
         } = self;
         loop {
             match next_server_event(
+                async {
+                    fatal.wait().await;
+                },
                 async {
                     let _ = shutdown.wait_started().await;
                 },
@@ -327,6 +411,17 @@ impl Server {
             )
             .await
             {
+                NextServerEvent::Fatal => {
+                    if let Some(readiness_probe) = readiness_probe {
+                        runtime_log::server_readiness_lost(readiness_probe.bind_address());
+                        readiness_probe.close();
+                    }
+                    drop(public_listener);
+                    drop(tunnel_endpoint);
+                    return Err(io::Error::other(
+                        "unrecoverable server failure after authorization commit",
+                    ));
+                }
                 NextServerEvent::Shutdown => break,
                 NextServerEvent::Visitor(accept_result) => {
                     let (visitor_stream, _) = accept_result?;
@@ -415,14 +510,30 @@ mod tests {
     use std::future::ready;
     use std::time::Duration;
 
-    use super::{NextServerEvent, QUIC_CLOSE_FLUSH_DURATION, next_server_event};
+    use super::{FatalSignal, NextServerEvent, QUIC_CLOSE_FLUSH_DURATION, next_server_event};
     use crate::shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
 
     #[tokio::test]
     async fn shutdown_wins_when_accepts_are_also_ready() {
-        let event = next_server_event(ready(()), ready("visitor"), ready("tunnel")).await;
+        let event = next_server_event(
+            std::future::pending::<()>(),
+            ready(()),
+            ready("visitor"),
+            ready("tunnel"),
+        )
+        .await;
 
         assert!(matches!(event, NextServerEvent::Shutdown));
+    }
+
+    #[tokio::test]
+    async fn fatal_wins_over_shutdown_and_accepts() {
+        let fatal = FatalSignal::default();
+        fatal.fire();
+        let event =
+            next_server_event(fatal.wait(), ready(()), ready("visitor"), ready("tunnel")).await;
+
+        assert!(matches!(event, NextServerEvent::Fatal));
     }
 
     #[test]

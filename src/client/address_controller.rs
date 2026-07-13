@@ -60,15 +60,19 @@ impl AddressWorkerControl {
 
 struct WorkerSlot {
     maintenance_tx: watch::Sender<MaintenanceIntent>,
+    generation: u64,
 }
+
+type RunningWorker = BoxFuture<'static, (ServerAddress, u64, Result<(), String>)>;
 
 /// Owns address-worker lifecycle keyed by normalized Server address.
 pub struct AddressController {
     workers: HashMap<ServerAddress, WorkerSlot>,
-    running: FuturesUnordered<BoxFuture<'static, (ServerAddress, Result<(), String>)>>,
+    running: FuturesUnordered<RunningWorker>,
     ready_logged: Arc<AtomicBool>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
+    next_generation: u64,
 }
 
 /// Signals process shutdown to every address worker without borrowing the controller mutably.
@@ -98,6 +102,7 @@ impl AddressController {
             ready_logged: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
             shutdown_rx,
+            next_generation: 1,
         }
     }
 
@@ -129,40 +134,29 @@ impl AddressController {
         }
     }
 
-    /// Start maintaining `address`, or re-adopt a Retiring worker for it.
+    /// Start maintaining `address`, or re-adopt a live Retiring worker for it.
     ///
-    /// Returns `false` when a Maintain worker already exists (duplicate prevention).
+    /// Returns `false` when a live Maintain worker already exists (duplicate prevention).
+    /// If a previous worker has already exited but has not been reaped yet, the stale
+    /// slot is replaced by a newly spawned worker.
     pub fn add<F, Fut>(&mut self, address: ServerAddress, spawn: F) -> bool
     where
         F: FnOnce(ServerAddress, AddressWorkerControl) -> Fut,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
         if let Some(slot) = self.workers.get(&address) {
-            let current = *slot.maintenance_tx.borrow();
-            if current == MaintenanceIntent::Maintain {
-                return false;
+            if slot.is_live() {
+                let current = *slot.maintenance_tx.borrow();
+                if current == MaintenanceIntent::Maintain {
+                    return false;
+                }
+                let _ = slot.maintenance_tx.send(MaintenanceIntent::Maintain);
+                return true;
             }
-            let _ = slot.maintenance_tx.send(MaintenanceIntent::Maintain);
-            return true;
+            self.workers.remove(&address);
         }
 
-        let (maintenance_tx, maintenance_rx) = watch::channel(MaintenanceIntent::Maintain);
-        let control = AddressWorkerControl {
-            maintenance: maintenance_rx,
-            shutdown: self.shutdown_rx.clone(),
-            ready_logged: Arc::clone(&self.ready_logged),
-        };
-        let worker_address = address.clone();
-        let future = spawn(address.clone(), control);
-        let join = tokio::spawn(future);
-        self.running.push(Box::pin(async move {
-            let result = match join.await {
-                Ok(result) => result,
-                Err(join_error) => Err(join_error.to_string()),
-            };
-            (worker_address, result)
-        }));
-        self.workers.insert(address, WorkerSlot { maintenance_tx });
+        self.spawn_worker(address, spawn);
         true
     }
 
@@ -170,23 +164,26 @@ impl AddressController {
     ///
     /// Establishing / reconnecting workers should exit after observing
     /// [`MaintenanceIntent::Retire`]. Connected workers stay Retiring until remote
-    /// closure or process shutdown. Returns `false` when no worker exists.
+    /// closure or process shutdown. Returns `false` when no live worker exists.
     pub fn remove(&mut self, address: &ServerAddress) -> bool {
         let Some(slot) = self.workers.get(address) else {
             return false;
         };
+        if !slot.is_live() {
+            return false;
+        }
         let _ = slot.maintenance_tx.send(MaintenanceIntent::Retire);
         true
     }
 
-    /// Restore maintenance for a Retiring address without starting a second dial loop.
+    /// Restore maintenance for a live Retiring address without starting a second dial loop.
     ///
-    /// Returns `false` when no Retiring worker exists for `address`.
+    /// Returns `false` when no live Retiring worker exists for `address`.
     pub fn re_adopt(&mut self, address: &ServerAddress) -> bool {
         let Some(slot) = self.workers.get(address) else {
             return false;
         };
-        if *slot.maintenance_tx.borrow() != MaintenanceIntent::Retire {
+        if !slot.is_live() || *slot.maintenance_tx.borrow() != MaintenanceIntent::Retire {
             return false;
         }
         let _ = slot.maintenance_tx.send(MaintenanceIntent::Maintain);
@@ -206,15 +203,18 @@ impl AddressController {
         let existing: Vec<ServerAddress> = self.workers.keys().cloned().collect();
         for address in existing {
             if desired_set.contains(&address) {
-                if self.maintenance_intent(&address) == Some(MaintenanceIntent::Retire) {
-                    let _ = self.re_adopt(&address);
+                if self.maintenance_intent(&address) == Some(MaintenanceIntent::Retire)
+                    && !self.re_adopt(&address)
+                {
+                    // Stale Retiring slot: fall through to spawn below.
+                    self.workers.remove(&address);
                 }
             } else if self.maintenance_intent(&address) == Some(MaintenanceIntent::Maintain) {
                 let _ = self.remove(&address);
             }
         }
         for address in desired {
-            if !self.contains(address) {
+            if !self.contains(address) || !self.worker_is_live(address) {
                 let _ = self.add(address.clone(), &mut spawn);
             }
         }
@@ -231,18 +231,29 @@ impl AddressController {
         }
     }
 
-    /// Wait for the next worker completion and drop its slot.
+    /// Wait for the next current worker completion and drop its slot.
     ///
-    /// Unexpected worker failures are returned as `Err`. Clean completion is `Ok`.
+    /// Completions from workers that were already replaced are ignored so a stale
+    /// exit cannot clear a respawned slot. Unexpected worker failures are returned
+    /// as `Err`. Clean completion is `Ok`.
     pub async fn next_completion(
         &mut self,
     ) -> Option<Result<ServerAddress, (ServerAddress, String)>> {
-        let (address, result) = self.running.next().await?;
-        self.workers.remove(&address);
-        Some(match result {
-            Ok(()) => Ok(address),
-            Err(error) => Err((address, error)),
-        })
+        while let Some((address, generation, result)) = self.running.next().await {
+            let is_current = self
+                .workers
+                .get(&address)
+                .is_some_and(|slot| slot.generation == generation);
+            if !is_current {
+                continue;
+            }
+            self.workers.remove(&address);
+            return Some(match result {
+                Ok(()) => Ok(address),
+                Err(error) => Err((address, error)),
+            });
+        }
+        None
     }
 
     /// Drive workers until every slot has completed, or one fails unexpectedly.
@@ -255,6 +266,49 @@ impl AddressController {
             }
         }
         Ok(())
+    }
+
+    fn worker_is_live(&self, address: &ServerAddress) -> bool {
+        self.workers.get(address).is_some_and(WorkerSlot::is_live)
+    }
+
+    fn spawn_worker<F, Fut>(&mut self, address: ServerAddress, spawn: F)
+    where
+        F: FnOnce(ServerAddress, AddressWorkerControl) -> Fut,
+        Fut: Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.saturating_add(1);
+
+        let (maintenance_tx, maintenance_rx) = watch::channel(MaintenanceIntent::Maintain);
+        let control = AddressWorkerControl {
+            maintenance: maintenance_rx,
+            shutdown: self.shutdown_rx.clone(),
+            ready_logged: Arc::clone(&self.ready_logged),
+        };
+        let worker_address = address.clone();
+        let future = spawn(address.clone(), control);
+        let join = tokio::spawn(future);
+        self.running.push(Box::pin(async move {
+            let result = match join.await {
+                Ok(result) => result,
+                Err(join_error) => Err(join_error.to_string()),
+            };
+            (worker_address, generation, result)
+        }));
+        self.workers.insert(
+            address,
+            WorkerSlot {
+                maintenance_tx,
+                generation,
+            },
+        );
+    }
+}
+
+impl WorkerSlot {
+    fn is_live(&self) -> bool {
+        self.maintenance_tx.receiver_count() > 0
     }
 }
 
@@ -354,6 +408,54 @@ mod tests {
             .run_until_idle()
             .await
             .expect("shutdown should drain workers");
+    }
+
+    #[tokio::test]
+    async fn add_respawns_after_a_worker_exits_before_completion_is_reaped() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let (exit_tx, exit_rx) = oneshot::channel::<()>();
+        let mut controller = AddressController::new();
+        let target = address("tunnel.example.test");
+        let starts_for_spawn = Arc::clone(&starts);
+
+        assert!(controller.add(target.clone(), {
+            let starts_for_spawn = Arc::clone(&starts_for_spawn);
+            move |_address, control| {
+                starts_for_spawn.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let _ = exit_tx.send(());
+                    // Drop control so the maintenance watch closes while the slot remains.
+                    drop(control);
+                    Ok(())
+                }
+            }
+        }));
+        exit_rx.await.expect("first worker should exit");
+        wait_until(|| starts.load(Ordering::SeqCst) == 1).await;
+        assert!(controller.contains(&target));
+
+        assert!(controller.add(target.clone(), {
+            let starts_for_spawn = Arc::clone(&starts_for_spawn);
+            move |_address, control| {
+                starts_for_spawn.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    wait_for_shutdown(&control).await;
+                    Ok(())
+                }
+            }
+        }));
+        wait_until(|| starts.load(Ordering::SeqCst) == 2).await;
+        assert_eq!(
+            controller.maintenance_intent(&target),
+            Some(MaintenanceIntent::Maintain)
+        );
+
+        controller.request_shutdown();
+        controller
+            .run_until_idle()
+            .await
+            .expect("shutdown should drain workers");
+        assert_eq!(controller.worker_count(), 0);
     }
 
     #[tokio::test]

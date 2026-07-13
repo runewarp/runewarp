@@ -3,7 +3,7 @@ use std::io::Cursor;
 use runewarp::{CLIENT_CERT_LIFETIME_DAYS, generate_client_identity};
 
 #[test]
-fn generated_client_certificate_uses_the_phase_two_default_lifetime() {
+fn generated_client_certificate_uses_a_hundred_year_lifetime() {
     let generated = generate_client_identity().unwrap();
     let certificate_der = rustls_pemfile::certs(&mut Cursor::new(generated.certificate_pem))
         .next()
@@ -13,5 +13,6 @@ fn generated_client_certificate_uses_the_phase_two_default_lifetime() {
     let lifetime = certificate.validity().not_after.to_datetime()
         - certificate.validity().not_before.to_datetime();
 
+    assert_eq!(CLIENT_CERT_LIFETIME_DAYS, 36_500);
     assert_eq!(lifetime.whole_days(), CLIENT_CERT_LIFETIME_DAYS as i64);
 }

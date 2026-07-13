@@ -241,8 +241,6 @@ pub struct ClientIdentityArgs {
 pub enum ClientIdentitySubcommand {
     /// Initialize Client identity.
     Init(ClientIdentityDirArgs),
-    /// Renew Client identity certificates.
-    Renew(ClientIdentityDirArgs),
     /// Rotate Client identity.
     Rotate(ClientIdentityDirArgs),
     /// Show the Client identity fingerprint.

@@ -73,12 +73,12 @@ Static fanout does not change these trust boundaries. When a Client dials multip
 
 `runewarp client identity init` creates a Client keypair, an initial self-signed certificate, and `client-identity.txt`.
 
-Ordinary certificate renewal is expected to keep the same key:
+Self-hosted Client identity certificates are operationally non-expiring key carriers:
 
-- certificates are valid for **90 days**
-- the Client renews them at **60 days**
-- renewal happens before the initial connect and before reconnect attempts
-- same-key renewal preserves the `client-identity`
+- newly initialized and rotated certificates use a **100-year** validity window
+- the Server authorizes the pinned Client identity from the subject public key and does not validate certificate issuer, chain, SAN, validity window, or revocation state
+- existing shorter-lived certificates remain accepted after their encoded expiry; Core does not rewrite them
+- there is no automatic or manual self-signed Client identity certificate renewal
 
 `runewarp client identity rotate` changes the key and therefore changes the identity.
 

@@ -44,13 +44,11 @@ pub use config::{
 };
 pub use hostname::{PublicHostname, PublicHostnameError, ServerHostname, ServerHostnameError};
 pub use identity::{
-    CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
-    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientCertificateRenewalDecision,
-    ClientCertificateState, ClientIdentity, ClientIdentityMaterialError, GeneratedClientIdentity,
+    CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
+    ClientIdentity, ClientIdentityMaterialError, GeneratedClientIdentity,
     ParseClientIdentityCertificateError, ParseClientIdentityError,
-    client_identity_from_certificate_der, decide_client_certificate_renewal,
-    generate_client_identity, inspect_client_certificate_renewal, read_client_identity,
-    renew_client_identity_certificate, rotate_client_identity,
+    client_identity_from_certificate_der, generate_client_identity, read_client_identity,
+    rotate_client_identity,
 };
 pub use paths::{
     XdgPathError, default_client_acme_state_dir, default_client_identity_material_dir,

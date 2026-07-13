@@ -3,9 +3,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use runewarp::{
-    CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS,
-    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, default_client_identity_material_dir,
-    generate_client_identity, read_client_identity, renew_client_identity_certificate,
+    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
+    default_client_identity_material_dir, generate_client_identity, read_client_identity,
     resolve_client_identity_material_dir_from_config, rotate_client_identity,
 };
 
@@ -18,24 +17,10 @@ pub(crate) fn run(config: Option<PathBuf>, command: cli::ClientIdentityArgs) -> 
             let directory = resolve_client_identity_dir(config, args.dir)?;
             write_client_identity_artifacts(&directory)
         }
-        cli::ClientIdentitySubcommand::Renew(args) => {
-            let directory = resolve_client_identity_dir(config, args.dir)?;
-            let renewed = renew_client_identity_certificate(&directory)?;
-            print_client_identity_summary(
-                "Client identity renewed",
-                &directory,
-                renewed.client_identity,
-            )?;
-            Ok(())
-        }
         cli::ClientIdentitySubcommand::Rotate(args) => {
             let directory = resolve_client_identity_dir(config, args.dir)?;
             let rotated = rotate_client_identity(&directory)?;
-            print_client_identity_summary(
-                "Client identity rotated",
-                &directory,
-                rotated.client_identity,
-            )?;
+            print_client_identity_summary("Client identity rotated", &directory, rotated);
             Ok(())
         }
         cli::ClientIdentitySubcommand::Show(args) => {
@@ -64,7 +49,7 @@ fn write_client_identity_artifacts(directory: &Path) -> Result<(), Box<dyn std::
             "Client identity already exists",
             directory,
             existing_identity,
-        )?;
+        );
         return Ok(());
     }
 
@@ -101,7 +86,7 @@ fn write_client_identity_artifacts(directory: &Path) -> Result<(), Box<dyn std::
         "Client identity initialized",
         directory,
         generated.client_identity,
-    )?;
+    );
     Ok(())
 }
 
@@ -109,29 +94,9 @@ fn print_client_identity_summary(
     headline: &str,
     directory: &Path,
     client_identity: runewarp::ClientIdentity,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let certificate_window = certs::read_certificate_window(&directory.join(CLIENT_CERT_FILENAME))?;
-
+) {
     println!("{headline}: {client_identity}");
     println!("Identity directory: {}", directory.display());
-    println!("Certificate lifetime: {CLIENT_CERT_LIFETIME_DAYS} days");
-    println!("Renewal target: {CLIENT_CERT_RENEW_AFTER_DAYS} days");
-    println!(
-        "Issued at (UTC): {}",
-        certs::format_utc(certificate_window.issued_at)
-    );
-    println!(
-        "Renew after (UTC): {}",
-        certs::format_utc(
-            certificate_window.issued_at
-                + time::Duration::days(CLIENT_CERT_RENEW_AFTER_DAYS as i64),
-        )
-    );
-    println!(
-        "Expires at (UTC): {}",
-        certs::format_utc(certificate_window.expires_at)
-    );
-    Ok(())
 }
 
 fn existing_client_identity_paths(directory: &Path) -> Vec<PathBuf> {

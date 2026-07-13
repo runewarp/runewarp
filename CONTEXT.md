@@ -101,7 +101,7 @@ The operator-run local endpoint that a **Client** connects to after it selects a
 _Avoid_: Service, tunnel
 
 **Client identity**:
-The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime; ordinary renewal preserves it, while rotation changes it. One **Tunnel** may authorize one or more **Client identities**.
+The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime; self-signed Client identity certificates are operationally non-expiring key carriers, while explicit key rotation changes the identity. One **Tunnel** may authorize one or more **Client identities**.
 _Avoid_: Certificate, serial number
 
 **Tunnel pool**:
@@ -226,8 +226,8 @@ _Avoid_: CI environment, deploy target
 > **Dev:** "If I start two **Client instances**, do they need different **Client identities**?"
 > **Domain expert:** "No. They may share one **Client identity** or use separate ones."
 >
-> **Dev:** "If I renew the **Client** certificate, did the **Client identity** change?"
-> **Domain expert:** "No. Ordinary renewal keeps the same key, so the **Client identity** stays the same. Rotation is the identity-changing action."
+> **Dev:** "If the self-signed Client identity certificate expires, did the **Client identity** change?"
+> **Domain expert:** "No. The **Client identity** is the pinned public key. Encoded certificate expiry has no operational effect in pinned-key mode; only explicit key rotation changes the identity."
 >
 > **Dev:** "Why does the manual Server path trust a **Server CA** instead of the leaf cert directly?"
 > **Domain expert:** "Because the **Server CA** signs the **Server certificate**, so the Server leaf can renew without changing the Client's trust anchor."
@@ -286,7 +286,7 @@ _Avoid_: CI environment, deploy target
 - "server address" and "server hostname" were easy to blur — resolved: **Server address** is the client-configured endpoint; **Server hostname** is the hostname form of that endpoint when a hostname is used.
 - "service" and "backend" were used interchangeably — resolved: **Service** is the client-side config unit; **Local backend** is the actual local endpoint the **Client** dials, whether it terminates TLS or receives plaintext.
 - "passthrough" could blur Server behavior with Service behavior — resolved: **TLS passthrough** is the broad traffic behavior, while **TLS mode** is the **Service** setting that can keep passthrough or switch to **Terminate mode**.
-- "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key, while certificates can rotate without changing that identity.
+- "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key; the self-signed certificate is only a key carrier, and only explicit key rotation changes that identity.
 - "server certificate" and the trust anchor behind it were easy to conflate — resolved: **Server certificate** is the presented leaf; **Server CA** is the private issuer in the manual Server path.
 - "ca-file trust" sounded like a file-path detail instead of a trust model — resolved: **Exclusive CA trust** means the **Client** trusts only the configured CA bundle for the **Server certificate**.
 - "public CA" was too vague once Client-side TLS termination existed — resolved: **Public hostname CA** is the issuer for manual **Public hostname certificates**, distinct from the **Server CA**.

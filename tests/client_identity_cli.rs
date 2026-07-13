@@ -3,9 +3,11 @@ use std::io::Cursor;
 use std::path::Path;
 
 use assert_cmd::Command;
+use rcgen::{CertificateParams, KeyPair, PublicKeyData};
 use runewarp::client_identity_from_certificate_der;
 use rustls_pemfile::certs;
 use tempfile::tempdir;
+use time::{Duration, OffsetDateTime};
 
 #[test]
 fn client_identity_init_writes_identity_artifacts_to_the_requested_directory() {
@@ -172,8 +174,65 @@ fn client_identity_init_writes_pem_artifacts_and_a_client_identity() {
             .chars()
             .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
     );
-    assert!(stdout.contains("90 days"));
-    assert!(stdout.contains("60 days"));
+    assert!(stdout.contains(&format!(
+        "Client identity initialized: {}",
+        client_identity.trim()
+    )));
+    assert!(stdout.contains("Identity directory: client-identity"));
+    assert!(!stdout.contains("Certificate lifetime:"));
+    assert!(!stdout.contains("Renewal target:"));
+    assert!(!stdout.contains("Issued at (UTC):"));
+    assert!(!stdout.contains("Renew after (UTC):"));
+    assert!(!stdout.contains("Expires at (UTC):"));
+
+    let certificate_der = certs(&mut Cursor::new(certificate.as_bytes()))
+        .next()
+        .expect("generated certificate")
+        .expect("parse generated certificate");
+    let (_, parsed) = x509_parser::parse_x509_certificate(certificate_der.as_ref()).unwrap();
+    let lifetime =
+        parsed.validity().not_after.to_datetime() - parsed.validity().not_before.to_datetime();
+    assert_eq!(lifetime.whole_days(), 36_500);
+}
+
+#[test]
+fn client_identity_init_leaves_complete_expired_material_unchanged() {
+    let tempdir = tempdir().unwrap();
+    let directory = tempdir.path().join("client-identity");
+    fs::create_dir_all(&directory).unwrap();
+    write_expired_client_identity(&directory);
+
+    let original_private_key = fs::read(directory.join("client.key")).unwrap();
+    let original_certificate = fs::read(directory.join("client.crt")).unwrap();
+    let original_identity = fs::read_to_string(directory.join("client-identity.txt")).unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert_eq!(
+        fs::read(directory.join("client.key")).unwrap(),
+        original_private_key
+    );
+    assert_eq!(
+        fs::read(directory.join("client.crt")).unwrap(),
+        original_certificate
+    );
+    assert_eq!(
+        fs::read_to_string(directory.join("client-identity.txt")).unwrap(),
+        original_identity
+    );
+    assert!(stdout.contains(&format!(
+        "Client identity already exists: {}",
+        original_identity.trim()
+    )));
+    assert!(stdout.contains("Identity directory: client-identity"));
+    assert!(!stdout.contains("Expires at (UTC):"));
 }
 
 #[test]
@@ -247,46 +306,20 @@ fn client_identity_init_rejects_runtime_routing_flags() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn client_identity_renew_reuses_the_existing_key_and_identity() {
+fn client_identity_renew_is_rejected_as_an_unknown_subcommand() {
     let tempdir = tempdir().unwrap();
 
-    Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
-
-    let original_private_key = fs::read(tempdir.path().join("client-identity/client.key")).unwrap();
-    let original_certificate = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
-    let original_identity =
-        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
-
-    Command::cargo_bin("runewarp")
+    let assert = Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
         .args(["client", "identity", "renew", "--dir", "client-identity"])
         .assert()
-        .success();
+        .failure();
 
-    let renewed_private_key = fs::read(tempdir.path().join("client-identity/client.key")).unwrap();
-    let renewed_certificate = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
-    let renewed_identity =
-        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
-    let renewed_certificate_der = certs(&mut Cursor::new(renewed_certificate.clone()))
-        .next()
-        .expect("renewed certificate")
-        .expect("parse renewed certificate");
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
 
-    assert_eq!(renewed_private_key, original_private_key);
-    assert_ne!(renewed_certificate, original_certificate);
-    assert_eq!(renewed_identity, original_identity);
-    assert_eq!(
-        client_identity_from_certificate_der(renewed_certificate_der.as_ref())
-            .unwrap()
-            .to_string(),
-        renewed_identity.trim(),
-    );
+    assert!(stderr.contains("unrecognized subcommand"));
+    assert!(stderr.contains("renew"));
 }
 
 #[test]
@@ -305,7 +338,7 @@ fn client_identity_rotate_replaces_the_key_and_client_identity() {
     let original_identity =
         fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
 
-    Command::cargo_bin("runewarp")
+    let assert = Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
         .args(["client", "identity", "rotate", "--dir", "client-identity"])
@@ -320,6 +353,7 @@ fn client_identity_rotate_replaces_the_key_and_client_identity() {
         .next()
         .expect("rotated certificate")
         .expect("parse rotated certificate");
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
     assert_ne!(rotated_private_key, original_private_key);
     assert_ne!(rotated_certificate, original_certificate);
@@ -330,6 +364,13 @@ fn client_identity_rotate_replaces_the_key_and_client_identity() {
             .to_string(),
         rotated_identity.trim(),
     );
+    assert!(stdout.contains(&format!(
+        "Client identity rotated: {}",
+        rotated_identity.trim()
+    )));
+    assert!(stdout.contains("Identity directory: client-identity"));
+    assert!(!stdout.contains("Certificate lifetime:"));
+    assert!(!stdout.contains("Expires at (UTC):"));
 }
 
 #[test]
@@ -385,9 +426,11 @@ fn client_identity_init_is_idempotent_when_material_already_exists()
 
     assert_eq!(current_identity, original_identity);
     assert!(stdout.contains("Client identity already exists"));
-    assert!(stdout.contains("Issued at (UTC):"));
-    assert!(stdout.contains("Renew after (UTC):"));
-    assert!(stdout.contains("Expires at (UTC):"));
+    assert!(stdout.contains("Identity directory: client-identity"));
+    assert!(!stdout.contains("Issued at (UTC):"));
+    assert!(!stdout.contains("Renew after (UTC):"));
+    assert!(!stdout.contains("Expires at (UTC):"));
+    assert!(!stdout.contains("Certificate lifetime:"));
     assert!(!stdout.contains("os error"));
     Ok(())
 }
@@ -418,8 +461,8 @@ fn client_identity_init_reports_repair_guidance_for_partial_material()
 }
 
 #[test]
-fn client_identity_init_reports_paths_and_utc_timestamps() -> Result<(), Box<dyn std::error::Error>>
-{
+fn client_identity_init_reports_identity_and_directory_only()
+-> Result<(), Box<dyn std::error::Error>> {
     let tempdir = tempdir()?;
 
     let assert = Command::cargo_bin("runewarp")?
@@ -429,11 +472,19 @@ fn client_identity_init_reports_paths_and_utc_timestamps() -> Result<(), Box<dyn
         .success();
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
+    let client_identity =
+        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt"))?;
 
+    assert!(stdout.contains(&format!(
+        "Client identity initialized: {}",
+        client_identity.trim()
+    )));
     assert!(stdout.contains("Identity directory: client-identity"));
-    assert!(stdout.contains("Issued at (UTC):"));
-    assert!(stdout.contains("Renew after (UTC):"));
-    assert!(stdout.contains("Expires at (UTC):"));
+    assert!(!stdout.contains("Issued at (UTC):"));
+    assert!(!stdout.contains("Renew after (UTC):"));
+    assert!(!stdout.contains("Expires at (UTC):"));
+    assert!(!stdout.contains("Certificate lifetime:"));
+    assert!(!stdout.contains("Renewal target:"));
     Ok(())
 }
 
@@ -460,6 +511,27 @@ fn assert_exists(path: &Path) {
         "expected {} to exist after `runewarp client identity init`",
         path.display()
     );
+}
+
+fn write_expired_client_identity(directory: &Path) {
+    let signing_key = KeyPair::generate().unwrap();
+    let not_before = OffsetDateTime::now_utc() - Duration::days(120);
+    let mut certificate_params =
+        CertificateParams::new(vec!["runewarp-client".to_owned()]).unwrap();
+    certificate_params.not_before = not_before;
+    certificate_params.not_after = not_before + Duration::days(90);
+    let certificate = certificate_params.self_signed(&signing_key).unwrap();
+    let client_identity = runewarp::ClientIdentity::from_subject_public_key_info(
+        &signing_key.subject_public_key_info(),
+    );
+
+    fs::write(directory.join("client.key"), signing_key.serialize_pem()).unwrap();
+    fs::write(directory.join("client.crt"), certificate.pem()).unwrap();
+    fs::write(
+        directory.join("client-identity.txt"),
+        client_identity.to_string(),
+    )
+    .unwrap();
 }
 
 #[test]

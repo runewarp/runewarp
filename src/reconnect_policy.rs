@@ -7,40 +7,46 @@ use rand::rngs::StdRng;
 const RETRY_WINDOWS_SECS: [u64; 10] = [1, 2, 3, 5, 8, 12, 18, 27, 41, 60];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RetryDecision {
-    pub(crate) window: Duration,
-    pub(crate) delay: Duration,
-    pub(crate) display_delay_secs: u64,
+pub struct RetryDecision {
+    pub window: Duration,
+    pub delay: Duration,
+    pub display_delay_secs: u64,
 }
 
-pub(crate) struct ReconnectPolicy<R> {
+pub struct ReconnectPolicy<R> {
     retry_count: usize,
     rng: R,
 }
 
 impl ReconnectPolicy<StdRng> {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::new_with_rng(StdRng::from_os_rng())
     }
 }
 
+impl Default for ReconnectPolicy<StdRng> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<R: RngCore> ReconnectPolicy<R> {
-    pub(crate) fn new_with_rng(rng: R) -> Self {
+    pub fn new_with_rng(rng: R) -> Self {
         Self {
             retry_count: 0,
             rng,
         }
     }
 
-    pub(crate) fn is_fresh(&self) -> bool {
+    pub fn is_fresh(&self) -> bool {
         self.retry_count == 0
     }
 
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.retry_count = 0;
     }
 
-    pub(crate) fn next_retry(&mut self) -> RetryDecision {
+    pub fn next_retry(&mut self) -> RetryDecision {
         let window = Duration::from_secs(RETRY_WINDOWS_SECS[self.retry_count]);
         let delay = jitter_delay(window, &mut self.rng);
         self.retry_count = usize::min(self.retry_count + 1, RETRY_WINDOWS_SECS.len() - 1);

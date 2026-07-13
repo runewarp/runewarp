@@ -502,6 +502,35 @@ pub fn client_graceful_shutdown_closing_tunnel_connection() {
     );
 }
 
+pub fn managed_session_snapshot_received(role: &str, revision: &str) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "managed session snapshot received",
+            [
+                ("role", Cow::Borrowed(role)),
+                ("revision", Cow::Borrowed(revision)),
+            ],
+        ),
+    );
+}
+
+pub fn managed_session_reconnecting(role: &str, display_delay_secs: u64) {
+    emit(
+        EventLevel::Warn,
+        &event_line(
+            "managed session reconnecting",
+            [
+                ("role", Cow::Borrowed(role)),
+                (
+                    "next-retry-delay",
+                    Cow::Owned(format!("{display_delay_secs}s")),
+                ),
+            ],
+        ),
+    );
+}
+
 fn shutdown_mode_label(mode: ShutdownMode) -> &'static str {
     match mode {
         ShutdownMode::Graceful => "graceful",

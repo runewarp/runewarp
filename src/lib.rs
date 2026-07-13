@@ -7,9 +7,11 @@ pub mod config;
 mod control_address;
 mod hostname;
 mod identity;
+pub mod managed_session;
 mod paths;
 mod proxy;
 mod quic;
+pub mod reconnect_policy;
 pub mod runtime_log;
 mod server;
 mod server_address;
@@ -54,6 +56,11 @@ pub use identity::{
     ParseClientIdentityCertificateError, ParseClientIdentityError,
     client_identity_from_certificate_der, generate_client_identity, read_client_identity,
     rotate_client_identity,
+};
+pub use managed_session::{
+    CONTROL_ALPN_H2, ConnectionError, ControlClientIdentityMaterial, ManagedSession,
+    ManagedSessionConnection, ManagedSessionEvent, ManagedSessionRole, SessionMaterial,
+    SnapshotEnvelope, events_path, load_control_tls_material,
 };
 pub use paths::{
     XdgPathError, default_client_acme_state_dir, default_client_identity_material_dir,

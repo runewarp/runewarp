@@ -102,7 +102,59 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
             }
         }
     });
-    let server_result = server.run_with_shutdown(&shutdown).await;
+    let server_result = if let Some(control) = config.control.as_ref() {
+        let identity = config
+            .identity
+            .as_ref()
+            .expect("managed Server config includes identity");
+        let material = runewarp::SessionMaterial {
+            control_hostname: control.address.hostname().as_str().to_owned(),
+            trust: control.trust.clone(),
+            identity: runewarp::ControlClientIdentityMaterial::from_server_identity_dir(
+                &identity.directory,
+            ),
+        };
+        let mut session = runewarp::ManagedSession::new(
+            control.address.clone(),
+            runewarp::ManagedSessionRole::Server,
+            material,
+        );
+        let session_shutdown = shutdown.clone();
+        let session_task = tokio::spawn(async move {
+            session
+                .run(
+                    |event| async move {
+                        match event {
+                            runewarp::ManagedSessionEvent::Snapshot(envelope) => {
+                                runewarp::runtime_log::managed_session_snapshot_received(
+                                    "server",
+                                    &envelope.revision,
+                                );
+                            }
+                            runewarp::ManagedSessionEvent::Reconnecting { display_delay_secs } => {
+                                runewarp::runtime_log::managed_session_reconnecting(
+                                    "server",
+                                    display_delay_secs,
+                                );
+                            }
+                        }
+                    },
+                    async move {
+                        session_shutdown.wait_started().await;
+                        // Keep the downlink alive through graceful drain; the
+                        // task is stopped when the Server runtime returns.
+                        std::future::pending::<()>().await;
+                    },
+                )
+                .await;
+        });
+        let server_result = server.run_with_shutdown(&shutdown).await;
+        session_task.abort();
+        let _ = session_task.await;
+        server_result
+    } else {
+        server.run_with_shutdown(&shutdown).await
+    };
     if let Err(error) = server_result {
         return Err(logged_runtime_failure(Box::new(error)));
     }

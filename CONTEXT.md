@@ -133,8 +133,8 @@ The certificate a **Server** presents to authenticate its **Server identity** to
 _Avoid_: Server certificate, Server identity
 
 **Managed session**:
-The authenticated live relationship between one **Server** or **Client instance** and a managed control plane for receiving managed inputs and reporting applied state. It is separate from Visitor traffic and **Tunnel connections**.
-_Avoid_: Tunnel connection, data path
+The authenticated live relationship between one **Server** or **Client instance** and a managed control plane for receiving managed inputs and reporting applied state. Core establishes it as one mutually authenticated HTTP/2 connection with a single role-specific SSE downlink; it is separate from Visitor traffic and **Tunnel connections**.
+_Avoid_: Tunnel connection, data path, control channel
 
 **Tunnel pool**:
 The set of live **Tunnel connections** and their serving **Client instances** currently available for one **Tunnel**, regardless of which authorized **Client identity** each member uses.
@@ -324,7 +324,7 @@ _Avoid_: CI environment, deploy target
 - "passthrough" could blur Server behavior with Service behavior — resolved: **TLS passthrough** is the broad traffic behavior, while **TLS mode** is the **Service** setting that can keep passthrough or switch to **Terminate mode**.
 - "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key; the self-signed certificate is only a key carrier, and only explicit key rotation changes that identity.
 - "Cloud-signed Client" could imply Cloud-owned key material — resolved: Cloud may attest an existing **Client identity**, but the customer retains the private key and identity ownership.
-- "control channel" could blur a live relationship with its eventual transport — resolved: **Managed session** names the relationship; its transport is a separate design decision.
+- "control channel" could blur a live relationship with its eventual transport — resolved: **Managed session** names the relationship; Core implements it as mutually authenticated HTTP/2 with one role-specific SSE downlink.
 - "server certificate" and the trust anchor behind it were easy to conflate — resolved: **Server certificate** is the presented leaf; **Server CA** is the private issuer in the manual Server path.
 - "ca-file trust" sounded like a file-path detail instead of a trust model — resolved: **Exclusive CA trust** means the **Client** trusts only the configured CA bundle for the **Server certificate**.
 - "public CA" was too vague once Client-side TLS termination existed — resolved: **Public hostname CA** is the issuer for manual **Public hostname certificates**, distinct from the **Server CA**.

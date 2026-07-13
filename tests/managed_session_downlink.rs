@@ -53,6 +53,7 @@ enum SseBehavior {
     Redirect,
     CloseAfterFirstByte,
     WrongContentType,
+    NeverRespond,
 }
 
 #[derive(Debug)]
@@ -272,7 +273,9 @@ async fn handle_request(
             .unwrap());
     }
 
-    match *behavior.lock().unwrap() {
+    let behavior = *behavior.lock().unwrap();
+    match behavior {
+        SseBehavior::NeverRespond => std::future::pending().await,
         SseBehavior::Redirect => Ok(Response::builder()
             .status(StatusCode::FOUND)
             .header(LOCATION, REDIRECT_TARGET)
@@ -381,6 +384,47 @@ fn session_material(
             key_path: client_key.to_path_buf(),
         },
     }
+}
+
+#[test]
+fn invalid_initial_tls_material_fails_session_construction() {
+    let dir = tempdir().unwrap();
+    let material = session_material(
+        "localhost",
+        &dir.path().join("missing-ca.crt"),
+        &dir.path().join("missing-client.crt"),
+        &dir.path().join("missing-client.key"),
+    );
+    let address = ControlAddress::parse("localhost:443").unwrap();
+
+    assert!(
+        ManagedSession::new(address, ManagedSessionRole::Client, material).is_err(),
+        "invalid local material must fail initial startup"
+    );
+}
+
+#[tokio::test]
+async fn session_returns_shutdown_result_to_runtime() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(
+        "localhost",
+        &paths.ca_cert,
+        &paths.client_cert,
+        &paths.client_key,
+    );
+    let address = ControlAddress::parse("localhost:443").unwrap();
+    let mut session =
+        ManagedSession::new(address, ManagedSessionRole::Client, session_material).unwrap();
+
+    let result = session
+        .run(|_event| async {}, async {
+            Err::<(), _>(std::io::Error::other("shutdown unavailable"))
+        })
+        .await;
+
+    assert_eq!(result.unwrap_err().to_string(), "shutdown unavailable");
 }
 
 async fn connect_client(
@@ -598,7 +642,6 @@ async fn connection_is_ready_for_additional_streams_after_successful_sse() {
     )
     .await;
 
-    assert!(connection.connection_ready_for_additional_streams);
     assert!(connection.can_send_additional_request());
 
     fixture.shutdown().await;
@@ -619,7 +662,8 @@ async fn sse_failure_establishes_a_new_tls_connection() {
     let address = fixture.control_address();
 
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let mut session_runner = ManagedSession::new(address, ManagedSessionRole::Client, session);
+    let mut session_runner =
+        ManagedSession::new(address, ManagedSessionRole::Client, session).unwrap();
     let metrics = fixture.metrics.clone();
     let runner = tokio::spawn(async move {
         session_runner
@@ -644,6 +688,53 @@ async fn sse_failure_establishes_a_new_tls_connection() {
     let _ = runner.await;
     assert!(fixture.metrics.tls_accepts.load(Ordering::SeqCst) >= 2);
 
+    fixture.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn response_header_stall_reconnects_after_first_snapshot_deadline() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(&material, SseBehavior::NeverRespond).await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(
+        "localhost",
+        &paths.ca_cert,
+        &paths.client_cert,
+        &paths.client_key,
+    );
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                std::future::pending::<()>(),
+            )
+            .await;
+    });
+
+    let event = tokio::time::timeout(Duration::from_secs(61), event_rx.recv())
+        .await
+        .expect("connection establishment should time out")
+        .expect("session should emit a reconnect event");
+    assert!(matches!(
+        event,
+        runewarp::ManagedSessionEvent::Reconnecting { .. }
+    ));
+
+    runner.abort();
+    let _ = runner.await;
     fixture.shutdown().await;
 }
 

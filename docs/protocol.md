@@ -143,7 +143,7 @@ In **Managed mode**, each Server or Client runtime establishes one mutually auth
 6. The first valid snapshot has an independent 60-second deadline that keepalive comments cannot extend. Any 60-second silence without SSE bytes also replaces the session.
 7. Any downlink failure closes the entire HTTP/2 connection before reconnect. Reconnect uses the same full-jitter windows capped at 60 seconds as Tunnel reconnect; the policy resets only after a valid snapshot establishes the new session.
 
-State-report streams on the same connection and role-input application are separate Managed-session steps; the downlink must leave the authenticated HTTP/2 connection ready for additional streams after the SSE response succeeds.
+The current runtime does not open state-report streams or apply role input. After the SSE response succeeds, the downlink keeps the authenticated HTTP/2 connection ready for additional streams.
 
 ## Runtime invariants
 

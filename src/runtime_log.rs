@@ -16,7 +16,7 @@ use tracing_subscriber::{fmt as tracing_fmt, reload};
 
 use crate::client_hello::ClientHelloError;
 use crate::shutdown::ShutdownMode;
-use crate::{ClientIdentity, LogLevel};
+use crate::{ClientIdentity, LogLevel, ManagedSessionEvent, ManagedSessionRole};
 
 static LOGGER: OnceLock<InstalledLogger> = OnceLock::new();
 
@@ -502,33 +502,33 @@ pub fn client_graceful_shutdown_closing_tunnel_connection() {
     );
 }
 
-pub fn managed_session_snapshot_received(role: &str, revision: &str) {
-    emit(
-        EventLevel::Info,
-        &event_line(
-            "managed session snapshot received",
-            [
-                ("role", Cow::Borrowed(role)),
-                ("revision", Cow::Borrowed(revision)),
-            ],
+pub fn managed_session_event(role: ManagedSessionRole, event: &ManagedSessionEvent) {
+    let role = match role {
+        ManagedSessionRole::Server => "server",
+        ManagedSessionRole::Client => "client",
+    };
+    match event {
+        ManagedSessionEvent::Snapshot(_) => emit(
+            EventLevel::Info,
+            &event_line(
+                "managed session snapshot received",
+                [("role", Cow::Borrowed(role))],
+            ),
         ),
-    );
-}
-
-pub fn managed_session_reconnecting(role: &str, display_delay_secs: u64) {
-    emit(
-        EventLevel::Warn,
-        &event_line(
-            "managed session reconnecting",
-            [
-                ("role", Cow::Borrowed(role)),
-                (
-                    "next-retry-delay",
-                    Cow::Owned(format!("{display_delay_secs}s")),
-                ),
-            ],
+        ManagedSessionEvent::Reconnecting { display_delay_secs } => emit(
+            EventLevel::Warn,
+            &event_line(
+                "managed session reconnecting",
+                [
+                    ("role", Cow::Borrowed(role)),
+                    (
+                        "next-retry-delay",
+                        Cow::Owned(format!("{display_delay_secs}s")),
+                    ),
+                ],
+            ),
         ),
-    );
+    }
 }
 
 fn shutdown_mode_label(mode: ShutdownMode) -> &'static str {
@@ -1237,7 +1237,7 @@ mod tests {
         client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
         client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_unauthorized,
         emit, emit_server_tunnel_connection_dropped, install, installed_level,
-        server_graceful_shutdown_deadline_expired,
+        managed_session_event, server_graceful_shutdown_deadline_expired,
         server_orderly_shutdown_closing_tunnel_connections, server_orderly_shutdown_escalated,
         server_orderly_shutdown_started, server_public_listener_ready, server_readiness_gained,
         server_readiness_listener_enabled, server_readiness_lost, server_route,
@@ -1245,7 +1245,10 @@ mod tests {
         server_tunnel_connection_failed, server_tunnel_connection_terminated,
         server_tunnel_connection_unauthorized, server_tunnel_listener_ready, warning,
     };
-    use crate::{ClientHelloError, ClientIdentity, LogLevel, ShutdownMode};
+    use crate::{
+        ClientHelloError, ClientIdentity, LogLevel, ManagedSessionEvent, ManagedSessionRole,
+        ShutdownMode, SnapshotEnvelope,
+    };
 
     static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1344,6 +1347,23 @@ mod tests {
 
         assert!(output.contains("debug detail"));
         assert!(output.contains("server route forwarded: public-hostname=app.example.test"));
+    }
+
+    #[test]
+    fn managed_session_snapshot_logs_role_without_opaque_revision() {
+        let output = capture(LogLevel::Info, || {
+            managed_session_event(
+                ManagedSessionRole::Client,
+                &ManagedSessionEvent::Snapshot(SnapshotEnvelope {
+                    revision: "control-supplied-secret".to_owned(),
+                    input: serde_json::json!({}),
+                }),
+            );
+        });
+
+        assert!(output.contains("INFO managed session snapshot received: role=client"));
+        assert!(!output.contains("control-supplied-secret"));
+        assert!(!output.contains("revision="));
     }
 
     #[test]

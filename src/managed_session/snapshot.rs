@@ -32,7 +32,9 @@ impl fmt::Display for SnapshotError {
             Self::InvalidJson => formatter.write_str("snapshot JSON was invalid"),
             Self::MissingRevision => formatter.write_str("snapshot omitted revision"),
             Self::EmptyRevision => formatter.write_str("snapshot revision was empty"),
-            Self::MissingInput => formatter.write_str("snapshot omitted input"),
+            Self::MissingInput => {
+                formatter.write_str("snapshot input was missing or not an object")
+            }
             Self::UnknownEventType(event_type) => {
                 write!(formatter, "unknown SSE event type `{event_type}`")
             }
@@ -47,8 +49,6 @@ impl std::error::Error for SnapshotError {}
 struct RawSnapshot {
     revision: Option<String>,
     input: Option<Value>,
-    #[serde(flatten)]
-    _unknown: serde_json::Map<String, Value>,
 }
 
 /// Interpret a completed SSE event as a v1 snapshot envelope.
@@ -121,10 +121,13 @@ mod tests {
             parse_snapshot_event(Some("snapshot"), r#"{"revision":"rev-1"}"#).unwrap_err(),
             SnapshotError::MissingInput
         );
-        assert_eq!(
+        let invalid_input =
             parse_snapshot_event(Some("snapshot"), r#"{"revision":"rev-1","input":null}"#)
-                .unwrap_err(),
-            SnapshotError::MissingInput
+                .unwrap_err();
+        assert_eq!(invalid_input, SnapshotError::MissingInput);
+        assert_eq!(
+            invalid_input.to_string(),
+            "snapshot input was missing or not an object"
         );
     }
 }

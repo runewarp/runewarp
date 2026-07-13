@@ -67,8 +67,6 @@ pub struct ManagedSessionConnection {
     // Keep the connection driver alive for the lifetime of the session.
     conn: Option<tokio::task::JoinHandle<Result<(), hyper::Error>>>,
     body: Incoming,
-    /// True while the HTTP/2 sender can still open additional streams.
-    pub connection_ready_for_additional_streams: bool,
 }
 
 impl Drop for ManagedSessionConnection {
@@ -88,18 +86,20 @@ impl ManagedSessionConnection {
     ) -> Result<Self, ConnectionError> {
         let host = address.hostname().as_str();
         let port = address.port();
-        let socket_addr = tokio::net::lookup_host((host, port))
+        let socket_addrs: Vec<_> = tokio::net::lookup_host((host, port))
             .await
             .map_err(ConnectionError::Dns)?
-            .next()
-            .ok_or_else(|| {
-                ConnectionError::Dns(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "control hostname resolved to no addresses",
-                ))
-            })?;
+            .collect();
+        if socket_addrs.is_empty() {
+            return Err(ConnectionError::Dns(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "control hostname resolved to no addresses",
+            )));
+        }
 
-        let tcp = TcpStream::connect(socket_addr)
+        // Try every resolved address. Linux commonly returns `::1` before
+        // `127.0.0.1`; one refused family must not discard a reachable peer.
+        let tcp = TcpStream::connect(socket_addrs.as_slice())
             .await
             .map_err(ConnectionError::Connect)?;
         tcp.set_nodelay(true).map_err(ConnectionError::Connect)?;
@@ -183,11 +183,9 @@ where
         return Err(ConnectionError::SseRejected);
     }
 
-    let ready_for_more = !sender.is_closed();
     Ok(ManagedSessionConnection {
         sender,
         conn: Some(conn_handle),
         body: response.into_body(),
-        connection_ready_for_additional_streams: ready_for_more,
     })
 }

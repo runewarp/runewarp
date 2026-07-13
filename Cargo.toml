@@ -53,6 +53,7 @@ sha2 = "0.11.0"
 tempfile = "3.27.0"
 time = "0.3.47"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
+tokio = { version = "1.52.3", features = ["test-util"] }
 
 [[bin]]
 name = "runewarp"

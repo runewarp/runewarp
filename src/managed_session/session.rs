@@ -10,7 +10,7 @@ use super::connection::{ConnectionError, ManagedSessionConnection};
 use super::role::ManagedSessionRole;
 use super::snapshot::{SnapshotEnvelope, SnapshotError, parse_snapshot_event};
 use super::sse::{SseParseError, SseParseItem, SseParser};
-use super::timing::{SessionClock, SessionDeadlines, SystemSessionClock};
+use super::timing::{FIRST_SNAPSHOT_DEADLINE, SessionClock, SessionDeadlines, SystemSessionClock};
 use super::tls::{ControlTlsMaterialError, SessionMaterial, load_control_tls_material};
 use crate::ControlAddress;
 use crate::reconnect_policy::ReconnectPolicy;
@@ -79,14 +79,8 @@ impl ManagedSession<SystemSessionClock> {
         address: ControlAddress,
         role: ManagedSessionRole,
         material: SessionMaterial,
-    ) -> Self {
-        Self {
-            address,
-            role,
-            material,
-            clock: SystemSessionClock,
-            reconnect: ReconnectPolicy::new(),
-        }
+    ) -> Result<Self, ControlTlsMaterialError> {
+        Self::with_clock(address, role, material, SystemSessionClock)
     }
 }
 
@@ -96,18 +90,22 @@ impl<C: SessionClock> ManagedSession<C> {
         role: ManagedSessionRole,
         material: SessionMaterial,
         clock: C,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ControlTlsMaterialError> {
+        // Initial local material is a startup invariant. Later connection
+        // attempts reload the same paths so post-start replacement failures
+        // remain recoverable through the reconnect loop.
+        load_control_tls_material(&material)?;
+        Ok(Self {
             address,
             role,
             material,
             clock,
             reconnect: ReconnectPolicy::new(),
-        }
+        })
     }
 
     /// Run until `shutdown` completes, emitting downlink events to `on_event`.
-    pub async fn run<F, Fut, S, Shut>(&mut self, mut on_event: F, shutdown: S)
+    pub async fn run<F, Fut, S, Shut>(&mut self, mut on_event: F, shutdown: S) -> Shut
     where
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
@@ -117,7 +115,7 @@ impl<C: SessionClock> ManagedSession<C> {
         loop {
             let outcome = tokio::select! {
                 biased;
-                _ = &mut shutdown => return,
+                shutdown_result = &mut shutdown => return shutdown_result,
                 outcome = self.run_one_connection(&mut on_event) => outcome,
             };
 
@@ -139,7 +137,7 @@ impl<C: SessionClock> ManagedSession<C> {
 
             tokio::select! {
                 biased;
-                _ = &mut shutdown => return,
+                shutdown_result = &mut shutdown => return shutdown_result,
                 _ = tokio::time::sleep(retry.delay) => {}
             }
         }
@@ -155,12 +153,15 @@ impl<C: SessionClock> ManagedSession<C> {
     {
         let tls =
             load_control_tls_material(&self.material).map_err(ManagedSessionError::TlsMaterial)?;
-        let mut connection = ManagedSessionConnection::connect(&self.address, &tls, self.role)
-            .await
-            .map_err(ManagedSessionError::Connection)?;
-
-        let mut parser = SseParser::new();
         let mut deadlines = SessionDeadlines::new(self.clock.now());
+        let mut connection = tokio::time::timeout(
+            FIRST_SNAPSHOT_DEADLINE,
+            ManagedSessionConnection::connect(&self.address, &tls, self.role),
+        )
+        .await
+        .map_err(|_| ManagedSessionError::FirstSnapshotTimeout)?
+        .map_err(ManagedSessionError::Connection)?;
+        let mut parser = SseParser::new();
         let mut received_valid_snapshot = false;
 
         loop {

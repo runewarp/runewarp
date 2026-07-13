@@ -1,3 +1,5 @@
+use std::io;
+
 use runewarp::{
     OrderlyShutdown, PreparedServer, QUIC_CLOSE_FLUSH_DURATION, ServerRuntimeArgs, ShutdownMode,
     resolve_server_config_from_cli,
@@ -114,44 +116,34 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
                 &identity.directory,
             ),
         };
-        let mut session = runewarp::ManagedSession::new(
+        let mut session = match runewarp::ManagedSession::new(
             control.address.clone(),
             runewarp::ManagedSessionRole::Server,
             material,
+        ) {
+            Ok(session) => session,
+            Err(error) => return Err(logged_runtime_failure(Box::new(error))),
+        };
+        let session_runtime = session.run(
+            |event| async move {
+                runewarp::runtime_log::managed_session_event(
+                    runewarp::ManagedSessionRole::Server,
+                    &event,
+                );
+            },
+            std::future::pending::<()>(),
         );
-        let session_shutdown = shutdown.clone();
-        let session_task = tokio::spawn(async move {
-            session
-                .run(
-                    |event| async move {
-                        match event {
-                            runewarp::ManagedSessionEvent::Snapshot(envelope) => {
-                                runewarp::runtime_log::managed_session_snapshot_received(
-                                    "server",
-                                    &envelope.revision,
-                                );
-                            }
-                            runewarp::ManagedSessionEvent::Reconnecting { display_delay_secs } => {
-                                runewarp::runtime_log::managed_session_reconnecting(
-                                    "server",
-                                    display_delay_secs,
-                                );
-                            }
-                        }
-                    },
-                    async move {
-                        session_shutdown.wait_started().await;
-                        // Keep the downlink alive through graceful drain; the
-                        // task is stopped when the Server runtime returns.
-                        std::future::pending::<()>().await;
-                    },
-                )
-                .await;
-        });
-        let server_result = server.run_with_shutdown(&shutdown).await;
-        session_task.abort();
-        let _ = session_task.await;
-        server_result
+        let server_runtime = server.run_with_shutdown(&shutdown);
+        tokio::pin!(session_runtime);
+        tokio::pin!(server_runtime);
+        tokio::select! {
+            server_result = &mut server_runtime => server_result,
+            _ = &mut session_runtime => {
+                return Err(logged_runtime_failure(Box::new(io::Error::other(
+                    "managed session stopped unexpectedly",
+                ))));
+            }
+        }
     } else {
         server.run_with_shutdown(&shutdown).await
     };

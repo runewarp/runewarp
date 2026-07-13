@@ -35,14 +35,12 @@ pub enum SseParseItem {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SseParseError {
     InvalidUtf8,
-    MalformedField,
 }
 
 impl fmt::Display for SseParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidUtf8 => formatter.write_str("SSE stream contained invalid UTF-8"),
-            Self::MalformedField => formatter.write_str("SSE stream contained a malformed field"),
         }
     }
 }
@@ -108,7 +106,6 @@ impl SseParser {
             "id" | "retry" => {
                 // Accepted and ignored: Core owns revision equality and reconnect timing.
             }
-            "" => return Err(SseParseError::MalformedField),
             _ => {
                 // Unknown fields are ignored per the SSE grammar.
             }

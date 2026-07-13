@@ -60,29 +60,17 @@ where
             control.address.clone(),
             runewarp::ManagedSessionRole::Client,
             material,
-        );
-        let session_task = session.run(
+        )?;
+        let shutdown_result = session.run(
             |event| async move {
-                match event {
-                    runewarp::ManagedSessionEvent::Snapshot(envelope) => {
-                        runewarp::runtime_log::managed_session_snapshot_received(
-                            "client",
-                            &envelope.revision,
-                        );
-                    }
-                    runewarp::ManagedSessionEvent::Reconnecting { display_delay_secs } => {
-                        runewarp::runtime_log::managed_session_reconnecting(
-                            "client",
-                            display_delay_secs,
-                        );
-                    }
-                }
+                runewarp::runtime_log::managed_session_event(
+                    runewarp::ManagedSessionRole::Client,
+                    &event,
+                );
             },
-            async {
-                let _ = shutdown_signal.await;
-            },
+            shutdown_signal,
         );
-        session_task.await;
+        let _mode = shutdown_result.await?;
         runewarp::runtime_log::client_graceful_shutdown_started();
         shutdown.request();
         return Ok(());

@@ -57,6 +57,10 @@ impl ReadinessGate {
         self.ready.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
     }
+
+    pub(crate) fn mark_not_ready(&self) {
+        self.ready.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Applies validated Server Managed-session input onto live authorization state.

@@ -1,4 +1,5 @@
-//! Black-box integration tests for managed Server authorization apply (#155).
+//! Black-box integration tests for managed Server authorization apply (#155)
+//! and revocation/drain semantics (#156).
 
 mod common;
 
@@ -26,10 +27,10 @@ use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, CONTROL_ALPN_H2,
     ControlAddress, ControlClientIdentityMaterial, ControlTrust, GeneratedClientIdentity,
-    ManagedSession, ManagedSessionEvent, ManagedSessionRole, PreparedClient, PreparedServer,
-    SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_KEY_FILENAME, SessionMaterial, events_path,
-    generate_client_identity, initialize_manual_server_certificate, load_client_config,
-    load_server_config, state_path,
+    ManagedSession, ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PreparedClient,
+    PreparedServer, QUIC_CLOSE_FLUSH_DURATION, SERVER_IDENTITY_CERT_FILENAME,
+    SERVER_IDENTITY_KEY_FILENAME, SessionMaterial, events_path, generate_client_identity,
+    initialize_manual_server_certificate, load_client_config, load_server_config, state_path,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -41,7 +42,7 @@ use std::sync::Mutex;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -184,13 +185,33 @@ struct ManagedServerHarness {
     second_client: GeneratedClientIdentity,
     event_rx: mpsc::UnboundedReceiver<ManagedSessionEvent>,
     stop_tx: Option<oneshot::Sender<()>>,
-    server_task: JoinHandle<io::Result<()>>,
+    shutdown: Option<OrderlyShutdown>,
+    server_task: Option<JoinHandle<io::Result<()>>>,
     session_task: JoinHandle<()>,
     client_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl ManagedServerHarness {
     async fn start() -> Self {
+        Self::start_inner(None).await
+    }
+
+    async fn start_with_graceful_drain(graceful: Duration) -> Self {
+        Self::start_inner(Some(OrderlyShutdown::new(
+            graceful,
+            QUIC_CLOSE_FLUSH_DURATION,
+        )))
+        .await
+    }
+
+    fn begin_graceful(&self) {
+        self.shutdown
+            .as_ref()
+            .expect("graceful drain harness required")
+            .begin_graceful();
+    }
+
+    async fn start_inner(shutdown: Option<OrderlyShutdown>) -> Self {
         let tempdir = tempfile::tempdir().unwrap();
         let material = generate_control_mtls_material("runewarp-server-a");
         let control = ControlFixture::start(&material).await;
@@ -295,7 +316,12 @@ tunnel-bind-address = "127.0.0.1:0"
                 )
                 .await;
         });
-        let server_task = tokio::spawn(async move { server.run().await });
+        let server_task = if let Some(ref shutdown) = shutdown {
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move { server.run_with_shutdown(&shutdown).await })
+        } else {
+            tokio::spawn(async move { server.run().await })
+        };
 
         Self {
             _tempdir: tempdir,
@@ -311,7 +337,8 @@ tunnel-bind-address = "127.0.0.1:0"
             second_client,
             event_rx,
             stop_tx: Some(stop_tx),
-            server_task,
+            shutdown,
+            server_task: Some(server_task),
             session_task,
             client_tasks: Mutex::new(Vec::new()),
         }
@@ -323,6 +350,23 @@ tunnel-bind-address = "127.0.0.1:0"
         backend_addr: SocketAddr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let handle = connect_running_client(self, identity_dir, backend_addr).await?;
+        self.client_tasks.lock().unwrap().push(handle);
+        Ok(())
+    }
+
+    async fn spawn_dual_hostname_client(
+        &self,
+        identity_dir: &str,
+        app_backend_addr: SocketAddr,
+        api_backend_addr: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let handle = connect_running_dual_hostname_client(
+            self,
+            identity_dir,
+            app_backend_addr,
+            api_backend_addr,
+        )
+        .await?;
         self.client_tasks.lock().unwrap().push(handle);
         Ok(())
     }
@@ -349,8 +393,10 @@ tunnel-bind-address = "127.0.0.1:0"
             let _ = stop_tx.send(());
         }
         let _ = self.session_task.await;
-        self.server_task.abort();
-        let _ = self.server_task.await;
+        if let Some(server_task) = self.server_task.take() {
+            server_task.abort();
+            let _ = server_task.await;
+        }
         self.control.shutdown().await;
     }
 }
@@ -522,6 +568,386 @@ async fn managed_server_authorization_apply_controls_traffic_and_readiness() {
     harness.shutdown().await;
 }
 
+#[tokio::test]
+async fn managed_server_identity_revocation_closes_live_work_and_denies_new_handshakes() {
+    let mut harness = ManagedServerHarness::start().await;
+    let app_backend = spawn_tls_backend(
+        &harness.app_backend_cert,
+        &harness.app_backend_key,
+        *b"pong",
+    )
+    .await;
+
+    let first_identity = harness.trusted_client.client_identity.to_string();
+    let second_identity = harness.second_client.client_identity.to_string();
+    harness.push_authorization(
+        "rev-1",
+        &format!(
+            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{first_identity}"]}}]}}"#
+        ),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-1").await;
+    wait_for_readiness_open(harness.readiness_addr).await;
+
+    harness
+        .spawn_client("client-one", app_backend.0)
+        .await
+        .expect("authorized tunnel client must connect");
+    sleep(Duration::from_millis(50)).await;
+    let response = visitor_ping(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+        .await
+        .expect("authorized visitor traffic must succeed");
+    assert_eq!(response, *b"pong");
+
+    // Replace authorization while client-one is still connected.
+    harness.push_authorization(
+        "rev-2",
+        &format!(
+            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
+        ),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-2").await;
+    wait_for_state_revision(&harness.control.metrics, "rev-2").await;
+    wait_for_readiness_open(harness.readiness_addr).await;
+
+    wait_for_tls_failure(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+        .await
+        .expect("revoked identity live visitor traffic must fail");
+    match connect_running_client(&harness, "client-one", app_backend.0).await {
+        Err(_) => {}
+        Ok(handle) => {
+            // QUIC may surface ApplicationVerificationFailure after connect returns.
+            sleep(Duration::from_millis(50)).await;
+            wait_for_tls_failure(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+                .await
+                .expect("revoked identity must not serve after a new handshake attempt");
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    harness
+        .spawn_client("client-two", app_backend.0)
+        .await
+        .expect("replacement identity must connect");
+    sleep(Duration::from_millis(50)).await;
+    let replacement = visitor_ping(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+        .await
+        .expect("replacement identity must serve visitor traffic");
+    assert_eq!(replacement, *b"pong");
+    wait_for_readiness_open(harness.readiness_addr).await;
+
+    app_backend.1.abort();
+    let _ = app_backend.1.await;
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_server_hostname_only_revocation_resets_only_affected_streams() {
+    let mut harness = ManagedServerHarness::start().await;
+    let app_backend = spawn_tls_backend(
+        &harness.app_backend_cert,
+        &harness.app_backend_key,
+        *b"pong",
+    )
+    .await;
+    let api_backend = spawn_tls_backend(
+        &harness.api_backend_cert,
+        &harness.api_backend_key,
+        *b"pong",
+    )
+    .await;
+
+    let identity = harness.trusted_client.client_identity.to_string();
+    harness.push_authorization(
+        "rev-both",
+        &format!(
+            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}","{API_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+        ),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-both").await;
+    wait_for_readiness_open(harness.readiness_addr).await;
+
+    harness
+        .spawn_dual_hostname_client("client-one", app_backend.0, api_backend.0)
+        .await
+        .expect("dual-hostname tunnel client must connect");
+    sleep(Duration::from_millis(50)).await;
+
+    let app_response = visitor_ping(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+        .await
+        .expect("APP hostname must work before hostname-only revocation");
+    assert_eq!(app_response, *b"pong");
+    let api_response = visitor_ping(harness.public_addr, &harness.api_backend_cert, API_HOSTNAME)
+        .await
+        .expect("API hostname must work before hostname-only revocation");
+    assert_eq!(api_response, *b"pong");
+
+    harness.push_authorization(
+        "rev-app-only",
+        &format!(
+            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+        ),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-app-only").await;
+    wait_for_state_revision(&harness.control.metrics, "rev-app-only").await;
+
+    wait_for_tls_failure(harness.public_addr, &harness.api_backend_cert, API_HOSTNAME)
+        .await
+        .expect("revoked hostname must stop routing");
+    let still_app = visitor_ping(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+        .await
+        .expect("retained hostname must keep working on the same connected client");
+    assert_eq!(still_app, *b"pong");
+
+    app_backend.1.abort();
+    api_backend.1.abort();
+    let _ = app_backend.1.await;
+    let _ = api_backend.1.await;
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_server_unrelated_identity_survives_targeted_revocation() {
+    let mut harness = ManagedServerHarness::start().await;
+    let app_backend = spawn_tls_backend(
+        &harness.app_backend_cert,
+        &harness.app_backend_key,
+        *b"pong",
+    )
+    .await;
+    let api_backend = spawn_tls_backend(
+        &harness.api_backend_cert,
+        &harness.api_backend_key,
+        *b"pong",
+    )
+    .await;
+
+    let first_identity = harness.trusted_client.client_identity.to_string();
+    let second_identity = harness.second_client.client_identity.to_string();
+    harness.push_authorization(
+        "rev-both",
+        &format!(
+            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{first_identity}"]}},{{"public_hostnames":["{API_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
+        ),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-both").await;
+    wait_for_readiness_open(harness.readiness_addr).await;
+
+    harness
+        .spawn_client("client-one", app_backend.0)
+        .await
+        .expect("client-one must connect");
+    harness
+        .spawn_client("client-two", api_backend.0)
+        .await
+        .expect("client-two must connect");
+    sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(
+        visitor_ping(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+            .await
+            .expect("APP must work before targeted revocation"),
+        *b"pong"
+    );
+    assert_eq!(
+        visitor_ping(harness.public_addr, &harness.api_backend_cert, API_HOSTNAME)
+            .await
+            .expect("API must work before targeted revocation"),
+        *b"pong"
+    );
+
+    harness.push_authorization(
+        "rev-drop-one",
+        &format!(
+            r#"{{"tunnels":[{{"public_hostnames":["{API_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
+        ),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-drop-one").await;
+    wait_for_state_revision(&harness.control.metrics, "rev-drop-one").await;
+
+    wait_for_tls_failure(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+        .await
+        .expect("revoked client-one/APP must fail");
+    let api_still = visitor_ping(harness.public_addr, &harness.api_backend_cert, API_HOSTNAME)
+        .await
+        .expect("unrelated client-two/API must survive targeted revocation");
+    assert_eq!(api_still, *b"pong");
+
+    app_backend.1.abort();
+    api_backend.1.abort();
+    let _ = app_backend.1.await;
+    let _ = api_backend.1.await;
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_server_retains_authorization_through_control_session_loss() {
+    let mut harness = ManagedServerHarness::start().await;
+    let app_backend = spawn_tls_backend(
+        &harness.app_backend_cert,
+        &harness.app_backend_key,
+        *b"pong",
+    )
+    .await;
+
+    let identity = harness.trusted_client.client_identity.to_string();
+    let auth_input = format!(
+        r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+    );
+    harness.push_authorization("rev-1", &auth_input);
+    wait_for_applied(&mut harness.event_rx, "rev-1").await;
+    wait_for_readiness_open(harness.readiness_addr).await;
+    wait_for_state_revision(&harness.control.metrics, "rev-1").await;
+
+    harness
+        .spawn_client("client-one", app_backend.0)
+        .await
+        .expect("authorized tunnel client must connect");
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        visitor_ping(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+            .await
+            .expect("visitor traffic must work before session loss"),
+        *b"pong"
+    );
+
+    let tls_before = harness.control.metrics.tls_accepts.load(Ordering::SeqCst);
+    let reports_before = harness.control.metrics.state_bodies.lock().unwrap().len();
+    harness
+        .control
+        .push_snapshot("event: patch\ndata: {}\n\n".to_owned());
+    wait_for_reconnecting(&mut harness.event_rx).await;
+
+    wait_for_readiness_open(harness.readiness_addr).await;
+    assert_eq!(
+        visitor_ping(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+            .await
+            .expect("authorization must be retained while Control reconnects"),
+        *b"pong"
+    );
+
+    harness.push_authorization("rev-1", &auth_input);
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let resumed = {
+                let bodies = harness.control.metrics.state_bodies.lock().unwrap();
+                if bodies.len() > reports_before {
+                    assert_eq!(
+                        bodies.last(),
+                        Some(&json!({ "revision": "rev-1" })),
+                        "equal revision after reconnect must resume state reporting"
+                    );
+                    true
+                } else {
+                    false
+                }
+            };
+            if resumed {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("equal revision after reconnect must resume state reporting");
+    assert!(
+        harness.control.metrics.tls_accepts.load(Ordering::SeqCst) > tls_before,
+        "Control reconnect must open a new TLS connection"
+    );
+
+    app_backend.1.abort();
+    let _ = app_backend.1.await;
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_server_applies_authorization_change_during_graceful_drain() {
+    let mut harness = ManagedServerHarness::start_with_graceful_drain(Duration::from_secs(5)).await;
+    let (backend_addr, backend_started, backend_release, backend_task) = spawn_staged_tls_backend(
+        &harness.app_backend_cert,
+        &harness.app_backend_key,
+        *b"on",
+        *b"e!",
+    )
+    .await;
+
+    let identity = harness.trusted_client.client_identity.to_string();
+    harness.push_authorization(
+        "rev-live",
+        &format!(
+            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+        ),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-live").await;
+    wait_for_readiness_open(harness.readiness_addr).await;
+
+    harness
+        .spawn_client("client-one", backend_addr)
+        .await
+        .expect("authorized tunnel client must connect");
+    sleep(Duration::from_millis(50)).await;
+
+    let connector = TlsConnector::from(Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store_with(&harness.app_backend_cert))
+            .with_no_client_auth(),
+    ));
+    let tcp_stream = TcpStream::connect(harness.public_addr).await.unwrap();
+    let mut tls_stream = connector
+        .connect(
+            ServerName::try_from(APP_HOSTNAME.to_owned()).unwrap(),
+            tcp_stream,
+        )
+        .await
+        .unwrap();
+    tls_stream.write_all(b"ping").await.unwrap();
+
+    timeout(Duration::from_secs(1), backend_started)
+        .await
+        .expect("timed out waiting for the first backend response chunk")
+        .expect("staged backend should signal once the first response chunk is sent");
+
+    let mut initial_bytes = [0_u8; 2];
+    tls_stream.read_exact(&mut initial_bytes).await.unwrap();
+    assert_eq!(&initial_bytes, b"on");
+
+    harness.begin_graceful();
+    wait_for_readiness_closed(harness.readiness_addr).await;
+    let mut server_task = harness
+        .server_task
+        .take()
+        .expect("graceful drain harness owns the server task");
+    assert!(
+        timeout(Duration::from_millis(100), &mut server_task)
+            .await
+            .is_err(),
+        "graceful drain must stay alive while the landed stream is still active"
+    );
+
+    harness.push_authorization("rev-drain-revoke", r#"{"tunnels":[]}"#);
+    wait_for_applied(&mut harness.event_rx, "rev-drain-revoke").await;
+    wait_for_state_revision(&harness.control.metrics, "rev-drain-revoke").await;
+
+    let mut rest = [0_u8; 2];
+    let aborted = timeout(Duration::from_secs(1), tls_stream.read_exact(&mut rest)).await;
+    assert!(
+        matches!(aborted, Ok(Err(_)) | Err(_)),
+        "authorization revocation during drain must abort the landed stream immediately"
+    );
+    drop(backend_release);
+
+    timeout(Duration::from_secs(2), &mut server_task)
+        .await
+        .expect("server should complete after revocation clears active streams")
+        .expect("server task should join cleanly")
+        .expect("server shutdown should succeed");
+
+    backend_task.abort();
+    let _ = backend_task.await;
+    harness.shutdown().await;
+}
+
 fn write_client_identity_material(directory: &std::path::Path, identity: &GeneratedClientIdentity) {
     fs::create_dir_all(directory).unwrap();
     fs::write(
@@ -566,12 +992,62 @@ backend-address = "{backend_addr}"
     path
 }
 
+fn write_dual_hostname_client_config(
+    base: &std::path::Path,
+    identity_dir: &str,
+    app_backend_addr: SocketAddr,
+    api_backend_addr: SocketAddr,
+) -> std::path::PathBuf {
+    let path = base.join(format!("{identity_dir}-dual.toml"));
+    fs::write(
+        &path,
+        format!(
+            r#"
+[client]
+server-address = "{SERVER_HOSTNAME}"
+server-trust = "ca-file"
+server-ca-file = "server-cert/server-ca.crt"
+identity-dir = "{identity_dir}"
+
+[[client.services]]
+public-hostnames = ["{APP_HOSTNAME}"]
+backend-address = "{app_backend_addr}"
+
+[[client.services]]
+public-hostnames = ["{API_HOSTNAME}"]
+backend-address = "{api_backend_addr}"
+"#
+        ),
+    )
+    .unwrap();
+    path
+}
+
 async fn connect_running_client(
     harness: &ManagedServerHarness,
     identity_dir: &str,
     backend_addr: SocketAddr,
 ) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
     let config_path = write_client_config(harness._tempdir.path(), identity_dir, backend_addr);
+    let settings = load_client_config(&config_path)?;
+    let client = PreparedClient::connect_to(&settings, localhost(0), harness.tunnel_addr).await?;
+    Ok(tokio::spawn(async move {
+        let _ = client.run().await;
+    }))
+}
+
+async fn connect_running_dual_hostname_client(
+    harness: &ManagedServerHarness,
+    identity_dir: &str,
+    app_backend_addr: SocketAddr,
+    api_backend_addr: SocketAddr,
+) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
+    let config_path = write_dual_hostname_client_config(
+        harness._tempdir.path(),
+        identity_dir,
+        app_backend_addr,
+        api_backend_addr,
+    );
     let settings = load_client_config(&config_path)?;
     let client = PreparedClient::connect_to(&settings, localhost(0), harness.tunnel_addr).await?;
     Ok(tokio::spawn(async move {
@@ -619,6 +1095,20 @@ async fn wait_for_rejected(
     .unwrap_or_else(|_| panic!("timed out waiting for Rejected {{ revision: {revision} }}"));
 }
 
+async fn wait_for_reconnecting(event_rx: &mut mpsc::UnboundedReceiver<ManagedSessionEvent>) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match event_rx.recv().await {
+                Some(ManagedSessionEvent::Reconnecting { .. }) => break,
+                Some(_) => {}
+                None => panic!("managed session event channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for ManagedSessionEvent::Reconnecting");
+}
+
 async fn wait_for_state_revision(metrics: &FixtureMetrics, revision: &str) {
     let expected = json!({ "revision": revision });
     timeout(Duration::from_secs(5), async {
@@ -650,6 +1140,19 @@ async fn wait_for_readiness_open(readiness_addr: SocketAddr) {
     })
     .await
     .expect("readiness must open after the first successful apply");
+}
+
+async fn wait_for_readiness_closed(readiness_addr: SocketAddr) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if TcpStream::connect(readiness_addr).await.is_err() {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("readiness must close when graceful drain begins");
 }
 
 fn snapshot_sse(revision: &str, input: &str) -> String {
@@ -827,6 +1330,46 @@ async fn spawn_tls_backend(
     });
 
     (addr, task)
+}
+
+async fn spawn_staged_tls_backend(
+    certificate: &CertificateDer<'static>,
+    private_key: &[u8],
+    first_chunk: [u8; 2],
+    second_chunk: [u8; 2],
+) -> (
+    SocketAddr,
+    oneshot::Receiver<()>,
+    Arc<Notify>,
+    JoinHandle<()>,
+) {
+    let listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(
+        RustlsServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.clone()], private_key_from_der(private_key))
+            .unwrap(),
+    ));
+    let (started_tx, started_rx) = oneshot::channel();
+    let release = Arc::new(Notify::new());
+    let release_for_task = release.clone();
+
+    let task = tokio::spawn(async move {
+        let (tcp_stream, _) = listener.accept().await.unwrap();
+        let mut tls_stream = acceptor.accept(tcp_stream).await.unwrap();
+        let mut request = [0_u8; 4];
+        tls_stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"ping");
+        tls_stream.write_all(&first_chunk).await.unwrap();
+        tls_stream.flush().await.unwrap();
+        let _ = started_tx.send(());
+        release_for_task.notified().await;
+        let _ = tls_stream.write_all(&second_chunk).await;
+        let _ = tls_stream.shutdown().await;
+    });
+
+    (addr, started_rx, release, task)
 }
 
 async fn visitor_ping(

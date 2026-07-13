@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use quinn::Connection;
 use tokio::sync::RwLock;
+use tokio::task::AbortHandle;
 
 use crate::{ClientIdentity, runtime_log};
 
@@ -12,6 +13,7 @@ struct PoolMember {
     client_identity: ClientIdentity,
     connection: Connection,
     active_streams: Arc<AtomicUsize>,
+    close_watcher: AbortHandle,
 }
 
 #[derive(Clone)]
@@ -65,6 +67,14 @@ pub(crate) struct ActiveClientPool {
     next_round_robin_offset: Arc<AtomicU64>,
 }
 
+/// A pool member detached from its previous Tunnel pool without closing the connection.
+pub(crate) struct TakenPoolMember {
+    pub(crate) client_identity: ClientIdentity,
+    connection: Connection,
+    active_streams: Arc<AtomicUsize>,
+    close_watcher: AbortHandle,
+}
+
 impl ActiveClientPool {
     pub(crate) fn new() -> Self {
         Self {
@@ -105,28 +115,31 @@ impl ActiveClientPool {
 
     pub(crate) async fn register(&self, connection: Connection, client_identity: ClientIdentity) {
         let member_id = self.next_member_id.fetch_add(1, Ordering::Relaxed);
-        {
-            let mut members = self.members.write().await;
-            members.push(PoolMember {
-                member_id,
-                client_identity: client_identity.clone(),
-                connection: connection.clone(),
-                active_streams: Arc::new(AtomicUsize::new(0)),
-            });
-        }
-        runtime_log::server_tunnel_connection_accepted(&client_identity);
-
         let members = self.members.clone();
         let client_identity_for_close = client_identity.clone();
-        tokio::spawn(async move {
-            let close_error = connection.closed().await;
+        let connection_for_close = connection.clone();
+        let close_watcher = tokio::spawn(async move {
+            let close_error = connection_for_close.closed().await;
             runtime_log::server_tunnel_connection_terminated(
                 &client_identity_for_close,
                 &close_error,
             );
             let mut members_guard = members.write().await;
             members_guard.retain(|member| member.member_id != member_id);
-        });
+        })
+        .abort_handle();
+
+        {
+            let mut members = self.members.write().await;
+            members.push(PoolMember {
+                member_id,
+                client_identity: client_identity.clone(),
+                connection,
+                active_streams: Arc::new(AtomicUsize::new(0)),
+                close_watcher,
+            });
+        }
+        runtime_log::server_tunnel_connection_accepted(&client_identity);
     }
 
     pub(crate) async fn close_all_connections(&self, reason: &'static [u8]) -> usize {
@@ -137,7 +150,6 @@ impl ActiveClientPool {
         members.len()
     }
 
-    #[allow(dead_code)] // called from TunnelRegistry::close_connections_for_identities
     pub(crate) async fn close_connections_for_identities(
         &self,
         identities: &std::collections::HashSet<ClientIdentity>,
@@ -152,6 +164,65 @@ impl ActiveClientPool {
             }
         }
         closed
+    }
+
+    /// Remove every live member without closing their connections.
+    ///
+    /// Used when Tunnel indices change across an authorization commit so
+    /// surviving connections can be adopted into the pool that matches their
+    /// Client identity under the new snapshot. The caller's `adopt_member`
+    /// aborts the previous close watcher; members that are not adopted keep
+    /// their watcher so revocation still logs termination against the empty
+    /// prior pool list.
+    pub(crate) async fn take_members(&self) -> Vec<TakenPoolMember> {
+        let members = std::mem::take(&mut *self.members.write().await);
+        members
+            .into_iter()
+            .map(|member| TakenPoolMember {
+                client_identity: member.client_identity,
+                connection: member.connection,
+                active_streams: member.active_streams,
+                close_watcher: member.close_watcher,
+            })
+            .collect()
+    }
+
+    /// Place a previously taken member into this pool with exactly one close watcher.
+    ///
+    /// Aborts the watcher from the previous pool and starts a new one bound to
+    /// this pool so remaps do not accumulate duplicate termination tasks.
+    pub(crate) async fn adopt_member(&self, member: TakenPoolMember) {
+        let TakenPoolMember {
+            client_identity,
+            connection,
+            active_streams,
+            close_watcher,
+        } = member;
+        close_watcher.abort();
+
+        let member_id = self.next_member_id.fetch_add(1, Ordering::Relaxed);
+        let members = self.members.clone();
+        let client_identity_for_close = client_identity.clone();
+        let connection_for_close = connection.clone();
+        let close_watcher = tokio::spawn(async move {
+            let close_error = connection_for_close.closed().await;
+            runtime_log::server_tunnel_connection_terminated(
+                &client_identity_for_close,
+                &close_error,
+            );
+            let mut members_guard = members.write().await;
+            members_guard.retain(|member| member.member_id != member_id);
+        })
+        .abort_handle();
+
+        let mut members = self.members.write().await;
+        members.push(PoolMember {
+            member_id,
+            client_identity,
+            connection,
+            active_streams,
+            close_watcher,
+        });
     }
 
     #[cfg(test)]

@@ -97,6 +97,9 @@ pub enum ServerIdentityMaterialError {
         path: PathBuf,
         source: io::Error,
     },
+    ParseIdentity {
+        path: PathBuf,
+    },
     ParseCertificate {
         path: PathBuf,
     },
@@ -112,6 +115,13 @@ impl fmt::Display for ServerIdentityMaterialError {
         match self {
             Self::ReadFile { path, .. } => {
                 write!(formatter, "failed to read {}", path.display())
+            }
+            Self::ParseIdentity { path } => {
+                write!(
+                    formatter,
+                    "failed to parse a server identity fingerprint from {}",
+                    path.display()
+                )
             }
             Self::ParseCertificate { path } => {
                 write!(
@@ -136,7 +146,9 @@ impl std::error::Error for ServerIdentityMaterialError {
         match self {
             Self::ReadFile { source, .. } => Some(source),
             Self::ParseKey(source) => Some(source),
-            Self::ParseCertificate { .. } | Self::IdentityMismatch { .. } => None,
+            Self::ParseIdentity { .. }
+            | Self::ParseCertificate { .. }
+            | Self::IdentityMismatch { .. } => None,
         }
     }
 }
@@ -169,7 +181,7 @@ fn load_server_identity_material(
         })?
         .trim()
         .parse::<ServerIdentity>()
-        .map_err(|_| ServerIdentityMaterialError::ParseCertificate {
+        .map_err(|_| ServerIdentityMaterialError::ParseIdentity {
             path: identity_path,
         })?;
     if stored_identity != key_identity {

@@ -76,7 +76,7 @@ impl fmt::Display for ControlAddressError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingHostname => formatter.write_str("hostname must not be empty"),
-            Self::InvalidPort => formatter.write_str("port must be a valid u16"),
+            Self::InvalidPort => formatter.write_str("port must be in 1..=65535"),
             Self::Scheme => formatter.write_str(
                 "control address must be a DNS hostname with an optional port, not a URL with a scheme",
             ),
@@ -145,9 +145,15 @@ mod tests {
 
     #[test]
     fn rejects_port_zero() {
-        assert_eq!(
-            ControlAddress::parse("control.example.test:0").unwrap_err(),
-            ControlAddressError::InvalidPort
-        );
+        let error = ControlAddress::parse("control.example.test:0").unwrap_err();
+        assert_eq!(error, ControlAddressError::InvalidPort);
+        assert_eq!(error.to_string(), "port must be in 1..=65535");
+    }
+
+    #[test]
+    fn rejects_non_numeric_port() {
+        let error = ControlAddress::parse("control.example.test:abc").unwrap_err();
+        assert_eq!(error, ControlAddressError::InvalidPort);
+        assert_eq!(error.to_string(), "port must be in 1..=65535");
     }
 }

@@ -245,6 +245,49 @@ identity-dir = "server-identity"
 }
 
 #[test]
+fn identity_fingerprint_file_parse_failure_is_distinct_from_certificate_parse() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    let identity_dir = tempdir.path().join("server-identity");
+    common::write_server_identity_material(&identity_dir);
+    fs::write(
+        identity_dir.join("server-identity.txt"),
+        "not-a-fingerprint",
+    )
+    .unwrap();
+
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[control]
+address = "control.example.test"
+
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+identity-dir = "server-identity"
+"#,
+    )
+    .unwrap();
+
+    let message = load_server_config(&tempdir.path().join("config.toml"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("failed to parse a server identity fingerprint"),
+        "expected fingerprint parse error, got: {message}"
+    );
+    assert!(
+        !message.contains("failed to parse a server identity certificate"),
+        "fingerprint parse should not be reported as a certificate parse: {message}"
+    );
+}
+
+#[test]
 fn control_ca_file_trust_defaults_and_resolves_relative_paths() {
     let tempdir = tempdir().unwrap();
     write_managed_server_material(tempdir.path(), "server-cert", "server-identity").unwrap();

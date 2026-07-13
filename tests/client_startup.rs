@@ -1,7 +1,7 @@
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     ClientConfig, ClientPublicCertConfig, ClientTlsMode, LogLevel, PreparedClient, PublicHostname,
-    Server, ServerAddress, ServerAuthorization, ServerBindConfig, ServerHostname,
+    Server, ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
     ServerTunnelConfig, ServiceConfig, generate_client_identity,
     initialize_manual_client_public_cert, load_client_config,
     make_server_quic_config_with_client_admission,
@@ -54,6 +54,7 @@ async fn prepared_client_connects_from_validated_settings() {
             Arc::new(authorization.clone()),
         )
         .unwrap(),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -134,6 +135,7 @@ async fn prepared_client_uses_the_configured_server_address_port() {
             Arc::new(authorization.clone()),
         )
         .unwrap(),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -224,6 +226,7 @@ async fn prepared_client_rejects_settings_without_services() {
             Arc::new(authorization.clone()),
         )
         .unwrap(),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -485,6 +488,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
             Arc::new(authorization.clone()),
         )
         .unwrap(),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -601,6 +605,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
             Arc::new(authorization.clone()),
         )
         .unwrap(),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -701,6 +706,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
             Arc::new(authorization.clone()),
         )
         .unwrap(),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -806,6 +812,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
             Arc::new(authorization.clone()),
         )
         .unwrap(),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();

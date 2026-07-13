@@ -21,14 +21,21 @@ use crate::ControlAddress;
 use crate::reconnect_policy::ReconnectPolicy;
 
 /// Events emitted by the Managed-session engine for local observability.
+///
+/// Server reconciliation surfaces as Received (`Snapshot`), `Applying`,
+/// `Applied`, `Rejected`, and `Superseded` without a separate status endpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManagedSessionEvent {
     /// A validated snapshot envelope was received on the active downlink.
     Snapshot(SnapshotEnvelope),
+    /// Role-adapter apply has started for this revision.
+    Applying { revision: String },
     /// A revision was successfully applied through the role adapter.
     Applied { revision: String },
     /// Role input was rejected or invalid; prior applied revision is retained.
     Rejected { revision: String },
+    /// A queued snapshot was discarded because a newer complete snapshot arrived.
+    Superseded { revision: String },
     /// The session is waiting before replacing a failed connection.
     Reconnecting { display_delay_secs: u64 },
 }
@@ -252,6 +259,10 @@ impl<C: SessionClock> ManagedSession<C> {
         Fut: Future<Output = ()>,
     {
         let QueuedSnapshot { revision, input } = snapshot;
+        on_event(ManagedSessionEvent::Applying {
+            revision: revision.clone(),
+        })
+        .await;
         let apply = adapter.apply(input);
         tokio::pin!(apply);
 
@@ -381,10 +392,13 @@ impl<C: SessionClock> ManagedSession<C> {
             revision: envelope.revision,
             input,
         };
-        if applying {
-            loop_state.queue.note_while_applying(queued);
+        let superseded = if applying {
+            loop_state.queue.note_while_applying(queued)
         } else {
-            loop_state.queue.note_when_idle(queued);
+            loop_state.queue.note_when_idle(queued)
+        };
+        if let Some(revision) = superseded {
+            on_event(ManagedSessionEvent::Superseded { revision }).await;
         }
     }
 

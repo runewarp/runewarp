@@ -1,9 +1,11 @@
 mod active_client;
 mod authorization;
+mod managed_adapter;
 mod tunnel_registry;
 mod visitor_stream;
 
 pub use self::authorization::{AuthorizationSnapshot, PreparedAuthorization, ServerAuthorization};
+pub use self::managed_adapter::ServerAuthorizationAdapter;
 
 use std::future::Future;
 use std::io;
@@ -12,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use quinn::Endpoint;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 
 use crate::{
     HANDSHAKE_TIMEOUT, ServerHostname,
@@ -21,10 +23,22 @@ use crate::{
     shutdown::{OrderlyShutdown, ShutdownMode},
 };
 
+use self::managed_adapter::ReadinessGate;
 use self::tunnel_registry::TunnelRegistry;
 use self::visitor_stream::VisitorStreamHandler;
 
 pub const QUIC_CLOSE_FLUSH_DURATION: Duration = Duration::from_millis(100);
+
+/// How the Server admits authorization and readiness at bind time.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ServerAdmission {
+    /// Static mode: requires at least one Tunnel and gains readiness immediately.
+    #[default]
+    Static,
+    /// Managed mode: empty authorization is allowed; readiness stays deferred
+    /// until the first successful Managed-session apply.
+    Managed,
+}
 
 pub struct ServerBindConfig {
     pub public_bind_addr: SocketAddr,
@@ -36,6 +50,7 @@ pub struct ServerBindConfig {
     pub authorization: ServerAuthorization,
     pub public_tls_config: Option<Arc<rustls::ServerConfig>>,
     pub quic_server_config: quinn::ServerConfig,
+    pub admission: ServerAdmission,
 }
 
 pub struct Server {
@@ -44,10 +59,12 @@ pub struct Server {
     readiness_probe: Option<ReadinessProbe>,
     tunnel_registry: TunnelRegistry,
     visitor_stream_handler: VisitorStreamHandler,
+    authorization_adapter: ServerAuthorizationAdapter,
 }
 
 struct ReadinessProbe {
     bind_address: SocketAddr,
+    gate: ReadinessGate,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -76,8 +93,12 @@ where
 }
 
 impl ReadinessProbe {
-    async fn bind(bind_addr: SocketAddr) -> io::Result<Self> {
-        let listener = TcpListener::bind(bind_addr).await.map_err(|source| {
+    async fn bind(bind_addr: SocketAddr, initially_ready: bool) -> io::Result<Self> {
+        // Reserve the readiness port at startup. For managed admission, keep the
+        // socket bound without listen() so probes stay Unready and no other
+        // process can claim the port, then listen only after the first apply.
+        let socket = tcp_socket_for(bind_addr)?;
+        socket.bind(bind_addr).map_err(|source| {
             io::Error::new(
                 source.kind(),
                 format!(
@@ -86,17 +107,56 @@ impl ReadinessProbe {
                 ),
             )
         })?;
-        let bind_address = listener.local_addr()?;
-        let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                drop(stream);
-            }
-        });
-        Ok(Self { bind_address, task })
+        let bind_address = socket.local_addr()?;
+        let gate = ReadinessGate::new(initially_ready);
+        let task = if initially_ready {
+            let listener = socket.listen(128).map_err(|source| {
+                io::Error::new(
+                    source.kind(),
+                    format!(
+                        "failed to listen on server.readiness-bind-address {}: {}",
+                        bind_address, source
+                    ),
+                )
+            })?;
+            tokio::spawn(async move {
+                accept_readiness_connections(listener).await;
+            })
+        } else {
+            let accept_gate = gate.clone();
+            tokio::spawn(async move {
+                accept_gate.wait_until_ready().await;
+                match socket.listen(128) {
+                    Ok(listener) => {
+                        // Emit gained only after listen succeeds so a failed
+                        // listen cannot leave operators thinking readiness is up.
+                        runtime_log::server_readiness_gained(bind_address);
+                        accept_readiness_connections(listener).await;
+                    }
+                    Err(error) => {
+                        runtime_log::emit(
+                            runtime_log::EventLevel::Error,
+                            &format!(
+                                "failed to listen on server readiness address {bind_address}: {error}"
+                            ),
+                        );
+                    }
+                }
+            })
+        };
+        Ok(Self {
+            bind_address,
+            gate,
+            task,
+        })
     }
 
     fn bind_address(&self) -> SocketAddr {
         self.bind_address
+    }
+
+    fn gate(&self) -> ReadinessGate {
+        self.gate.clone()
     }
 
     fn close(self) {
@@ -104,9 +164,24 @@ impl ReadinessProbe {
     }
 }
 
+fn tcp_socket_for(bind_addr: SocketAddr) -> io::Result<TcpSocket> {
+    match bind_addr {
+        SocketAddr::V4(_) => TcpSocket::new_v4(),
+        SocketAddr::V6(_) => TcpSocket::new_v6(),
+    }
+}
+
+async fn accept_readiness_connections(listener: TcpListener) {
+    while let Ok((stream, _)) = listener.accept().await {
+        drop(stream);
+    }
+}
+
 impl Server {
     pub async fn bind(config: ServerBindConfig) -> io::Result<Self> {
-        if config.authorization.current_tunnel_count() == 0 {
+        if config.admission == ServerAdmission::Static
+            && config.authorization.current_tunnel_count() == 0
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "server bind requires at least one configured Tunnel",
@@ -143,14 +218,23 @@ impl Server {
                 ),
             )
         })?;
+        let initially_ready = config.admission == ServerAdmission::Static;
         let readiness_probe = match config.readiness_bind_addr {
-            Some(bind_addr) => Some(ReadinessProbe::bind(bind_addr).await?),
+            Some(bind_addr) => Some(ReadinessProbe::bind(bind_addr, initially_ready).await?),
             None => None,
         };
         if let Some(readiness_probe) = readiness_probe.as_ref() {
             runtime_log::server_readiness_listener_enabled(readiness_probe.bind_address());
-            runtime_log::server_readiness_gained(readiness_probe.bind_address());
+            if initially_ready {
+                runtime_log::server_readiness_gained(readiness_probe.bind_address());
+            }
         }
+        let readiness_gate = readiness_probe.as_ref().map(ReadinessProbe::gate);
+        let authorization_adapter = ServerAuthorizationAdapter::new(
+            config.server_hostname,
+            tunnel_registry.clone(),
+            readiness_gate,
+        );
 
         Ok(Self {
             public_listener,
@@ -158,6 +242,7 @@ impl Server {
             readiness_probe,
             tunnel_registry,
             visitor_stream_handler,
+            authorization_adapter,
         })
     }
 
@@ -173,6 +258,11 @@ impl Server {
         self.readiness_probe
             .as_ref()
             .map(ReadinessProbe::bind_address)
+    }
+
+    /// Shared Managed-session role adapter for atomic authorization applies.
+    pub fn authorization_adapter(&self) -> ServerAuthorizationAdapter {
+        self.authorization_adapter.clone()
     }
 
     pub async fn run(self) -> io::Result<()> {
@@ -225,6 +315,7 @@ impl Server {
             readiness_probe,
             tunnel_registry,
             visitor_stream_handler,
+            authorization_adapter: _,
         } = self;
         loop {
             match next_server_event(

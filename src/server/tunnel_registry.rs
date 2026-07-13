@@ -25,7 +25,6 @@ pub(crate) enum TunnelRouteOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // returned by commit_authorization for managed authorization applies
 pub(crate) struct LiveWorkDispatch {
     pub connections_closed: usize,
     pub streams_reset: usize,
@@ -110,12 +109,10 @@ impl TunnelRegistry {
         })
     }
 
-    #[allow(dead_code)] // shared handle for managed authorization commit and tests
     pub(crate) fn authorization(&self) -> Arc<AuthorizationState> {
         self.authorization.clone()
     }
 
-    #[allow(dead_code)] // managed authorization apply path; exercised in unit tests today
     pub(crate) async fn commit_authorization(
         &self,
         prepared: PreparedAuthorization,

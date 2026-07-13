@@ -400,8 +400,8 @@ mod tests {
     use runewarp::{
         AddressController, AddressWorkerControl, CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME,
         CLIENT_KEY_FILENAME, ClientConfig, ClientTlsMode, LogLevel, PublicHostname, Server,
-        ServerAddress, ServerAuthorization, ServerBindConfig, ServerHostname, ServerTunnelConfig,
-        ServiceConfig, ShutdownMode, generate_client_identity,
+        ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
+        ServerTunnelConfig, ServiceConfig, ShutdownMode, generate_client_identity,
         make_server_quic_config_with_client_admission,
     };
 
@@ -549,6 +549,7 @@ mod tests {
                 Arc::new(authorization.clone()),
             )
             .map_err(io::Error::other)?,
+            admission: ServerAdmission::Static,
         })
         .await
         .map_err(io::Error::other)?;

@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    PreparedClient, PreparedServer, generate_client_identity, initialize_manual_server_certificate,
-    load_client_config, load_server_config,
+    PreparedClient, PreparedServer, RoleAdapter, generate_client_identity,
+    initialize_manual_server_certificate, load_client_config, load_server_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -131,6 +131,78 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         .expect("readiness listener should bind");
     assert!(readiness_addr.ip().is_loopback());
     TcpStream::connect(readiness_addr).await.unwrap();
+}
+
+#[tokio::test]
+async fn managed_prepared_server_binds_empty_auth_and_defers_readiness_until_first_apply() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    common::write_server_identity_material(&tempdir.path().join("server-identity"));
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[control]
+address = "control.example.test"
+trust = "system"
+
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+identity-dir = "server-identity"
+public-bind-address = "127.0.0.1:0"
+tunnel-bind-address = "127.0.0.1:0"
+readiness-bind-address = "127.0.0.1:0"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
+    assert!(settings.tunnels.is_empty());
+    let server = PreparedServer::bind(
+        &settings,
+        settings.public_bind_address,
+        settings.tunnel_connection_bind_address,
+    )
+    .await
+    .expect("managed Server must bind with empty authorization");
+
+    let readiness_addr = server
+        .readiness_addr()
+        .expect("managed Server must bind the readiness listener");
+    if let Ok(Ok(_)) = timeout(
+        Duration::from_millis(100),
+        TcpStream::connect(readiness_addr),
+    )
+    .await
+    {
+        panic!("readiness must stay Unready before the first successful apply");
+    }
+
+    let mut adapter = server
+        .authorization_adapter()
+        .expect("managed Server exposes an authorization adapter");
+    adapter
+        .apply(runewarp::ServerManagedInput { tunnels: vec![] })
+        .await
+        .expect("empty Tunnel collection remains a valid first apply");
+
+    let opened = timeout(Duration::from_secs(2), async {
+        loop {
+            if TcpStream::connect(readiness_addr).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        opened.is_ok(),
+        "first successful apply must make readiness available"
+    );
 }
 
 #[tokio::test]

@@ -141,7 +141,7 @@ The set of live **Tunnel connections** and their serving **Client instances** cu
 _Avoid_: Tunnel, cluster
 
 **Server readiness**:
-The externally observable ingress-admission signal for a **Server**. When **Server readiness** succeeds, new load-balanced visitor traffic may be admitted. When it fails, no new load-balanced visitor traffic should land there.
+The externally observable ingress-admission signal for a **Server**. When **Server readiness** succeeds, new load-balanced visitor traffic may be admitted. When it fails, no new load-balanced visitor traffic should land there. In **Managed mode**, readiness stays unavailable until the first successful Server input apply, then remains available through later Control loss while the last applied authorization is retained.
 _Avoid_: Graceful shutdown, tunnel coverage, health
 
 **Graceful shutdown**:

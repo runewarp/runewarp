@@ -1,6 +1,8 @@
 //! Managed-session timing windows.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 /// Deadline for the first valid snapshot on a new connection. Keepalive
 /// comments do not extend this window.
@@ -9,12 +11,15 @@ pub const FIRST_SNAPSHOT_DEADLINE: Duration = Duration::from_secs(60);
 /// Maximum silence between any SSE bytes before the session is replaced.
 pub const SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Clock used by the Managed-session loop so tests can inject time.
+/// Cadence for repeating the last successfully applied revision to Control.
+pub const STATE_HEARTBEAT: Duration = Duration::from_secs(20);
+
+/// Clock used by the Managed-session loop so tests can pause Tokio time.
 pub trait SessionClock {
     fn now(&self) -> Instant;
 }
 
-/// Wall-clock [`SessionClock`] backed by [`Instant::now`].
+/// Tokio-time [`SessionClock`] backed by [`Instant::now`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemSessionClock;
 
@@ -67,7 +72,9 @@ impl SessionDeadlines {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+
+    use tokio::time::Instant;
 
     use super::{FIRST_SNAPSHOT_DEADLINE, SILENCE_TIMEOUT, SessionDeadlines};
 

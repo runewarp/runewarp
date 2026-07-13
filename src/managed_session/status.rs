@@ -1,6 +1,8 @@
-//! Managed-session status policy for SSE downlink responses.
+//! Managed-session status policy for SSE downlink and state-report responses.
 
 use http::{HeaderMap, StatusCode, header};
+use http_body_util::BodyExt;
+use hyper::body::Incoming;
 
 /// Outcome of classifying an SSE response before body parsing begins.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9,6 +11,15 @@ pub enum SseResponseClass {
     Success,
     /// Any other outcome: retry by replacing the Managed session.
     RetryableFailure,
+}
+
+/// Outcome of classifying a state-report response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StateResponseClass {
+    /// Exact status 204 with an empty body.
+    Success,
+    /// Any other outcome: leave SSE undisturbed and retry later.
+    Failure,
 }
 
 /// Classify an SSE response. Redirects, 204, other non-success statuses, and
@@ -24,6 +35,37 @@ pub fn classify_sse_response(status: StatusCode, headers: &HeaderMap) -> SseResp
         return SseResponseClass::RetryableFailure;
     }
     SseResponseClass::Success
+}
+
+/// Classify a state-report response from status alone before reading the body.
+pub fn classify_state_status(status: StatusCode) -> StateResponseClass {
+    if status == StatusCode::NO_CONTENT {
+        StateResponseClass::Success
+    } else {
+        StateResponseClass::Failure
+    }
+}
+
+/// Classify a fully read state-report response. Success requires exact status
+/// 204 and an empty body.
+pub fn classify_state_response(status: StatusCode, body: &[u8]) -> StateResponseClass {
+    if classify_state_status(status) != StateResponseClass::Success {
+        return StateResponseClass::Failure;
+    }
+    if body.is_empty() {
+        StateResponseClass::Success
+    } else {
+        StateResponseClass::Failure
+    }
+}
+
+/// Collect a state-response body and classify it. Used by connection writes.
+pub async fn classify_state_incoming(
+    status: StatusCode,
+    body: Incoming,
+) -> Result<StateResponseClass, hyper::Error> {
+    let collected = body.collect().await?;
+    Ok(classify_state_response(status, &collected.to_bytes()))
 }
 
 fn content_type_is_event_stream(headers: &HeaderMap) -> bool {
@@ -46,7 +88,9 @@ fn content_type_is_event_stream(headers: &HeaderMap) -> bool {
 mod tests {
     use http::{HeaderMap, HeaderValue, StatusCode, header};
 
-    use super::{SseResponseClass, classify_sse_response};
+    use super::{
+        SseResponseClass, StateResponseClass, classify_sse_response, classify_state_response,
+    };
 
     fn headers_with_content_type(value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -120,6 +164,26 @@ mod tests {
         assert_eq!(
             classify_sse_response(StatusCode::OK, &HeaderMap::new()),
             SseResponseClass::RetryableFailure
+        );
+    }
+
+    #[test]
+    fn state_write_succeeds_only_for_exact_204_with_empty_body() {
+        assert_eq!(
+            classify_state_response(StatusCode::NO_CONTENT, b""),
+            StateResponseClass::Success
+        );
+        assert_eq!(
+            classify_state_response(StatusCode::NO_CONTENT, b"{}"),
+            StateResponseClass::Failure
+        );
+        assert_eq!(
+            classify_state_response(StatusCode::OK, b""),
+            StateResponseClass::Failure
+        );
+        assert_eq!(
+            classify_state_response(StatusCode::INTERNAL_SERVER_ERROR, b""),
+            StateResponseClass::Failure
         );
     }
 }

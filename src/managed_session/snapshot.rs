@@ -1,8 +1,8 @@
 //! v1 Managed-session snapshot envelope validation.
 //!
-//! Deep role-input schema checks belong to later reconciliation work. This
-//! module only validates the shared envelope required to accept a downlink
-//! snapshot: non-empty opaque revision plus a present `input` object.
+//! Validates the shared envelope required to accept a downlink snapshot:
+//! non-empty opaque revision plus a present `input` object. Role-specific
+//! `input` schema checks live in [`super::input`].
 
 use std::fmt;
 

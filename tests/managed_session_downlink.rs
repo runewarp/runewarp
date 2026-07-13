@@ -23,8 +23,8 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
     CONTROL_ALPN_H2, ConnectionError, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
-    ManagedSession, ManagedSessionConnection, ManagedSessionRole, SessionMaterial, events_path,
-    load_control_tls_material,
+    DeferredClientAdapter, ManagedSession, ManagedSessionConnection, ManagedSessionRole,
+    SessionMaterial, events_path, load_control_tls_material,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -419,7 +419,7 @@ async fn session_returns_shutdown_result_to_runtime() {
         ManagedSession::new(address, ManagedSessionRole::Client, session_material).unwrap();
 
     let result = session
-        .run(|_event| async {}, async {
+        .run(&mut DeferredClientAdapter, |_event| async {}, async {
             Err::<(), _>(std::io::Error::other("shutdown unavailable"))
         })
         .await;
@@ -667,7 +667,7 @@ async fn sse_failure_establishes_a_new_tls_connection() {
     let metrics = fixture.metrics.clone();
     let runner = tokio::spawn(async move {
         session_runner
-            .run(|_event| async {}, async {
+            .run(&mut DeferredClientAdapter, |_event| async {}, async {
                 let _ = stop_rx.await;
             })
             .await;
@@ -713,6 +713,7 @@ async fn response_header_stall_reconnects_after_first_snapshot_deadline() {
     let runner = tokio::spawn(async move {
         session
             .run(
+                &mut DeferredClientAdapter,
                 move |event| {
                     let event_tx = event_tx.clone();
                     async move {

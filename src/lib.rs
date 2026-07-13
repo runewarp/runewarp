@@ -58,9 +58,11 @@ pub use identity::{
     rotate_client_identity,
 };
 pub use managed_session::{
-    CONTROL_ALPN_H2, ConnectionError, ControlClientIdentityMaterial, ManagedSession,
-    ManagedSessionConnection, ManagedSessionEvent, ManagedSessionRole, SessionMaterial,
-    SnapshotEnvelope, events_path, load_control_tls_material,
+    ApplyError, CONTROL_ALPN_H2, ClientManagedInput, ConnectionError,
+    ControlClientIdentityMaterial, DeferredClientAdapter, DeferredServerAdapter, InputError,
+    ManagedSession, ManagedSessionConnection, ManagedSessionEvent, ManagedSessionRole, RoleAdapter,
+    STATE_HEARTBEAT, ServerManagedInput, SessionMaterial, SnapshotEnvelope, events_path,
+    load_control_tls_material, parse_client_input, parse_server_input, state_path,
 };
 pub use paths::{
     XdgPathError, default_client_acme_state_dir, default_client_identity_material_dir,

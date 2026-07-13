@@ -124,7 +124,9 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
             Ok(session) => session,
             Err(error) => return Err(logged_runtime_failure(Box::new(error))),
         };
+        let mut adapter = runewarp::DeferredServerAdapter;
         let session_runtime = session.run(
+            &mut adapter,
             |event| async move {
                 runewarp::runtime_log::managed_session_event(
                     runewarp::ManagedSessionRole::Server,

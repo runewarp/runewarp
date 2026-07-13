@@ -1,3 +1,5 @@
+use std::io;
+
 use runewarp::{
     OrderlyShutdown, PreparedServer, QUIC_CLOSE_FLUSH_DURATION, ServerRuntimeArgs, ShutdownMode,
     resolve_server_config_from_cli,
@@ -102,7 +104,49 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
             }
         }
     });
-    let server_result = server.run_with_shutdown(&shutdown).await;
+    let server_result = if let Some(control) = config.control.as_ref() {
+        let identity = config
+            .identity
+            .as_ref()
+            .expect("managed Server config includes identity");
+        let material = runewarp::SessionMaterial {
+            control_hostname: control.address.hostname().as_str().to_owned(),
+            trust: control.trust.clone(),
+            identity: runewarp::ControlClientIdentityMaterial::from_server_identity_dir(
+                &identity.directory,
+            ),
+        };
+        let mut session = match runewarp::ManagedSession::new(
+            control.address.clone(),
+            runewarp::ManagedSessionRole::Server,
+            material,
+        ) {
+            Ok(session) => session,
+            Err(error) => return Err(logged_runtime_failure(Box::new(error))),
+        };
+        let session_runtime = session.run(
+            |event| async move {
+                runewarp::runtime_log::managed_session_event(
+                    runewarp::ManagedSessionRole::Server,
+                    &event,
+                );
+            },
+            std::future::pending::<()>(),
+        );
+        let server_runtime = server.run_with_shutdown(&shutdown);
+        tokio::pin!(session_runtime);
+        tokio::pin!(server_runtime);
+        tokio::select! {
+            server_result = &mut server_runtime => server_result,
+            _ = &mut session_runtime => {
+                return Err(logged_runtime_failure(Box::new(io::Error::other(
+                    "managed session stopped unexpectedly",
+                ))));
+            }
+        }
+    } else {
+        server.run_with_shutdown(&shutdown).await
+    };
     if let Err(error) = server_result {
         return Err(logged_runtime_failure(Box::new(error)));
     }

@@ -131,6 +131,20 @@ When the remote **Server** exits gracefully, the **Client instance** still treat
 
 When more than one authenticated connection is live for the same **Tunnel** on one **Server** node, those connections form a **Tunnel pool**. Each new Visitor stream is placed onto the pool member with the fewest active proxied streams, with round-robin tie-breaking when load is equal. If the chosen member dies before the proxied stream is established, the Visitor connection fails immediately; the Server does not retry placement onto a different pool member.
 
+## Managed-session Control downlink
+
+In **Managed mode**, each Server or Client runtime establishes one mutually authenticated HTTPS session to the configured **Control address**:
+
+1. Load the role identity certificate/key and Control trust roots for that connection attempt (Client identity for Clients; Server identity for Servers). Material is reloaded for each new connection, not per request.
+2. Dial the Control hostname, require ALPN-negotiated HTTP/2 (`h2`), and never fall back to HTTP/1.1.
+3. Open exactly one role-specific SSE downlink: `GET /v1/server/events` or `GET /v1/client/events`. The request carries no role selector, hostname selector, session ID, or runtime-instance ID.
+4. Accept the SSE response only for status `200` with media type `text/event-stream`. Redirects, status `204`, other non-success statuses, and wrong media types fail the session.
+5. Parse standard SSE framing. Comment lines are keepalives. `id` and `retry` fields are ignored. Every data event must be `event: snapshot` with JSON that includes a non-empty opaque `revision` and an `input` object; unknown JSON fields in a known v1 snapshot are ignored. Malformed framing, invalid UTF-8/JSON, missing required fields, empty revisions, and unknown event types fail the session.
+6. The first valid snapshot has an independent 60-second deadline that keepalive comments cannot extend. Any 60-second silence without SSE bytes also replaces the session.
+7. Any downlink failure closes the entire HTTP/2 connection before reconnect. Reconnect uses the same full-jitter windows capped at 60 seconds as Tunnel reconnect; the policy resets only after a valid snapshot establishes the new session.
+
+The current runtime does not open state-report streams or apply role input. After the SSE response succeeds, the downlink keeps the authenticated HTTP/2 connection ready for additional streams.
+
 ## Runtime invariants
 
 - each **Client instance** has one or more **Tunnel connections**

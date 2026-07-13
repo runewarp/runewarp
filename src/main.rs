@@ -2,7 +2,6 @@ mod client_runtime;
 mod commands;
 mod config_hints;
 mod error_handling;
-mod reconnect_policy;
 
 use std::env;
 use std::io;

@@ -11,7 +11,7 @@ use runewarp::{
 };
 use tokio::net::lookup_host;
 
-use crate::reconnect_policy::ReconnectPolicy;
+use runewarp::reconnect_policy::ReconnectPolicy;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RetryDisposition {
@@ -35,8 +35,6 @@ where
 {
     let mut controller = AddressController::new();
     let settings = Arc::new(settings.clone());
-    let managed_waiting_for_assignment =
-        settings.control.is_some() && settings.server_addresses.is_empty();
     controller.seed_static(settings.server_addresses.clone(), {
         let settings = Arc::clone(&settings);
         move |server_address, control| {
@@ -48,10 +46,31 @@ where
     });
 
     let shutdown = controller.shutdown_handle();
-    if managed_waiting_for_assignment {
-        // Managed mode starts with no Server addresses until Control assigns them.
-        // Stay alive for shutdown instead of treating an empty controller as done.
-        let _mode = shutdown_signal.await?;
+    if let Some(control) = settings.control.as_ref() {
+        // Managed mode: run the Control downlink until shutdown. Snapshot apply
+        // and state reporting land in later Managed-session work.
+        let material = runewarp::SessionMaterial {
+            control_hostname: control.address.hostname().as_str().to_owned(),
+            trust: control.trust.clone(),
+            identity: runewarp::ControlClientIdentityMaterial::from_client_identity_dir(
+                &settings.identity_directory,
+            ),
+        };
+        let mut session = runewarp::ManagedSession::new(
+            control.address.clone(),
+            runewarp::ManagedSessionRole::Client,
+            material,
+        )?;
+        let shutdown_result = session.run(
+            |event| async move {
+                runewarp::runtime_log::managed_session_event(
+                    runewarp::ManagedSessionRole::Client,
+                    &event,
+                );
+            },
+            shutdown_signal,
+        );
+        let _mode = shutdown_result.await?;
         runewarp::runtime_log::client_graceful_shutdown_started();
         shutdown.request();
         return Ok(());

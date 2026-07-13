@@ -35,6 +35,7 @@ Runtime diagnostics follow the same boundary.
 - rejected or authenticated **Client identity** values on tunnel-auth warnings
 - Client `backend-address` values in routing diagnostics
 - graceful-shutdown lifecycle lines
+- Managed-session role and reconnect outcome
 - `server acme challenge handled` with `server-hostname=...` for `acme-tls/1` traffic on the **Server hostname**
 - distinct Client ACME challenge-handling lines for terminating **Public hostnames**
 
@@ -43,6 +44,7 @@ Runtime diagnostics follow the same boundary.
 - buffered ClientHello bytes
 - HTTP headers or bodies
 - decrypted application plaintext
+- Control snapshot input and opaque revision values
 - remote socket addresses for Server tunnel lifecycle or forwarded-route events
 
 ## Public traffic invariants
@@ -73,9 +75,13 @@ Static fanout does not change these trust boundaries. When a Client dials multip
 Managed mode introduces a separate trust boundary for the Control endpoint:
 
 1. the Server authenticates to Control with **Server identity** material from `server.identity-dir`
-2. the Client and Server validate the Control endpoint through `control.trust = "system"` or through `control.trust = "ca-file"` with an exclusive CA bundle
+2. the Client authenticates to Control with the same Client identity material used for Tunnel mTLS from `client.identity-dir`
+3. the Client and Server validate the Control endpoint through `control.trust = "system"` or through `control.trust = "ca-file"` with an exclusive CA bundle
+4. Control sessions require mutually authenticated TLS with mandatory HTTP/2 ALPN; Core does not follow Control redirects and does not fall back to HTTP/1.1
 
 **Server identity** is not the **Server certificate**. The Server certificate still identifies the tunnel endpoint to Clients. Server identity is a pinned public-key identity presented only to Control.
+
+Identity and trust material are loaded when establishing each new Managed-session connection. Post-start reload failures remain recoverable in-process through the existing reconnect policy.
 
 ## Certificate and identity lifecycle
 

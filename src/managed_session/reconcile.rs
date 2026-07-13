@@ -58,15 +58,29 @@ impl<I> SnapshotQueue<I> {
     }
 
     /// Retain only the newest candidate while an apply is in flight.
-    pub fn note_while_applying(&mut self, snapshot: QueuedSnapshot<I>) {
+    ///
+    /// Returns the superseded pending revision when one is replaced.
+    pub fn note_while_applying(&mut self, snapshot: QueuedSnapshot<I>) -> Option<String> {
         debug_assert!(self.applying);
+        let superseded = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.revision.clone());
         self.pending = Some(snapshot);
+        superseded
     }
 
     /// Retain a candidate while idle. Later [`take_next`] starts the apply.
-    pub fn note_when_idle(&mut self, snapshot: QueuedSnapshot<I>) {
+    ///
+    /// Returns the superseded pending revision when one is replaced.
+    pub fn note_when_idle(&mut self, snapshot: QueuedSnapshot<I>) -> Option<String> {
         debug_assert!(!self.applying);
+        let superseded = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.revision.clone());
         self.pending = Some(snapshot);
+        superseded
     }
 
     /// Take the newest pending candidate and mark apply in flight.
@@ -129,7 +143,8 @@ mod tests {
         );
 
         queue.note_while_applying(snapshot("rev-2"));
-        queue.note_while_applying(snapshot("rev-3"));
+        let superseded = queue.note_while_applying(snapshot("rev-3"));
+        assert_eq!(superseded.as_deref(), Some("rev-2"));
         queue.finish_apply();
 
         let next = queue.take_next().expect("pending newest remains");

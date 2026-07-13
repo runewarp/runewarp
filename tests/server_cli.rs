@@ -593,6 +593,9 @@ identity-dir = "server-identity"
 "#,
     )?;
 
+    // Managed empty authorization binds successfully, then the Managed session
+    // keeps reconnecting to Control. Bound the wait so the CLI assertion stays
+    // about address precedence rather than Control availability.
     let assert = Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
         .args([
@@ -602,10 +605,16 @@ identity-dir = "server-identity"
             "--control-address",
             "override.example.test",
         ])
+        .timeout(std::time::Duration::from_secs(2))
         .assert()
         .failure();
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
+    assert!(
+        stderr.contains("server public listener ready")
+            || stderr.contains("server tunnel listener ready"),
+        "managed Server should bind before Control reconnect loops: {stderr}"
+    );
     assert!(!stderr.contains("configured.example.test"));
     assert!(!stderr.contains("control.address is required"));
     Ok(())

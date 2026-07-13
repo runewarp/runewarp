@@ -202,3 +202,33 @@ pub fn write_server_identity_material(directory: &Path) -> ServerIdentity {
     .unwrap();
     identity
 }
+
+/// Write Control client leaf PEM as Server identity material under `directory`.
+///
+/// The Control fixture verifies peer certificates against the same CA, so managed
+/// Server session tests reuse that leaf as `server.crt` / `server.key`.
+#[allow(dead_code)]
+pub fn write_control_client_as_server_identity(
+    directory: &Path,
+    material: &ControlMtlsMaterial,
+) -> ServerIdentity {
+    fs::create_dir_all(directory).unwrap();
+    let key = KeyPair::from_pem(&material.client_key_pem).unwrap();
+    let identity = ServerIdentity::from_subject_public_key_info(&key.subject_public_key_info());
+    fs::write(
+        directory.join(SERVER_IDENTITY_KEY_FILENAME),
+        &material.client_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        directory.join(SERVER_IDENTITY_CERT_FILENAME),
+        &material.client_cert_pem,
+    )
+    .unwrap();
+    fs::write(
+        directory.join(SERVER_IDENTITY_FILENAME),
+        identity.to_string(),
+    )
+    .unwrap();
+    identity
+}

@@ -9,10 +9,10 @@ use runewarp::{
     ClientConfigResolutionDefaults, ClientConnectConfig, ClientPublicCertConfig, ClientRuntimeArgs,
     ClientTlsMode, GeneratedClientIdentity, LogLevel, OrderlyShutdown, PreparedClient,
     PreparedServer, PublicHostname, QUIC_CLOSE_FLUSH_DURATION, SelectedClientConfig, Server,
-    ServerAddress, ServerAuthorization, ServerBindConfig, ServerHostname, ServerTunnelConfig,
-    ServiceConfig, ShutdownMode, generate_client_identity, initialize_manual_server_certificate,
-    load_client_config, load_server_config, make_client_quic_config,
-    make_client_quic_config_with_client_auth, make_server_quic_config,
+    ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
+    ServerTunnelConfig, ServiceConfig, ShutdownMode, generate_client_identity,
+    initialize_manual_server_certificate, load_client_config, load_server_config,
+    make_client_quic_config, make_client_quic_config_with_client_auth, make_server_quic_config,
     make_server_quic_config_with_client_admission,
     make_server_quic_config_with_client_admission_resolver, resolve_selected_client_config,
 };
@@ -86,6 +86,7 @@ async fn forwards_tls_passthrough_end_to_end() {
             &tunnel_key,
             &authorization,
         ),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -360,6 +361,7 @@ async fn drops_public_tls_when_no_client_is_connected() {
             &authorization,
         ),
         public_tls_config: None,
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -417,6 +419,7 @@ async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
             &authorization,
         ),
         public_tls_config: Some(Arc::new(challenge_server_config)),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -492,6 +495,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
             &authorization,
         ),
         public_tls_config: Some(Arc::new(challenge_server_config)),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -591,6 +595,7 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
             Arc::new(authorization.clone()),
         )
         .unwrap(),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -691,6 +696,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
         )
         .unwrap(),
         public_tls_config: None,
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -751,6 +757,7 @@ async fn library_constructors_expose_addresses_before_running() {
             &tunnel_key,
             &authorization,
         ),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -841,6 +848,7 @@ async fn server_bind_rejects_empty_configured_tunnels() {
             private_key_from_der(&tunnel_key),
         )
         .unwrap(),
+        admission: ServerAdmission::Static,
     })
     .await
     {
@@ -890,6 +898,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
             &tunnel_key,
             &authorization,
         ),
+        admission: ServerAdmission::Static,
     })
     .await
     .expect("server should bind");
@@ -976,6 +985,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
             &tunnel_key,
             &authorization,
         ),
+        admission: ServerAdmission::Static,
     })
     .await
     .expect("server should bind");
@@ -1045,6 +1055,7 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
             &tunnel_key,
             &authorization,
         ),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -1126,6 +1137,7 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
             &tunnel_key,
             &authorization,
         ),
+        admission: ServerAdmission::Static,
     })
     .await
     .expect("server should bind");
@@ -1228,6 +1240,7 @@ async fn graceful_server_shutdown_keeps_already_landed_streams_until_they_finish
             &tunnel_key,
             &authorization,
         ),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -1320,6 +1333,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
             &tunnel_key,
             &authorization,
         ),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();
@@ -1390,6 +1404,7 @@ async fn a_busier_tunnel_pool_member_stops_winning_new_stream_placement() {
             &tunnel_key,
             &authorization,
         ),
+        admission: ServerAdmission::Static,
     })
     .await
     .unwrap();

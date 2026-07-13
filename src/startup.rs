@@ -39,6 +39,7 @@ pub struct PreparedServer {
     graceful_shutdown_duration: std::time::Duration,
     trusted_client_identities: Vec<ClientIdentity>,
     acme_runtime: Option<ManagedAcmeRuntime>,
+    managed: bool,
 }
 
 impl PreparedServer {
@@ -96,6 +97,12 @@ impl PreparedServer {
                 )
             }
         };
+        let managed = config.control.is_some();
+        let admission = if managed {
+            crate::ServerAdmission::Managed
+        } else {
+            crate::ServerAdmission::Static
+        };
         let server = Server::bind(ServerBindConfig {
             public_bind_addr,
             tunnel_connection_bind_addr,
@@ -106,6 +113,7 @@ impl PreparedServer {
                 .as_ref()
                 .map(|acme| acme.state.challenge_rustls_config()),
             quic_server_config,
+            admission,
         })
         .await
         .map_err(ServerStartupError::Bind)?;
@@ -115,6 +123,7 @@ impl PreparedServer {
             graceful_shutdown_duration: config.graceful_shutdown_duration,
             trusted_client_identities,
             acme_runtime,
+            managed,
         })
     }
 
@@ -132,6 +141,13 @@ impl PreparedServer {
 
     pub fn trusted_client_identities(&self) -> &[ClientIdentity] {
         &self.trusted_client_identities
+    }
+
+    /// Managed-session Server authorization adapter shared with the bound runtime.
+    ///
+    /// Returns `None` for static Servers.
+    pub fn authorization_adapter(&self) -> Option<crate::ServerAuthorizationAdapter> {
+        self.managed.then(|| self.server.authorization_adapter())
     }
 
     pub async fn run(self) -> io::Result<()> {

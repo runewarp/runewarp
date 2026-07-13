@@ -80,7 +80,7 @@ pub use quic::{
 };
 pub use server::{
     AuthorizationSnapshot, PreparedAuthorization, QUIC_CLOSE_FLUSH_DURATION, Server,
-    ServerAuthorization, ServerBindConfig,
+    ServerAdmission, ServerAuthorization, ServerAuthorizationAdapter, ServerBindConfig,
 };
 pub use server_address::{ServerAddress, ServerAddressError};
 pub use server_cert::{

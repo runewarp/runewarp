@@ -48,8 +48,8 @@ pub trait RoleAdapter: Send {
     fn apply(&mut self, input: Self::Input) -> impl Future<Output = Result<(), ApplyError>> + Send;
 }
 
-/// Temporary Server adapter that accepts validated inputs without wiring the
-/// authorization snapshot yet (see issue #155).
+/// Temporary Server adapter that accepts validated inputs without wiring live
+/// authorization. Production managed Servers use [`crate::ServerAuthorizationAdapter`].
 #[derive(Clone, Debug, Default)]
 pub struct DeferredServerAdapter;
 

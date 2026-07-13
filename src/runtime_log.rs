@@ -515,6 +515,13 @@ pub fn managed_session_event(role: ManagedSessionRole, event: &ManagedSessionEve
                 [("role", Cow::Borrowed(role))],
             ),
         ),
+        ManagedSessionEvent::Applying { revision: _ } => emit(
+            EventLevel::Info,
+            &event_line(
+                "managed session revision applying",
+                [("role", Cow::Borrowed(role))],
+            ),
+        ),
         ManagedSessionEvent::Applied { revision: _ } => emit(
             EventLevel::Info,
             &event_line(
@@ -526,6 +533,13 @@ pub fn managed_session_event(role: ManagedSessionRole, event: &ManagedSessionEve
             EventLevel::Warn,
             &event_line(
                 "managed session revision rejected",
+                [("role", Cow::Borrowed(role))],
+            ),
+        ),
+        ManagedSessionEvent::Superseded { revision: _ } => emit(
+            EventLevel::Info,
+            &event_line(
+                "managed session revision superseded",
                 [("role", Cow::Borrowed(role))],
             ),
         ),

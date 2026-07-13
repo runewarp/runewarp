@@ -109,7 +109,7 @@ cert-dir = "/etc/runewarp/server-cert"
 identity-dir = "/etc/runewarp/server-identity"
 ```
 
-Managed mode requires an effective Control address, allows empty `[[server.tunnels]]`, and requires `server.identity-dir` material distinct from `server.cert-dir`.
+Managed mode requires an effective Control address, allows empty `[[server.tunnels]]`, and requires `server.identity-dir` material distinct from `server.cert-dir`. Authorization comes only from Control-published Server snapshots after process start; the Server stays Unready and admits no Tunnel or Visitor work until the first successful apply.
 
 ### Client with exact-match routing
 
@@ -201,7 +201,7 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `server.identity-dir` | managed only | Directory containing Server identity material for Control authentication. Valid only in managed mode. Defaults to the XDG Server identity path. Must resolve to a different directory than `server.cert-dir`. |
 | `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
 | `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** **Tunnel connections**. Defaults to `0.0.0.0:443`. |
-| `server.readiness-bind-address` | no | Optional literal TCP socket address for a probe-only **Server readiness** listener. When configured, TCP accept success means the Server is ready for new ingress admission. There is no default listener. |
+| `server.readiness-bind-address` | no | Optional literal TCP socket address for a probe-only **Server readiness** listener. When configured, TCP accept success means the Server is ready for new ingress admission. There is no default listener. In managed mode the listener address is validated at startup, but the probe stays Unready until the first successful Server input apply. |
 | `server.graceful-shutdown-duration` | no | Operator-facing graceful drain window for the Server role. Defaults to `"60s"`. Supports non-negative integer durations with `ms`, `s`, `m`, or `h` suffixes. `"0s"` disables the longer drain window and makes graceful Server shutdown converge to fast Server behavior. |
 | `server.acme.email` | with ACME | Let's Encrypt ACME contact address. TLS-ALPN-01 only. |
 | `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp uses the XDG default state path and creates it during startup after validation succeeds. |

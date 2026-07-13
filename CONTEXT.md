@@ -105,8 +105,20 @@ The operator-run local endpoint that a **Client** connects to after it selects a
 _Avoid_: Service, tunnel
 
 **Client identity**:
-The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime; self-signed Client identity certificates are operationally non-expiring key carriers, while explicit key rotation changes the identity. One **Tunnel** may authorize one or more **Client identities**.
+The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime or issuer; self-signed Client identity certificates are operationally non-expiring key carriers, and Cloud-issued attestation preserves it, while explicit key rotation changes the identity. One **Tunnel** may authorize one or more **Client identities**.
 _Avoid_: Certificate, serial number
+
+**Server identity**:
+The stable trust identity used by one or more **Servers**, defined by its pinned public key rather than a certificate lifetime or issuer. Certificate renewal and process restarts preserve it; key rotation changes it.
+_Avoid_: Server certificate, Server hostname, serial number
+
+**Server identity certificate**:
+The certificate a **Server** presents to authenticate its **Server identity** to a managed control plane. It attests the identity without defining it, so renewal with the same key preserves the **Server identity**.
+_Avoid_: Server certificate, Server identity
+
+**Managed session**:
+The authenticated live relationship between one **Server** or **Client instance** and a managed control plane for receiving managed inputs and reporting applied state. It is separate from Visitor traffic and **Tunnel connections**.
+_Avoid_: Tunnel connection, data path
 
 **Tunnel pool**:
 The set of live **Tunnel connections** and their serving **Client instances** currently available for one **Tunnel**, regardless of which authorized **Client identity** each member uses.
@@ -193,6 +205,7 @@ _Avoid_: CI environment, deploy target
 - A **Client instance** uses exactly one **Client identity** at a time
 - A **Client identity** can be used by one or more **Client instances**
 - A **Client identity** is authorized by exactly one **Tunnel**
+- A **Managed session** belongs to exactly one **Server** or **Client instance**
 - A **Tunnel pool** belongs to exactly one **Tunnel**
 - A **Tunnel pool** may contain members using different authorized **Client identities** of that **Tunnel**
 - A **Server readiness** signal belongs to exactly one **Server**
@@ -232,6 +245,9 @@ _Avoid_: CI environment, deploy target
 >
 > **Dev:** "If the self-signed Client identity certificate expires, did the **Client identity** change?"
 > **Domain expert:** "No. The **Client identity** is the pinned public key. Encoded certificate expiry has no operational effect in pinned-key mode; only explicit key rotation changes the identity."
+>
+> **Dev:** "If Cloud signs a certificate for the Client's existing public key, does Cloud now own the **Client identity**?"
+> **Domain expert:** "No. The public key remains the **Client identity**, and the customer retains its private key. Cloud's certificate only attests that identity."
 >
 > **Dev:** "Why does the manual Server path trust a **Server CA** instead of the leaf cert directly?"
 > **Domain expert:** "Because the **Server CA** signs the **Server certificate**, so the Server leaf can renew without changing the Client's trust anchor."
@@ -291,6 +307,8 @@ _Avoid_: CI environment, deploy target
 - "service" and "backend" were used interchangeably — resolved: **Service** is the client-side config unit; **Local backend** is the actual local endpoint the **Client** dials, whether it terminates TLS or receives plaintext.
 - "passthrough" could blur Server behavior with Service behavior — resolved: **TLS passthrough** is the broad traffic behavior, while **TLS mode** is the **Service** setting that can keep passthrough or switch to **Terminate mode**.
 - "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key; the self-signed certificate is only a key carrier, and only explicit key rotation changes that identity.
+- "Cloud-signed Client" could imply Cloud-owned key material — resolved: Cloud may attest an existing **Client identity**, but the customer retains the private key and identity ownership.
+- "control channel" could blur a live relationship with its eventual transport — resolved: **Managed session** names the relationship; its transport is a separate design decision.
 - "server certificate" and the trust anchor behind it were easy to conflate — resolved: **Server certificate** is the presented leaf; **Server CA** is the private issuer in the manual Server path.
 - "ca-file trust" sounded like a file-path detail instead of a trust model — resolved: **Exclusive CA trust** means the **Client** trusts only the configured CA bundle for the **Server certificate**.
 - "public CA" was too vague once Client-side TLS termination existed — resolved: **Public hostname CA** is the issuer for manual **Public hostname certificates**, distinct from the **Server CA**.

@@ -12,8 +12,7 @@ use x509_parser::parse_x509_certificate;
 
 use crate::cert_file_ops;
 
-pub const CLIENT_CERT_LIFETIME_DAYS: u64 = 90;
-pub const CLIENT_CERT_RENEW_AFTER_DAYS: u64 = 60;
+pub const CLIENT_CERT_LIFETIME_DAYS: u64 = 36_500;
 pub const CLIENT_CERT_FILENAME: &str = "client.crt";
 pub const CLIENT_KEY_FILENAME: &str = "client.key";
 pub const CLIENT_IDENTITY_FILENAME: &str = "client-identity.txt";
@@ -96,27 +95,6 @@ pub struct GeneratedClientIdentity {
     pub private_key_pem: String,
     pub certificate_pem: String,
     pub client_identity: ClientIdentity,
-}
-
-pub struct ClientCertificateState {
-    pub client_identity: ClientIdentity,
-    pub renew_at: OffsetDateTime,
-    pub expires_at: OffsetDateTime,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClientCertificateRenewalDecision {
-    NotDue {
-        renew_at: OffsetDateTime,
-        expires_at: OffsetDateTime,
-    },
-    Due {
-        renew_at: OffsetDateTime,
-        expires_at: OffsetDateTime,
-    },
-    Expired {
-        expired_at: OffsetDateTime,
-    },
 }
 
 #[derive(Debug)]
@@ -206,45 +184,15 @@ impl std::error::Error for ClientIdentityMaterialError {
     }
 }
 
-pub fn renew_client_identity_certificate(
-    directory: &Path,
-) -> Result<ClientCertificateState, ClientIdentityMaterialError> {
-    let material = load_client_identity_material(directory)?;
-    let certificate_pem =
-        issue_client_certificate(&material.signing_key, OffsetDateTime::now_utc())
-            .map_err(ClientIdentityMaterialError::Generate)?;
-    let certificate_path = directory.join(CLIENT_CERT_FILENAME);
-    replace_file_atomically_with_mode(&certificate_path, certificate_pem.as_bytes(), 0o644)?;
-    let updated_material = load_client_identity_material(directory)?;
-
-    Ok(ClientCertificateState {
-        client_identity: updated_material.client_identity,
-        renew_at: updated_material.renew_at,
-        expires_at: updated_material.expires_at,
-    })
-}
-
-pub fn inspect_client_certificate_renewal(
-    directory: &Path,
-    now: OffsetDateTime,
-) -> Result<ClientCertificateRenewalDecision, ClientIdentityMaterialError> {
-    let material = load_client_identity_material(directory)?;
-    Ok(decide_client_certificate_renewal(
-        material.renew_at,
-        material.expires_at,
-        now,
-    ))
-}
-
 pub fn read_client_identity(
     directory: &Path,
 ) -> Result<ClientIdentity, ClientIdentityMaterialError> {
-    Ok(load_client_identity_material(directory)?.client_identity)
+    load_client_identity_material(directory)
 }
 
 pub fn rotate_client_identity(
     directory: &Path,
-) -> Result<ClientCertificateState, ClientIdentityMaterialError> {
+) -> Result<ClientIdentity, ClientIdentityMaterialError> {
     let _ = load_client_identity_material(directory)?;
     let generated = generate_client_identity().map_err(ClientIdentityMaterialError::Generate)?;
 
@@ -264,12 +212,7 @@ pub fn rotate_client_identity(
         0o644,
     )?;
 
-    let updated_material = load_client_identity_material(directory)?;
-    Ok(ClientCertificateState {
-        client_identity: updated_material.client_identity,
-        renew_at: updated_material.renew_at,
-        expires_at: updated_material.expires_at,
-    })
+    load_client_identity_material(directory)
 }
 
 pub fn client_identity_from_certificate_der(
@@ -298,16 +241,9 @@ fn issue_client_certificate(
     Ok(certificate.pem())
 }
 
-struct LoadedClientIdentityMaterial {
-    signing_key: KeyPair,
-    client_identity: ClientIdentity,
-    renew_at: OffsetDateTime,
-    expires_at: OffsetDateTime,
-}
-
 fn load_client_identity_material(
     directory: &Path,
-) -> Result<LoadedClientIdentityMaterial, ClientIdentityMaterialError> {
+) -> Result<ClientIdentity, ClientIdentityMaterialError> {
     let key_path = directory.join(CLIENT_KEY_FILENAME);
     let key_pem =
         fs::read_to_string(&key_path).map_err(|source| ClientIdentityMaterialError::ReadFile {
@@ -363,21 +299,7 @@ fn load_client_identity_material(
         });
     }
 
-    let (_, certificate) = parse_x509_certificate(certificate_der.as_ref()).map_err(|_| {
-        ClientIdentityMaterialError::ParseCertificate {
-            path: certificate_path.clone(),
-        }
-    })?;
-    let renew_at = certificate.validity().not_before.to_datetime()
-        + Duration::days(CLIENT_CERT_RENEW_AFTER_DAYS as i64);
-    let expires_at = certificate.validity().not_after.to_datetime();
-
-    Ok(LoadedClientIdentityMaterial {
-        signing_key,
-        client_identity: stored_identity,
-        renew_at,
-        expires_at,
-    })
+    Ok(stored_identity)
 }
 
 fn replace_file_atomically_with_mode(
@@ -393,37 +315,11 @@ fn replace_file_atomically_with_mode(
     })
 }
 
-pub fn decide_client_certificate_renewal(
-    renew_at: OffsetDateTime,
-    expires_at: OffsetDateTime,
-    now: OffsetDateTime,
-) -> ClientCertificateRenewalDecision {
-    if now >= expires_at {
-        ClientCertificateRenewalDecision::Expired {
-            expired_at: expires_at,
-        }
-    } else if now >= renew_at {
-        ClientCertificateRenewalDecision::Due {
-            renew_at,
-            expires_at,
-        }
-    } else {
-        ClientCertificateRenewalDecision::NotDue {
-            renew_at,
-            expires_at,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use time::{Duration, OffsetDateTime};
 
-    use super::{
-        CLIENT_CERT_LIFETIME_DAYS, CLIENT_CERT_RENEW_AFTER_DAYS, ClientCertificateRenewalDecision,
-        ClientIdentity, decide_client_certificate_renewal,
-    };
+    use super::{CLIENT_CERT_LIFETIME_DAYS, ClientIdentity};
 
     #[test]
     fn parses_lowercase_hex_client_identities() {
@@ -452,62 +348,8 @@ mod tests {
     }
 
     #[test]
-    fn phase_two_identity_defaults_stay_explicit() {
-        assert_eq!(CLIENT_CERT_LIFETIME_DAYS, 90);
-        assert_eq!(CLIENT_CERT_RENEW_AFTER_DAYS, 60);
-    }
-
-    #[test]
-    fn renewal_decision_is_not_due_before_the_renewal_window() {
-        let renew_at = OffsetDateTime::UNIX_EPOCH + Duration::days(60);
-        let expires_at = OffsetDateTime::UNIX_EPOCH + Duration::days(90);
-
-        assert_eq!(
-            decide_client_certificate_renewal(
-                renew_at,
-                expires_at,
-                OffsetDateTime::UNIX_EPOCH + Duration::days(59),
-            ),
-            ClientCertificateRenewalDecision::NotDue {
-                renew_at,
-                expires_at,
-            }
-        );
-    }
-
-    #[test]
-    fn renewal_decision_is_due_inside_the_renewal_window() {
-        let renew_at = OffsetDateTime::UNIX_EPOCH + Duration::days(60);
-        let expires_at = OffsetDateTime::UNIX_EPOCH + Duration::days(90);
-
-        assert_eq!(
-            decide_client_certificate_renewal(
-                renew_at,
-                expires_at,
-                OffsetDateTime::UNIX_EPOCH + Duration::days(60),
-            ),
-            ClientCertificateRenewalDecision::Due {
-                renew_at,
-                expires_at,
-            }
-        );
-    }
-
-    #[test]
-    fn renewal_decision_marks_expired_certificates() {
-        let renew_at = OffsetDateTime::UNIX_EPOCH + Duration::days(60);
-        let expires_at = OffsetDateTime::UNIX_EPOCH + Duration::days(90);
-
-        assert_eq!(
-            decide_client_certificate_renewal(
-                renew_at,
-                expires_at,
-                OffsetDateTime::UNIX_EPOCH + Duration::days(90),
-            ),
-            ClientCertificateRenewalDecision::Expired {
-                expired_at: expires_at
-            }
-        );
+    fn client_identity_certificate_lifetime_is_one_hundred_years() {
+        assert_eq!(CLIENT_CERT_LIFETIME_DAYS, 36_500);
     }
 
     proptest! {

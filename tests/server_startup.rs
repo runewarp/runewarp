@@ -15,10 +15,13 @@ use rustls_acme::CertCache;
 use rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY;
 use rustls_acme::caches::DirCache;
 use tempfile::tempdir;
+use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+mod common;
 
 #[tokio::test]
 async fn prepared_server_binds_the_existing_runtime_from_validated_settings() {
@@ -168,6 +171,98 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             .to_string()
             .contains("failed to bind server.readiness-bind-address")
     );
+}
+
+#[tokio::test]
+async fn prepared_server_accepts_an_expired_pinned_client_identity_certificate() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+
+    let (client_identity, certificate_pem, private_key_pem) =
+        common::expired_client_identity_material();
+    let certificate_der =
+        rustls_pemfile::certs(&mut std::io::Cursor::new(certificate_pem.as_bytes()))
+            .next()
+            .unwrap()
+            .unwrap();
+    let (_, certificate) = x509_parser::parse_x509_certificate(certificate_der.as_ref()).unwrap();
+    assert!(
+        certificate.validity().not_after.to_datetime() < OffsetDateTime::now_utc(),
+        "test certificate must already be expired"
+    );
+
+    fs::write(tempdir.path().join("client.crt"), certificate_pem).unwrap();
+    fs::write(tempdir.path().join("client.key"), private_key_pem).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity.txt"),
+        client_identity.to_string(),
+    )
+    .unwrap();
+
+    fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{client_identity}"
+"#
+        ),
+    )
+    .unwrap();
+
+    let backend = spawn_tls_backend(vec!["app.example.test".to_owned()], *b"pong").await;
+
+    fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+server-trust = "ca-file"
+server-ca-file = "server-cert/server-ca.crt"
+identity-dir = "."
+
+[[client.services]]
+backend-address = "__BACKEND_ADDRESS__"
+"#
+        .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
+    )
+    .unwrap();
+
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    let app_response = request_tls_response(public_addr, &backend.1, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(app_response, *b"pong");
+
+    backend.2.abort();
+    server_task.abort();
+    client_task.abort();
+    let _ = backend.2.await;
+    let _ = server_task.await;
+    let _ = client_task.await;
 }
 
 fn localhost(port: u16) -> SocketAddr {

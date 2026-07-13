@@ -221,7 +221,7 @@ When `[server.acme]` is enabled, Runewarp warns at startup if `server.public-bin
 - `client.key`
 - `client-identity.txt`
 
-`runewarp client identity renew` reissues `client.crt` with the same key, so the `client-identity` stays stable. `runewarp client identity rotate` changes the key and therefore changes the `client-identity`.
+`runewarp client identity rotate` changes the key and therefore changes the `client-identity`. Self-signed Client identity certificates are operationally non-expiring key carriers; Core does not renew them automatically or through a CLI subcommand.
 
 ### Terminate-mode certificate material
 

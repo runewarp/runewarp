@@ -2,14 +2,12 @@ use std::error::Error;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use runewarp::{PreparedClient, ServerAddress, ShutdownMode};
-use time::OffsetDateTime;
 use tokio::net::lookup_host;
 use tokio::sync::watch;
 
@@ -95,8 +93,6 @@ async fn run_server_address_until_shutdown(
         if shutdown_requested(&shutdown) {
             return Ok(());
         }
-        ensure_client_identity_fresh(&settings.identity_directory)
-            .map_err(|error| error.to_string())?;
         let phase = client_tunnel_phase(connected_once);
         let attempt_kind = client_tunnel_attempt_kind(reconnect_policy.is_fresh());
         let dial_target = match tokio::select! {
@@ -229,19 +225,6 @@ async fn run_server_address_until_shutdown(
     }
 }
 
-fn ensure_client_identity_fresh(
-    directory: &Path,
-) -> Result<(), runewarp::ClientIdentityMaterialError> {
-    match runewarp::inspect_client_certificate_renewal(directory, OffsetDateTime::now_utc())? {
-        runewarp::ClientCertificateRenewalDecision::NotDue { .. } => Ok(()),
-        runewarp::ClientCertificateRenewalDecision::Due { .. }
-        | runewarp::ClientCertificateRenewalDecision::Expired { .. } => {
-            runewarp::renew_client_identity_certificate(directory)?;
-            Ok(())
-        }
-    }
-}
-
 fn retry_disposition_for_client_connect_error(
     error: &runewarp::ClientStartupError,
 ) -> RetryDisposition {
@@ -337,16 +320,13 @@ mod tests {
     use std::fs;
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
-    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
 
     use quinn::{ApplicationClose, ConnectionClose, TransportErrorCode, VarInt};
-    use rcgen::{CertificateParams, KeyPair, PublicKeyData};
     use rustls::RootCertStore;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
     use tempfile::tempdir;
-    use time::{Duration as TimeDuration, OffsetDateTime};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::{oneshot, watch};
@@ -354,16 +334,15 @@ mod tests {
     use tokio_rustls::{TlsAcceptor, TlsConnector};
 
     use runewarp::{
-        CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_IDENTITY_FILENAME,
-        CLIENT_KEY_FILENAME, ClientConfig, ClientIdentity, ClientTlsMode, LogLevel, PublicHostname,
-        Server, ServerAddress, ServerAuthorization, ServerBindConfig, ServerHostname,
-        ServerTunnelConfig, ServiceConfig, ShutdownMode, generate_client_identity,
-        make_server_quic_config_with_client_admission,
+        CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientConfig,
+        ClientTlsMode, LogLevel, PublicHostname, Server, ServerAddress, ServerAuthorization,
+        ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, ShutdownMode,
+        generate_client_identity, make_server_quic_config_with_client_admission,
     };
 
     use super::{
-        RetryDisposition, client_tunnel_attempt_kind, ensure_client_identity_fresh,
-        run_until_orderly_shutdown, wait_for_retry_delay,
+        RetryDisposition, client_tunnel_attempt_kind, run_until_orderly_shutdown,
+        wait_for_retry_delay,
     };
 
     #[test]
@@ -602,102 +581,6 @@ mod tests {
             io::ErrorKind::TimedOut,
             "healthy server address never became ready",
         ))
-    }
-
-    #[test]
-    fn ensure_client_identity_fresh_renews_due_certificates_before_connecting() {
-        let tempdir = tempdir().expect("tempdir should be created");
-        write_client_identity_with_not_before(
-            tempdir.path(),
-            OffsetDateTime::now_utc() - TimeDuration::days(61),
-        );
-
-        let original_private_key = fs::read(tempdir.path().join(CLIENT_KEY_FILENAME))
-            .expect("client key should be readable");
-        let original_certificate = fs::read(tempdir.path().join(CLIENT_CERT_FILENAME))
-            .expect("client certificate should be readable");
-        let original_identity = fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME))
-            .expect("client identity should be readable");
-
-        ensure_client_identity_fresh(tempdir.path()).expect("due certificate should be renewed");
-
-        assert_eq!(
-            fs::read(tempdir.path().join(CLIENT_KEY_FILENAME))
-                .expect("client key should remain readable"),
-            original_private_key
-        );
-        assert_ne!(
-            fs::read(tempdir.path().join(CLIENT_CERT_FILENAME))
-                .expect("renewed client certificate should be readable"),
-            original_certificate
-        );
-        assert_eq!(
-            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME))
-                .expect("client identity should remain readable"),
-            original_identity
-        );
-    }
-
-    #[test]
-    fn ensure_client_identity_fresh_leaves_not_yet_due_certificates_untouched() {
-        let tempdir = tempdir().expect("tempdir should be created");
-        write_client_identity_with_not_before(
-            tempdir.path(),
-            OffsetDateTime::now_utc() - TimeDuration::days(60) + TimeDuration::minutes(1),
-        );
-
-        let original_private_key = fs::read(tempdir.path().join(CLIENT_KEY_FILENAME))
-            .expect("client key should be readable");
-        let original_certificate = fs::read(tempdir.path().join(CLIENT_CERT_FILENAME))
-            .expect("client certificate should be readable");
-        let original_identity = fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME))
-            .expect("client identity should be readable");
-
-        ensure_client_identity_fresh(tempdir.path())
-            .expect("not-yet-due certificate should remain untouched");
-
-        assert_eq!(
-            fs::read(tempdir.path().join(CLIENT_KEY_FILENAME))
-                .expect("client key should remain readable"),
-            original_private_key
-        );
-        assert_eq!(
-            fs::read(tempdir.path().join(CLIENT_CERT_FILENAME))
-                .expect("client certificate should remain readable"),
-            original_certificate
-        );
-        assert_eq!(
-            fs::read_to_string(tempdir.path().join(CLIENT_IDENTITY_FILENAME))
-                .expect("client identity should remain readable"),
-            original_identity
-        );
-    }
-
-    fn write_client_identity_with_not_before(directory: &Path, not_before: OffsetDateTime) {
-        let signing_key = KeyPair::generate().expect("test signing key should generate");
-        let mut certificate_params = CertificateParams::new(vec!["runewarp-client".to_owned()])
-            .expect("test certificate params should build");
-        certificate_params.not_before = not_before;
-        certificate_params.not_after =
-            not_before + TimeDuration::days(CLIENT_CERT_LIFETIME_DAYS as i64);
-        let certificate = certificate_params
-            .self_signed(&signing_key)
-            .expect("test certificate should self-sign");
-        let client_identity =
-            ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
-
-        fs::write(
-            directory.join(CLIENT_KEY_FILENAME),
-            signing_key.serialize_pem(),
-        )
-        .expect("test key should be written");
-        fs::write(directory.join(CLIENT_CERT_FILENAME), certificate.pem())
-            .expect("test certificate should be written");
-        fs::write(
-            directory.join(CLIENT_IDENTITY_FILENAME),
-            client_identity.to_string(),
-        )
-        .expect("test client identity should be written");
     }
 
     fn localhost(port: u16) -> SocketAddr {

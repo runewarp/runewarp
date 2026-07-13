@@ -118,6 +118,11 @@ impl TunnelRegistry {
         prepared: PreparedAuthorization,
     ) -> LiveWorkDispatch {
         let previous = self.authorization.current();
+        // Hold the pools write lock across snapshot commit and realignment so
+        // concurrent route/register cannot observe new Tunnel indices against
+        // the previous pool layout. Readers acquire this lock before reading
+        // the authorization snapshot for the same reason.
+        let mut pools = self.tunnel_pools.write().await;
         let next = self.authorization.commit(prepared);
 
         let removed_identities = previous
@@ -128,14 +133,39 @@ impl TunnelRegistry {
         let connections_closed = if removed_identities.is_empty() {
             0
         } else {
-            self.close_connections_for_identities(&removed_identities, b"authorization revoked")
-                .await
+            let mut closed = 0;
+            for pool in pools.iter() {
+                closed += pool
+                    .close_connections_for_identities(&removed_identities, b"authorization revoked")
+                    .await;
+            }
+            closed
         };
 
         // Continuity is by Client identity, not Tunnel index. Take members from
         // every existing pool before resizing, then adopt survivors into the
         // pool that matches their identity under the new snapshot.
-        self.realign_pools_to_snapshot(&next).await;
+        let mut taken = Vec::new();
+        for pool in pools.iter() {
+            taken.extend(pool.take_members().await);
+        }
+        while pools.len() < next.tunnel_count() {
+            pools.push(ActiveClientPool::new());
+        }
+        pools.truncate(next.tunnel_count());
+        for member in taken {
+            let Some(tunnel_index) = next.tunnel_index_for_client_identity(&member.client_identity)
+            else {
+                // Identity was revoked; close already signaled above. Drop the
+                // detached member and leave its prior close watcher to log
+                // termination against the empty previous pool list.
+                continue;
+            };
+            if let Some(pool) = pools.get(tunnel_index) {
+                pool.adopt_member(member).await;
+            }
+        }
+        drop(pools);
 
         let streams_reset = self.reset_streams_not_authorized_by(&next);
 
@@ -145,35 +175,6 @@ impl TunnelRegistry {
         }
     }
 
-    async fn realign_pools_to_snapshot(&self, snapshot: &AuthorizationSnapshot) {
-        let mut pools = self.tunnel_pools.write().await;
-        let mut taken = Vec::new();
-        for pool in pools.iter() {
-            taken.extend(pool.take_members().await);
-        }
-        while pools.len() < snapshot.tunnel_count() {
-            pools.push(ActiveClientPool::new());
-        }
-        pools.truncate(snapshot.tunnel_count());
-
-        for member in taken {
-            let Some(tunnel_index) =
-                snapshot.tunnel_index_for_client_identity(&member.client_identity)
-            else {
-                // Identity was revoked; close_connections_for_identities already
-                // closed the QUIC connection. Drop the detached member.
-                continue;
-            };
-            if let Some(pool) = pools.get(tunnel_index) {
-                pool.adopt_member(member).await;
-            }
-        }
-    }
-
-    async fn pool_at(&self, tunnel_index: usize) -> Option<ActiveClientPool> {
-        self.tunnel_pools.read().await.get(tunnel_index).cloned()
-    }
-
     pub(crate) async fn route_tunnel_connection(
         &self,
         public_hostname: &PublicHostname,
@@ -181,13 +182,17 @@ impl TunnelRegistry {
         if !self.admitting_streams.load(Ordering::SeqCst) {
             return TunnelRouteOutcome::NoActiveTunnelConnection;
         }
+        // Lock pools before reading authorization so the index→pool view stays
+        // coherent with commit_authorization's write-locked swap+realign.
+        let pools = self.tunnel_pools.read().await;
         let snapshot = self.authorization.current();
         let Some(tunnel_index) = snapshot.tunnel_index_for_public_hostname(public_hostname) else {
             return TunnelRouteOutcome::Unauthorized;
         };
-        let Some(pool) = self.pool_at(tunnel_index).await else {
+        let Some(pool) = pools.get(tunnel_index).cloned() else {
             return TunnelRouteOutcome::NoActiveTunnelConnection;
         };
+        drop(pools);
         let Some(connection) = pool.select_connection().await else {
             return TunnelRouteOutcome::NoActiveTunnelConnection;
         };
@@ -199,15 +204,18 @@ impl TunnelRegistry {
             connection.close(0_u32.into(), b"server shutting down");
             return;
         }
+        // Same pools-before-authorization lock order as route_tunnel_connection.
+        let pools = self.tunnel_pools.read().await;
         let Some((tunnel_index, client_identity)) = self.tunnel_registration_context(&connection)
         else {
             connection.close(0_u32.into(), b"unmapped client identity");
             return;
         };
-        let Some(pool) = self.pool_at(tunnel_index).await else {
+        let Some(pool) = pools.get(tunnel_index).cloned() else {
             connection.close(0_u32.into(), b"unmapped client identity");
             return;
         };
+        drop(pools);
         pool.register(connection, client_identity).await;
     }
 
@@ -216,21 +224,6 @@ impl TunnelRegistry {
         let mut closed = 0;
         for pool in pools.iter() {
             closed += pool.close_all_connections(reason).await;
-        }
-        closed
-    }
-
-    pub(crate) async fn close_connections_for_identities(
-        &self,
-        identities: &HashSet<ClientIdentity>,
-        reason: &'static [u8],
-    ) -> usize {
-        let pools = self.tunnel_pools.read().await.clone();
-        let mut closed = 0;
-        for pool in pools.iter() {
-            closed += pool
-                .close_connections_for_identities(identities, reason)
-                .await;
         }
         closed
     }

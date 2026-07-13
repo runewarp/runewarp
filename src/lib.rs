@@ -19,9 +19,10 @@ mod tls_material;
 mod trust;
 
 pub use client::{
-    Client, ClientConfigResolutionDefaults, ClientConfigResolutionError, ClientConnectConfig,
-    ClientConnectError, ClientRuntimeArgs, SelectedClientConfig, resolve_client_config_from_cli,
-    resolve_selected_client_config, select_client_config,
+    AddressController, AddressControllerShutdown, AddressWorkerControl, Client,
+    ClientConfigResolutionDefaults, ClientConfigResolutionError, ClientConnectConfig,
+    ClientConnectError, ClientRuntimeArgs, MaintenanceIntent, SelectedClientConfig,
+    resolve_client_config_from_cli, resolve_selected_client_config, select_client_config,
 };
 pub use client_hello::{
     CLIENT_HELLO_BUFFER_LIMIT, ClientHelloError, ParsedClientHello, read_client_hello,

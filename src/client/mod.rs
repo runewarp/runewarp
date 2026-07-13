@@ -1,6 +1,11 @@
+mod address_controller;
 mod service;
 mod termination_tls;
 mod tunnel_stream;
+
+pub use address_controller::{
+    AddressController, AddressControllerShutdown, AddressWorkerControl, MaintenanceIntent,
+};
 
 use std::fmt;
 use std::future::Future;

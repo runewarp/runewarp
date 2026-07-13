@@ -1,6 +1,8 @@
 use std::time::Duration;
 
 use rand::RngCore;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 const RETRY_WINDOWS_SECS: [u64; 10] = [1, 2, 3, 5, 8, 12, 18, 27, 41, 60];
 
@@ -16,9 +18,9 @@ pub(crate) struct ReconnectPolicy<R> {
     rng: R,
 }
 
-impl ReconnectPolicy<rand::rngs::ThreadRng> {
+impl ReconnectPolicy<StdRng> {
     pub(crate) fn new() -> Self {
-        Self::new_with_rng(rand::rng())
+        Self::new_with_rng(StdRng::from_os_rng())
     }
 }
 

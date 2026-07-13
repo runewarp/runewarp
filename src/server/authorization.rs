@@ -66,12 +66,6 @@ impl ClientIdentityAdmission for ServerAuthorization {
     }
 }
 
-impl ClientIdentityAdmission for AuthorizationState {
-    fn authorizes_client_identity(&self, identity: &ClientIdentity) -> bool {
-        self.current().authorizes_client_identity(identity)
-    }
-}
-
 /// Immutable authorization facts consulted by routing and handshake admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizationSnapshot {
@@ -157,6 +151,10 @@ impl AuthorizationSnapshot {
 
     pub fn authorizes_client_identity(&self, client_identity: &ClientIdentity) -> bool {
         self.trusted_client_identities.contains(client_identity)
+    }
+
+    pub fn authorized_public_hostnames(&self) -> impl Iterator<Item = &PublicHostname> {
+        self.public_hostname_to_tunnel.keys()
     }
 
     pub fn trusted_client_identities(&self) -> &HashSet<ClientIdentity> {

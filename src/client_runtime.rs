@@ -356,8 +356,9 @@ mod tests {
     use runewarp::{
         CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_IDENTITY_FILENAME,
         CLIENT_KEY_FILENAME, ClientConfig, ClientIdentity, ClientTlsMode, LogLevel, PublicHostname,
-        Server, ServerAddress, ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
-        ShutdownMode, generate_client_identity, make_server_quic_config_with_client_auth,
+        Server, ServerAddress, ServerAuthorization, ServerBindConfig, ServerHostname,
+        ServerTunnelConfig, ServiceConfig, ShutdownMode, generate_client_identity,
+        make_server_quic_config_with_client_admission,
     };
 
     use super::{
@@ -480,21 +481,25 @@ mod tests {
         let server_cert = CertificateDer::from(certified_server.cert);
         let server_key = certified_server.signing_key.serialize_der();
         let client_identity = generate_client_identity().map_err(io::Error::other)?;
+        let authorization = ServerAuthorization::from_tunnels(
+            &server_hostname("localhost"),
+            &[ServerTunnelConfig {
+                public_hostnames: vec![public_hostname("app.example.test")],
+                authorized_client_identities: vec![client_identity.client_identity.clone()],
+            }],
+        )
+        .unwrap();
         let server = Server::bind(ServerBindConfig {
             public_bind_addr: localhost(0),
             tunnel_connection_bind_addr: localhost(0),
             readiness_bind_addr: None,
             server_hostname: server_hostname("localhost"),
-            configured_tunnels: vec![ServerTunnelConfig {
-                public_hostnames: vec![public_hostname("app.example.test")],
-                authorized_client_identities: vec![client_identity.client_identity.clone()],
-            }],
-            authorization: None,
+            authorization: authorization.clone(),
             public_tls_config: None,
-            quic_server_config: make_server_quic_config_with_client_auth(
+            quic_server_config: make_server_quic_config_with_client_admission(
                 vec![server_cert.clone()],
                 private_key_from_der(&server_key),
-                std::slice::from_ref(&client_identity.client_identity),
+                Arc::new(authorization.clone()),
             )
             .map_err(io::Error::other)?,
         })

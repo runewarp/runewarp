@@ -139,7 +139,7 @@ impl ActiveClientPool {
         members.len()
     }
 
-    #[allow(dead_code)] // selective connection close dispatch for managed authorization commits
+    #[allow(dead_code)] // called from TunnelRegistry::close_connections_for_identities
     pub(crate) async fn close_connections_for_identities(
         &self,
         identities: &std::collections::HashSet<ClientIdentity>,

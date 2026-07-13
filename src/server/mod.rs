@@ -31,10 +31,9 @@ pub struct ServerBindConfig {
     pub tunnel_connection_bind_addr: SocketAddr,
     pub readiness_bind_addr: Option<SocketAddr>,
     pub server_hostname: ServerHostname,
-    pub configured_tunnels: Vec<crate::ServerTunnelConfig>,
-    /// When set, Public-hostname routing uses this shared authorization snapshot.
-    /// Production startup passes the same handle used by QUIC Client-identity admission.
-    pub authorization: Option<ServerAuthorization>,
+    /// Shared authorization snapshot consulted by Public-hostname routing.
+    /// Pass the same handle to the QUIC Client-identity admission builder.
+    pub authorization: ServerAuthorization,
     pub public_tls_config: Option<Arc<rustls::ServerConfig>>,
     pub quic_server_config: quinn::ServerConfig,
 }
@@ -107,26 +106,13 @@ impl ReadinessProbe {
 
 impl Server {
     pub async fn bind(config: ServerBindConfig) -> io::Result<Self> {
-        let tunnel_registry = match config.authorization {
-            Some(authorization) => {
-                if authorization.current_tunnel_count() == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "server bind requires at least one configured Tunnel",
-                    ));
-                }
-                TunnelRegistry::from_authorization(authorization)?
-            }
-            None => {
-                if config.configured_tunnels.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "server bind requires at least one configured Tunnel",
-                    ));
-                }
-                TunnelRegistry::configured(&config.server_hostname, &config.configured_tunnels)?
-            }
-        };
+        if config.authorization.current_tunnel_count() == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "server bind requires at least one configured Tunnel",
+            ));
+        }
+        let tunnel_registry = TunnelRegistry::from_authorization(config.authorization)?;
         let visitor_stream_handler = VisitorStreamHandler::new(
             config.server_hostname.clone(),
             tunnel_registry.clone(),

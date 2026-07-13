@@ -101,8 +101,7 @@ impl PreparedServer {
             tunnel_connection_bind_addr,
             readiness_bind_addr: config.readiness_bind_address,
             server_hostname: config.hostname.clone(),
-            configured_tunnels: config.tunnels.clone(),
-            authorization: Some(authorization),
+            authorization,
             public_tls_config: acme_runtime
                 .as_ref()
                 .map(|acme| acme.state.challenge_rustls_config()),

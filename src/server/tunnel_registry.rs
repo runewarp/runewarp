@@ -1,10 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use quinn::Connection;
 use rustls::pki_types::CertificateDer;
+use tokio::sync::RwLock;
+use tokio::task::AbortHandle;
 
 use crate::{
     ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig,
@@ -12,6 +14,7 @@ use crate::{
 };
 
 use super::active_client::{ActiveClientPool, SelectedTunnelConnection};
+use super::authorization::{AuthorizationState, ServerAuthorization};
 
 pub(crate) enum TunnelRouteOutcome {
     Unauthorized,
@@ -19,11 +22,22 @@ pub(crate) enum TunnelRouteOutcome {
     Connected(SelectedTunnelConnection),
 }
 
+struct ActiveVisitorStream {
+    stream_id: u64,
+    #[allow(dead_code)] // read by selective Public-hostname stream reset dispatch
+    public_hostname: PublicHostname,
+    #[allow(dead_code)] // retained for selective revocation against the serving connection
+    member_id: u64,
+    #[allow(dead_code)] // read by selective Public-hostname stream reset dispatch
+    abort_handle: AbortHandle,
+}
+
 #[derive(Clone)]
 pub(crate) struct TunnelRegistry {
-    client_identity_to_tunnel: Arc<HashMap<ClientIdentity, usize>>,
-    public_hostname_to_tunnel: Arc<HashMap<PublicHostname, usize>>,
+    authorization: Arc<AuthorizationState>,
     tunnel_pools: Arc<Vec<ActiveClientPool>>,
+    visitor_streams: Arc<RwLock<Vec<ActiveVisitorStream>>>,
+    next_stream_id: Arc<AtomicU64>,
     accepting_tunnel_connections: Arc<AtomicBool>,
     admitting_streams: Arc<AtomicBool>,
 }
@@ -31,6 +45,10 @@ pub(crate) struct TunnelRegistry {
 impl TunnelRegistry {
     #[cfg(test)]
     pub(crate) fn single(public_hostnames: Vec<PublicHostname>) -> io::Result<Self> {
+        use std::collections::{HashMap, HashSet};
+
+        use super::authorization::AuthorizationSnapshot;
+
         let mut public_hostname_to_tunnel = HashMap::new();
         let mut seen_public_hostnames = HashSet::new();
         for hostname in public_hostnames {
@@ -44,70 +62,48 @@ impl TunnelRegistry {
             }
             public_hostname_to_tunnel.insert(hostname, 0);
         }
+        let snapshot = AuthorizationSnapshot::from_parts_for_test(
+            HashMap::new(),
+            public_hostname_to_tunnel,
+            HashSet::new(),
+            1,
+        );
         Ok(Self {
-            client_identity_to_tunnel: Arc::new(HashMap::new()),
-            public_hostname_to_tunnel: Arc::new(public_hostname_to_tunnel),
+            authorization: Arc::new(AuthorizationState::from_snapshot_for_test(snapshot)),
             tunnel_pools: Arc::new(vec![ActiveClientPool::new()]),
+            visitor_streams: Arc::new(RwLock::new(Vec::new())),
+            next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
             admitting_streams: Arc::new(AtomicBool::new(true)),
         })
     }
+
     pub(crate) fn configured(
         server_hostname: &ServerHostname,
         tunnels: &[ServerTunnelConfig],
     ) -> io::Result<Self> {
-        let mut client_identity_to_tunnel = HashMap::new();
-        let mut public_hostname_to_tunnel = HashMap::new();
-        let mut seen_client_identities = HashSet::new();
-        let mut seen_public_hostnames = HashSet::new();
-        let mut tunnel_pools = Vec::with_capacity(tunnels.len());
-        for (index, tunnel) in tunnels.iter().enumerate() {
-            if tunnel.public_hostnames.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "server.tunnels[].public-hostnames must not be empty",
-                ));
-            }
-            for client_identity in &tunnel.authorized_client_identities {
-                if !seen_client_identities.insert(client_identity.clone()) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "authorized Client identities must be unique across all Server Tunnels: {}",
-                            client_identity
-                        ),
-                    ));
-                }
-                client_identity_to_tunnel.insert(client_identity.clone(), index);
-            }
-            for hostname in &tunnel.public_hostnames {
-                if hostname.as_str() == server_hostname.as_str() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "server.tunnels[].public-hostnames must not include server.hostname `{server_hostname}`"
-                        ),
-                    ));
-                }
-                if !seen_public_hostnames.insert(hostname.clone()) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "server.tunnels[].public-hostnames must be unique after normalization: {hostname}"
-                        ),
-                    ));
-                }
-                public_hostname_to_tunnel.insert(hostname.clone(), index);
-            }
+        Self::from_authorization(ServerAuthorization::from_tunnels(server_hostname, tunnels)?)
+    }
+
+    pub(crate) fn from_authorization(authorization: ServerAuthorization) -> io::Result<Self> {
+        let tunnel_count = authorization.current_tunnel_count();
+        let mut tunnel_pools = Vec::with_capacity(tunnel_count);
+        for _ in 0..tunnel_count {
             tunnel_pools.push(ActiveClientPool::new());
         }
         Ok(Self {
-            client_identity_to_tunnel: Arc::new(client_identity_to_tunnel),
-            public_hostname_to_tunnel: Arc::new(public_hostname_to_tunnel),
+            authorization: authorization.state().clone(),
             tunnel_pools: Arc::new(tunnel_pools),
+            visitor_streams: Arc::new(RwLock::new(Vec::new())),
+            next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
             admitting_streams: Arc::new(AtomicBool::new(true)),
         })
+    }
+
+    #[allow(dead_code)] // shared authorization handle for managed commit and verifier wiring
+    pub(crate) fn authorization(&self) -> Arc<AuthorizationState> {
+        self.authorization.clone()
     }
 
     pub(crate) async fn route_tunnel_connection(
@@ -117,11 +113,14 @@ impl TunnelRegistry {
         if !self.admitting_streams.load(Ordering::SeqCst) {
             return TunnelRouteOutcome::NoActiveTunnelConnection;
         }
-        let Some(tunnel_index) = self.public_hostname_to_tunnel.get(public_hostname).copied()
-        else {
+        let snapshot = self.authorization.current();
+        let Some(tunnel_index) = snapshot.tunnel_index_for_public_hostname(public_hostname) else {
             return TunnelRouteOutcome::Unauthorized;
         };
-        let Some(connection) = self.tunnel_pools[tunnel_index].select_connection().await else {
+        let Some(pool) = self.tunnel_pools.get(tunnel_index) else {
+            return TunnelRouteOutcome::NoActiveTunnelConnection;
+        };
+        let Some(connection) = pool.select_connection().await else {
             return TunnelRouteOutcome::NoActiveTunnelConnection;
         };
         TunnelRouteOutcome::Connected(connection)
@@ -137,9 +136,11 @@ impl TunnelRegistry {
             connection.close(0_u32.into(), b"unmapped client identity");
             return;
         };
-        self.tunnel_pools[tunnel_index]
-            .register(connection, client_identity)
-            .await;
+        let Some(pool) = self.tunnel_pools.get(tunnel_index) else {
+            connection.close(0_u32.into(), b"unmapped client identity");
+            return;
+        };
+        pool.register(connection, client_identity).await;
     }
 
     pub(crate) async fn close_all(&self, reason: &'static [u8]) -> usize {
@@ -148,6 +149,81 @@ impl TunnelRegistry {
             closed += pool.close_all_connections(reason).await;
         }
         closed
+    }
+
+    #[allow(dead_code)] // selective connection close dispatch for managed authorization commits
+    pub(crate) async fn close_connections_for_identities(
+        &self,
+        identities: &HashSet<ClientIdentity>,
+        reason: &'static [u8],
+    ) -> usize {
+        let mut closed = 0;
+        for pool in self.tunnel_pools.iter() {
+            closed += pool
+                .close_connections_for_identities(identities, reason)
+                .await;
+        }
+        closed
+    }
+
+    pub(crate) async fn track_visitor_stream(
+        &self,
+        public_hostname: PublicHostname,
+        member_id: u64,
+        abort_handle: AbortHandle,
+    ) -> u64 {
+        let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
+        self.visitor_streams
+            .write()
+            .await
+            .push(ActiveVisitorStream {
+                stream_id,
+                public_hostname,
+                member_id,
+                abort_handle,
+            });
+        stream_id
+    }
+
+    pub(crate) async fn untrack_visitor_stream(&self, stream_id: u64) {
+        self.visitor_streams
+            .write()
+            .await
+            .retain(|stream| stream.stream_id != stream_id);
+    }
+
+    #[allow(dead_code)] // selective Visitor stream reset dispatch for managed authorization commits
+    pub(crate) async fn reset_streams_for_public_hostname(
+        &self,
+        public_hostname: &PublicHostname,
+    ) -> usize {
+        let mut streams = self.visitor_streams.write().await;
+        let mut reset = 0;
+        streams.retain(|stream| {
+            if &stream.public_hostname == public_hostname {
+                stream.abort_handle.abort();
+                reset += 1;
+                false
+            } else {
+                true
+            }
+        });
+        reset
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn tracked_visitor_stream_count(&self) -> usize {
+        self.visitor_streams.read().await.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn tracked_visitor_hostnames(&self) -> Vec<PublicHostname> {
+        self.visitor_streams
+            .read()
+            .await
+            .iter()
+            .map(|stream| stream.public_hostname.clone())
+            .collect()
     }
 
     pub(crate) async fn active_connection_count(&self) -> usize {
@@ -177,7 +253,10 @@ impl TunnelRegistry {
         connection: &Connection,
     ) -> Option<(usize, ClientIdentity)> {
         let identity = client_identity_from_connection(connection)?;
-        let tunnel_index = self.client_identity_to_tunnel.get(&identity).copied()?;
+        let tunnel_index = self
+            .authorization
+            .current()
+            .tunnel_index_for_client_identity(&identity)?;
         Some((tunnel_index, identity))
     }
 }
@@ -193,6 +272,7 @@ fn client_identity_from_connection(connection: &Connection) -> Option<ClientIden
 mod tests {
     use std::io::{self, Cursor};
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use quinn::{Connection, Endpoint};
@@ -287,6 +367,66 @@ mod tests {
                 .await,
             TunnelRouteOutcome::NoActiveTunnelConnection
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_streams_for_public_hostname_aborts_only_matching_tracked_streams()
+    -> io::Result<()> {
+        let registry = TunnelRegistry::single(vec![
+            public_hostname("app.example.test"),
+            public_hostname("api.example.test"),
+        ])?;
+        let keep_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let app_keep = keep_running.clone();
+        let api_keep = keep_running.clone();
+        let app_task = tokio::spawn(async move {
+            while app_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        });
+        let api_task = tokio::spawn(async move {
+            while api_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        });
+        let app_stream_id = registry
+            .track_visitor_stream(
+                public_hostname("app.example.test"),
+                1,
+                app_task.abort_handle(),
+            )
+            .await;
+        let api_stream_id = registry
+            .track_visitor_stream(
+                public_hostname("api.example.test"),
+                2,
+                api_task.abort_handle(),
+            )
+            .await;
+
+        assert_eq!(
+            registry
+                .reset_streams_for_public_hostname(&public_hostname("app.example.test"))
+                .await,
+            1
+        );
+        assert!(
+            app_task
+                .await
+                .expect_err("app stream should abort")
+                .is_cancelled()
+        );
+        assert_eq!(
+            registry.tracked_visitor_hostnames().await,
+            vec![public_hostname("api.example.test")]
+        );
+
+        keep_running.store(false, std::sync::atomic::Ordering::Relaxed);
+        api_task.await.expect("api stream should finish normally");
+        registry.untrack_visitor_stream(api_stream_id).await;
+        registry.untrack_visitor_stream(app_stream_id).await;
+        assert_eq!(registry.tracked_visitor_stream_count().await, 0);
         Ok(())
     }
 

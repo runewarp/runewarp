@@ -40,6 +40,7 @@ async fn prepared_client_connects_from_validated_settings() {
             public_hostnames: vec![public_hostname("app.example.test")],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -115,6 +116,7 @@ async fn prepared_client_uses_the_configured_server_address_port() {
             public_hostnames: vec![public_hostname("app.example.test")],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -200,6 +202,7 @@ async fn prepared_client_rejects_settings_without_services() {
             public_hostnames: vec![public_hostname("app.example.test")],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -452,6 +455,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
             public_hostnames: vec![public_hostname("app.example.test")],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -562,6 +566,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
             ],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -656,6 +661,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
             public_hostnames: vec![public_hostname("app.example.test")],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],
@@ -755,6 +761,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
             ],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![server_cert.clone()],

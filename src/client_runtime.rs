@@ -489,6 +489,7 @@ mod tests {
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
+            authorization: None,
             public_tls_config: None,
             quic_server_config: make_server_quic_config_with_client_auth(
                 vec![server_cert.clone()],

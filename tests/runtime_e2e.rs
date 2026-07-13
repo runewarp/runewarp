@@ -75,6 +75,7 @@ async fn forwards_tls_passthrough_end_to_end() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
@@ -343,6 +344,7 @@ async fn drops_public_tls_when_no_client_is_connected() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
+        authorization: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
             &tunnel_key,
@@ -395,6 +397,7 @@ async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
+        authorization: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
             &tunnel_key,
@@ -465,6 +468,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
+        authorization: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
             &tunnel_key,
@@ -559,6 +563,7 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config_with_client_auth_resolver(
             resolver.clone(),
@@ -653,6 +658,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
+        authorization: None,
         quic_server_config: make_server_quic_config_with_client_auth(
             vec![tunnel_cert.clone()],
             private_key_from_der(&tunnel_key),
@@ -709,6 +715,7 @@ async fn library_constructors_expose_addresses_before_running() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &trusted_client)],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
@@ -760,6 +767,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_hostnames() {
             configured_tunnel(&["App.Example.Test."], &first_client),
             configured_tunnel(&["app.example.test"], &second_client),
         ],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
@@ -792,6 +800,7 @@ async fn server_bind_rejects_duplicate_configured_tunnel_client_identities() {
             configured_tunnel(&["app.example.test"], &shared_client),
             configured_tunnel(&["api.example.test"], &shared_client),
         ],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert.clone()],
@@ -822,6 +831,7 @@ async fn server_bind_rejects_empty_configured_tunnels() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: Vec::new(),
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_server_quic_config(
             vec![tunnel_cert],
@@ -866,6 +876,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
@@ -947,6 +958,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
@@ -1011,6 +1023,7 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
@@ -1087,6 +1100,7 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
@@ -1184,6 +1198,7 @@ async fn graceful_server_shutdown_keeps_already_landed_streams_until_they_finish
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
@@ -1271,6 +1286,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,
@@ -1336,6 +1352,7 @@ async fn a_busier_tunnel_pool_member_stops_winning_new_stream_placement() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         configured_tunnels: vec![configured_tunnel(&["app.example.test"], &shared_client)],
+        authorization: None,
         public_tls_config: None,
         quic_server_config: make_authenticated_server_quic_config(
             &tunnel_cert,

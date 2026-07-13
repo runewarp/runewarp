@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Prefactored static Server authorization behind one atomically replaceable **Authorization snapshot** shared by Public-hostname routing and QUIC Client-identity handshake admission, including targeted connection-close and stream-reset dispatch seams. (#150)
 - Added standard top-level `--version` and `-V` output, with `-dev` builds now appending the baked-in 12-character commit SHA for traceability. (#135)
 
 ## [0.2.0] - 2026-06-30

@@ -137,10 +137,28 @@ impl VisitorStreamHandler {
                 return Ok(());
             }
         };
-        let _active_stream_guard = tunnel_connection.record_open_stream();
+        let active_stream_guard = tunnel_connection.record_open_stream();
         runtime_log::server_route(public_hostname.as_str(), ServerRouteOutcome::Forwarded);
 
-        proxy_tcp_over_quic(visitor_stream, buffered_bytes, send, recv).await
+        let member_id = tunnel_connection.member_id();
+        let registry = self.tunnel_registry.clone();
+        let tracked_hostname = public_hostname.clone();
+        let proxy_task = tokio::spawn(async move {
+            let _active_stream_guard = active_stream_guard;
+            proxy_tcp_over_quic(visitor_stream, buffered_bytes, send, recv).await
+        });
+        let stream_id = registry
+            .track_visitor_stream(tracked_hostname, member_id, proxy_task.abort_handle())
+            .await;
+        let proxy_result = match proxy_task.await {
+            Ok(result) => result,
+            Err(join_error) if join_error.is_cancelled() => Ok(()),
+            Err(join_error) => Err(io::Error::other(format!(
+                "visitor stream proxy task failed: {join_error}"
+            ))),
+        };
+        registry.untrack_visitor_stream(stream_id).await;
+        proxy_result
     }
 }
 

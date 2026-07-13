@@ -1070,6 +1070,10 @@ async fn mid_apply_keeps_prior_revision_reports_and_collapses_to_newest() {
         );
     }
 
+    // Resume before I/O-driven waits. Under pause, tokio timeouts can auto-advance
+    // while the gated apply is blocked on Notify and fire before SSE events land.
+    tokio::time::resume();
+
     // Supersede mid-apply: only the newest pending candidate should remain.
     fixture.push_snapshot(snapshot_sse(
         "rev-mid",

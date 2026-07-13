@@ -358,14 +358,12 @@ fn session_material(
 
 struct RecordingAdapter {
     applied: Mutex<Vec<ClientManagedInput>>,
-    reject_revisions: Mutex<Vec<String>>,
 }
 
 impl RecordingAdapter {
     fn new() -> Self {
         Self {
             applied: Mutex::new(Vec::new()),
-            reject_revisions: Mutex::new(Vec::new()),
         }
     }
 }
@@ -378,23 +376,52 @@ impl RoleAdapter for RecordingAdapter {
     }
 
     async fn apply(&mut self, input: Self::Input) -> Result<(), ApplyError> {
-        // Reject marker: empty collection with a sentinel is not used; rejection
-        // is controlled by reject_revisions checked via a side channel before
-        // push. For simplicity, always accept unless reject list is non-empty
-        // and we pop a reject token.
-        let should_reject = {
-            let mut rejects = self.reject_revisions.lock().unwrap();
-            if rejects.is_empty() {
-                false
-            } else {
-                rejects.remove(0);
-                true
-            }
-        };
-        if should_reject {
-            return Err(ApplyError::new("adapter rejected candidate"));
-        }
         self.applied.lock().unwrap().push(input);
+        Ok(())
+    }
+}
+
+/// Holds one apply until released so tests can observe mid-apply behavior.
+struct GatedAdapter {
+    applied_labels: Arc<Mutex<Vec<String>>>,
+    gate_next: Arc<AtomicBool>,
+    apply_started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl GatedAdapter {
+    fn new() -> Self {
+        Self {
+            applied_labels: Arc::new(Mutex::new(Vec::new())),
+            gate_next: Arc::new(AtomicBool::new(false)),
+            apply_started: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        }
+    }
+
+    fn label(input: &ClientManagedInput) -> String {
+        input
+            .server_addresses
+            .first()
+            .map(|address| address.hostname().as_str().to_owned())
+            .unwrap_or_else(|| "empty".to_owned())
+    }
+}
+
+impl RoleAdapter for GatedAdapter {
+    type Input = ClientManagedInput;
+
+    fn parse_input(input: &Value) -> Result<Self::Input, runewarp::InputError> {
+        DeferredClientAdapter::parse_input(input)
+    }
+
+    async fn apply(&mut self, input: Self::Input) -> Result<(), ApplyError> {
+        let label = Self::label(&input);
+        if self.gate_next.swap(false, Ordering::SeqCst) {
+            self.apply_started.notify_waiters();
+            self.release.notified().await;
+        }
+        self.applied_labels.lock().unwrap().push(label);
         Ok(())
     }
 }
@@ -934,5 +961,169 @@ async fn rollback_to_previously_applied_revision_is_applied() {
     let _ = stop_tx.send(());
     let adapter = runner.await.unwrap();
     assert_eq!(adapter.applied.lock().unwrap().len(), 3);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mid_apply_keeps_prior_revision_reports_and_collapses_to_newest() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse("rev-1", "{\"server_addresses\":[]}")],
+    )
+    .await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let mut adapter = GatedAdapter::new();
+    let apply_started = adapter.apply_started.clone();
+    let release = adapter.release.clone();
+    let gate_next = adapter.gate_next.clone();
+    let applied_labels = adapter.applied_labels.clone();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-1"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !fixture.metrics.state_bodies.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    gate_next.store(true, Ordering::SeqCst);
+    fixture.push_snapshot(snapshot_sse(
+        "rev-hold",
+        "{\"server_addresses\":[\"hold.example.test\"]}",
+    ));
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        apply_started.notified().await;
+    })
+    .await
+    .expect("gated apply should start");
+
+    // Pause only after the gated apply is in flight so heartbeat sleeps advance
+    // deterministically without racing connection setup.
+    tokio::time::pause();
+
+    // While apply is held, Control must keep receiving the prior applied revision.
+    let reports_before_heartbeat = fixture.metrics.state_bodies.lock().unwrap().len();
+    for _ in 0..20 {
+        if fixture.metrics.state_bodies.lock().unwrap().len() > reports_before_heartbeat {
+            break;
+        }
+        tokio::time::advance(STATE_HEARTBEAT).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    }
+    {
+        let bodies = fixture.metrics.state_bodies.lock().unwrap();
+        assert!(
+            bodies.len() > reports_before_heartbeat,
+            "expected prior-revision heartbeat during in-flight apply"
+        );
+        assert!(
+            bodies
+                .iter()
+                .all(|body| body == &serde_json::json!({"revision":"rev-1"})),
+            "during apply, reports must stay on the prior successfully applied revision"
+        );
+    }
+
+    // Supersede mid-apply: only the newest pending candidate should remain.
+    fixture.push_snapshot(snapshot_sse(
+        "rev-mid",
+        "{\"server_addresses\":[\"mid.example.test\"]}",
+    ));
+    fixture.push_snapshot(snapshot_sse(
+        "rev-newest",
+        "{\"server_addresses\":[\"newest.example.test\"]}",
+    ));
+    // Invalid input must not displace the newest valid pending candidate.
+    fixture.push_snapshot(snapshot_sse(
+        "rev-bad",
+        "{\"server_addresses\":[\"127.0.0.1\"]}",
+    ));
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Rejected { revision }) if revision == "rev-bad"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("invalid mid-apply input should be rejected without ack");
+
+    release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-newest"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("newest pending candidate should apply after the gated apply finishes");
+
+    assert_eq!(
+        *applied_labels.lock().unwrap(),
+        vec![
+            "empty".to_owned(),
+            "hold.example.test".to_owned(),
+            "newest.example.test".to_owned(),
+        ],
+        "superseded mid-apply candidate must be discarded"
+    );
+
+    let _ = stop_tx.send(());
+    let _ = runner.await;
     fixture.shutdown().await;
 }

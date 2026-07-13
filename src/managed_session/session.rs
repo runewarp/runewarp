@@ -9,7 +9,7 @@ use tokio::time::Instant;
 
 use super::adapter::RoleAdapter;
 use super::connection::{ConnectionError, ManagedSessionConnection};
-use super::reconcile::{AppliedRevision, SnapshotQueue};
+use super::reconcile::{AppliedRevision, QueuedSnapshot, SnapshotQueue};
 use super::role::ManagedSessionRole;
 use super::snapshot::{SnapshotEnvelope, SnapshotError, parse_snapshot_event};
 use super::sse::{SseParseError, SseParseItem, SseParser};
@@ -181,7 +181,7 @@ impl<C: SessionClock> ManagedSession<C> {
         .await
         .map_err(|_| ManagedSessionError::FirstSnapshotTimeout)?
         .map_err(ManagedSessionError::Connection)?;
-        let mut loop_state = ConnectionLoop {
+        let mut loop_state = ConnectionLoop::<A::Input> {
             connection,
             parser: SseParser::new(),
             deadlines: SessionDeadlines::new(self.clock.now()),
@@ -194,20 +194,21 @@ impl<C: SessionClock> ManagedSession<C> {
         };
 
         loop {
-            let envelope = self
-                .wait_for_apply_candidate(&mut loop_state, on_event)
+            let snapshot = self
+                .wait_for_apply_candidate::<A, _, _>(&mut loop_state, on_event)
                 .await?;
-            self.apply_while_reading(adapter, envelope, &mut loop_state, on_event)
+            self.apply_while_reading(adapter, snapshot, &mut loop_state, on_event)
                 .await?;
         }
     }
 
-    async fn wait_for_apply_candidate<F, Fut>(
+    async fn wait_for_apply_candidate<A, F, Fut>(
         &mut self,
-        loop_state: &mut ConnectionLoop,
+        loop_state: &mut ConnectionLoop<A::Input>,
         on_event: &mut F,
-    ) -> Result<SnapshotEnvelope, ManagedSessionError>
+    ) -> Result<QueuedSnapshot<A::Input>, ManagedSessionError>
     where
+        A: RoleAdapter,
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
     {
@@ -228,7 +229,8 @@ impl<C: SessionClock> ManagedSession<C> {
             );
             tokio::select! {
                 chunk = loop_state.connection.next_chunk() => {
-                    self.ingest_chunk(chunk, loop_state, on_event, false).await?;
+                    self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, false)
+                        .await?;
                 }
                 _ = tokio::time::sleep(wait) => {
                     self.handle_timer(loop_state).await?;
@@ -240,8 +242,8 @@ impl<C: SessionClock> ManagedSession<C> {
     async fn apply_while_reading<A, F, Fut>(
         &mut self,
         adapter: &mut A,
-        envelope: SnapshotEnvelope,
-        loop_state: &mut ConnectionLoop,
+        snapshot: QueuedSnapshot<A::Input>,
+        loop_state: &mut ConnectionLoop<A::Input>,
         on_event: &mut F,
     ) -> Result<(), ManagedSessionError>
     where
@@ -249,21 +251,8 @@ impl<C: SessionClock> ManagedSession<C> {
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
     {
-        let revision = envelope.revision.clone();
-        let parsed = match A::parse_input(&envelope.input) {
-            Ok(input) => input,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "managed session role input invalid"
-                );
-                on_event(ManagedSessionEvent::Rejected { revision }).await;
-                loop_state.queue.finish_apply();
-                return Ok(());
-            }
-        };
-
-        let apply = adapter.apply(parsed);
+        let QueuedSnapshot { revision, input } = snapshot;
+        let apply = adapter.apply(input);
         tokio::pin!(apply);
 
         let apply_result = loop {
@@ -275,7 +264,8 @@ impl<C: SessionClock> ManagedSession<C> {
             tokio::select! {
                 result = &mut apply => break result,
                 chunk = loop_state.connection.next_chunk() => {
-                    self.ingest_chunk(chunk, loop_state, on_event, true).await?;
+                    self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, true)
+                        .await?;
                 }
                 _ = tokio::time::sleep(wait) => {
                     self.handle_timer(loop_state).await?;
@@ -304,14 +294,15 @@ impl<C: SessionClock> ManagedSession<C> {
         Ok(())
     }
 
-    async fn ingest_chunk<F, Fut>(
+    async fn ingest_chunk<A, F, Fut>(
         &mut self,
         chunk: Result<Option<bytes::Bytes>, ConnectionError>,
-        loop_state: &mut ConnectionLoop,
+        loop_state: &mut ConnectionLoop<A::Input>,
         on_event: &mut F,
         applying: bool,
     ) -> Result<(), ManagedSessionError>
     where
+        A: RoleAdapter,
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
     {
@@ -344,7 +335,7 @@ impl<C: SessionClock> ManagedSession<C> {
                         self.reconnect.reset();
                     }
                     on_event(ManagedSessionEvent::Snapshot(envelope.clone())).await;
-                    self.accept_envelope(envelope, loop_state, on_event, applying)
+                    self.accept_envelope::<A, _, _>(envelope, loop_state, on_event, applying)
                         .await;
                 }
             }
@@ -352,52 +343,54 @@ impl<C: SessionClock> ManagedSession<C> {
         Ok(())
     }
 
-    async fn accept_envelope<F, Fut>(
+    async fn accept_envelope<A, F, Fut>(
         &mut self,
         envelope: SnapshotEnvelope,
-        loop_state: &mut ConnectionLoop,
+        loop_state: &mut ConnectionLoop<A::Input>,
         on_event: &mut F,
         applying: bool,
     ) where
+        A: RoleAdapter,
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
     {
-        if self.applied.matches(&envelope.revision) {
-            if applying {
-                // Keep Control's newest desired snapshot even when it matches the
-                // currently applied revision: after the in-flight apply commits, this
-                // may be the correct rollback/pending candidate.
-                loop_state.queue.note_while_applying(envelope);
-            } else {
-                self.report_applied(loop_state).await;
+        if !applying && self.applied.matches(&envelope.revision) {
+            self.report_applied(loop_state).await;
+            return;
+        }
+
+        // Validate through the role adapter before queueing so invalid or
+        // adapter-rejected candidates never displace a newer valid pending
+        // snapshot. The parsed input is retained so apply does not re-parse.
+        let input = match A::parse_input(&envelope.input) {
+            Ok(input) => input,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "managed session role input invalid"
+                );
+                on_event(ManagedSessionEvent::Rejected {
+                    revision: envelope.revision,
+                })
+                .await;
+                return;
             }
-            return;
-        }
+        };
 
-        // Validate before queueing so invalid candidates never displace a newer
-        // valid pending snapshot.
-        if let Err(error) = validate_input_for_role(self.role, &envelope.input) {
-            tracing::warn!(
-                error = %error,
-                "managed session role input invalid"
-            );
-            on_event(ManagedSessionEvent::Rejected {
-                revision: envelope.revision,
-            })
-            .await;
-            return;
-        }
-
+        let queued = QueuedSnapshot {
+            revision: envelope.revision,
+            input,
+        };
         if applying {
-            loop_state.queue.note_while_applying(envelope);
+            loop_state.queue.note_while_applying(queued);
         } else {
-            loop_state.queue.note_when_idle(envelope);
+            loop_state.queue.note_when_idle(queued);
         }
     }
 
-    async fn handle_timer(
+    async fn handle_timer<I>(
         &self,
-        loop_state: &mut ConnectionLoop,
+        loop_state: &mut ConnectionLoop<I>,
     ) -> Result<(), ManagedSessionError> {
         let now = self.clock.now();
         if loop_state.deadlines.expired(now) {
@@ -416,7 +409,7 @@ impl<C: SessionClock> ManagedSession<C> {
         Ok(())
     }
 
-    async fn report_applied(&self, loop_state: &mut ConnectionLoop) {
+    async fn report_applied<I>(&self, loop_state: &mut ConnectionLoop<I>) {
         let Some(revision) = self.applied.get() else {
             return;
         };
@@ -437,23 +430,13 @@ impl<C: SessionClock> ManagedSession<C> {
     }
 }
 
-struct ConnectionLoop {
+struct ConnectionLoop<I> {
     connection: ManagedSessionConnection,
     parser: SseParser,
     deadlines: SessionDeadlines,
     received_valid_snapshot: bool,
-    queue: SnapshotQueue,
+    queue: SnapshotQueue<I>,
     next_heartbeat: Option<Instant>,
-}
-
-fn validate_input_for_role(
-    role: ManagedSessionRole,
-    input: &serde_json::Value,
-) -> Result<(), super::input::InputError> {
-    match role {
-        ManagedSessionRole::Server => super::input::parse_server_input(input).map(|_| ()),
-        ManagedSessionRole::Client => super::input::parse_client_input(input).map(|_| ()),
-    }
 }
 
 fn next_wait(

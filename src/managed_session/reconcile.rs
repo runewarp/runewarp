@@ -1,12 +1,9 @@
 //! Latest-state, non-preemptive reconciliation helpers.
 //!
 //! While an apply is in flight, newer snapshots collapse to a single pending
-//! candidate. Equal applied revisions are skipped by the session before they
-//! reach this queue. Previously applied but non-current revisions remain valid
-//! rollback candidates because equality is checked only against the current
-//! applied revision.
-
-use super::snapshot::SnapshotEnvelope;
+//! candidate. Equal applied revisions are skipped when idle. Previously applied
+//! but non-current revisions remain valid rollback candidates because equality
+//! is checked only against the current applied revision.
 
 /// Memory-only applied revision retained by one Managed-session process.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -32,14 +29,27 @@ impl AppliedRevision {
     }
 }
 
+/// A validated snapshot ready for role-adapter apply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuedSnapshot<I> {
+    pub revision: String,
+    pub input: I,
+}
+
 /// Collapse queue for non-preemptive latest-state reconciliation.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SnapshotQueue {
-    pending: Option<SnapshotEnvelope>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotQueue<I> {
+    pending: Option<QueuedSnapshot<I>>,
     applying: bool,
 }
 
-impl SnapshotQueue {
+impl<I> Default for SnapshotQueue<I> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<I> SnapshotQueue<I> {
     pub fn new() -> Self {
         Self {
             pending: None,
@@ -48,19 +58,19 @@ impl SnapshotQueue {
     }
 
     /// Retain only the newest candidate while an apply is in flight.
-    pub fn note_while_applying(&mut self, envelope: SnapshotEnvelope) {
+    pub fn note_while_applying(&mut self, snapshot: QueuedSnapshot<I>) {
         debug_assert!(self.applying);
-        self.pending = Some(envelope);
+        self.pending = Some(snapshot);
     }
 
     /// Retain a candidate while idle. Later [`take_next`] starts the apply.
-    pub fn note_when_idle(&mut self, envelope: SnapshotEnvelope) {
+    pub fn note_when_idle(&mut self, snapshot: QueuedSnapshot<I>) {
         debug_assert!(!self.applying);
-        self.pending = Some(envelope);
+        self.pending = Some(snapshot);
     }
 
     /// Take the newest pending candidate and mark apply in flight.
-    pub fn take_next(&mut self) -> Option<SnapshotEnvelope> {
+    pub fn take_next(&mut self) -> Option<QueuedSnapshot<I>> {
         if self.applying {
             return None;
         }
@@ -77,15 +87,12 @@ impl SnapshotQueue {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use super::{AppliedRevision, QueuedSnapshot, SnapshotQueue};
 
-    use super::{AppliedRevision, SnapshotQueue};
-    use crate::managed_session::snapshot::SnapshotEnvelope;
-
-    fn envelope(revision: &str) -> SnapshotEnvelope {
-        SnapshotEnvelope {
+    fn snapshot(revision: &str) -> QueuedSnapshot<&'static str> {
+        QueuedSnapshot {
             revision: revision.to_owned(),
-            input: json!({"server_addresses": []}),
+            input: "input",
         }
     }
 
@@ -113,7 +120,7 @@ mod tests {
     #[test]
     fn queue_is_non_preemptive_and_keeps_only_latest_pending() {
         let mut queue = SnapshotQueue::new();
-        queue.note_when_idle(envelope("rev-1"));
+        queue.note_when_idle(snapshot("rev-1"));
         let first = queue.take_next().expect("idle take starts apply");
         assert_eq!(first.revision, "rev-1");
         assert!(
@@ -121,8 +128,8 @@ mod tests {
             "cannot start another apply while one is in flight"
         );
 
-        queue.note_while_applying(envelope("rev-2"));
-        queue.note_while_applying(envelope("rev-3"));
+        queue.note_while_applying(snapshot("rev-2"));
+        queue.note_while_applying(snapshot("rev-3"));
         queue.finish_apply();
 
         let next = queue.take_next().expect("pending newest remains");

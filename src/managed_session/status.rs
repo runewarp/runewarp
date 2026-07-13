@@ -60,10 +60,17 @@ pub fn classify_state_response(status: StatusCode, body: &[u8]) -> StateResponse
 }
 
 /// Collect a state-response body and classify it. Used by connection writes.
+///
+/// Non-204 responses fail immediately without reading the body, so a large or
+/// slow error body cannot stall or inflate memory on the shared connection.
 pub async fn classify_state_incoming(
     status: StatusCode,
     body: Incoming,
 ) -> Result<StateResponseClass, hyper::Error> {
+    if classify_state_status(status) != StateResponseClass::Success {
+        drop(body);
+        return Ok(StateResponseClass::Failure);
+    }
     let collected = body.collect().await?;
     Ok(classify_state_response(status, &collected.to_bytes()))
 }

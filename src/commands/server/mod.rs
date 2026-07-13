@@ -13,6 +13,7 @@ mod cert;
 pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
     let runtime = ServerRuntimeArgs {
         hostname: command.hostname,
+        control_address: command.control_address,
     };
     let config = command.config;
     if let Some(cli::ServerSubcommand::Cert(command)) = command.command {
@@ -21,6 +22,13 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
                 "--hostname is only supported for `runewarp server`, not `runewarp server cert ...` \
                  (got `{hostname}`). Use `runewarp server cert init --hostname ...` or \
                  `runewarp server cert rotate-ca --hostname ...` for certificate commands."
+            )
+            .into());
+        }
+        if let Some(control_address) = runtime.control_address {
+            return Err(format!(
+                "--control-address is only supported for `runewarp server`, not `runewarp server cert ...` \
+                 (got `{control_address}`)."
             )
             .into());
         }

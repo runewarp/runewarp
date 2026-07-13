@@ -85,6 +85,9 @@ pub struct ServerArgs {
     /// RUNEWARP_SERVER_HOSTNAME and server.hostname from config.
     #[arg(long, value_name = "HOSTNAME")]
     pub hostname: Option<String>,
+    /// Override the Control endpoint for the runtime Server command. Enables managed mode.
+    #[arg(long, value_name = "HOSTNAME[:PORT]")]
+    pub control_address: Option<String>,
     #[command(subcommand)]
     pub command: Option<ServerSubcommand>,
 }
@@ -156,6 +159,9 @@ pub struct ClientArgs {
     /// Supply a catch-all backend address for the runtime Client command.
     #[arg(long, value_name = "ADDRESS")]
     pub backend_address: Option<String>,
+    /// Override the Control endpoint for the runtime Client command. Enables managed mode.
+    #[arg(long, value_name = "HOSTNAME[:PORT]")]
+    pub control_address: Option<String>,
     #[command(subcommand)]
     pub command: Option<ClientSubcommand>,
 }

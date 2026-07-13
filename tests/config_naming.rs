@@ -40,6 +40,7 @@ backend-address = "localhost:8443"
         &runewarp::ClientRuntimeArgs {
             server_addresses: Vec::new(),
             backend_address: None,
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,

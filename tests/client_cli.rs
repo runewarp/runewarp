@@ -515,3 +515,101 @@ tls-mode = "terminate"
     assert!(!stderr.contains("client.public-cert-dir or [client.acme] is required"));
     Ok(())
 }
+
+#[test]
+fn client_runtime_control_address_is_rejected_for_identity_subcommands() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args([
+            "client",
+            "--control-address",
+            "control.example.test",
+            "identity",
+            "show",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("--control-address may be used only with `runewarp client`"));
+}
+
+#[test]
+fn client_runtime_control_address_is_rejected_for_public_cert_subcommands() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args([
+            "client",
+            "--control-address",
+            "control.example.test",
+            "public-cert",
+            "rotate-ca",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("--control-address may be used only with `runewarp client`"));
+}
+
+#[test]
+fn client_cli_only_managed_shape_accepts_control_and_backend_without_server_address()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+    let xdg_config = tempdir.path().join("xdg-config");
+    let xdg_data = tempdir.path().join("xdg-data");
+    fs::create_dir_all(xdg_config.join("runewarp")).unwrap();
+    fs::create_dir_all(&xdg_data).unwrap();
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .args([
+            "client",
+            "--control-address",
+            "control.example.test",
+            "--backend-address",
+            "127.0.0.1:443",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
+    assert!(!stderr.contains("--server-address is required"));
+    assert!(!stderr.contains("--server-address may not be used with --control-address"));
+    assert!(
+        stderr.contains("client.identity-dir directory not found"),
+        "expected managed CLI-only startup to reach identity material validation, got: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn client_managed_runtime_rejects_server_address_flags() -> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+    let xdg_config = tempdir.path().join("xdg-config");
+    let xdg_data = tempdir.path().join("xdg-data");
+    fs::create_dir_all(xdg_config.join("runewarp")).unwrap();
+    fs::create_dir_all(&xdg_data).unwrap();
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .args([
+            "client",
+            "--control-address",
+            "control.example.test",
+            "--server-address",
+            "tunnel.example.test",
+            "--backend-address",
+            "127.0.0.1:443",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
+    assert!(stderr.contains("--server-address may not be used with --control-address"));
+    Ok(())
+}

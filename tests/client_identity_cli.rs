@@ -589,3 +589,65 @@ fn client_identity_init_rejects_the_removed_directory_flag() {
     assert!(stderr.contains("unexpected argument '--directory'"));
     assert!(stderr.contains("--dir"));
 }
+
+#[test]
+fn client_identity_init_rejects_managed_config_without_explicit_dir() {
+    let tempdir = tempdir().unwrap();
+    fs::write(
+        tempdir.path().join("managed-client.toml"),
+        r#"
+[control]
+address = "control.example.test"
+
+[client]
+identity-dir = "client-identity"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "--config",
+            "managed-client.toml",
+            "identity",
+            "init",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("client identity init and rotate are not supported for managed-mode"));
+}
+
+#[test]
+fn client_identity_init_still_works_with_explicit_dir_in_managed_config() {
+    let tempdir = tempdir().unwrap();
+    fs::write(
+        tempdir.path().join("managed-client.toml"),
+        r#"
+[control]
+address = "control.example.test"
+"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args([
+            "client",
+            "--config",
+            "managed-client.toml",
+            "identity",
+            "init",
+            "--dir",
+            "client-identity",
+        ])
+        .assert()
+        .success();
+
+    assert!(tempdir.path().join("client-identity/client.key").is_file());
+}

@@ -991,6 +991,8 @@ mod tests {
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: Vec::new(),
+            control: None,
+            identity: None,
         };
 
         super::prepare_default_server_acme_state_dir(&settings)?;
@@ -1014,6 +1016,8 @@ mod tests {
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: Vec::new(),
+            control: None,
+            identity: None,
         };
         let manual_settings = ServerConfig {
             certificate: ServerCertificateConfig::Manual {
@@ -1059,6 +1063,7 @@ mod tests {
                 state_directory: tempdir.path().join("acme-state"),
                 state_directory_was_defaulted: false,
             }),
+            control: None,
         };
 
         let (configs, acme_runtimes) = super::load_termination_tls_configs(&settings)
@@ -1102,6 +1107,7 @@ mod tests {
                 state_directory: state_directory.clone(),
                 state_directory_was_defaulted: true,
             }),
+            control: None,
         };
 
         super::prepare_default_client_acme_state_dir(&settings)?;
@@ -1130,6 +1136,8 @@ mod tests {
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: Vec::new(),
+            control: None,
+            identity: None,
         };
 
         let error = match super::prepare_default_server_acme_state_dir(&settings) {
@@ -1172,6 +1180,7 @@ mod tests {
                 state_directory: state_directory.clone(),
                 state_directory_was_defaulted: true,
             }),
+            control: None,
         };
 
         let error = match super::prepare_default_client_acme_state_dir(&settings) {
@@ -1292,6 +1301,8 @@ mod tests {
                     .unwrap(),
                 ],
             }],
+            control: None,
+            identity: None,
         }
     }
 

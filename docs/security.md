@@ -18,6 +18,7 @@ In the default passthrough mode, Runewarp does not terminate customer TLS on the
 | Server-side **Public hostname** authorization | Prevents random public traffic from entering a Tunnel just because some Client is connected |
 | Server certificate validation | Confirms the Client is connected to the intended **Server hostname** |
 | **Exclusive CA trust** | Limits trust for the Tunnel connection to the configured CA bundle |
+| **Control trust** | Limits trust for the Control endpoint to system roots or an exclusive CA bundle |
 | Pinned **Client identity** | Confirms the Client public key authorized for the selected Tunnel |
 | Backend TLS termination (passthrough) | Keeps customer TLS termination off the public edge in the default mode |
 | **Public hostname CA** (terminate) | Operator-managed trust anchor for Visitors when the Client terminates TLS |
@@ -66,6 +67,15 @@ The tunnel-connection trust model is:
 The pinned value is the client public key, not the certificate lifetime or serial number. Handshake admission and Public-hostname routing consult one shared **Authorization snapshot**, so identity additions and removals can replace admission without rebinding the tunnel listener. Live Tunnel connections retain their authenticated Client identity, and admitted Visitor streams retain their Public hostname and serving connection, so the runtime can dispatch targeted connection closes and stream resets without disturbing unrelated work.
 
 Static fanout does not change these trust boundaries. When a Client dials multiple **Server addresses**, each **Tunnel connection** still uses the same shared Client identity, Server-certificate validation mode, and local Service-routing config.
+
+## Control authentication (managed mode)
+
+Managed mode introduces a separate trust boundary for the Control endpoint:
+
+1. the Server authenticates to Control with **Server identity** material from `server.identity-dir`
+2. the Client and Server validate the Control endpoint through `control.trust = "system"` or through `control.trust = "ca-file"` with an exclusive CA bundle
+
+**Server identity** is not the **Server certificate**. The Server certificate still identifies the tunnel endpoint to Clients. Server identity is a pinned public-key identity presented only to Control.
 
 ## Certificate and identity lifecycle
 

@@ -3,11 +3,12 @@ use std::io::Cursor;
 use std::path::Path;
 
 use assert_cmd::Command;
-use rcgen::{CertificateParams, KeyPair, PublicKeyData};
 use runewarp::client_identity_from_certificate_der;
 use rustls_pemfile::certs;
 use tempfile::tempdir;
-use time::{Duration, OffsetDateTime};
+use time::OffsetDateTime;
+
+mod common;
 
 #[test]
 fn client_identity_init_writes_identity_artifacts_to_the_requested_directory() {
@@ -205,6 +206,15 @@ fn client_identity_init_leaves_complete_expired_material_unchanged() {
     let original_private_key = fs::read(directory.join("client.key")).unwrap();
     let original_certificate = fs::read(directory.join("client.crt")).unwrap();
     let original_identity = fs::read_to_string(directory.join("client-identity.txt")).unwrap();
+    let certificate_der = certs(&mut Cursor::new(original_certificate.as_slice()))
+        .next()
+        .expect("expired certificate")
+        .expect("parse expired certificate");
+    let (_, parsed) = x509_parser::parse_x509_certificate(certificate_der.as_ref()).unwrap();
+    assert!(
+        parsed.validity().not_after.to_datetime() < OffsetDateTime::now_utc(),
+        "test certificate must already be expired"
+    );
 
     let assert = Command::cargo_bin("runewarp")
         .unwrap()
@@ -514,19 +524,11 @@ fn assert_exists(path: &Path) {
 }
 
 fn write_expired_client_identity(directory: &Path) {
-    let signing_key = KeyPair::generate().unwrap();
-    let not_before = OffsetDateTime::now_utc() - Duration::days(120);
-    let mut certificate_params =
-        CertificateParams::new(vec!["runewarp-client".to_owned()]).unwrap();
-    certificate_params.not_before = not_before;
-    certificate_params.not_after = not_before + Duration::days(90);
-    let certificate = certificate_params.self_signed(&signing_key).unwrap();
-    let client_identity = runewarp::ClientIdentity::from_subject_public_key_info(
-        &signing_key.subject_public_key_info(),
-    );
+    let (client_identity, certificate_pem, private_key_pem) =
+        common::expired_client_identity_material();
 
-    fs::write(directory.join("client.key"), signing_key.serialize_pem()).unwrap();
-    fs::write(directory.join("client.crt"), certificate.pem()).unwrap();
+    fs::write(directory.join("client.key"), private_key_pem).unwrap();
+    fs::write(directory.join("client.crt"), certificate_pem).unwrap();
     fs::write(
         directory.join("client-identity.txt"),
         client_identity.to_string(),

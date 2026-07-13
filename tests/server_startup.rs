@@ -4,10 +4,10 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rcgen::{CertificateParams, KeyPair, PublicKeyData, generate_simple_self_signed};
+use rcgen::generate_simple_self_signed;
 use runewarp::{
-    ClientIdentity, PreparedClient, PreparedServer, generate_client_identity,
-    initialize_manual_server_certificate, load_client_config, load_server_config,
+    PreparedClient, PreparedServer, generate_client_identity, initialize_manual_server_certificate,
+    load_client_config, load_server_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -15,11 +15,13 @@ use rustls_acme::CertCache;
 use rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY;
 use rustls_acme::caches::DirCache;
 use tempfile::tempdir;
-use time::{Duration as TimeDuration, OffsetDateTime};
+use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+mod common;
 
 #[tokio::test]
 async fn prepared_server_binds_the_existing_runtime_from_validated_settings() {
@@ -180,7 +182,8 @@ async fn prepared_server_accepts_an_expired_pinned_client_identity_certificate()
     )
     .unwrap();
 
-    let (client_identity, certificate_pem, private_key_pem) = expired_client_identity_material();
+    let (client_identity, certificate_pem, private_key_pem) =
+        common::expired_client_identity_material();
     let certificate_der =
         rustls_pemfile::certs(&mut std::io::Cursor::new(certificate_pem.as_bytes()))
             .next()
@@ -1478,22 +1481,4 @@ fn root_store_with(certificate: &CertificateDer<'static>) -> RootCertStore {
     let mut roots = RootCertStore::empty();
     roots.add(certificate.clone()).unwrap();
     roots
-}
-
-fn expired_client_identity_material() -> (ClientIdentity, String, String) {
-    let signing_key = KeyPair::generate().unwrap();
-    let not_before = OffsetDateTime::now_utc() - TimeDuration::days(120);
-    let mut certificate_params =
-        CertificateParams::new(vec!["runewarp-client".to_owned()]).unwrap();
-    certificate_params.not_before = not_before;
-    certificate_params.not_after = not_before + TimeDuration::days(90);
-    let certificate = certificate_params.self_signed(&signing_key).unwrap();
-    let client_identity =
-        ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
-
-    (
-        client_identity,
-        certificate.pem(),
-        signing_key.serialize_pem(),
-    )
 }

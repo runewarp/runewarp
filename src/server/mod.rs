@@ -1,6 +1,9 @@
 mod active_client;
+mod authorization;
 mod tunnel_registry;
 mod visitor_stream;
+
+pub use self::authorization::{AuthorizationSnapshot, PreparedAuthorization, ServerAuthorization};
 
 use std::future::Future;
 use std::io;
@@ -12,7 +15,7 @@ use quinn::Endpoint;
 use tokio::net::TcpListener;
 
 use crate::{
-    HANDSHAKE_TIMEOUT, ServerHostname, ServerTunnelConfig,
+    HANDSHAKE_TIMEOUT, ServerHostname,
     quic::with_handshake_timeout,
     runtime_log,
     shutdown::{OrderlyShutdown, ShutdownMode},
@@ -28,7 +31,9 @@ pub struct ServerBindConfig {
     pub tunnel_connection_bind_addr: SocketAddr,
     pub readiness_bind_addr: Option<SocketAddr>,
     pub server_hostname: ServerHostname,
-    pub configured_tunnels: Vec<ServerTunnelConfig>,
+    /// Shared authorization snapshot consulted by Public-hostname routing.
+    /// Pass the same handle to the QUIC Client-identity admission builder.
+    pub authorization: ServerAuthorization,
     pub public_tls_config: Option<Arc<rustls::ServerConfig>>,
     pub quic_server_config: quinn::ServerConfig,
 }
@@ -101,14 +106,13 @@ impl ReadinessProbe {
 
 impl Server {
     pub async fn bind(config: ServerBindConfig) -> io::Result<Self> {
-        if config.configured_tunnels.is_empty() {
+        if config.authorization.current_tunnel_count() == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "server bind requires at least one configured Tunnel",
             ));
         }
-        let tunnel_registry =
-            TunnelRegistry::configured(&config.server_hostname, &config.configured_tunnels)?;
+        let tunnel_registry = TunnelRegistry::from_authorization(config.authorization)?;
         let visitor_stream_handler = VisitorStreamHandler::new(
             config.server_hostname.clone(),
             tunnel_registry.clone(),

@@ -1,13 +1,15 @@
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     ClientConfig, ClientPublicCertConfig, ClientTlsMode, LogLevel, PreparedClient, PublicHostname,
-    Server, ServerAddress, ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
-    generate_client_identity, initialize_manual_client_public_cert, load_client_config,
-    make_server_quic_config_with_client_auth,
+    Server, ServerAddress, ServerAuthorization, ServerBindConfig, ServerHostname,
+    ServerTunnelConfig, ServiceConfig, generate_client_identity,
+    initialize_manual_client_public_cert, load_client_config,
+    make_server_quic_config_with_client_admission,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn public_hostname(hostname: &str) -> PublicHostname {
@@ -31,20 +33,25 @@ async fn prepared_client_connects_from_validated_settings() {
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
+    let authorization = ServerAuthorization::from_tunnels(
+        &server_hostname("tunnel.example.test"),
+        &[ServerTunnelConfig {
+            public_hostnames: vec![public_hostname("app.example.test")],
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
+        }],
+    )
+    .unwrap();
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
-        configured_tunnels: vec![ServerTunnelConfig {
-            public_hostnames: vec![public_hostname("app.example.test")],
-            authorized_client_identities: vec![client_identity.client_identity.clone()],
-        }],
+        authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_auth(
+        quic_server_config: make_server_quic_config_with_client_admission(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
-            std::slice::from_ref(&client_identity.client_identity),
+            Arc::new(authorization.clone()),
         )
         .unwrap(),
     })
@@ -104,6 +111,14 @@ async fn prepared_client_uses_the_configured_server_address_port() {
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
+    let authorization = ServerAuthorization::from_tunnels(
+        &server_hostname("localhost"),
+        &[ServerTunnelConfig {
+            public_hostnames: vec![public_hostname("app.example.test")],
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
+        }],
+    )
+    .unwrap();
     let server = Server::bind(ServerBindConfig {
         // Bind dual-stack wildcard listeners so `localhost` resolution order does not make
         // this port-selection test flaky across environments.
@@ -111,15 +126,12 @@ async fn prepared_client_uses_the_configured_server_address_port() {
         tunnel_connection_bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
         readiness_bind_addr: None,
         server_hostname: server_hostname("localhost"),
-        configured_tunnels: vec![ServerTunnelConfig {
-            public_hostnames: vec![public_hostname("app.example.test")],
-            authorized_client_identities: vec![client_identity.client_identity.clone()],
-        }],
+        authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_auth(
+        quic_server_config: make_server_quic_config_with_client_admission(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
-            std::slice::from_ref(&client_identity.client_identity),
+            Arc::new(authorization.clone()),
         )
         .unwrap(),
     })
@@ -191,20 +203,25 @@ async fn prepared_client_rejects_settings_without_services() {
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
+    let authorization = ServerAuthorization::from_tunnels(
+        &server_hostname("tunnel.example.test"),
+        &[ServerTunnelConfig {
+            public_hostnames: vec![public_hostname("app.example.test")],
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
+        }],
+    )
+    .unwrap();
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
-        configured_tunnels: vec![ServerTunnelConfig {
-            public_hostnames: vec![public_hostname("app.example.test")],
-            authorized_client_identities: vec![client_identity.client_identity.clone()],
-        }],
+        authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_auth(
+        quic_server_config: make_server_quic_config_with_client_admission(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
-            std::slice::from_ref(&client_identity.client_identity),
+            Arc::new(authorization.clone()),
         )
         .unwrap(),
     })
@@ -443,20 +460,25 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
+    let authorization = ServerAuthorization::from_tunnels(
+        &server_hostname("tunnel.example.test"),
+        &[ServerTunnelConfig {
+            public_hostnames: vec![public_hostname("app.example.test")],
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
+        }],
+    )
+    .unwrap();
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
-        configured_tunnels: vec![ServerTunnelConfig {
-            public_hostnames: vec![public_hostname("app.example.test")],
-            authorized_client_identities: vec![client_identity.client_identity.clone()],
-        }],
+        authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_auth(
+        quic_server_config: make_server_quic_config_with_client_admission(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
-            std::slice::from_ref(&client_identity.client_identity),
+            Arc::new(authorization.clone()),
         )
         .unwrap(),
     })
@@ -550,23 +572,28 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
-    let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
-        readiness_bind_addr: None,
-        server_hostname: server_hostname("tunnel.example.test"),
-        configured_tunnels: vec![ServerTunnelConfig {
+    let authorization = ServerAuthorization::from_tunnels(
+        &server_hostname("tunnel.example.test"),
+        &[ServerTunnelConfig {
             public_hostnames: vec![
                 public_hostname("app.example.test"),
                 public_hostname("api.example.test"),
             ],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
+    )
+    .unwrap();
+    let server = Server::bind(ServerBindConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
+        server_hostname: server_hostname("tunnel.example.test"),
+        authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_auth(
+        quic_server_config: make_server_quic_config_with_client_admission(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
-            std::slice::from_ref(&client_identity.client_identity),
+            Arc::new(authorization.clone()),
         )
         .unwrap(),
     })
@@ -647,20 +674,25 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
+    let authorization = ServerAuthorization::from_tunnels(
+        &server_hostname("tunnel.example.test"),
+        &[ServerTunnelConfig {
+            public_hostnames: vec![public_hostname("app.example.test")],
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
+        }],
+    )
+    .unwrap();
     let server = Server::bind(ServerBindConfig {
         public_bind_addr: localhost(0),
         tunnel_connection_bind_addr: localhost(0),
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
-        configured_tunnels: vec![ServerTunnelConfig {
-            public_hostnames: vec![public_hostname("app.example.test")],
-            authorized_client_identities: vec![client_identity.client_identity.clone()],
-        }],
+        authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_auth(
+        quic_server_config: make_server_quic_config_with_client_admission(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
-            std::slice::from_ref(&client_identity.client_identity),
+            Arc::new(authorization.clone()),
         )
         .unwrap(),
     })
@@ -743,23 +775,28 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
-    let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
-        readiness_bind_addr: None,
-        server_hostname: server_hostname("tunnel.example.test"),
-        configured_tunnels: vec![ServerTunnelConfig {
+    let authorization = ServerAuthorization::from_tunnels(
+        &server_hostname("tunnel.example.test"),
+        &[ServerTunnelConfig {
             public_hostnames: vec![
                 public_hostname("app.example.test"),
                 public_hostname("api.example.test"),
             ],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
+    )
+    .unwrap();
+    let server = Server::bind(ServerBindConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
+        server_hostname: server_hostname("tunnel.example.test"),
+        authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_auth(
+        quic_server_config: make_server_quic_config_with_client_admission(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
-            std::slice::from_ref(&client_identity.client_identity),
+            Arc::new(authorization.clone()),
         )
         .unwrap(),
     })

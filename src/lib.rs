@@ -58,12 +58,17 @@ pub use paths::{
     default_server_acme_state_dir, default_server_cert_material_dir,
 };
 pub use quic::{
-    HANDSHAKE_TIMEOUT, IDLE_TIMEOUT, KEEPALIVE_INTERVAL, MAX_SERVER_OPENED_BIDI_STREAMS,
-    QuicConfigError, RUNEWARP_ALPN, make_client_quic_config,
+    ClientIdentityAdmission, HANDSHAKE_TIMEOUT, IDLE_TIMEOUT, KEEPALIVE_INTERVAL,
+    MAX_SERVER_OPENED_BIDI_STREAMS, QuicConfigError, RUNEWARP_ALPN, make_client_quic_config,
     make_client_quic_config_with_client_auth, make_server_quic_config,
+    make_server_quic_config_with_client_admission,
+    make_server_quic_config_with_client_admission_resolver,
     make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
 };
-pub use server::{QUIC_CLOSE_FLUSH_DURATION, Server, ServerBindConfig};
+pub use server::{
+    AuthorizationSnapshot, PreparedAuthorization, QUIC_CLOSE_FLUSH_DURATION, Server,
+    ServerAuthorization, ServerBindConfig,
+};
 pub use server_address::{ServerAddress, ServerAddressError};
 pub use server_cert::{
     SERVER_CA_FILENAME, initialize_manual_server_certificate, inspect_manual_server_certificate,

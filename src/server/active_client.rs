@@ -9,12 +9,15 @@ use crate::{ClientIdentity, runtime_log};
 #[derive(Clone)]
 struct PoolMember {
     member_id: u64,
+    client_identity: ClientIdentity,
     connection: Connection,
     active_streams: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
 pub(crate) struct SelectedTunnelConnection {
+    member_id: u64,
+    client_identity: ClientIdentity,
     connection: Connection,
     active_streams: Arc<AtomicUsize>,
 }
@@ -22,6 +25,14 @@ pub(crate) struct SelectedTunnelConnection {
 impl SelectedTunnelConnection {
     pub(crate) fn connection(&self) -> Connection {
         self.connection.clone()
+    }
+
+    pub(crate) fn member_id(&self) -> u64 {
+        self.member_id
+    }
+
+    pub(crate) fn client_identity(&self) -> &ClientIdentity {
+        &self.client_identity
     }
 
     pub(crate) fn record_open_stream(&self) -> ActiveStreamGuard {
@@ -83,6 +94,8 @@ impl ActiveClientPool {
                 let member = &members[index];
                 (member.active_streams.load(Ordering::Relaxed) == lowest_active_streams).then(
                     || SelectedTunnelConnection {
+                        member_id: member.member_id,
+                        client_identity: member.client_identity.clone(),
                         connection: member.connection.clone(),
                         active_streams: member.active_streams.clone(),
                     },
@@ -96,6 +109,7 @@ impl ActiveClientPool {
             let mut members = self.members.write().await;
             members.push(PoolMember {
                 member_id,
+                client_identity: client_identity.clone(),
                 connection: connection.clone(),
                 active_streams: Arc::new(AtomicUsize::new(0)),
             });
@@ -121,6 +135,33 @@ impl ActiveClientPool {
             member.connection.close(0_u32.into(), reason);
         }
         members.len()
+    }
+
+    #[allow(dead_code)] // called from TunnelRegistry::close_connections_for_identities
+    pub(crate) async fn close_connections_for_identities(
+        &self,
+        identities: &std::collections::HashSet<ClientIdentity>,
+        reason: &'static [u8],
+    ) -> usize {
+        let members = self.members.read().await.clone();
+        let mut closed = 0;
+        for member in &members {
+            if identities.contains(&member.client_identity) {
+                member.connection.close(0_u32.into(), reason);
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn retained_client_identities(&self) -> Vec<ClientIdentity> {
+        self.members
+            .read()
+            .await
+            .iter()
+            .map(|member| member.client_identity.clone())
+            .collect()
     }
 
     pub(crate) async fn connection_count(&self) -> usize {
@@ -156,6 +197,61 @@ mod tests {
         GeneratedClientIdentity, generate_client_identity,
         make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
     };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closes_only_connections_matching_client_identities() -> io::Result<()> {
+        let first_identity = generate_test_client_identity()?;
+        let second_identity = generate_test_client_identity()?;
+        let first_fixture = TunnelConnectionFixture::connect(&first_identity).await?;
+        let second_fixture = TunnelConnectionFixture::connect(&second_identity).await?;
+        let pool = ActiveClientPool::new();
+        pool.register(
+            first_fixture.server_connection.clone(),
+            first_identity.client_identity.clone(),
+        )
+        .await;
+        pool.register(
+            second_fixture.server_connection.clone(),
+            second_identity.client_identity.clone(),
+        )
+        .await;
+
+        let mut revoke = std::collections::HashSet::new();
+        revoke.insert(first_identity.client_identity.clone());
+        assert_eq!(
+            pool.close_connections_for_identities(&revoke, b"authorization revoked")
+                .await,
+            1
+        );
+
+        timeout(
+            Duration::from_secs(1),
+            first_fixture.server_connection.closed(),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "revoked connection should close"))?;
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if pool.connection_count().await == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "revoked pool member should be removed after close",
+            )
+        })?;
+        assert_eq!(
+            pool.retained_client_identities().await,
+            vec![second_identity.client_identity.clone()]
+        );
+        assert_eq!(pool.connection_count().await, 1);
+        Ok(())
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn registers_multiple_same_tunnel_connections_without_replacement() -> io::Result<()> {

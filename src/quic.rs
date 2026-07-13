@@ -19,6 +19,11 @@ use rustls::{
 
 use crate::{ClientIdentity, client_identity_from_certificate_der, runtime_log};
 
+/// Live Client-identity handshake admission consulted by the QUIC verifier.
+pub trait ClientIdentityAdmission: Send + Sync + fmt::Debug {
+    fn authorizes_client_identity(&self, identity: &ClientIdentity) -> bool;
+}
+
 pub const RUNEWARP_ALPN: &[u8] = b"runewarp/1";
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
@@ -84,11 +89,23 @@ pub fn make_server_quic_config_with_client_auth(
     private_key: PrivateKeyDer<'static>,
     trusted_client_identities: &[ClientIdentity],
 ) -> Result<quinn::ServerConfig, QuicConfigError> {
+    make_server_quic_config_with_client_admission(
+        cert_chain,
+        private_key,
+        Arc::new(StaticClientIdentityAdmission::from_identities(
+            trusted_client_identities,
+        )),
+    )
+}
+
+pub fn make_server_quic_config_with_client_admission(
+    cert_chain: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+    admission: Arc<dyn ClientIdentityAdmission>,
+) -> Result<quinn::ServerConfig, QuicConfigError> {
     let provider = server_crypto_provider();
-    let verifier = PinnedClientCertVerifier::new(
-        trusted_client_identities,
-        provider.signature_verification_algorithms,
-    );
+    let verifier =
+        PinnedClientCertVerifier::new(admission, provider.signature_verification_algorithms);
     let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .with_client_cert_verifier(Arc::new(verifier))
@@ -108,11 +125,21 @@ pub fn make_server_quic_config_with_client_auth_resolver(
     cert_resolver: Arc<dyn ResolvesServerCert>,
     trusted_client_identities: &[ClientIdentity],
 ) -> Result<quinn::ServerConfig, QuicConfigError> {
+    make_server_quic_config_with_client_admission_resolver(
+        cert_resolver,
+        Arc::new(StaticClientIdentityAdmission::from_identities(
+            trusted_client_identities,
+        )),
+    )
+}
+
+pub fn make_server_quic_config_with_client_admission_resolver(
+    cert_resolver: Arc<dyn ResolvesServerCert>,
+    admission: Arc<dyn ClientIdentityAdmission>,
+) -> Result<quinn::ServerConfig, QuicConfigError> {
     let provider = server_crypto_provider();
-    let verifier = PinnedClientCertVerifier::new(
-        trusted_client_identities,
-        provider.signature_verification_algorithms,
-    );
+    let verifier =
+        PinnedClientCertVerifier::new(admission, provider.signature_verification_algorithms);
     let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .with_client_cert_verifier(Arc::new(verifier))
@@ -205,19 +232,38 @@ fn server_crypto_provider() -> Arc<CryptoProvider> {
 }
 
 #[derive(Debug)]
-struct PinnedClientCertVerifier {
+struct StaticClientIdentityAdmission {
     trusted_client_identities: HashSet<ClientIdentity>,
+}
+
+impl StaticClientIdentityAdmission {
+    fn from_identities(trusted_client_identities: &[ClientIdentity]) -> Self {
+        Self {
+            trusted_client_identities: trusted_client_identities.iter().cloned().collect(),
+        }
+    }
+}
+
+impl ClientIdentityAdmission for StaticClientIdentityAdmission {
+    fn authorizes_client_identity(&self, identity: &ClientIdentity) -> bool {
+        self.trusted_client_identities.contains(identity)
+    }
+}
+
+#[derive(Debug)]
+struct PinnedClientCertVerifier {
+    admission: Arc<dyn ClientIdentityAdmission>,
     supported_algorithms: WebPkiSupportedAlgorithms,
     root_hint_subjects: Vec<DistinguishedName>,
 }
 
 impl PinnedClientCertVerifier {
     fn new(
-        trusted_client_identities: &[ClientIdentity],
+        admission: Arc<dyn ClientIdentityAdmission>,
         supported_algorithms: WebPkiSupportedAlgorithms,
     ) -> Self {
         Self {
-            trusted_client_identities: trusted_client_identities.iter().cloned().collect(),
+            admission,
             supported_algorithms,
             root_hint_subjects: Vec::new(),
         }
@@ -245,7 +291,7 @@ impl ClientCertVerifier for PinnedClientCertVerifier {
     ) -> Result<ClientCertVerified, rustls::Error> {
         let client_identity = client_identity_from_certificate_der(end_entity.as_ref())
             .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        if self.trusted_client_identities.contains(&client_identity) {
+        if self.admission.authorizes_client_identity(&client_identity) {
             Ok(ClientCertVerified::assertion())
         } else {
             runtime_log::server_tunnel_connection_unauthorized(&client_identity);
@@ -293,8 +339,8 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     use super::{
-        PinnedClientCertVerifier, make_client_quic_config, make_server_quic_config,
-        with_handshake_timeout,
+        PinnedClientCertVerifier, StaticClientIdentityAdmission, make_client_quic_config,
+        make_server_quic_config, with_handshake_timeout,
     };
     use crate::generate_client_identity;
 
@@ -343,8 +389,10 @@ mod tests {
         let certificate = client_leaf_certificate(&generated_client_identity).unwrap();
         let client_identity = generated_client_identity.client_identity.clone();
         let provider = rustls::crypto::ring::default_provider();
-        let verifier =
-            PinnedClientCertVerifier::new(&[], provider.signature_verification_algorithms);
+        let verifier = PinnedClientCertVerifier::new(
+            Arc::new(StaticClientIdentityAdmission::from_identities(&[])),
+            provider.signature_verification_algorithms,
+        );
 
         let output = capture_logs(|| {
             let result =

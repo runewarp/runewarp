@@ -68,6 +68,10 @@ _Avoid_: Server hostname, tunnel hostname
 The Server-owned rule that allows a **Tunnel** to admit traffic only for its explicit **Public hostnames**.
 _Avoid_: Client registration, wildcard routing
 
+**Authorization snapshot**:
+The immutable Server-owned Public-hostname routing and trusted Client-identity set that Public-hostname routing and QUIC Client-identity handshake admission consult together. Static configuration loads one snapshot at startup; a prepared replacement can be validated independently and committed atomically.
+_Avoid_: Tunnel registry, handshake config, routing table
+
 **Public hostname certificate**:
 The certificate presented to a **Visitor** for a **Public hostname** when a **Service** is in **Terminate mode**.
 _Avoid_: Server certificate, public certificate

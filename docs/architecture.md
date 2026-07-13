@@ -120,10 +120,11 @@ The Local backend receives unencrypted bytes directly and does not need to termi
 | **Server CA** | Optional private trust anchor for the manual Server-certificate path |
 | **Client identity** | Pinned public-key identity used to authenticate the Client to the Server; each Tunnel may authorize one or more of them |
 | **Public hostname authorization** | Owned by Server config through explicit `server.tunnels[].public-hostnames` |
+| **Authorization snapshot** | Immutable Server-owned set of Public-hostname routing and trusted Client identities; Public-hostname routing and QUIC Client-identity handshake admission consult the same current snapshot |
 | **Public hostname CA** (manual) | Private trust anchor in `client.public-cert-dir` shared with Visitors when `tls-mode = "terminate"` is in use |
 | **Public hostname certificates via Client ACME** | Automatically provisioned by Let's Encrypt via `[client.acme]` for **Public hostnames** of terminating Services; `acme-tls/1` challenge traffic for those hostnames is routed through the Server to the Client like ordinary Visitor TLS |
 
-The client validates the server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The server authenticates one of the Tunnel's pinned `client-identity` values from the client public key rather than the certificate lifetime.
+The client validates the server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The server authenticates one of the Tunnel's pinned `client-identity` values from the client public key rather than the certificate lifetime. Static Server startup loads one **Authorization snapshot** shared by Public-hostname routing and the live QUIC Client-identity verifier; a prepared replacement can be validated beside the live snapshot and committed atomically without exposing a mixed view.
 
 ## Current runtime limits
 

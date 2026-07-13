@@ -24,12 +24,13 @@ use crate::tls_material::{
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig, ClientConnectError,
-    ClientIdentity, ClientPublicCertConfig, ClientTlsMode, QuicConfigError, Server, ServerAddress,
-    ServerBindConfig, ServerCertificateConfig, ServerConfig, ServiceConfig,
+    ClientIdentity, ClientIdentityAdmission, ClientPublicCertConfig, ClientTlsMode,
+    QuicConfigError, Server, ServerAddress, ServerAuthorization, ServerBindConfig,
+    ServerCertificateConfig, ServerConfig, ServiceConfig,
     client::TerminationTlsConfigs,
     client::validate_services,
-    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
-    make_server_quic_config_with_client_auth_resolver,
+    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_admission,
+    make_server_quic_config_with_client_admission_resolver,
     shutdown::{OrderlyShutdown, ShutdownMode},
 };
 
@@ -47,19 +48,18 @@ impl PreparedServer {
         tunnel_connection_bind_addr: SocketAddr,
     ) -> Result<Self, ServerStartupError> {
         prepare_default_server_acme_state_dir(config)?;
-        let trusted_client_identities = config
-            .tunnels
-            .iter()
-            .flat_map(|tunnel| tunnel.authorized_client_identities.iter().cloned())
-            .collect::<Vec<_>>();
+        let authorization = ServerAuthorization::from_tunnels(&config.hostname, &config.tunnels)
+            .map_err(ServerStartupError::Bind)?;
+        let admission: Arc<dyn ClientIdentityAdmission> = Arc::new(authorization.clone());
+        let trusted_client_identities = authorization.trusted_client_identities();
         let (quic_server_config, acme_runtime) = match &config.certificate {
             ServerCertificateConfig::Manual { directory } => {
                 let cert_chain = load_certificate_chain(&directory.join(SERVER_CERT_FILENAME))?;
                 let private_key = load_private_key(&directory.join(SERVER_KEY_FILENAME))?;
-                let quic_server_config = make_server_quic_config_with_client_auth(
+                let quic_server_config = make_server_quic_config_with_client_admission(
                     cert_chain,
                     private_key,
-                    &trusted_client_identities,
+                    admission,
                 )
                 .map_err(ServerStartupError::QuicConfig)?;
                 (quic_server_config, None)
@@ -82,9 +82,9 @@ impl PreparedServer {
                 let acme_state = build_acme_state(config.hostname.as_str(), email, state_directory);
                 let acme_lifecycle =
                     AcmeLifecycle::server(config.hostname.as_str(), state_directory).await;
-                let quic_server_config = make_server_quic_config_with_client_auth_resolver(
+                let quic_server_config = make_server_quic_config_with_client_admission_resolver(
                     acme_state.resolver(),
-                    &trusted_client_identities,
+                    admission,
                 )
                 .map_err(ServerStartupError::QuicConfig)?;
                 (
@@ -101,7 +101,7 @@ impl PreparedServer {
             tunnel_connection_bind_addr,
             readiness_bind_addr: config.readiness_bind_address,
             server_hostname: config.hostname.clone(),
-            configured_tunnels: config.tunnels.clone(),
+            authorization,
             public_tls_config: acme_runtime
                 .as_ref()
                 .map(|acme| acme.state.challenge_rustls_config()),

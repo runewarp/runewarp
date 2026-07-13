@@ -69,16 +69,32 @@ This track reduces avoidable downtime across client and server deployment shapes
 
 This track expands the data plane without changing the product boundary.
 
+### Tunnel protocol evolution
+
+**Goal**
+
+- the Client and Server use a versioned, capability-negotiated protocol with typed bidirectional exchange for ingress lifecycle and metadata
+
+**Planned work**
+
+- support extensible Client-to-Server and Server-to-Client messages without turning the Tunnel connection into a managed configuration channel
+- make Client-triggered drain the first required lifecycle signal: a draining Client instance stops receiving new Visitor work while existing work gets its bounded opportunity to finish
+- evaluate HTTP/3, Reverse HTTP CONNECT, Extended CONNECT, and the Capsule Protocol against the current `runewarp/1` transport through research and a measured prototype
+- adopt HTTP/3 only if that evidence justifies replacing the simpler custom QUIC-stream protocol; otherwise preserve the required lifecycle and extension behavior on a narrower substrate
+- keep generic CONNECT-UDP, CONNECT-IP, private-access, mesh, NAT-traversal, and relay product modes outside this committed Core track
+
 ### Public QUIC passthrough
 
 **Goal**
 
-- Runewarp can route QUIC-based application traffic on the public edge as well as TLS over TCP, including HTTP/3-capable **Local backends** and visitors that already speak QUIC natively
+- Runewarp can route QUIC-based application traffic on the public edge as well as TLS over TCP, including ordinary browser HTTP/3 traffic and other QUIC-native **Visitors** reaching QUIC-capable **Local backends**
 
 **Planned work**
 
 - decide how public QUIC passthrough coexists with Client Tunnel connections on `443/udp`
-- support HTTP/3 on top of the public QUIC data path without requiring `runewarp proxy` for QUIC-capable visitors
+- support ordinary Visitor HTTP/3 directly, without requiring a Runewarp-aware visitor proxy
+- relay Public QUIC through the existing authenticated Client–Server transport without requiring a second transport; the exact stream/datagram substrate follows the tunnel-protocol evidence
+- allow HTTP Datagram, QUIC DATAGRAM, or Capsule Protocol primitives internally without exposing generic CONNECT-UDP as a Core product mode
 - explicitly evaluate whether early Client-side QUIC termination belongs in this track or a later extension
 - preserve explicit Server-side authorization for the routed hostname set
 - keep customer traffic opaque to the public edge
@@ -277,35 +293,6 @@ This track explores what a future managed Runewarp offering would need without r
 - design a separate authenticated management API for Server configuration
 - keep Server-authoritative routing intact even when configuration is managed remotely
 - decide later how managed configuration relates to static config files during rollout, recovery, and mixed deployments
-
-## Visitor proxy
-
-This later track adds a visitor-side proxy mode (`runewarp proxy`) for applications that still need a visitor-side wrapper after the native public data paths have expanded, starting with TCP access to existing terminating Services through Runewarp.
-
-### TCP visitor proxy
-
-**Outcome**
-
-- **Visitors** can run a Runewarp in proxy mode with minimal setup to reach TCP services through ordinary Runewarp ingress
-
-**Planned work**
-
-- add `runewarp proxy` mode to existing binary
-- start with TCP rather than bundling UDP into the first milestone
-- reuse ordinary Visitor TLS to normal **Terminate mode** Services instead of adding a proxy-specific routing mode
-- keep visitor setup minimal without locking the roadmap to a strict zero-config distribution story
-
-### UDP extension
-
-**Outcome**
-
-- Visitor proxy can later cover UDP workloads once the underlying public QUIC data path exists
-
-**Planned work**
-
-- build the UDP story on top of public QUIC passthrough rather than inventing a separate path first
-- keep `runewarp proxy` focused on protocols that still need a visitor-side wrapper after native public QUIC support exists
-- revisit the visitor UX once the protocol prerequisites are in place
 
 ## Deliberate non-goals
 

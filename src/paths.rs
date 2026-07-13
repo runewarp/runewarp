@@ -75,6 +75,18 @@ pub fn default_server_cert_material_dir() -> Result<PathBuf, XdgPathError> {
         .join("cert"))
 }
 
+pub fn default_server_identity_material_dir() -> Result<PathBuf, XdgPathError> {
+    Ok(runewarp_dir(XdgDirectory::Data)?
+        .join("server")
+        .join("identity"))
+}
+
+pub fn default_control_ca_path() -> Result<PathBuf, XdgPathError> {
+    Ok(runewarp_dir(XdgDirectory::Data)?
+        .join("control")
+        .join("ca.crt"))
+}
+
 pub fn default_server_acme_state_dir() -> Result<PathBuf, XdgPathError> {
     Ok(runewarp_dir(XdgDirectory::State)?
         .join("server")

@@ -35,6 +35,8 @@ where
 {
     let mut controller = AddressController::new();
     let settings = Arc::new(settings.clone());
+    let managed_waiting_for_assignment =
+        settings.control.is_some() && settings.server_addresses.is_empty();
     controller.seed_static(settings.server_addresses.clone(), {
         let settings = Arc::clone(&settings);
         move |server_address, control| {
@@ -46,6 +48,15 @@ where
     });
 
     let shutdown = controller.shutdown_handle();
+    if managed_waiting_for_assignment {
+        // Managed mode starts with no Server addresses until Control assigns them.
+        // Stay alive for shutdown instead of treating an empty controller as done.
+        let _mode = shutdown_signal.await?;
+        runewarp::runtime_log::client_graceful_shutdown_started();
+        shutdown.request();
+        return Ok(());
+    }
+
     let runtime = controller.run_until_idle();
     tokio::pin!(runtime);
     tokio::pin!(shutdown_signal);
@@ -570,6 +581,7 @@ mod tests {
                 tls_mode: ClientTlsMode::Passthrough,
             }],
             public_cert_config: None,
+            control: None,
         };
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();

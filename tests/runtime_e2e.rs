@@ -311,6 +311,7 @@ identity-dir = "client-identity"
         &ClientRuntimeArgs {
             server_addresses: vec!["tunnel.example.test".to_owned()],
             backend_address: Some(backend.0.to_string()),
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory: tempdir.path().join("unused-default"),
@@ -1844,6 +1845,7 @@ client-identity = "{}"
             state_directory: acme_state_dir,
             state_directory_was_defaulted: false,
         }),
+        control: None,
     };
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
@@ -2009,6 +2011,7 @@ client-identity = "{}"
             state_directory: acme_state_dir,
             state_directory_was_defaulted: false,
         }),
+        control: None,
     };
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
@@ -2129,6 +2132,7 @@ client-identity = "{}"
             state_directory: acme_state_dir,
             state_directory_was_defaulted: false,
         }),
+        control: None,
     };
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
@@ -2266,6 +2270,7 @@ client-identity = "{}"
             state_directory: acme_state_dir,
             state_directory_was_defaulted: false,
         }),
+        control: None,
     };
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await

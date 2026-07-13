@@ -76,6 +76,22 @@ _Avoid_: Tunnel registry, handshake config, routing table
 The Client-owned runtime that maintains at most one address worker per normalized **Server address**, and that can replace maintenance intent through add, remove, and re-adopt operations without process restart. Static Client startup seeds it from the configured address set; Managed-session reconciliation builds on the same seam later.
 _Avoid_: fanout loop, connection pool, dial manager
 
+**Control**:
+The managed-service endpoint that assigns configuration and authenticates Server and Client roles over HTTPS.
+_Avoid_: tunnel endpoint, Server address
+
+**Control address**:
+The DNS hostname with optional port that identifies the Control endpoint. Written without a scheme; HTTPS is mandatory and inferred.
+_Avoid_: Server address, URL
+
+**Managed mode**:
+Configuration and runtime shape where an effective Control address is present. Managed Servers omit static `[[server.tunnels]]` authorization and use `server.identity-dir`. Managed Clients omit static Server addresses.
+_Avoid_: static mode, self-hosted baseline
+
+**Server identity**:
+The pinned public-key identity the Server presents to Control, distinct from the **Server certificate** used on the tunnel endpoint.
+_Avoid_: Server certificate, Client identity
+
 **Public hostname certificate**:
 The certificate presented to a **Visitor** for a **Public hostname** when a **Service** is in **Terminate mode**.
 _Avoid_: Server certificate, public certificate

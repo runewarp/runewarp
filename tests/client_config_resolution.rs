@@ -20,6 +20,7 @@ fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<
         &ClientRuntimeArgs {
             server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("localhost:8443".to_owned()),
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory: identity_directory.clone(),
@@ -50,6 +51,7 @@ fn cli_only_resolution_requires_backend_address_without_a_selected_config()
         &ClientRuntimeArgs {
             server_addresses: vec!["tunnel.example.test".to_owned()],
             backend_address: None,
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -90,6 +92,7 @@ fn cli_only_resolution_accepts_repeated_server_address_flags_without_a_selected_
                 "backup.example.test:9443".to_owned(),
             ],
             backend_address: Some("localhost:8443".to_owned()),
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -130,6 +133,7 @@ hostname = "tunnel.example.test"
         &ClientRuntimeArgs {
             server_addresses: vec!["tunnel.example.test:9443".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -166,6 +170,7 @@ log-level = "off"
         &ClientRuntimeArgs {
             server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -203,6 +208,7 @@ server-address = "127.0.0.1:443"
         &ClientRuntimeArgs {
             server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -244,6 +250,7 @@ backend-address = "backend.internal:443"
                 "backup.example.test:9443".to_owned(),
             ],
             backend_address: None,
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -287,6 +294,7 @@ backend-address = "backend.internal:443"
         &ClientRuntimeArgs {
             server_addresses: Vec::new(),
             backend_address: Some("override.internal:8443".to_owned()),
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -328,6 +336,7 @@ public-hostnames = ["app.example.test"]
         &ClientRuntimeArgs {
             server_addresses: Vec::new(),
             backend_address: Some("override.internal:8443".to_owned()),
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -358,6 +367,7 @@ fn cli_only_resolution_rejects_ip_literal_server_addresses() -> Result<(), Box<d
         &ClientRuntimeArgs {
             server_addresses: vec!["127.0.0.1:443".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
+            control_address: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,

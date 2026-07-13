@@ -12,26 +12,45 @@ pub mod client;
 mod preparation;
 pub mod server;
 
-use self::preparation::PreparedDirectory;
 use self::preparation::client::{
     PreparedClientAcmeConfig, PreparedClientConfig, PreparedClientServiceConfig,
     PreparedClientTlsMode, PreparedClientTrust,
 };
+use self::preparation::control::PreparedControlTrust;
 use self::preparation::server::{
     PreparedServerAcmeConfig, PreparedServerConfig, PreparedServerTunnelConfig,
 };
+use self::preparation::{PreparedDirectory, resolve_default_path};
+use crate::control_address::ControlAddress;
 use crate::server_address::ServerAddress;
+use crate::server_identity::{ServerIdentity, read_server_identity};
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, validate_server_tls_material,
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
-    PublicHostname, SERVER_CA_FILENAME, ServerHostname, XdgPathError,
+    PublicHostname, SERVER_CA_FILENAME, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_FILENAME,
+    SERVER_IDENTITY_KEY_FILENAME, ServerHostname, XdgPathError,
+    default_server_identity_material_dir,
 };
 
 pub use self::preparation::server::ServerRuntimeArgs;
 
 pub const SERVER_HOSTNAME_ENV_VAR: &str = "RUNEWARP_SERVER_HOSTNAME";
+
+pub use crate::trust::ControlTrust;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlConfig {
+    pub address: ControlAddress,
+    pub trust: ControlTrust,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerIdentityConfig {
+    pub directory: PathBuf,
+    pub identity: ServerIdentity,
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -61,6 +80,8 @@ pub struct ServerConfig {
     pub readiness_bind_address: Option<SocketAddr>,
     pub graceful_shutdown_duration: std::time::Duration,
     pub tunnels: Vec<ServerTunnelConfig>,
+    pub control: Option<ControlConfig>,
+    pub identity: Option<ServerIdentityConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +112,7 @@ pub struct ClientConfig {
     pub identity_directory: PathBuf,
     pub services: Vec<ServiceConfig>,
     pub public_cert_config: Option<ClientPublicCertConfig>,
+    pub control: Option<ControlConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -478,8 +500,16 @@ fn validate_prepared_server_config(
         acme,
         tunnels,
         unknown_field_messages,
+        control,
+        identity_directory,
     } = prepared;
     let mut messages = unknown_field_messages;
+    messages.extend(control.unknown_field_messages);
+
+    let managed = control.address.is_some();
+    if control.section_present && control.address.is_none() {
+        messages.push("control.address is required".to_owned());
+    }
 
     let hostname = match hostname {
         Some(hostname) => {
@@ -539,21 +569,71 @@ fn validate_prepared_server_config(
         graceful_shutdown_duration.as_str(),
         &mut messages,
     );
-    if tunnels.is_empty() {
-        messages.push("at least one [[server.tunnels]] entry is required".to_owned());
-    }
-    let validated_tunnels = tunnels
-        .into_iter()
-        .map(|tunnel| validate_prepared_server_tunnel(tunnel, &mut messages))
-        .collect::<Vec<_>>();
-    validate_unique_client_identities(&validated_tunnels, &mut messages);
-    if let Some(hostname) = hostname.as_ref() {
-        validate_unique_server_hostnames(hostname, &validated_tunnels, &mut messages);
-    }
-    let tunnels = validated_tunnels
-        .into_iter()
-        .filter_map(|tunnel| tunnel.settings)
-        .collect::<Vec<_>>();
+
+    let validated_tunnels = if managed {
+        if !tunnels.is_empty() {
+            messages.push("[[server.tunnels]] may not be configured in managed mode".to_owned());
+        }
+        Vec::new()
+    } else {
+        if tunnels.is_empty() {
+            messages.push("at least one [[server.tunnels]] entry is required".to_owned());
+        }
+        let validated = tunnels
+            .into_iter()
+            .map(|tunnel| validate_prepared_server_tunnel(tunnel, &mut messages))
+            .collect::<Vec<_>>();
+        validate_unique_client_identities(&validated, &mut messages);
+        if let Some(hostname) = hostname.as_ref() {
+            validate_unique_server_hostnames(hostname, &validated, &mut messages);
+        }
+        validated
+            .into_iter()
+            .filter_map(|tunnel| tunnel.settings)
+            .collect::<Vec<_>>()
+    };
+
+    let identity = if managed {
+        let identity_directory = match identity_directory {
+            Some(directory) => directory.into_option(&mut messages),
+            None => resolve_default_path(default_server_identity_material_dir)
+                .into_option(&mut messages),
+        }
+        .and_then(|directory| {
+            validate_existing_directory_path("server.identity-dir", directory, &mut messages)
+        });
+        if let (Some(identity_directory), Some(cert_directory)) = (
+            identity_directory.as_ref(),
+            certificate_directory(&certificate),
+        ) && paths_refer_to_same_location(identity_directory, &cert_directory)
+        {
+            messages.push(
+                "server.identity-dir must resolve to a different directory than server.cert-dir"
+                    .to_owned(),
+            );
+        }
+        identity_directory.and_then(|directory| {
+            validate_prepared_server_identity_material(directory, &mut messages)
+        })
+    } else {
+        if identity_directory.is_some() {
+            messages.push("server.identity-dir may be set only in managed mode".to_owned());
+        }
+        None
+    };
+
+    let control = if managed {
+        let address = control.address.and_then(|address| {
+            validate_control_address_field("control.address", address, &mut messages)
+        });
+        let trust = validate_prepared_control_trust(control.trust, &mut messages);
+        match (address, trust) {
+            (Some(address), Some(trust)) => Some(ControlConfig { address, trust }),
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     if messages.is_empty() {
         Ok(ServerConfig {
@@ -566,7 +646,9 @@ fn validate_prepared_server_config(
             readiness_bind_address,
             graceful_shutdown_duration: graceful_shutdown_duration
                 .expect("validated server.graceful-shutdown-duration"),
-            tunnels,
+            tunnels: validated_tunnels,
+            control,
+            identity,
         })
     } else {
         Err(ConfigFileError::Validation {
@@ -593,30 +675,49 @@ pub(crate) fn validate_prepared_client_config(
         acme_present,
         acme,
         unknown_field_messages,
+        control,
         ..
     } = prepared;
     let mut messages = unknown_field_messages;
+    messages.extend(control.unknown_field_messages);
 
-    if server_address.is_some() && server_addresses.is_some() {
-        messages.push(
-            "client.server-address and client.server-addresses are mutually exclusive".to_owned(),
-        );
+    let managed = control.address.is_some();
+    if control.section_present && control.address.is_none() {
+        messages.push("control.address is required".to_owned());
     }
 
     let mut validated_server_addresses = Vec::new();
-    match (server_address, server_addresses) {
-        (Some(server_address), None) => {
+    if managed {
+        if server_address.is_some() || server_addresses.is_some() {
+            messages.push(
+                "client.server-address and client.server-addresses may not be configured in managed mode"
+                    .to_owned(),
+            );
+        }
+        if let Some(server_address) = server_address {
+            let _ = validate_server_address_field(
+                "client.server-address",
+                server_address,
+                &mut messages,
+            );
+        }
+        if let Some(server_addresses) = server_addresses {
+            for (index, server_address) in server_addresses.into_iter().enumerate() {
+                let field = format!("client.server-addresses[{index}]");
+                let _ = validate_server_address_field(&field, server_address, &mut messages);
+            }
+        }
+    } else if server_address.is_some() && server_addresses.is_some() {
+        messages.push(
+            "client.server-address and client.server-addresses are mutually exclusive".to_owned(),
+        );
+        if let (Some(server_address), Some(server_addresses)) = (server_address, server_addresses) {
             if let Some(server_address) = validate_server_address_field(
                 "client.server-address",
                 server_address,
                 &mut messages,
             ) {
                 validated_server_addresses.push(server_address);
-            }
-        }
-        (None, Some(server_addresses)) => {
-            if server_addresses.is_empty() {
-                messages.push("client.server-addresses must contain at least one entry".to_owned());
             }
             for (index, server_address) in server_addresses.into_iter().enumerate() {
                 let field = format!("client.server-addresses[{index}]");
@@ -627,29 +728,56 @@ pub(crate) fn validate_prepared_client_config(
                 }
             }
         }
-        (None, None) => {
-            messages
-                .push("client.server-address or client.server-addresses is required".to_owned());
-        }
-        (Some(server_address), Some(server_addresses)) => {
-            if let Some(server_address) = validate_server_address_field(
-                "client.server-address",
-                server_address,
-                &mut messages,
-            ) {
-                validated_server_addresses.push(server_address);
-            }
-            for (index, server_address) in server_addresses.into_iter().enumerate() {
-                let field = format!("client.server-addresses[{index}]");
-                if let Some(server_address) =
-                    validate_server_address_field(&field, server_address, &mut messages)
-                {
+    } else {
+        match (server_address, server_addresses) {
+            (Some(server_address), None) => {
+                if let Some(server_address) = validate_server_address_field(
+                    "client.server-address",
+                    server_address,
+                    &mut messages,
+                ) {
                     validated_server_addresses.push(server_address);
                 }
             }
+            (None, Some(server_addresses)) => {
+                if server_addresses.is_empty() {
+                    messages
+                        .push("client.server-addresses must contain at least one entry".to_owned());
+                }
+                for (index, server_address) in server_addresses.into_iter().enumerate() {
+                    let field = format!("client.server-addresses[{index}]");
+                    if let Some(server_address) =
+                        validate_server_address_field(&field, server_address, &mut messages)
+                    {
+                        validated_server_addresses.push(server_address);
+                    }
+                }
+            }
+            (None, None) => {
+                messages.push(
+                    "client.server-address or client.server-addresses is required".to_owned(),
+                );
+            }
+            (Some(server_address), Some(server_addresses)) => {
+                if let Some(server_address) = validate_server_address_field(
+                    "client.server-address",
+                    server_address,
+                    &mut messages,
+                ) {
+                    validated_server_addresses.push(server_address);
+                }
+                for (index, server_address) in server_addresses.into_iter().enumerate() {
+                    let field = format!("client.server-addresses[{index}]");
+                    if let Some(server_address) =
+                        validate_server_address_field(&field, server_address, &mut messages)
+                    {
+                        validated_server_addresses.push(server_address);
+                    }
+                }
+            }
         }
+        validate_unique_server_addresses(&validated_server_addresses, &mut messages);
     }
-    validate_unique_server_addresses(&validated_server_addresses, &mut messages);
 
     let server_ca_file = match trust {
         PreparedClientTrust::System => None,
@@ -765,23 +893,42 @@ pub(crate) fn validate_prepared_client_config(
         .filter_map(|service| service.settings)
         .collect::<Vec<_>>();
 
+    let control_config = if managed {
+        let address = control.address.and_then(|address| {
+            validate_control_address_field("control.address", address, &mut messages)
+        });
+        let trust = validate_prepared_control_trust(control.trust, &mut messages);
+        match (address, trust) {
+            (Some(address), Some(trust)) => Some(ControlConfig { address, trust }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     if messages.is_empty() {
+        let (server_hostname, server_port) = match validated_server_addresses.first() {
+            Some(first) => (first.hostname().clone(), first.port()),
+            None => {
+                // Managed mode starts with an empty Server-address assignment. These
+                // legacy single-target fields stay unused until addresses are applied.
+                (
+                    ServerHostname::try_from("unassigned.invalid")
+                        .expect("literal hostname is valid by construction"),
+                    crate::server_address::DEFAULT_SERVER_PORT,
+                )
+            }
+        };
         Ok(ClientConfig {
-            server_addresses: validated_server_addresses.clone(),
-            server_hostname: validated_server_addresses
-                .first()
-                .expect("validated client Server address")
-                .hostname()
-                .clone(),
-            server_port: validated_server_addresses
-                .first()
-                .expect("validated client Server address")
-                .port(),
+            server_addresses: validated_server_addresses,
+            server_hostname,
+            server_port,
             log_level,
             server_ca_file,
             identity_directory: identity_directory.expect("validated client.identity-dir"),
             services,
             public_cert_config,
+            control: control_config,
         })
     } else {
         Err(ConfigFileError::Validation {
@@ -1097,6 +1244,96 @@ fn validate_prepared_client_service(
     }
 }
 
+fn validate_control_address_field(
+    field_name: &str,
+    address: String,
+    messages: &mut Vec<String>,
+) -> Option<ControlAddress> {
+    match ControlAddress::parse(&address) {
+        Ok(address) => Some(address),
+        Err(error) => {
+            messages.push(format!("{field_name} is invalid: {error}"));
+            None
+        }
+    }
+}
+
+fn validate_prepared_control_trust(
+    trust: PreparedControlTrust,
+    messages: &mut Vec<String>,
+) -> Option<ControlTrust> {
+    match trust {
+        PreparedControlTrust::System => Some(ControlTrust::System),
+        PreparedControlTrust::CaFile(ca_file) => ca_file
+            .into_option(messages)
+            .and_then(|ca_file| validate_existing_file("control.ca-file", ca_file, messages))
+            .map(ControlTrust::CaFile),
+        PreparedControlTrust::InvalidMode(value) => {
+            messages.push(format!(
+                "control.trust must be one of `system` or `ca-file`, got `{value}`"
+            ));
+            None
+        }
+        PreparedControlTrust::UnexpectedCaFile => {
+            messages.push(
+                "control.ca-file may be set only when control.trust = \"ca-file\"".to_owned(),
+            );
+            None
+        }
+    }
+}
+
+fn validate_prepared_server_identity_material(
+    directory: PathBuf,
+    messages: &mut Vec<String>,
+) -> Option<ServerIdentityConfig> {
+    let _ = validate_directory_file(
+        "server.identity-dir",
+        &directory,
+        SERVER_IDENTITY_CERT_FILENAME,
+        messages,
+    );
+    let _ = validate_directory_file(
+        "server.identity-dir",
+        &directory,
+        SERVER_IDENTITY_KEY_FILENAME,
+        messages,
+    );
+    let _ = validate_directory_file(
+        "server.identity-dir",
+        &directory,
+        SERVER_IDENTITY_FILENAME,
+        messages,
+    );
+    match read_server_identity(&directory) {
+        Ok(identity) => Some(ServerIdentityConfig {
+            directory,
+            identity,
+        }),
+        Err(error) => {
+            messages.push(format!("server identity material is invalid: {error}"));
+            None
+        }
+    }
+}
+
+fn certificate_directory(certificate: &Option<ServerCertificateConfig>) -> Option<PathBuf> {
+    match certificate {
+        Some(ServerCertificateConfig::Manual { directory }) => Some(directory.clone()),
+        Some(ServerCertificateConfig::Acme { .. }) | None => None,
+    }
+}
+
+fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 fn validate_server_hostname_field(
     field_name: &str,
     hostname: String,
@@ -1372,6 +1609,7 @@ pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value)
             "tunnel-bind-address",
             "readiness-bind-address",
             "graceful-shutdown-duration",
+            "identity-dir",
             "tunnels",
         ],
         &mut messages,
@@ -1394,6 +1632,22 @@ pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value)
     }
 
     messages
+}
+
+pub(crate) fn collect_control_unknown_field_messages(section_value: &toml::Value) -> Vec<String> {
+    let mut messages = Vec::new();
+    let Some(control) = section_value.as_table() else {
+        return messages;
+    };
+
+    push_unknown_table_fields(control, &["address", "trust", "ca-file"], &mut messages);
+
+    messages
+}
+
+pub fn is_managed_client_config(path: &Path) -> Result<bool, ConfigFileError> {
+    let control = preparation::control::prepare_control_section(path, None)?;
+    Ok(control.address.is_some())
 }
 
 pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value) -> Vec<String> {
@@ -1450,9 +1704,18 @@ fn push_unknown_table_fields(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case")]
+pub(crate) struct RawControlConfig {
+    pub(crate) address: Option<String>,
+    pub(crate) trust: Option<String>,
+    pub(crate) ca_file: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) struct RawServerConfig {
     pub(crate) hostname: Option<String>,
     pub(crate) cert_dir: Option<PathBuf>,
+    pub(crate) identity_dir: Option<PathBuf>,
     pub(crate) acme: Option<RawServerAcmeConfig>,
     pub(crate) public_bind_address: Option<String>,
     pub(crate) tunnel_bind_address: Option<String>,

@@ -208,10 +208,9 @@ impl PreparedClient {
         config: &ClientConfig,
         local_bind_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
-        let server_address = config
-            .server_addresses
-            .first()
-            .expect("validated client config includes at least one Server address");
+        let Some(server_address) = config.server_addresses.first() else {
+            return Err(ClientStartupError::NoConfiguredServerAddress);
+        };
         let mut server_addrs =
             lookup_host((server_address.hostname().as_str(), server_address.port()))
                 .await
@@ -229,10 +228,9 @@ impl PreparedClient {
         local_bind_addr: SocketAddr,
         server_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
-        let server_address = config
-            .server_addresses
-            .first()
-            .expect("validated client config includes at least one Server address");
+        let Some(server_address) = config.server_addresses.first() else {
+            return Err(ClientStartupError::NoConfiguredServerAddress);
+        };
         Self::connect_to_server_address(config, local_bind_addr, server_address, server_addr).await
     }
 
@@ -456,6 +454,7 @@ pub enum ClientStartupError {
     AddRootCertificate(rustls::Error),
     QuicConfig(QuicConfigError),
     Resolve(io::Error),
+    NoConfiguredServerAddress,
     MissingServerAddress {
         server_hostname: String,
     },
@@ -481,6 +480,9 @@ impl fmt::Display for ClientStartupError {
             }
             Self::QuicConfig(source) => write!(formatter, "{source}"),
             Self::Resolve(_) => formatter.write_str("failed to resolve the Server hostname"),
+            Self::NoConfiguredServerAddress => {
+                formatter.write_str("client config does not include any Server addresses")
+            }
             Self::MissingServerAddress { server_hostname } => {
                 write!(
                     formatter,
@@ -510,6 +512,7 @@ impl std::error::Error for ClientStartupError {
             Self::CreateDirectory { source, .. } => Some(source),
             Self::InvalidSettings(_)
             | Self::NativeRoots { .. }
+            | Self::NoConfiguredServerAddress
             | Self::MissingServerAddress { .. } => None,
         }
     }
@@ -770,14 +773,14 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use super::{
-        ClientStartupError, NativeRootsLoad, PreparedServer, ServerStartupError,
+        ClientStartupError, NativeRootsLoad, PreparedClient, PreparedServer, ServerStartupError,
         acme_terminating_hostnames, build_root_store,
     };
     use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
     use crate::{
-        ClientConfig, ClientIdentity, ClientPublicCertConfig, ClientTlsMode, LogLevel,
-        PublicHostname, ServerAddress, ServerCertificateConfig, ServerConfig, ServerHostname,
-        ServerTunnelConfig, ServiceConfig,
+        ClientConfig, ClientIdentity, ClientPublicCertConfig, ClientTlsMode, ControlAddress,
+        ControlConfig, ControlTrust, LogLevel, PublicHostname, ServerAddress,
+        ServerCertificateConfig, ServerConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
     };
 
     fn public_hostname(hostname: &str) -> PublicHostname {
@@ -991,6 +994,8 @@ mod tests {
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: Vec::new(),
+            control: None,
+            identity: None,
         };
 
         super::prepare_default_server_acme_state_dir(&settings)?;
@@ -1014,6 +1019,8 @@ mod tests {
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: Vec::new(),
+            control: None,
+            identity: None,
         };
         let manual_settings = ServerConfig {
             certificate: ServerCertificateConfig::Manual {
@@ -1059,6 +1066,7 @@ mod tests {
                 state_directory: tempdir.path().join("acme-state"),
                 state_directory_was_defaulted: false,
             }),
+            control: None,
         };
 
         let (configs, acme_runtimes) = super::load_termination_tls_configs(&settings)
@@ -1102,6 +1110,7 @@ mod tests {
                 state_directory: state_directory.clone(),
                 state_directory_was_defaulted: true,
             }),
+            control: None,
         };
 
         super::prepare_default_client_acme_state_dir(&settings)?;
@@ -1130,6 +1139,8 @@ mod tests {
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: Vec::new(),
+            control: None,
+            identity: None,
         };
 
         let error = match super::prepare_default_server_acme_state_dir(&settings) {
@@ -1172,6 +1183,7 @@ mod tests {
                 state_directory: state_directory.clone(),
                 state_directory_was_defaulted: true,
             }),
+            control: None,
         };
 
         let error = match super::prepare_default_client_acme_state_dir(&settings) {
@@ -1272,6 +1284,57 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn prepared_client_connect_rejects_empty_server_addresses_without_panicking() {
+        let settings = ClientConfig {
+            server_addresses: Vec::new(),
+            server_hostname: server_hostname("unassigned.invalid"),
+            server_port: 443,
+            log_level: LogLevel::Info,
+            server_ca_file: None,
+            identity_directory: PathBuf::from("/tmp/unused-client-identity"),
+            services: vec![ServiceConfig {
+                public_hostnames: Some(vec![public_hostname("app.example.test")]),
+                backend_address: "127.0.0.1:8080".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
+            }],
+            public_cert_config: None,
+            control: Some(ControlConfig {
+                address: ControlAddress::parse("control.example.test").unwrap(),
+                trust: ControlTrust::System,
+            }),
+        };
+
+        let connect_error =
+            match PreparedClient::connect(&settings, "127.0.0.1:0".parse().unwrap()).await {
+                Ok(_) => panic!("empty server_addresses must not succeed"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            connect_error,
+            ClientStartupError::NoConfiguredServerAddress
+        ));
+        assert_eq!(
+            connect_error.to_string(),
+            "client config does not include any Server addresses"
+        );
+
+        let connect_to_error = match PreparedClient::connect_to(
+            &settings,
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:443".parse().unwrap(),
+        )
+        .await
+        {
+            Ok(_) => panic!("empty server_addresses must not succeed"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            connect_to_error,
+            ClientStartupError::NoConfiguredServerAddress
+        ));
+    }
+
     fn server_settings(certificate_directory: &Path) -> ServerConfig {
         ServerConfig {
             hostname: server_hostname("tunnel.example.test"),
@@ -1292,6 +1355,8 @@ mod tests {
                     .unwrap(),
                 ],
             }],
+            control: None,
+            identity: None,
         }
     }
 

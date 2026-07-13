@@ -15,12 +15,16 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
         config,
         server_address,
         backend_address,
+        control_address,
         command,
     } = command;
 
     if let Some(cli::ClientSubcommand::Identity(command)) = command {
-        let forbidden_flags =
-            client_identity_forbidden_runtime_flags(&server_address, backend_address.as_deref());
+        let forbidden_flags = client_identity_forbidden_runtime_flags(
+            &server_address,
+            backend_address.as_deref(),
+            control_address.as_deref(),
+        );
         if !forbidden_flags.is_empty() {
             return Err(format!(
                 "{} may be used only with `runewarp client`, not `runewarp client identity ...`",
@@ -32,12 +36,25 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
     }
 
     if let Some(cli::ClientSubcommand::PublicCert(command)) = command {
+        let forbidden_flags = client_public_cert_forbidden_runtime_flags(
+            &server_address,
+            backend_address.as_deref(),
+            control_address.as_deref(),
+        );
+        if !forbidden_flags.is_empty() {
+            return Err(format!(
+                "{} may be used only with `runewarp client`, not `runewarp client public-cert ...`",
+                forbidden_flags.join(" and ")
+            )
+            .into());
+        }
         return public_cert::run(config, command);
     }
 
     let runtime = ClientRuntimeArgs {
         server_addresses: server_address,
         backend_address,
+        control_address,
     };
     let config = resolve_client_config_from_cli(config.clone(), runtime)
         .map_err(wrap_client_config_resolution_error)?;
@@ -53,6 +70,7 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
 fn client_identity_forbidden_runtime_flags(
     server_addresses: &[String],
     backend_address: Option<&str>,
+    control_address: Option<&str>,
 ) -> Vec<&'static str> {
     let mut flags = Vec::new();
     if !server_addresses.is_empty() {
@@ -61,7 +79,18 @@ fn client_identity_forbidden_runtime_flags(
     if backend_address.is_some() {
         flags.push("--backend-address");
     }
+    if control_address.is_some() {
+        flags.push("--control-address");
+    }
     flags
+}
+
+fn client_public_cert_forbidden_runtime_flags(
+    server_addresses: &[String],
+    backend_address: Option<&str>,
+    control_address: Option<&str>,
+) -> Vec<&'static str> {
+    client_identity_forbidden_runtime_flags(server_addresses, backend_address, control_address)
 }
 
 fn wildcard(port: u16) -> SocketAddr {

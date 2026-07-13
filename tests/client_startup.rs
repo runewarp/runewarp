@@ -256,6 +256,7 @@ async fn prepared_client_rejects_settings_without_services() {
         identity_directory: tempdir.path().to_path_buf(),
         services: Vec::new(),
         public_cert_config: None,
+        control: None,
     };
 
     let join = tokio::spawn(async move {
@@ -326,6 +327,7 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
             },
         ],
         public_cert_config: None,
+        control: None,
     };
 
     let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
@@ -386,6 +388,7 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
             },
         ],
         public_cert_config: None,
+        control: None,
     };
 
     let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
@@ -438,6 +441,7 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
         public_cert_config: Some(ClientPublicCertConfig::Manual {
             directory: public_cert_dir,
         }),
+        control: None,
     };
 
     let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
@@ -522,6 +526,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
         public_cert_config: Some(ClientPublicCertConfig::Manual {
             directory: public_cert_dir,
         }),
+        control: None,
     };
 
     // We use a fake server_ca_file path; the connect will succeed despite the missing ca file
@@ -645,6 +650,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
         public_cert_config: Some(ClientPublicCertConfig::Manual {
             directory: public_cert_dir,
         }),
+        control: None,
     };
 
     // Startup must succeed — mixed services are valid
@@ -745,6 +751,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
             state_directory: acme_state_dir,
             state_directory_was_defaulted: false,
         }),
+        control: None,
     };
 
     // Startup must succeed without blocking — the ACME resolver starts with no cert loaded,
@@ -856,6 +863,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
             state_directory: acme_state_dir,
             state_directory_was_defaulted: false,
         }),
+        control: None,
     };
 
     // Startup must succeed: the passthrough service does not require ACME management.

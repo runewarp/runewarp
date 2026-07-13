@@ -3,6 +3,8 @@ use std::fs;
 use assert_cmd::Command;
 use tempfile::tempdir;
 
+mod common;
+
 #[test]
 fn server_help_prints_usage_and_subcommands() {
     let assert = Command::cargo_bin("runewarp")
@@ -549,5 +551,62 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
     assert!(stderr.contains("ERROR"));
     assert!(stderr.contains("failed to bind server.public-bind-address"));
+    Ok(())
+}
+
+#[test]
+fn server_runtime_control_address_override_is_rejected_for_cert_subcommands() {
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .args([
+            "server",
+            "--control-address",
+            "control.example.test",
+            "cert",
+            "renew",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("--control-address is only supported for `runewarp server`"));
+}
+
+#[test]
+fn server_runtime_cli_control_address_overrides_config() -> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempdir()?;
+    runewarp::initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )?;
+    common::write_server_identity_material(tempdir.path().join("server-identity").as_path());
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[control]
+address = "configured.example.test"
+
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+identity-dir = "server-identity"
+"#,
+    )?;
+
+    let assert = Command::cargo_bin("runewarp")?
+        .current_dir(tempdir.path())
+        .args([
+            "server",
+            "--config",
+            "server.toml",
+            "--control-address",
+            "override.example.test",
+        ])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
+    assert!(!stderr.contains("configured.example.test"));
+    assert!(!stderr.contains("control.address is required"));
     Ok(())
 }

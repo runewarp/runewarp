@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::config::preparation::control::prepare_control_section;
 use crate::config::preparation::{
     PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
 };
@@ -16,6 +17,7 @@ use crate::{
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerRuntimeArgs {
     pub hostname: Option<String>,
+    pub control_address: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +34,8 @@ pub(crate) struct PreparedServerConfig {
     pub(crate) acme: Option<PreparedServerAcmeConfig>,
     pub(crate) tunnels: Vec<PreparedServerTunnelConfig>,
     pub(crate) unknown_field_messages: Vec<String>,
+    pub(crate) control: crate::config::preparation::control::PreparedControlSection,
+    pub(crate) identity_directory: Option<PreparedValue<PathBuf>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,11 +78,13 @@ pub(crate) fn prepare_server_config_from_cli(
         raw.hostname = Some(hostname);
     }
     let log_level = load_log_level_from_path(path)?;
+    let control = prepare_control_section(path, runtime.control_address)?;
     Ok(prepare_raw_server_config(
         path,
         log_level,
         raw,
         unknown_field_messages,
+        control,
     ))
 }
 
@@ -87,12 +93,14 @@ fn prepare_raw_server_config(
     log_level: LogLevel,
     raw: RawServerConfig,
     unknown_field_messages: Vec<String>,
+    control: crate::config::preparation::control::PreparedControlSection,
 ) -> PreparedServerConfig {
     prepare_raw_server_config_with_defaults(
         path,
         log_level,
         raw,
         unknown_field_messages,
+        control,
         &default_server_cert_material_dir,
         &default_server_acme_state_dir,
     )
@@ -103,6 +111,7 @@ fn prepare_raw_server_config_with_defaults(
     log_level: LogLevel,
     raw: RawServerConfig,
     unknown_field_messages: Vec<String>,
+    control: crate::config::preparation::control::PreparedControlSection,
     default_server_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
     default_server_acme_state_dir: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> PreparedServerConfig {
@@ -143,6 +152,10 @@ fn prepare_raw_server_config_with_defaults(
         },
         tunnels: raw.tunnels.into_iter().map(prepare_server_tunnel).collect(),
         unknown_field_messages,
+        control,
+        identity_directory: raw
+            .identity_dir
+            .map(|directory| PreparedValue::Ready(resolve_path(config_dir, &directory))),
     }
 }
 
@@ -193,6 +206,7 @@ mod tests {
         PreparedDirectory, PreparedValue, ServerRuntimeArgs, prepare_server_config_from_cli,
         prepare_server_config_from_path,
     };
+    use crate::config::preparation::control::prepare_control_section_without_config;
     use crate::config::{LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig};
 
     #[test]
@@ -278,6 +292,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             &tempdir.path().join("config.toml"),
             ServerRuntimeArgs {
                 hostname: Some("overridden.example.test".to_owned()),
+                control_address: None,
             },
         )?;
 
@@ -296,12 +311,15 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         let default_cert_dir = tempdir.path().join("xdg-data/server/cert");
         let default_acme_state_dir = tempdir.path().join("xdg-state/server/acme");
 
+        let control = prepare_control_section_without_config(None);
+
         let manual = super::prepare_raw_server_config_with_defaults(
             &config_path,
             LogLevel::Info,
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: None,
+                identity_dir: None,
                 acme: None,
                 public_bind_address: None,
                 tunnel_bind_address: None,
@@ -317,6 +335,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 }],
             },
             Vec::new(),
+            control.clone(),
             &|| Ok(default_cert_dir.clone()),
             &|| Ok(default_acme_state_dir.clone()),
         );
@@ -336,6 +355,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: None,
+                identity_dir: None,
                 acme: Some(RawServerAcmeConfig {
                     email: Some("admin@example.test".to_owned()),
                     state_dir: None,
@@ -354,6 +374,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 }],
             },
             Vec::new(),
+            control,
             &|| Ok(tempdir.path().join("unused-cert-dir")),
             &|| Ok(default_acme_state_dir.clone()),
         );
@@ -382,6 +403,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: None,
+                identity_dir: None,
                 acme: Some(RawServerAcmeConfig {
                     email: Some("admin@example.test".to_owned()),
                     state_dir: Some(PathBuf::from("acme-state")),
@@ -400,6 +422,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 }],
             },
             Vec::new(),
+            prepare_control_section_without_config(None),
             &|| Ok(tempdir.path().join("unused-cert-dir")),
             &|| Ok(tempdir.path().join("unused-acme-state")),
         );

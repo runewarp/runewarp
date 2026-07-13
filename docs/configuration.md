@@ -8,6 +8,7 @@ Runewarp `0.1.x` is a public pre-1.0 release line. Minor releases may include br
 
 | Config area | Owns |
 | --- | --- |
+| `[control]` | Managed-mode Control endpoint address and Control trust |
 | `[server]` | Public routing, Server identity, and the Server certificate path |
 | `[[server.tunnels]]` | Explicit **Public hostname** authorization and one or more pinned **Client identities** for one **Tunnel** |
 | `[client]` | Tunnel dialing, Server trust, Client identity material, and optional terminate-mode certificate management |
@@ -43,18 +44,20 @@ For `runewarp server`, config/runtime precedence is:
 2. otherwise, the discovered default config file is selected
 3. `runewarp server --hostname <HOSTNAME>` replaces `server.hostname` from the selected config before validation
 4. when `--hostname` is omitted, `RUNEWARP_SERVER_HOSTNAME` replaces `server.hostname` from the selected config before validation
+5. `runewarp server --control-address <HOSTNAME[:PORT]>` replaces `control.address` from the selected config before validation and enables managed mode when an effective Control address is present
 
-The Server runtime stays config-file-first: only `server.hostname` is overridable at runtime, with precedence `--hostname` > `RUNEWARP_SERVER_HOSTNAME` > `server.hostname`, and the flag belongs only to the runtime `runewarp server` command.
+The Server runtime stays config-file-first: only `server.hostname` and the effective Control address are overridable at runtime. `--hostname` and `--control-address` belong only to the runtime `runewarp server` command, not `runewarp server cert ...`.
 
 For `runewarp client`, config/runtime precedence is:
 
 1. an explicit `--config` path selects that file and a missing explicit path remains an error
 2. otherwise, a discovered default config file is selected when it exists
-3. otherwise, there is no selected Client config and `runewarp client` may start in the CLI-only shape when at least one `--server-address` and `--backend-address` are present
+3. otherwise, there is no selected Client config and `runewarp client` may start in the CLI-only shape when `--control-address` and `--backend-address` are present, or in the static shape when at least one `--server-address` and `--backend-address` are present
 
 When a selected config file is involved:
 
 - repeated `--server-address` flags replace either `client.server-address` or `client.server-addresses` before validation
+- `--control-address` replaces `control.address` before validation and enables managed mode when an effective Control address is present
 - `--backend-address` may supply the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks
 - any configured Service blocks `--backend-address`, even when that Service block is malformed
 - a selected file with no `[client]` section may still start the Client when both runtime flags are present
@@ -70,6 +73,8 @@ When the matching config key is omitted, Runewarp uses:
 | Client identity material | `$XDG_DATA_HOME/runewarp/client/identity/` or `~/.local/share/runewarp/client/identity/` |
 | Manual Public hostname certificates | `$XDG_DATA_HOME/runewarp/client/public-cert/` or `~/.local/share/runewarp/client/public-cert/` |
 | Client CA bundle for `server-trust = "ca-file"` | `$XDG_DATA_HOME/runewarp/client/server-ca.crt` or `~/.local/share/runewarp/client/server-ca.crt` |
+| Control CA bundle for `control.trust = "ca-file"` | `$XDG_DATA_HOME/runewarp/control/ca.crt` or `~/.local/share/runewarp/control/ca.crt` |
+| Server identity material (managed mode) | `$XDG_DATA_HOME/runewarp/server/identity/` or `~/.local/share/runewarp/server/identity/` |
 | Server ACME state | `$XDG_STATE_HOME/runewarp/server/acme/` or `~/.local/state/runewarp/server/acme/` |
 | Client ACME state | `$XDG_STATE_HOME/runewarp/client/acme/` or `~/.local/state/runewarp/client/acme/` |
 
@@ -90,6 +95,21 @@ client-identities = [
 ```
 
 Add `[server.acme]` for the ACME path, or `server.cert-dir` for the manual/private-CA path.
+
+### Managed Server
+
+```toml
+[control]
+address = "control.example.com"
+trust = "system"
+
+[server]
+hostname = "tunnel.example.com"
+cert-dir = "/etc/runewarp/server-cert"
+identity-dir = "/etc/runewarp/server-identity"
+```
+
+Managed mode requires an effective Control address, allows empty `[[server.tunnels]]`, and requires `server.identity-dir` material distinct from `server.cert-dir`.
 
 ### Client with exact-match routing
 
@@ -164,12 +184,21 @@ Add `[client.acme]` for ACME-managed certificates, or `client.public-cert-dir` f
 
 At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warnings, and errors. `debug` adds routing diagnostics and ACME challenge-handling detail. Output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message.
 
+### Control
+
+| Key | Required | Notes |
+| --- | --- | --- |
+| `control.address` | when `[control]` is present | DNS hostname with optional port for the Control endpoint. HTTPS is mandatory and inferred. Schemes, paths, and IP literals are rejected. On `runewarp server` and `runewarp client`, `--control-address` may replace this value before validation. |
+| `control.trust` | no | `system` or `ca-file`. Defaults to `system`. |
+| `control.ca-file` | no | Exclusive CA bundle for the Control endpoint. Valid only when `control.trust = "ca-file"`. When omitted in `ca-file` mode, Runewarp uses the XDG default Control CA path. |
+
 ### Server
 
 | Key | Required | Notes |
 | --- | --- | --- |
 | `server.hostname` | yes | **Server hostname** for the Runewarp edge itself. Used for TLS validation and ACME. On the runtime `runewarp server` command only, `--hostname` or `RUNEWARP_SERVER_HOSTNAME` may replace this value before validation, with `--hostname` taking precedence. |
 | `server.cert-dir` | no | Directory containing manual/private-CA Server material. Defaults to the XDG Server material path when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
+| `server.identity-dir` | managed only | Directory containing Server identity material for Control authentication. Valid only in managed mode. Defaults to the XDG Server identity path. Must resolve to a different directory than `server.cert-dir`. |
 | `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
 | `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** **Tunnel connections**. Defaults to `0.0.0.0:443`. |
 | `server.readiness-bind-address` | no | Optional literal TCP socket address for a probe-only **Server readiness** listener. When configured, TCP accept success means the Server is ready for new ingress admission. There is no default listener. |
@@ -238,6 +267,23 @@ When one or more Services use `tls-mode = "terminate"`, the Client needs either 
 
 `[client.acme]` still depends on public TCP 443 reachability at the Server edge because `acme-tls/1` traffic for terminating **Public hostnames** follows the same public ingress and Tunnel path as ordinary Visitor TLS.
 
+### Control trust
+
+When managed mode is enabled, Runewarp supports the same exclusive trust modes for the Control endpoint as for tunnel Server addresses:
+
+- `system` uses the system trust store
+- `ca-file` uses only the configured CA bundle and does not combine it with system roots
+
+### Server identity material (managed mode)
+
+`server.identity-dir` holds:
+
+- `server.crt`
+- `server.key`
+- `server-identity.txt`
+
+This material authenticates the Server to Control. It is distinct from the **Server certificate** presented on the tunnel endpoint.
+
 ### Client-to-server trust
 
 Runewarp supports two Client trust modes:
@@ -250,16 +296,23 @@ Runewarp supports two Client trust modes:
 ### General boot-time validation
 
 - `runewarp server` requires a `[server]` section
-- `runewarp client` requires either a selected `[client]` section or both runtime routing flags when no selected Client config exists or the selected file has no `[client]` section
+- `runewarp client` requires either a selected `[client]` section or the appropriate runtime routing flags when no selected Client config exists or the selected file has no `[client]` section: static mode needs `--server-address` and `--backend-address`; managed CLI-only mode needs `--control-address` and `--backend-address`
+- present `[control]` requires an effective `control.address` after any `--control-address` override
+- managed mode is enabled when an effective Control address is present after config and CLI preparation
+- in managed mode, `[[server.tunnels]]` must be empty, `server.identity-dir` is required (or defaults to the XDG Server identity path), and `client.server-address`, `client.server-addresses`, and `--server-address` are rejected
+- in static mode, `server.identity-dir` is rejected and at least one `[[server.tunnels]]` entry is required
+- `server.identity-dir` must resolve to a different directory than `server.cert-dir`
 - `server.hostname` must be present unless the runtime `runewarp server --hostname` flag or `RUNEWARP_SERVER_HOSTNAME` supplies it
 - `[server.acme]` and `server.cert-dir` are mutually exclusive; when `[server.acme]` is absent, Runewarp uses the manual/private-CA path with `server.cert-dir` or its default XDG location
-- `runewarp client` must end up with at least one effective **Server address** after any allowed `--server-address` overlay
+- `runewarp client` must end up with at least one effective **Server address** after any allowed `--server-address` overlay in static mode
 - `client.server-address` and `client.server-addresses` are mutually exclusive
 - `client.server-addresses` must contain at least one entry when present
-- there must be at least one `[[server.tunnels]]` entry
+- there must be at least one `[[server.tunnels]]` entry in static mode
 - `runewarp client` must end up with at least one **Service**, either from config or from the runtime `--backend-address` Catch-all overlay
 - `client.server-trust` must be either `system` or `ca-file`
 - `client.server-ca-file` may be set only when `client.server-trust = "ca-file"`
+- `control.trust` must be either `system` or `ca-file`
+- `control.ca-file` may be set only when `control.trust = "ca-file"`
 - `--backend-address` may be used only when the selected config contributes no `[[client.services]]` blocks
 - every `client-identity` value and every entry in `client-identities` must be lowercase hex without colons
 - `server.tunnels[].client-identity` and `server.tunnels[].client-identities` are mutually exclusive

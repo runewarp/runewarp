@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::XdgPathError;
 
 pub(crate) mod client;
+pub(crate) mod control;
 pub(crate) mod server;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

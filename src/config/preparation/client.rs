@@ -1,4 +1,7 @@
 use crate::config::client::{ClientConfigResolutionError, ClientRuntimeArgs, SelectedClientConfig};
+use crate::config::preparation::control::{
+    PreparedControlSection, prepare_control_section, prepare_control_section_without_config,
+};
 use crate::config::preparation::{
     PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
 };
@@ -29,6 +32,7 @@ pub(crate) struct PreparedClientConfig {
     pub(crate) acme_present: bool,
     pub(crate) acme: Option<PreparedClientAcmeConfig>,
     pub(crate) unknown_field_messages: Vec<String>,
+    pub(crate) control: PreparedControlSection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,11 +112,13 @@ pub(crate) fn prepare_optional_client_config_from_path(
     let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
     let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
     let log_level = load_log_level_from_path(path)?;
+    let control = prepare_control_section(path, None)?;
     Ok(Some(prepare_raw_client_config(
         Some(path.to_path_buf()),
         log_level,
         raw,
         unknown_field_messages,
+        control,
         &default_identity_material_dir,
         &default_public_cert_dir,
     )))
@@ -168,15 +174,23 @@ fn prepare_selected_config_client_config(
     let mut raw = deserialize_selected_section::<RawClientConfig>(&path, "client", &section_value)
         .map_err(ClientConfigResolutionError::ConfigFile)?;
 
-    match runtime.server_addresses.as_slice() {
-        [] => {}
-        [server_address] => {
-            raw.server_address = Some(server_address.clone());
-            raw.server_addresses = None;
-        }
-        _ => {
-            raw.server_address = None;
-            raw.server_addresses = Some(runtime.server_addresses.clone());
+    let control = prepare_control_section(&path, runtime.control_address.clone())
+        .map_err(ClientConfigResolutionError::ConfigFile)?;
+    let managed = control.address.is_some();
+
+    if managed && !runtime.server_addresses.is_empty() {
+        messages.push("--server-address may not be used with --control-address".to_owned());
+    } else {
+        match runtime.server_addresses.as_slice() {
+            [] => {}
+            [server_address] => {
+                raw.server_address = Some(server_address.clone());
+                raw.server_addresses = None;
+            }
+            _ => {
+                raw.server_address = None;
+                raw.server_addresses = Some(runtime.server_addresses.clone());
+            }
         }
     }
 
@@ -200,6 +214,7 @@ fn prepare_selected_config_client_config(
         log_level,
         raw,
         messages,
+        control,
         default_identity_directory,
         default_public_cert_directory,
     ))
@@ -217,15 +232,32 @@ fn prepare_cli_only_client_config(
         Some(_) => "the selected config has no [client] section",
         None => "no selected client config is available",
     };
-    if runtime.server_addresses.is_empty() {
-        messages.push(format!(
-            "--server-address is required when {missing_context}"
-        ));
-    }
-    if runtime.backend_address.is_none() {
-        messages.push(format!(
-            "--backend-address is required when {missing_context}"
-        ));
+    let control = match selected_path {
+        Some(path) => prepare_control_section(path, runtime.control_address.clone())
+            .map_err(ClientConfigResolutionError::ConfigFile)?,
+        None => prepare_control_section_without_config(runtime.control_address.clone()),
+    };
+    let managed = control.address.is_some();
+    if managed {
+        if !runtime.server_addresses.is_empty() {
+            messages.push("--server-address may not be used with --control-address".to_owned());
+        }
+        if runtime.backend_address.is_none() {
+            messages.push(format!(
+                "--backend-address is required when {missing_context}"
+            ));
+        }
+    } else {
+        if runtime.server_addresses.is_empty() {
+            messages.push(format!(
+                "--server-address is required when {missing_context}"
+            ));
+        }
+        if runtime.backend_address.is_none() {
+            messages.push(format!(
+                "--backend-address is required when {missing_context}"
+            ));
+        }
     }
     if !messages.is_empty() {
         return Err(ClientConfigResolutionError::Validation {
@@ -238,10 +270,16 @@ fn prepare_cli_only_client_config(
         selected_path.map(Path::to_path_buf),
         log_level,
         RawClientConfig {
-            server_address: (runtime.server_addresses.len() == 1)
-                .then(|| runtime.server_addresses[0].clone()),
-            server_addresses: (runtime.server_addresses.len() > 1)
-                .then(|| runtime.server_addresses.clone()),
+            server_address: if !managed && runtime.server_addresses.len() == 1 {
+                Some(runtime.server_addresses[0].clone())
+            } else {
+                None
+            },
+            server_addresses: if !managed && runtime.server_addresses.len() > 1 {
+                Some(runtime.server_addresses.clone())
+            } else {
+                None
+            },
             server_trust: None,
             server_ca_file: None,
             identity_dir: None,
@@ -254,6 +292,7 @@ fn prepare_cli_only_client_config(
             }],
         },
         Vec::new(),
+        control,
         default_identity_directory,
         default_public_cert_directory,
     ))
@@ -264,6 +303,7 @@ pub(crate) fn prepare_raw_client_config(
     log_level: LogLevel,
     raw: RawClientConfig,
     unknown_field_messages: Vec<String>,
+    control: PreparedControlSection,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
     default_public_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> PreparedClientConfig {
@@ -272,6 +312,7 @@ pub(crate) fn prepare_raw_client_config(
         log_level,
         raw,
         unknown_field_messages,
+        control,
         &ClientPreparationDefaults {
             default_identity_directory,
             default_public_cert_directory,
@@ -286,6 +327,7 @@ fn prepare_raw_client_config_with_defaults(
     log_level: LogLevel,
     raw: RawClientConfig,
     unknown_field_messages: Vec<String>,
+    control: PreparedControlSection,
     defaults: &ClientPreparationDefaults<'_>,
 ) -> PreparedClientConfig {
     let config_dir = selected_path
@@ -342,6 +384,7 @@ fn prepare_raw_client_config_with_defaults(
             None
         },
         unknown_field_messages,
+        control,
     }
 }
 
@@ -447,6 +490,7 @@ mod tests {
         PreparedValue, prepare_selected_client_config,
     };
     use crate::config::client::{ClientRuntimeArgs, SelectedClientConfig};
+    use crate::config::preparation::control::prepare_control_section_without_config;
     use crate::config::{LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig};
 
     #[test]
@@ -477,6 +521,7 @@ mod tests {
             &ClientRuntimeArgs {
                 server_addresses: vec!["tunnel.example.test".to_owned()],
                 backend_address: Some("backend.internal:443".to_owned()),
+                control_address: None,
             },
             &|| Ok(identity_directory.clone()),
             &|| Ok(tempdir.path().join("unused-public-cert")),
@@ -526,6 +571,7 @@ hostname = "tunnel.example.test"
             &ClientRuntimeArgs {
                 server_addresses: vec!["tunnel.example.test".to_owned()],
                 backend_address: Some("backend.internal:443".to_owned()),
+                control_address: None,
             },
             &|| Ok(identity_directory.clone()),
             &|| Ok(tempdir.path().join("unused-public-cert")),
@@ -576,6 +622,7 @@ hostname = "tunnel.example.test"
                 }],
             },
             Vec::new(),
+            prepare_control_section_without_config(None),
             &ClientPreparationDefaults {
                 default_identity_directory: &|| Ok(identity_directory.clone()),
                 default_public_cert_directory: &|| Ok(public_cert_directory.clone()),
@@ -632,6 +679,7 @@ hostname = "tunnel.example.test"
                 }],
             },
             Vec::new(),
+            prepare_control_section_without_config(None),
             &ClientPreparationDefaults {
                 default_identity_directory: &|| Ok(default_identity_directory.clone()),
                 default_public_cert_directory: &|| Ok(default_public_cert_directory.clone()),
@@ -680,6 +728,7 @@ log-level = "off"
             &ClientRuntimeArgs {
                 server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
                 backend_address: Some("backend.internal:443".to_owned()),
+                control_address: None,
             },
             &|| Ok(identity_directory.clone()),
             &|| Ok(tempdir.path().join("unused-public-cert")),

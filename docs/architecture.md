@@ -124,11 +124,12 @@ The Local backend receives unencrypted bytes directly and does not need to termi
 | **Public hostname CA** (manual) | Private trust anchor in `client.public-cert-dir` shared with Visitors when `tls-mode = "terminate"` is in use |
 | **Public hostname certificates via Client ACME** | Automatically provisioned by Let's Encrypt via `[client.acme]` for **Public hostnames** of terminating Services; `acme-tls/1` challenge traffic for those hostnames is routed through the Server to the Client like ordinary Visitor TLS |
 
-The client validates the server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The server authenticates one of the Tunnel's pinned `client-identity` values from the client public key rather than the certificate lifetime. Static Server startup loads one **Authorization snapshot** shared by Public-hostname routing and the live QUIC Client-identity verifier; a prepared replacement can be validated beside the live snapshot and committed atomically without exposing a mixed view.
+The client validates the server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The server authenticates one of the Tunnel's pinned `client-identity` values from the client public key rather than the certificate lifetime. Static Server startup loads one **Authorization snapshot** shared by Public-hostname routing and the live QUIC Client-identity verifier; a prepared replacement can be validated beside the live snapshot and committed atomically without exposing a mixed view. Static Client startup seeds one **Address controller** from the configured **Server addresses**, retaining one independent worker per normalized address while preserving today's reconnect, traffic, one-shot Client-ready, and shutdown behavior.
 
 ## Current runtime limits
 
 - each **Client instance** establishes one or more **Tunnel connections**
+- static Client startup seeds one **Address controller** from the configured **Server addresses**, retaining one independent worker per normalized address and allowing maintenance intent to be replaced (add / remove / re-adopt) without process restart
 - readiness means at least one configured **Server address** is connected
 - failure of one configured **Server address** does not tear down healthy **Tunnel connections** to other configured **Server addresses**
 - a **Tunnel** stays available while at least one authenticated **Tunnel connection** is live

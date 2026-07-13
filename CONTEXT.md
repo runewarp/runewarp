@@ -72,6 +72,10 @@ _Avoid_: Client registration, wildcard routing
 The immutable Server-owned Public-hostname routing and trusted Client-identity set that Public-hostname routing and QUIC Client-identity handshake admission consult together. Static configuration loads one snapshot at startup; a prepared replacement can be validated independently and committed atomically.
 _Avoid_: Tunnel registry, handshake config, routing table
 
+**Address controller**:
+The Client-owned runtime that maintains at most one address worker per normalized **Server address**, and that can replace maintenance intent through add, remove, and re-adopt operations without process restart. Static Client startup seeds it from the configured address set; Managed-session reconciliation builds on the same seam later.
+_Avoid_: fanout loop, connection pool, dial manager
+
 **Public hostname certificate**:
 The certificate presented to a **Visitor** for a **Public hostname** when a **Service** is in **Terminate mode**.
 _Avoid_: Server certificate, public certificate

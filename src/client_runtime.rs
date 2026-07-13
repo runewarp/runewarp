@@ -3,13 +3,13 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
-use runewarp::{PreparedClient, ServerAddress, ShutdownMode};
+use runewarp::{
+    AddressController, AddressWorkerControl, MaintenanceIntent, PreparedClient, ServerAddress,
+    ShutdownMode,
+};
 use tokio::net::lookup_host;
-use tokio::sync::watch;
 
 use crate::reconnect_policy::ReconnectPolicy;
 
@@ -33,8 +33,20 @@ pub(crate) async fn run_until_orderly_shutdown<F>(
 where
     F: Future<Output = io::Result<ShutdownMode>>,
 {
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let runtime = run_until_shutdown(settings, local_bind_addr, &shutdown_rx);
+    let mut controller = AddressController::new();
+    let settings = Arc::new(settings.clone());
+    controller.seed_static(settings.server_addresses.clone(), {
+        let settings = Arc::clone(&settings);
+        move |server_address, control| {
+            let settings = Arc::clone(&settings);
+            async move {
+                run_server_address_worker(settings, server_address, local_bind_addr, control).await
+            }
+        }
+    });
+
+    let shutdown = controller.shutdown_handle();
+    let runtime = controller.run_until_idle();
     tokio::pin!(runtime);
     tokio::pin!(shutdown_signal);
     let client_result = tokio::select! {
@@ -42,61 +54,44 @@ where
         signal_result = &mut shutdown_signal => {
             let _mode = signal_result?;
             runewarp::runtime_log::client_graceful_shutdown_started();
-            let _ = shutdown_tx.send(true);
+            shutdown.request();
             runtime.await
         }
     };
-    client_result
+    client_result.map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
 }
 
-async fn run_until_shutdown(
-    settings: &runewarp::ClientConfig,
-    local_bind_addr: SocketAddr,
-    shutdown: &watch::Receiver<bool>,
-) -> Result<(), Box<dyn Error>> {
-    let settings = Arc::new(settings.clone());
-    let ready_logged = Arc::new(AtomicBool::new(false));
-    let mut tasks = FuturesUnordered::new();
-
-    for server_address in settings.server_addresses.clone() {
-        tasks.push(run_server_address_until_shutdown(
-            Arc::clone(&settings),
-            server_address,
-            local_bind_addr,
-            shutdown.clone(),
-            Arc::clone(&ready_logged),
-        ));
-    }
-
-    while let Some(result) = tasks.next().await {
-        match result {
-            Ok(()) => {}
-            Err(error) => return Err(Box::new(io::Error::other(error))),
-        }
-    }
-
-    Ok(())
-}
-
-async fn run_server_address_until_shutdown(
+async fn run_server_address_worker(
     settings: Arc<runewarp::ClientConfig>,
     server_address: ServerAddress,
     local_bind_addr: SocketAddr,
-    shutdown: watch::Receiver<bool>,
-    ready_logged: Arc<AtomicBool>,
+    control: AddressWorkerControl,
 ) -> Result<(), String> {
     let mut connected_once = false;
     let mut reconnect_policy = ReconnectPolicy::new();
     let configured_server_addr =
         configured_server_addr(server_address.hostname().as_str(), server_address.port());
+    let mut maintenance = control.subscribe_maintenance();
     loop {
-        if shutdown_requested(&shutdown) {
+        if control.shutdown_requested() || control.maintenance_intent() == MaintenanceIntent::Retire
+        {
+            // Establishing / reconnecting work stops on remove. Connected retirement is
+            // handled inside the tunnel run below and exits here only after that run ends.
             return Ok(());
         }
+
         let phase = client_tunnel_phase(connected_once);
         let attempt_kind = client_tunnel_attempt_kind(reconnect_policy.is_fresh());
         let dial_target = match tokio::select! {
-            _ = wait_for_shutdown(shutdown.clone()) => return Ok(()),
+            _ = wait_for_shutdown(&control) => return Ok(()),
+            changed = maintenance.changed() => {
+                if changed.is_err()
+                    || control.maintenance_intent() == MaintenanceIntent::Retire
+                {
+                    return Ok(());
+                }
+                continue;
+            }
             result = resolve_client_tunnel_dial_target(&server_address) => result,
         } {
             Ok(dial_target) => dial_target,
@@ -113,7 +108,7 @@ async fn run_server_address_until_shutdown(
                         retry.display_delay_secs,
                         &error.to_string(),
                     );
-                    if wait_for_retry_delay(retry.delay, &shutdown).await {
+                    if wait_for_retry_delay(retry.delay, &control).await {
                         continue;
                     }
                     return Ok(());
@@ -121,6 +116,10 @@ async fn run_server_address_until_shutdown(
                 return Err(error.to_string());
             }
         };
+
+        if control.maintenance_intent() == MaintenanceIntent::Retire {
+            return Ok(());
+        }
 
         runewarp::runtime_log::client_tunnel_connecting(
             phase,
@@ -130,8 +129,21 @@ async fn run_server_address_until_shutdown(
         );
 
         let client = match tokio::select! {
-            _ = wait_for_shutdown(shutdown.clone()) => return Ok(()),
-            result = PreparedClient::connect_to_server_address(&settings, local_bind_addr, &server_address, dial_target.resolved_server_addr) => result,
+            _ = wait_for_shutdown(&control) => return Ok(()),
+            changed = maintenance.changed() => {
+                if changed.is_err()
+                    || control.maintenance_intent() == MaintenanceIntent::Retire
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+            result = PreparedClient::connect_to_server_address(
+                &settings,
+                local_bind_addr,
+                &server_address,
+                dial_target.resolved_server_addr,
+            ) => result,
         } {
             Ok(client) => client,
             Err(error) => {
@@ -161,7 +173,7 @@ async fn run_server_address_until_shutdown(
                             &error.to_string(),
                         );
                     }
-                    if wait_for_retry_delay(retry.delay, &shutdown).await {
+                    if wait_for_retry_delay(retry.delay, &control).await {
                         continue;
                     }
                     return Ok(());
@@ -171,27 +183,38 @@ async fn run_server_address_until_shutdown(
         };
 
         let first_connection = !connected_once;
-        reconnect_policy.reset();
+        let retiring = control.maintenance_intent() == MaintenanceIntent::Retire;
+        if !retiring {
+            reconnect_policy.reset();
+        }
         connected_once = true;
         runewarp::runtime_log::client_tunnel_connected(
             phase,
             &dial_target.configured_server_addr,
             dial_target.resolved_server_addr,
         );
-        if first_connection && !ready_logged.swap(true, Ordering::SeqCst) {
+        if first_connection && control.claim_client_ready_log() {
             runewarp::runtime_log::client_ready(&dial_target.configured_server_addr);
         }
 
-        if let Err(error) = client
+        let run_result = client
             .run_until_shutdown({
-                let shutdown = shutdown.clone();
+                let control = control.clone();
                 async move {
-                    wait_for_shutdown(shutdown).await;
+                    wait_for_shutdown(&control).await;
                     ShutdownMode::Graceful
                 }
             })
-            .await
+            .await;
+
+        // Retiring connections stay live until remote close or process shutdown, then exit
+        // without reconnecting. Maintained connections reconnect after unexpected closes.
+        if control.shutdown_requested() || control.maintenance_intent() == MaintenanceIntent::Retire
         {
+            return Ok(());
+        }
+
+        if let Err(error) = run_result {
             let next_attempt_kind = client_tunnel_attempt_kind(reconnect_policy.is_fresh());
             let retry = reconnect_policy.next_retry();
             if is_unauthorized_client_connection_error(&error) {
@@ -215,7 +238,7 @@ async fn run_server_address_until_shutdown(
                     &error.to_string(),
                 );
             }
-            if wait_for_retry_delay(retry.delay, &shutdown).await {
+            if wait_for_retry_delay(retry.delay, &control).await {
                 continue;
             }
             return Ok(());
@@ -293,12 +316,9 @@ fn is_clean_client_tunnel_close(error: &quinn::ConnectionError) -> bool {
     )
 }
 
-fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
-    *shutdown.borrow()
-}
-
-async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
-    if *shutdown.borrow() {
+async fn wait_for_shutdown(control: &AddressWorkerControl) {
+    let mut shutdown = control.subscribe_shutdown();
+    if control.shutdown_requested() {
         return;
     }
     while shutdown.changed().await.is_ok() {
@@ -308,10 +328,22 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     }
 }
 
-async fn wait_for_retry_delay(delay: Duration, shutdown: &watch::Receiver<bool>) -> bool {
+/// Returns true when the worker should continue retrying after the delay.
+async fn wait_for_retry_delay(delay: Duration, control: &AddressWorkerControl) -> bool {
+    let mut maintenance = control.subscribe_maintenance();
     tokio::select! {
-        _ = wait_for_shutdown(shutdown.clone()) => false,
-        _ = tokio::time::sleep(delay) => true,
+        _ = wait_for_shutdown(control) => false,
+        changed = maintenance.changed() => {
+            if changed.is_err() {
+                return false;
+            }
+            !control.shutdown_requested()
+                && control.maintenance_intent() != MaintenanceIntent::Retire
+        }
+        _ = tokio::time::sleep(delay) => {
+            !control.shutdown_requested()
+                && control.maintenance_intent() != MaintenanceIntent::Retire
+        }
     }
 }
 
@@ -329,20 +361,21 @@ mod tests {
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::{oneshot, watch};
+    use tokio::sync::oneshot;
     use tokio::time::{sleep, timeout};
     use tokio_rustls::{TlsAcceptor, TlsConnector};
 
     use runewarp::{
-        CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientConfig,
-        ClientTlsMode, LogLevel, PublicHostname, Server, ServerAddress, ServerAuthorization,
-        ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, ShutdownMode,
-        generate_client_identity, make_server_quic_config_with_client_admission,
+        AddressController, AddressWorkerControl, CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME,
+        CLIENT_KEY_FILENAME, ClientConfig, ClientTlsMode, LogLevel, PublicHostname, Server,
+        ServerAddress, ServerAuthorization, ServerBindConfig, ServerHostname, ServerTunnelConfig,
+        ServiceConfig, ShutdownMode, generate_client_identity,
+        make_server_quic_config_with_client_admission,
     };
 
     use super::{
         RetryDisposition, client_tunnel_attempt_kind, run_until_orderly_shutdown,
-        wait_for_retry_delay,
+        wait_for_retry_delay, wait_for_shutdown,
     };
 
     #[test]
@@ -359,20 +392,23 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_retry_delay_completes_when_the_delay_elapses() {
-        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        assert!(wait_for_retry_delay(Duration::ZERO, &shutdown_rx).await);
+        let (control, mut controller) = spawn_idle_worker_control().await;
+        assert!(wait_for_retry_delay(Duration::ZERO, &control).await);
+        controller.request_shutdown();
+        controller.run_until_idle().await.unwrap();
     }
 
     #[tokio::test]
     async fn wait_for_retry_delay_stops_when_shutdown_arrives_first() {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            let _ = shutdown_tx.send(true);
+        let (control, mut controller) = spawn_idle_worker_control().await;
+        let wait = tokio::spawn({
+            let control = control.clone();
+            async move { wait_for_retry_delay(Duration::from_secs(60), &control).await }
         });
-
-        assert!(!wait_for_retry_delay(Duration::from_secs(60), &shutdown_rx).await);
+        tokio::task::yield_now().await;
+        controller.request_shutdown();
+        assert!(!wait.await.unwrap());
+        controller.run_until_idle().await.unwrap();
     }
 
     #[test]
@@ -581,6 +617,23 @@ mod tests {
             io::ErrorKind::TimedOut,
             "healthy server address never became ready",
         ))
+    }
+
+    async fn spawn_idle_worker_control() -> (AddressWorkerControl, AddressController) {
+        let mut controller = AddressController::new();
+        let (control_tx, control_rx) = oneshot::channel();
+        assert!(controller.add(
+            ServerAddress::parse("tunnel.example.test").unwrap(),
+            move |_address, control| {
+                async move {
+                    let _ = control_tx.send(control.clone());
+                    wait_for_shutdown(&control).await;
+                    Ok(())
+                }
+            }
+        ));
+        let control = control_rx.await.unwrap();
+        (control, controller)
     }
 
     fn localhost(port: u16) -> SocketAddr {

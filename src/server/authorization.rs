@@ -209,7 +209,7 @@ impl AuthorizationState {
     pub(crate) fn current(&self) -> Arc<AuthorizationSnapshot> {
         self.current
             .read()
-            .expect("authorization state lock must not be poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 
@@ -228,7 +228,7 @@ impl AuthorizationState {
         let mut current = self
             .current
             .write()
-            .expect("authorization state lock must not be poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *current = prepared.snapshot.clone();
         prepared.snapshot
     }
@@ -247,7 +247,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{AuthorizationSnapshot, AuthorizationState, ServerAuthorization};
     use crate::quic::ClientIdentityAdmission;
@@ -455,7 +455,11 @@ mod tests {
             }));
         }
 
-        thread::sleep(Duration::from_millis(5));
+        wait_until(
+            Duration::from_secs(2),
+            || observations.load(Ordering::Relaxed) > 0,
+            "readers should observe the initial snapshot before commit",
+        );
         let prepared = state.prepare(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
@@ -463,8 +467,13 @@ mod tests {
                 authorized_client_identities: vec![new_identity],
             }],
         )?;
+        let observations_before_commit = observations.load(Ordering::Relaxed);
         state.commit(prepared);
-        thread::sleep(Duration::from_millis(5));
+        wait_until(
+            Duration::from_secs(2),
+            || observations.load(Ordering::Relaxed) > observations_before_commit,
+            "readers should observe the committed snapshot",
+        );
         stop.store(true, Ordering::Release);
         for reader in readers {
             reader.join().expect("reader thread must not panic");
@@ -473,6 +482,14 @@ mod tests {
         assert!(observations.load(Ordering::Relaxed) > 0);
         assert_eq!(mixed_views.load(Ordering::Relaxed), 0);
         Ok(())
+    }
+
+    fn wait_until(timeout: Duration, mut ready: impl FnMut() -> bool, message: &str) {
+        let deadline = Instant::now() + timeout;
+        while !ready() {
+            assert!(Instant::now() < deadline, "{message} within {timeout:?}");
+            thread::yield_now();
+        }
     }
 
     #[test]

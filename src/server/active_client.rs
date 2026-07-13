@@ -17,7 +17,6 @@ struct PoolMember {
 #[derive(Clone)]
 pub(crate) struct SelectedTunnelConnection {
     member_id: u64,
-    #[allow(dead_code)] // retained for selective revocation against authenticated Client identity
     client_identity: ClientIdentity,
     connection: Connection,
     active_streams: Arc<AtomicUsize>,
@@ -32,7 +31,6 @@ impl SelectedTunnelConnection {
         self.member_id
     }
 
-    #[allow(dead_code)] // retained for selective revocation against authenticated Client identity
     pub(crate) fn client_identity(&self) -> &ClientIdentity {
         &self.client_identity
     }

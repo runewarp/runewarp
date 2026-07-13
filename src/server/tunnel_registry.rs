@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use quinn::Connection;
@@ -13,7 +14,9 @@ use crate::{ClientIdentity, PublicHostname, client_identity_from_certificate_der
 use crate::{ServerHostname, ServerTunnelConfig};
 
 use super::active_client::{ActiveClientPool, SelectedTunnelConnection};
-use super::authorization::{AuthorizationState, PreparedAuthorization, ServerAuthorization};
+use super::authorization::{
+    AuthorizationSnapshot, AuthorizationState, PreparedAuthorization, ServerAuthorization,
+};
 
 pub(crate) enum TunnelRouteOutcome {
     Unauthorized,
@@ -31,8 +34,8 @@ pub(crate) struct LiveWorkDispatch {
 struct ActiveVisitorStream {
     stream_id: u64,
     public_hostname: PublicHostname,
-    #[allow(dead_code)] // retained for selective revocation against the serving connection
     member_id: u64,
+    client_identity: ClientIdentity,
     abort_handle: AbortHandle,
 }
 
@@ -40,7 +43,8 @@ struct ActiveVisitorStream {
 pub(crate) struct TunnelRegistry {
     authorization: Arc<AuthorizationState>,
     tunnel_pools: Arc<RwLock<Vec<ActiveClientPool>>>,
-    visitor_streams: Arc<RwLock<Vec<ActiveVisitorStream>>>,
+    // std lock so track/reset stay synchronous (no await gap after stream admission).
+    visitor_streams: Arc<StdRwLock<Vec<ActiveVisitorStream>>>,
     next_stream_id: Arc<AtomicU64>,
     accepting_tunnel_connections: Arc<AtomicBool>,
     admitting_streams: Arc<AtomicBool>,
@@ -75,7 +79,7 @@ impl TunnelRegistry {
         Ok(Self {
             authorization: Arc::new(AuthorizationState::from_snapshot_for_test(snapshot)),
             tunnel_pools: Arc::new(RwLock::new(vec![ActiveClientPool::new()])),
-            visitor_streams: Arc::new(RwLock::new(Vec::new())),
+            visitor_streams: Arc::new(StdRwLock::new(Vec::new())),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
             admitting_streams: Arc::new(AtomicBool::new(true)),
@@ -99,7 +103,7 @@ impl TunnelRegistry {
         Ok(Self {
             authorization: authorization.state().clone(),
             tunnel_pools: Arc::new(RwLock::new(tunnel_pools)),
-            visitor_streams: Arc::new(RwLock::new(Vec::new())),
+            visitor_streams: Arc::new(StdRwLock::new(Vec::new())),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
             admitting_streams: Arc::new(AtomicBool::new(true)),
@@ -132,12 +136,7 @@ impl TunnelRegistry {
                 .await
         };
 
-        let mut streams_reset = 0;
-        for hostname in previous.authorized_public_hostnames() {
-            if next.tunnel_index_for_public_hostname(hostname).is_none() {
-                streams_reset += self.reset_streams_for_public_hostname(hostname).await;
-            }
-        }
+        let streams_reset = self.reset_streams_not_authorized_by(&next);
 
         LiveWorkDispatch {
             connections_closed,
@@ -219,41 +218,62 @@ impl TunnelRegistry {
         closed
     }
 
-    pub(crate) async fn track_visitor_stream(
+    pub(crate) fn track_visitor_stream(
         &self,
         public_hostname: PublicHostname,
         member_id: u64,
+        client_identity: ClientIdentity,
         abort_handle: AbortHandle,
     ) -> u64 {
         let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         self.visitor_streams
             .write()
-            .await
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(ActiveVisitorStream {
                 stream_id,
                 public_hostname,
                 member_id,
+                client_identity,
                 abort_handle,
             });
         stream_id
     }
 
-    pub(crate) async fn untrack_visitor_stream(&self, stream_id: u64) {
+    pub(crate) fn untrack_visitor_stream(&self, stream_id: u64) {
         self.visitor_streams
             .write()
-            .await
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .retain(|stream| stream.stream_id != stream_id);
     }
 
-    #[allow(dead_code)] // called from commit_authorization
-    pub(crate) async fn reset_streams_for_public_hostname(
+    #[allow(dead_code)] // selective hostname revocation; also used by tests
+    pub(crate) fn reset_streams_for_public_hostname(
         &self,
         public_hostname: &PublicHostname,
     ) -> usize {
-        let mut streams = self.visitor_streams.write().await;
+        self.reset_streams_matching(|stream| &stream.public_hostname == public_hostname)
+    }
+
+    #[allow(dead_code)] // selective serving-connection revocation
+    pub(crate) fn reset_streams_for_member(&self, member_id: u64) -> usize {
+        self.reset_streams_matching(|stream| stream.member_id == member_id)
+    }
+
+    fn reset_streams_not_authorized_by(&self, snapshot: &AuthorizationSnapshot) -> usize {
+        self.reset_streams_matching(|stream| !stream_remains_authorized(stream, snapshot))
+    }
+
+    fn reset_streams_matching(
+        &self,
+        mut should_reset: impl FnMut(&ActiveVisitorStream) -> bool,
+    ) -> usize {
+        let mut streams = self
+            .visitor_streams
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut reset = 0;
         streams.retain(|stream| {
-            if &stream.public_hostname == public_hostname {
+            if should_reset(stream) {
                 stream.abort_handle.abort();
                 reset += 1;
                 false
@@ -265,15 +285,18 @@ impl TunnelRegistry {
     }
 
     #[cfg(test)]
-    pub(crate) async fn tracked_visitor_stream_count(&self) -> usize {
-        self.visitor_streams.read().await.len()
+    pub(crate) fn tracked_visitor_stream_count(&self) -> usize {
+        self.visitor_streams
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 
     #[cfg(test)]
-    pub(crate) async fn tracked_visitor_hostnames(&self) -> Vec<PublicHostname> {
+    pub(crate) fn tracked_visitor_hostnames(&self) -> Vec<PublicHostname> {
         self.visitor_streams
             .read()
-            .await
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .map(|stream| stream.public_hostname.clone())
             .collect()
@@ -326,6 +349,19 @@ fn client_identity_from_connection(connection: &Connection) -> Option<ClientIden
     let certificate_chain = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
     let certificate = certificate_chain.first()?;
     client_identity_from_certificate_der(certificate.as_ref()).ok()
+}
+
+fn stream_remains_authorized(
+    stream: &ActiveVisitorStream,
+    snapshot: &AuthorizationSnapshot,
+) -> bool {
+    match (
+        snapshot.tunnel_index_for_public_hostname(&stream.public_hostname),
+        snapshot.tunnel_index_for_client_identity(&stream.client_identity),
+    ) {
+        (Some(hostname_tunnel), Some(identity_tunnel)) => hostname_tunnel == identity_tunnel,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -511,25 +547,23 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         });
-        let app_stream_id = registry
-            .track_visitor_stream(
-                public_hostname("app.example.test"),
-                1,
-                app_task.abort_handle(),
-            )
-            .await;
-        let api_stream_id = registry
-            .track_visitor_stream(
-                public_hostname("api.example.test"),
-                2,
-                api_task.abort_handle(),
-            )
-            .await;
+        let app_identity = generate_test_client_identity()?.client_identity;
+        let api_identity = generate_test_client_identity()?.client_identity;
+        let app_stream_id = registry.track_visitor_stream(
+            public_hostname("app.example.test"),
+            1,
+            app_identity,
+            app_task.abort_handle(),
+        );
+        let api_stream_id = registry.track_visitor_stream(
+            public_hostname("api.example.test"),
+            2,
+            api_identity,
+            api_task.abort_handle(),
+        );
 
         assert_eq!(
-            registry
-                .reset_streams_for_public_hostname(&public_hostname("app.example.test"))
-                .await,
+            registry.reset_streams_for_public_hostname(&public_hostname("app.example.test")),
             1
         );
         assert!(
@@ -539,15 +573,178 @@ mod tests {
                 .is_cancelled()
         );
         assert_eq!(
-            registry.tracked_visitor_hostnames().await,
+            registry.tracked_visitor_hostnames(),
             vec![public_hostname("api.example.test")]
         );
 
         keep_running.store(false, std::sync::atomic::Ordering::Relaxed);
         api_task.await.expect("api stream should finish normally");
-        registry.untrack_visitor_stream(api_stream_id).await;
-        registry.untrack_visitor_stream(app_stream_id).await;
-        assert_eq!(registry.tracked_visitor_stream_count().await, 0);
+        registry.untrack_visitor_stream(api_stream_id);
+        registry.untrack_visitor_stream(app_stream_id);
+        assert_eq!(registry.tracked_visitor_stream_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn commit_authorization_resets_streams_for_revoked_identities_and_remapped_hostnames()
+    -> io::Result<()> {
+        let first_identity = generate_test_client_identity()?;
+        let second_identity = generate_test_client_identity()?;
+        let registry = TunnelRegistry::configured(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                public_hostnames: vec![
+                    public_hostname("app.example.test"),
+                    public_hostname("shared.example.test"),
+                ],
+                authorized_client_identities: vec![first_identity.client_identity.clone()],
+            }],
+        )?;
+
+        let keep_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let remapped_keep = keep_running.clone();
+        let surviving_keep = keep_running.clone();
+        let revoked_keep = keep_running.clone();
+        let remapped_task = tokio::spawn(async move {
+            while remapped_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        });
+        let surviving_task = tokio::spawn(async move {
+            while surviving_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        });
+        let revoked_task = tokio::spawn(async move {
+            while revoked_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        });
+
+        registry.track_visitor_stream(
+            public_hostname("shared.example.test"),
+            1,
+            first_identity.client_identity.clone(),
+            remapped_task.abort_handle(),
+        );
+        registry.track_visitor_stream(
+            public_hostname("app.example.test"),
+            1,
+            first_identity.client_identity.clone(),
+            surviving_task.abort_handle(),
+        );
+
+        let remapped = registry.authorization().prepare(
+            &server_hostname("tunnel.example.test"),
+            &[
+                ServerTunnelConfig {
+                    public_hostnames: vec![public_hostname("app.example.test")],
+                    authorized_client_identities: vec![first_identity.client_identity.clone()],
+                },
+                ServerTunnelConfig {
+                    public_hostnames: vec![public_hostname("shared.example.test")],
+                    authorized_client_identities: vec![second_identity.client_identity.clone()],
+                },
+            ],
+        )?;
+        let dispatch = registry.commit_authorization(remapped).await;
+        assert_eq!(dispatch.streams_reset, 1);
+        assert!(
+            remapped_task
+                .await
+                .expect_err("hostname remapped away from serving identity should abort")
+                .is_cancelled()
+        );
+        assert_eq!(
+            registry.tracked_visitor_hostnames(),
+            vec![public_hostname("app.example.test")]
+        );
+
+        registry.track_visitor_stream(
+            public_hostname("app.example.test"),
+            1,
+            first_identity.client_identity.clone(),
+            revoked_task.abort_handle(),
+        );
+
+        let revoke_first = registry.authorization().prepare(
+            &server_hostname("tunnel.example.test"),
+            &[
+                ServerTunnelConfig {
+                    public_hostnames: vec![public_hostname("app.example.test")],
+                    authorized_client_identities: vec![
+                        generate_test_client_identity()?.client_identity,
+                    ],
+                },
+                ServerTunnelConfig {
+                    public_hostnames: vec![public_hostname("shared.example.test")],
+                    authorized_client_identities: vec![second_identity.client_identity.clone()],
+                },
+            ],
+        )?;
+        let dispatch = registry.commit_authorization(revoke_first).await;
+        assert_eq!(dispatch.streams_reset, 2);
+        assert!(
+            surviving_task
+                .await
+                .expect_err("revoked Client identity stream should abort")
+                .is_cancelled()
+        );
+        assert!(
+            revoked_task
+                .await
+                .expect_err("later stream for revoked identity should abort")
+                .is_cancelled()
+        );
+        assert_eq!(registry.tracked_visitor_stream_count(), 0);
+
+        keep_running.store(false, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_streams_for_member_aborts_only_matching_serving_connection() -> io::Result<()> {
+        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
+        let keep_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let first_keep = keep_running.clone();
+        let second_keep = keep_running.clone();
+        let first_task = tokio::spawn(async move {
+            while first_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        });
+        let second_task = tokio::spawn(async move {
+            while second_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        });
+        let identity = generate_test_client_identity()?.client_identity;
+        registry.track_visitor_stream(
+            public_hostname("app.example.test"),
+            7,
+            identity.clone(),
+            first_task.abort_handle(),
+        );
+        registry.track_visitor_stream(
+            public_hostname("app.example.test"),
+            8,
+            identity,
+            second_task.abort_handle(),
+        );
+
+        assert_eq!(registry.reset_streams_for_member(7), 1);
+        assert!(
+            first_task
+                .await
+                .expect_err("member stream should abort")
+                .is_cancelled()
+        );
+        assert_eq!(registry.tracked_visitor_stream_count(), 1);
+
+        keep_running.store(false, std::sync::atomic::Ordering::Relaxed);
+        second_task
+            .await
+            .expect("other member stream should finish normally");
         Ok(())
     }
 

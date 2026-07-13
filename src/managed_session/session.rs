@@ -1,25 +1,34 @@
-//! Managed-session reconnect loop.
+//! Managed-session reconnect, reconciliation, and applied-revision reporting.
 
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
 use rand::rngs::StdRng;
+use tokio::time::Instant;
 
+use super::adapter::RoleAdapter;
 use super::connection::{ConnectionError, ManagedSessionConnection};
+use super::reconcile::{AppliedRevision, QueuedSnapshot, SnapshotQueue};
 use super::role::ManagedSessionRole;
 use super::snapshot::{SnapshotEnvelope, SnapshotError, parse_snapshot_event};
 use super::sse::{SseParseError, SseParseItem, SseParser};
-use super::timing::{FIRST_SNAPSHOT_DEADLINE, SessionClock, SessionDeadlines, SystemSessionClock};
+use super::timing::{
+    FIRST_SNAPSHOT_DEADLINE, STATE_HEARTBEAT, SessionClock, SessionDeadlines, SystemSessionClock,
+};
 use super::tls::{ControlTlsMaterialError, SessionMaterial, load_control_tls_material};
 use crate::ControlAddress;
 use crate::reconnect_policy::ReconnectPolicy;
 
-/// Events emitted by the Managed-session downlink loop.
+/// Events emitted by the Managed-session engine for local observability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManagedSessionEvent {
     /// A validated snapshot envelope was received on the active downlink.
     Snapshot(SnapshotEnvelope),
+    /// A revision was successfully applied through the role adapter.
+    Applied { revision: String },
+    /// Role input was rejected or invalid; prior applied revision is retained.
+    Rejected { revision: String },
     /// The session is waiting before replacing a failed connection.
     Reconnecting { display_delay_secs: u64 },
 }
@@ -65,13 +74,14 @@ impl std::error::Error for ManagedSessionError {
     }
 }
 
-/// Role-neutral Managed-session downlink runner.
+/// Role-neutral Managed-session engine.
 pub struct ManagedSession<C = SystemSessionClock> {
     address: ControlAddress,
     role: ManagedSessionRole,
     material: SessionMaterial,
     clock: C,
     reconnect: ReconnectPolicy<StdRng>,
+    applied: AppliedRevision,
 }
 
 impl ManagedSession<SystemSessionClock> {
@@ -101,12 +111,24 @@ impl<C: SessionClock> ManagedSession<C> {
             material,
             clock,
             reconnect: ReconnectPolicy::new(),
+            applied: AppliedRevision::new(),
         })
     }
 
-    /// Run until `shutdown` completes, emitting downlink events to `on_event`.
-    pub async fn run<F, Fut, S, Shut>(&mut self, mut on_event: F, shutdown: S) -> Shut
+    /// Last successfully applied revision retained in this process only.
+    pub fn applied_revision(&self) -> Option<&str> {
+        self.applied.get()
+    }
+
+    /// Run until `shutdown` completes, driving the role adapter and reporting.
+    pub async fn run<A, F, Fut, S, Shut>(
+        &mut self,
+        adapter: &mut A,
+        mut on_event: F,
+        shutdown: S,
+    ) -> Shut
     where
+        A: RoleAdapter,
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
         S: Future<Output = Shut>,
@@ -116,14 +138,11 @@ impl<C: SessionClock> ManagedSession<C> {
             let outcome = tokio::select! {
                 biased;
                 shutdown_result = &mut shutdown => return shutdown_result,
-                outcome = self.run_one_connection(&mut on_event) => outcome,
+                outcome = self.run_one_connection(adapter, &mut on_event) => outcome,
             };
 
             match outcome {
-                Ok(()) => {
-                    // Clean shutdown from inside the connection is unexpected;
-                    // treat it like a stream end and reconnect.
-                }
+                Ok(()) => {}
                 Err(error) => {
                     tracing::warn!(error = %error, "managed session downlink failed");
                 }
@@ -143,89 +162,296 @@ impl<C: SessionClock> ManagedSession<C> {
         }
     }
 
-    async fn run_one_connection<F, Fut>(
+    async fn run_one_connection<A, F, Fut>(
         &mut self,
+        adapter: &mut A,
         on_event: &mut F,
     ) -> Result<(), ManagedSessionError>
     where
+        A: RoleAdapter,
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
     {
         let tls =
             load_control_tls_material(&self.material).map_err(ManagedSessionError::TlsMaterial)?;
-        let mut deadlines = SessionDeadlines::new(self.clock.now());
-        let mut connection = tokio::time::timeout(
+        let connection = tokio::time::timeout(
             FIRST_SNAPSHOT_DEADLINE,
             ManagedSessionConnection::connect(&self.address, &tls, self.role),
         )
         .await
         .map_err(|_| ManagedSessionError::FirstSnapshotTimeout)?
         .map_err(ManagedSessionError::Connection)?;
-        let mut parser = SseParser::new();
-        let mut received_valid_snapshot = false;
+        let mut loop_state = ConnectionLoop::<A::Input> {
+            connection,
+            parser: SseParser::new(),
+            deadlines: SessionDeadlines::new(self.clock.now()),
+            received_valid_snapshot: false,
+            queue: SnapshotQueue::new(),
+            next_heartbeat: self
+                .applied
+                .get()
+                .map(|_| self.clock.now() + STATE_HEARTBEAT),
+        };
 
         loop {
-            let wait = deadlines
-                .next_deadline()
-                .saturating_duration_since(self.clock.now());
-            let wait = if wait.is_zero() {
-                Duration::from_millis(1)
-            } else {
-                wait
-            };
+            let snapshot = self
+                .wait_for_apply_candidate::<A, _, _>(&mut loop_state, on_event)
+                .await?;
+            self.apply_while_reading(adapter, snapshot, &mut loop_state, on_event)
+                .await?;
+        }
+    }
 
-            let chunk = tokio::select! {
-                chunk = connection.next_chunk() => chunk,
-                _ = tokio::time::sleep(wait) => {
-                    let now = self.clock.now();
-                    if deadlines.expired(now) {
-                        if !received_valid_snapshot
-                            && now >= deadlines.first_snapshot_deadline
-                        {
-                            return Err(ManagedSessionError::FirstSnapshotTimeout);
-                        }
-                        return Err(ManagedSessionError::SilenceTimeout);
-                    }
+    async fn wait_for_apply_candidate<A, F, Fut>(
+        &mut self,
+        loop_state: &mut ConnectionLoop<A::Input>,
+        on_event: &mut F,
+    ) -> Result<QueuedSnapshot<A::Input>, ManagedSessionError>
+    where
+        A: RoleAdapter,
+        F: FnMut(ManagedSessionEvent) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        loop {
+            if let Some(pending) = loop_state.queue.take_next() {
+                if self.applied.matches(&pending.revision) {
+                    loop_state.queue.finish_apply();
+                    self.report_applied(loop_state).await;
                     continue;
                 }
-            };
-
-            let Some(bytes) = chunk.map_err(ManagedSessionError::Connection)? else {
-                return Err(ManagedSessionError::StreamEnded);
-            };
-            if bytes.is_empty() {
-                continue;
+                return Ok(pending);
             }
 
-            let now = self.clock.now();
-            deadlines.note_bytes(now);
-
-            let items = parser.push(&bytes).map_err(ManagedSessionError::Sse)?;
-            for item in items {
-                match item {
-                    SseParseItem::Comment => {
-                        // Comments refresh silence via note_bytes above but do
-                        // not extend the first-snapshot deadline.
-                    }
-                    SseParseItem::Event(event) => {
-                        if event.event_type.is_none() && event.data.is_empty() {
-                            // Standard SSE discards empty events; a blank
-                            // dispatch after comments or ignored fields is not
-                            // a session failure.
-                            continue;
-                        }
-                        let envelope =
-                            parse_snapshot_event(event.event_type.as_deref(), &event.data)
-                                .map_err(ManagedSessionError::Snapshot)?;
-                        deadlines.note_valid_snapshot(now);
-                        if !received_valid_snapshot {
-                            received_valid_snapshot = true;
-                            self.reconnect.reset();
-                        }
-                        on_event(ManagedSessionEvent::Snapshot(envelope)).await;
-                    }
+            let wait = next_wait(
+                &loop_state.deadlines,
+                loop_state.next_heartbeat,
+                self.clock.now(),
+            );
+            tokio::select! {
+                chunk = loop_state.connection.next_chunk() => {
+                    self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, false)
+                        .await?;
+                }
+                _ = tokio::time::sleep(wait) => {
+                    self.handle_timer(loop_state).await?;
                 }
             }
         }
+    }
+
+    async fn apply_while_reading<A, F, Fut>(
+        &mut self,
+        adapter: &mut A,
+        snapshot: QueuedSnapshot<A::Input>,
+        loop_state: &mut ConnectionLoop<A::Input>,
+        on_event: &mut F,
+    ) -> Result<(), ManagedSessionError>
+    where
+        A: RoleAdapter,
+        F: FnMut(ManagedSessionEvent) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let QueuedSnapshot { revision, input } = snapshot;
+        let apply = adapter.apply(input);
+        tokio::pin!(apply);
+
+        let apply_result = loop {
+            let wait = next_wait(
+                &loop_state.deadlines,
+                loop_state.next_heartbeat,
+                self.clock.now(),
+            );
+            tokio::select! {
+                result = &mut apply => break result,
+                chunk = loop_state.connection.next_chunk() => {
+                    self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, true)
+                        .await?;
+                }
+                _ = tokio::time::sleep(wait) => {
+                    self.handle_timer(loop_state).await?;
+                }
+            }
+        };
+
+        match apply_result {
+            Ok(()) => {
+                self.applied.set(revision.clone());
+                on_event(ManagedSessionEvent::Applied {
+                    revision: revision.clone(),
+                })
+                .await;
+                self.report_applied(loop_state).await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "managed session role input rejected"
+                );
+                on_event(ManagedSessionEvent::Rejected { revision }).await;
+            }
+        }
+        loop_state.queue.finish_apply();
+        Ok(())
+    }
+
+    async fn ingest_chunk<A, F, Fut>(
+        &mut self,
+        chunk: Result<Option<bytes::Bytes>, ConnectionError>,
+        loop_state: &mut ConnectionLoop<A::Input>,
+        on_event: &mut F,
+        applying: bool,
+    ) -> Result<(), ManagedSessionError>
+    where
+        A: RoleAdapter,
+        F: FnMut(ManagedSessionEvent) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let Some(bytes) = chunk.map_err(ManagedSessionError::Connection)? else {
+            return Err(ManagedSessionError::StreamEnded);
+        };
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        let now = self.clock.now();
+        loop_state.deadlines.note_bytes(now);
+
+        let items = loop_state
+            .parser
+            .push(&bytes)
+            .map_err(ManagedSessionError::Sse)?;
+        for item in items {
+            match item {
+                SseParseItem::Comment => {}
+                SseParseItem::Event(event) => {
+                    if event.event_type.is_none() && event.data.is_empty() {
+                        continue;
+                    }
+                    let envelope = parse_snapshot_event(event.event_type.as_deref(), &event.data)
+                        .map_err(ManagedSessionError::Snapshot)?;
+                    loop_state.deadlines.note_valid_snapshot(now);
+                    if !loop_state.received_valid_snapshot {
+                        loop_state.received_valid_snapshot = true;
+                        self.reconnect.reset();
+                    }
+                    on_event(ManagedSessionEvent::Snapshot(envelope.clone())).await;
+                    self.accept_envelope::<A, _, _>(envelope, loop_state, on_event, applying)
+                        .await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn accept_envelope<A, F, Fut>(
+        &mut self,
+        envelope: SnapshotEnvelope,
+        loop_state: &mut ConnectionLoop<A::Input>,
+        on_event: &mut F,
+        applying: bool,
+    ) where
+        A: RoleAdapter,
+        F: FnMut(ManagedSessionEvent) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        if !applying && self.applied.matches(&envelope.revision) {
+            self.report_applied(loop_state).await;
+            return;
+        }
+
+        // Validate through the role adapter before queueing so invalid or
+        // adapter-rejected candidates never displace a newer valid pending
+        // snapshot. The parsed input is retained so apply does not re-parse.
+        let input = match A::parse_input(&envelope.input) {
+            Ok(input) => input,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "managed session role input invalid"
+                );
+                on_event(ManagedSessionEvent::Rejected {
+                    revision: envelope.revision,
+                })
+                .await;
+                return;
+            }
+        };
+
+        let queued = QueuedSnapshot {
+            revision: envelope.revision,
+            input,
+        };
+        if applying {
+            loop_state.queue.note_while_applying(queued);
+        } else {
+            loop_state.queue.note_when_idle(queued);
+        }
+    }
+
+    async fn handle_timer<I>(
+        &self,
+        loop_state: &mut ConnectionLoop<I>,
+    ) -> Result<(), ManagedSessionError> {
+        let now = self.clock.now();
+        if loop_state.deadlines.expired(now) {
+            if !loop_state.received_valid_snapshot
+                && now >= loop_state.deadlines.first_snapshot_deadline
+            {
+                return Err(ManagedSessionError::FirstSnapshotTimeout);
+            }
+            return Err(ManagedSessionError::SilenceTimeout);
+        }
+        if let Some(deadline) = loop_state.next_heartbeat
+            && now >= deadline
+        {
+            self.report_applied(loop_state).await;
+        }
+        Ok(())
+    }
+
+    async fn report_applied<I>(&self, loop_state: &mut ConnectionLoop<I>) {
+        let Some(revision) = self.applied.get() else {
+            return;
+        };
+        match loop_state.connection.put_applied_revision(revision).await {
+            Ok(()) => {
+                loop_state.next_heartbeat = Some(self.clock.now() + STATE_HEARTBEAT);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "managed session state report failed"
+                );
+                // Retain the latest full state and retry on the next heartbeat.
+                // Do not disturb the SSE downlink or introduce a second backoff.
+                loop_state.next_heartbeat = Some(self.clock.now() + STATE_HEARTBEAT);
+            }
+        }
+    }
+}
+
+struct ConnectionLoop<I> {
+    connection: ManagedSessionConnection,
+    parser: SseParser,
+    deadlines: SessionDeadlines,
+    received_valid_snapshot: bool,
+    queue: SnapshotQueue<I>,
+    next_heartbeat: Option<Instant>,
+}
+
+fn next_wait(
+    deadlines: &SessionDeadlines,
+    next_heartbeat: Option<Instant>,
+    now: Instant,
+) -> Duration {
+    let mut deadline = deadlines.next_deadline();
+    if let Some(heartbeat) = next_heartbeat {
+        deadline = deadline.min(heartbeat);
+    }
+    let wait = deadline.saturating_duration_since(now);
+    if wait.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        wait
     }
 }

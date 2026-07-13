@@ -1,10 +1,11 @@
-//! One authenticated HTTP/2 Control connection carrying the SSE downlink.
+//! One authenticated HTTP/2 Control connection carrying the SSE downlink and
+//! concurrent applied-state writes.
 
 use std::fmt;
 
 use bytes::Bytes;
 use http::{Request, Uri};
-use http_body_util::{BodyExt, Empty};
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::client::conn::http2::{self, SendRequest};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -13,8 +14,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-use super::role::{ManagedSessionRole, events_path};
-use super::status::{SseResponseClass, classify_sse_response};
+use super::role::{ManagedSessionRole, events_path, state_path};
+use super::status::{
+    SseResponseClass, StateResponseClass, classify_sse_response, classify_state_incoming,
+};
 use super::tls::{CONTROL_ALPN_H2, ControlTlsMaterial};
 use crate::ControlAddress;
 
@@ -28,6 +31,7 @@ pub enum ConnectionError {
     ServerName(String),
     Http(hyper::Error),
     SseRejected,
+    StateRejected,
     Body(hyper::Error),
 }
 
@@ -43,6 +47,9 @@ impl fmt::Display for ConnectionError {
             Self::SseRejected => {
                 formatter.write_str("control SSE response was not status 200 event-stream")
             }
+            Self::StateRejected => {
+                formatter.write_str("control state response was not status 204 with an empty body")
+            }
             Self::Body(error) => write!(formatter, "control SSE body error: {error}"),
         }
     }
@@ -53,20 +60,22 @@ impl std::error::Error for ConnectionError {
         match self {
             Self::Dns(error) | Self::Connect(error) | Self::Tls(error) => Some(error),
             Self::Http(error) | Self::Body(error) => Some(error),
-            Self::Alpn | Self::ServerName(_) | Self::SseRejected => None,
+            Self::Alpn | Self::ServerName(_) | Self::SseRejected | Self::StateRejected => None,
         }
     }
 }
 
 /// Authenticated HTTP/2 connection with an open SSE downlink.
 ///
-/// The sender half remains available so later work can open state-report
+/// The sender half remains available so applied-state writes can open concurrent
 /// streams on the same connection. Dropping this value closes the connection.
 pub struct ManagedSessionConnection {
-    sender: SendRequest<Empty<Bytes>>,
+    sender: SendRequest<Full<Bytes>>,
     // Keep the connection driver alive for the lifetime of the session.
     conn: Option<tokio::task::JoinHandle<Result<(), hyper::Error>>>,
     body: Incoming,
+    authority: String,
+    role: ManagedSessionRole,
 }
 
 impl Drop for ManagedSessionConnection {
@@ -134,6 +143,43 @@ impl ManagedSessionConnection {
     pub fn can_send_additional_request(&self) -> bool {
         !self.sender.is_closed()
     }
+
+    /// PUT the applied revision on a concurrent stream of this connection.
+    ///
+    /// State writes are valid only after the matching SSE downlink is active,
+    /// which is true for any constructed [`ManagedSessionConnection`].
+    pub async fn put_applied_revision(&mut self, revision: &str) -> Result<(), ConnectionError> {
+        let uri = Uri::builder()
+            .scheme("https")
+            .authority(self.authority.clone())
+            .path_and_query(state_path(self.role))
+            .build()
+            .expect("control state URI is valid by construction");
+        let payload = serde_json::json!({ "revision": revision });
+        let body = Full::new(Bytes::from(
+            serde_json::to_vec(&payload).expect("revision payload serializes"),
+        ));
+        let request = Request::builder()
+            .method("PUT")
+            .uri(uri)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .expect("state request is valid by construction");
+
+        let response = self
+            .sender
+            .send_request(request)
+            .await
+            .map_err(ConnectionError::Http)?;
+        let status = response.status();
+        let class = classify_state_incoming(status, response.into_body())
+            .await
+            .map_err(ConnectionError::Http)?;
+        if class != StateResponseClass::Success {
+            return Err(ConnectionError::StateRejected);
+        }
+        Ok(())
+    }
 }
 
 async fn handshake_and_open_sse<S>(
@@ -160,7 +206,7 @@ where
     };
     let uri = Uri::builder()
         .scheme("https")
-        .authority(authority)
+        .authority(authority.clone())
         .path_and_query(path)
         .build()
         .expect("control SSE URI is valid by construction");
@@ -169,7 +215,7 @@ where
         .method("GET")
         .uri(uri)
         .header(http::header::ACCEPT, "text/event-stream")
-        .body(Empty::<Bytes>::new())
+        .body(Full::new(Bytes::new()))
         .expect("SSE request is valid by construction");
 
     let response = sender
@@ -187,5 +233,7 @@ where
         sender,
         conn: Some(conn_handle),
         body: response.into_body(),
+        authority,
+        role,
     })
 }

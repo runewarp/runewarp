@@ -47,8 +47,8 @@ where
 
     let shutdown = controller.shutdown_handle();
     if let Some(control) = settings.control.as_ref() {
-        // Managed mode: run the Control downlink until shutdown. Snapshot apply
-        // and state reporting land in later Managed-session work.
+        // Managed mode: run the Control session until shutdown. Server/Client
+        // authorization and address-controller wiring land in later issues.
         let material = runewarp::SessionMaterial {
             control_hostname: control.address.hostname().as_str().to_owned(),
             trust: control.trust.clone(),
@@ -61,7 +61,9 @@ where
             runewarp::ManagedSessionRole::Client,
             material,
         )?;
+        let mut adapter = runewarp::DeferredClientAdapter;
         let shutdown_result = session.run(
+            &mut adapter,
             |event| async move {
                 runewarp::runtime_log::managed_session_event(
                     runewarp::ManagedSessionRole::Client,

@@ -131,7 +131,7 @@ When the remote **Server** exits gracefully, the **Client instance** still treat
 
 When more than one authenticated connection is live for the same **Tunnel** on one **Server** node, those connections form a **Tunnel pool**. Each new Visitor stream is placed onto the pool member with the fewest active proxied streams, with round-robin tie-breaking when load is equal. If the chosen member dies before the proxied stream is established, the Visitor connection fails immediately; the Server does not retry placement onto a different pool member.
 
-## Managed-session Control downlink
+## Managed-session Control protocol
 
 In **Managed mode**, each Server or Client runtime establishes one mutually authenticated HTTPS session to the configured **Control address**:
 
@@ -141,9 +141,10 @@ In **Managed mode**, each Server or Client runtime establishes one mutually auth
 4. Accept the SSE response only for status `200` with media type `text/event-stream`. Redirects, status `204`, other non-success statuses, and wrong media types fail the session.
 5. Parse standard SSE framing. Comment lines are keepalives. `id` and `retry` fields are ignored. Every data event must be `event: snapshot` with JSON that includes a non-empty opaque `revision` and an `input` object; unknown JSON fields in a known v1 snapshot are ignored. Malformed framing, invalid UTF-8/JSON, missing required fields, empty revisions, and unknown event types fail the session.
 6. The first valid snapshot has an independent 60-second deadline that keepalive comments cannot extend. Any 60-second silence without SSE bytes also replaces the session.
-7. Any downlink failure closes the entire HTTP/2 connection before reconnect. Reconnect uses the same full-jitter windows capped at 60 seconds as Tunnel reconnect; the policy resets only after a valid snapshot establishes the new session.
-
-The current runtime does not open state-report streams or apply role input. After the SSE response succeeds, the downlink keeps the authenticated HTTP/2 connection ready for additional streams.
+7. Validate role-specific `input` before reconciliation. Server input uses canonical plural `tunnels` entries with `public_hostnames` and `client_identities` only. Client input uses canonical plural `server_addresses`. Empty overall collections are valid. Invalid input is not acknowledged: the SSE stream stays open and the prior successfully applied revision is retained.
+8. Reconciliation is latest-state and non-preemptive. Equal applied revisions skip apply. Previously applied non-current revisions remain valid rollback candidates. While an apply runs, newer complete snapshots collapse to one pending candidate.
+9. After the first successful apply, report the last successfully applied revision with `PUT /v1/server/state` or `PUT /v1/client/state` on the same authenticated HTTP/2 connection. The JSON body contains only `revision`. State writes begin only after the matching downlink is active, succeed only for exact status `204` with an empty body, report immediately after apply, and repeat every 20 seconds. A failed state write leaves the SSE stream undisturbed and retries on the next heartbeat without a second backoff machine.
+10. Any downlink failure closes the entire HTTP/2 connection before reconnect. Reconnect uses the same full-jitter windows capped at 60 seconds as Tunnel reconnect; the policy resets only after a valid snapshot establishes the new session. Applied revision state is memory-only and does not survive process restart.
 
 ## Runtime invariants
 

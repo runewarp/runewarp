@@ -515,6 +515,20 @@ pub fn managed_session_event(role: ManagedSessionRole, event: &ManagedSessionEve
                 [("role", Cow::Borrowed(role))],
             ),
         ),
+        ManagedSessionEvent::Applied { revision: _ } => emit(
+            EventLevel::Info,
+            &event_line(
+                "managed session revision applied",
+                [("role", Cow::Borrowed(role))],
+            ),
+        ),
+        ManagedSessionEvent::Rejected { revision: _ } => emit(
+            EventLevel::Warn,
+            &event_line(
+                "managed session revision rejected",
+                [("role", Cow::Borrowed(role))],
+            ),
+        ),
         ManagedSessionEvent::Reconnecting { display_delay_secs } => emit(
             EventLevel::Warn,
             &event_line(

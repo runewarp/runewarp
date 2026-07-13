@@ -78,6 +78,7 @@ Managed mode introduces a separate trust boundary for the Control endpoint:
 2. the Client authenticates to Control with the same Client identity material used for Tunnel mTLS from `client.identity-dir`
 3. the Client and Server validate the Control endpoint through `control.trust = "system"` or through `control.trust = "ca-file"` with an exclusive CA bundle
 4. Control sessions require mutually authenticated TLS with mandatory HTTP/2 ALPN; Core does not follow Control redirects and does not fall back to HTTP/1.1
+5. Applied-state reports share that same authenticated connection after the role-specific SSE downlink is active and carry only the last successfully applied opaque revision
 
 **Server identity** is not the **Server certificate**. The Server certificate still identifies the tunnel endpoint to Clients. Server identity is a pinned public-key identity presented only to Control.
 

@@ -590,6 +590,8 @@ address = "configured.example.test"
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
 identity-dir = "server-identity"
+public-bind-address = "127.0.0.1:0"
+tunnel-bind-address = "127.0.0.1:0"
 "#,
     )?;
 

@@ -16,21 +16,21 @@ use crate::{ServerHostname, ServerTunnelConfig};
 use super::tunnel_registry::TunnelRegistry;
 
 /// Shared gate for the probe-only readiness listener.
+///
+/// Marks when the Server should start accepting readiness probes. The listener
+/// task owns port reservation and emits `server_readiness_gained` only after
+/// `listen()` succeeds.
 #[derive(Clone, Debug)]
 pub(crate) struct ReadinessGate {
     ready: Arc<AtomicBool>,
-    gained_logged: Arc<AtomicBool>,
     notify: Arc<Notify>,
-    bind_address: std::net::SocketAddr,
 }
 
 impl ReadinessGate {
-    pub(crate) fn new(bind_address: std::net::SocketAddr, initially_ready: bool) -> Self {
+    pub(crate) fn new(initially_ready: bool) -> Self {
         Self {
             ready: Arc::new(AtomicBool::new(initially_ready)),
-            gained_logged: Arc::new(AtomicBool::new(initially_ready)),
             notify: Arc::new(Notify::new()),
-            bind_address,
         }
     }
 
@@ -56,9 +56,6 @@ impl ReadinessGate {
     pub(crate) fn mark_ready(&self) {
         self.ready.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
-        if !self.gained_logged.swap(true, Ordering::SeqCst) {
-            crate::runtime_log::server_readiness_gained(self.bind_address);
-        }
     }
 }
 
@@ -112,5 +109,45 @@ impl RoleAdapter for ServerAuthorizationAdapter {
 
     async fn apply(&mut self, input: Self::Input) -> Result<(), ApplyError> {
         self.commit_tunnels(&input.tunnels).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::Notify;
+
+    use super::ReadinessGate;
+
+    #[tokio::test]
+    async fn wait_until_ready_observes_mark_ready_without_missing_notify() {
+        let gate = ReadinessGate::new(false);
+        let started = Arc::new(Notify::new());
+        let waiter_started = started.clone();
+        let waiter_gate = gate.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_started.notify_one();
+            waiter_gate.wait_until_ready().await;
+        });
+
+        started.notified().await;
+        // Yield so the waiter reaches notified().await before mark_ready.
+        tokio::task::yield_now().await;
+        gate.mark_ready();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("wait_until_ready should observe mark_ready")
+            .expect("waiter task should finish");
+        assert!(gate.is_ready());
+    }
+
+    #[tokio::test]
+    async fn wait_until_ready_returns_immediately_when_already_ready() {
+        let gate = ReadinessGate::new(true);
+        tokio::time::timeout(Duration::from_millis(50), gate.wait_until_ready())
+            .await
+            .expect("already-ready gate must not block");
     }
 }

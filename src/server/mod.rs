@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use quinn::Endpoint;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 
 use crate::{
     HANDSHAKE_TIMEOUT, ServerHostname,
@@ -94,11 +94,11 @@ where
 
 impl ReadinessProbe {
     async fn bind(bind_addr: SocketAddr, initially_ready: bool) -> io::Result<Self> {
-        // Bind once to validate the address and capture any ephemeral port, then
-        // either start accepting immediately (static) or close until first apply
-        // (managed). Kernel listen backlog alone would otherwise make connect
-        // succeed while userspace still considers the Server Unready.
-        let listener = TcpListener::bind(bind_addr).await.map_err(|source| {
+        // Reserve the readiness port at startup. For managed admission, keep the
+        // socket bound without listen() so probes stay Unready and no other
+        // process can claim the port, then listen only after the first apply.
+        let socket = tcp_socket_for(bind_addr)?;
+        socket.bind(bind_addr).map_err(|source| {
             io::Error::new(
                 source.kind(),
                 format!(
@@ -107,30 +107,41 @@ impl ReadinessProbe {
                 ),
             )
         })?;
-        let bind_address = listener.local_addr()?;
-        let gate = ReadinessGate::new(bind_address, initially_ready);
-        let accept_gate = gate.clone();
+        let bind_address = socket.local_addr()?;
+        let gate = ReadinessGate::new(initially_ready);
         let task = if initially_ready {
+            let listener = socket.listen(128).map_err(|source| {
+                io::Error::new(
+                    source.kind(),
+                    format!(
+                        "failed to listen on server.readiness-bind-address {}: {}",
+                        bind_address, source
+                    ),
+                )
+            })?;
             tokio::spawn(async move {
                 accept_readiness_connections(listener).await;
             })
         } else {
-            drop(listener);
+            let accept_gate = gate.clone();
             tokio::spawn(async move {
                 accept_gate.wait_until_ready().await;
-                let listener = match TcpListener::bind(bind_address).await {
-                    Ok(listener) => listener,
+                match socket.listen(128) {
+                    Ok(listener) => {
+                        // Emit gained only after listen succeeds so a failed
+                        // listen cannot leave operators thinking readiness is up.
+                        runtime_log::server_readiness_gained(bind_address);
+                        accept_readiness_connections(listener).await;
+                    }
                     Err(error) => {
                         runtime_log::emit(
                             runtime_log::EventLevel::Error,
                             &format!(
-                                "failed to reopen server readiness listener on {bind_address}: {error}"
+                                "failed to listen on server readiness address {bind_address}: {error}"
                             ),
                         );
-                        return;
                     }
-                };
-                accept_readiness_connections(listener).await;
+                }
             })
         };
         Ok(Self {
@@ -150,6 +161,13 @@ impl ReadinessProbe {
 
     fn close(self) {
         self.task.abort();
+    }
+}
+
+fn tcp_socket_for(bind_addr: SocketAddr) -> io::Result<TcpSocket> {
+    match bind_addr {
+        SocketAddr::V4(_) => TcpSocket::new_v4(),
+        SocketAddr::V6(_) => TcpSocket::new_v6(),
     }
 }
 

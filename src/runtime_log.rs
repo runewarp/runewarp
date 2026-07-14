@@ -355,6 +355,13 @@ pub fn client_tunnel_closed(
     );
 }
 
+pub fn client_tunnel_retiring(configured_server_addr: &str) {
+    emit(
+        EventLevel::Info,
+        &client_tunnel_retiring_line(configured_server_addr),
+    );
+}
+
 pub fn client_tunnel_unauthorized(
     attempt_kind: ClientTunnelAttemptKind,
     configured_server_addr: &str,
@@ -1096,6 +1103,13 @@ fn client_tunnel_closed_line(
     )
 }
 
+fn client_tunnel_retiring_line(configured_server_addr: &str) -> String {
+    event_line(
+        "client tunnel connection retiring",
+        [("server-address", Cow::Borrowed(configured_server_addr))],
+    )
+}
+
 fn client_ready_line(configured_server_addr: &str) -> String {
     event_line(
         "client ready",
@@ -1282,9 +1296,9 @@ mod tests {
         client_graceful_shutdown_closing_tunnel_connection, client_graceful_shutdown_started,
         client_ready, client_route, client_trust_store_warning, client_tunnel_closed,
         client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
-        client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_unauthorized,
-        emit, emit_server_tunnel_connection_dropped, install, installed_level,
-        managed_session_event, server_graceful_shutdown_deadline_expired,
+        client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_retiring,
+        client_tunnel_unauthorized, emit, emit_server_tunnel_connection_dropped, install,
+        installed_level, managed_session_event, server_graceful_shutdown_deadline_expired,
         server_orderly_shutdown_closing_tunnel_connections, server_orderly_shutdown_escalated,
         server_orderly_shutdown_started, server_public_listener_ready, server_readiness_gained,
         server_readiness_listener_enabled, server_readiness_lost, server_route,
@@ -1556,6 +1570,7 @@ mod tests {
                 configured_server_addr,
                 resolved_server_addr,
             );
+            client_tunnel_retiring(configured_server_addr);
             client_ready(configured_server_addr);
             client_tunnel_closed(configured_server_addr, resolved_server_addr, 5);
             client_tunnel_disconnected(
@@ -1578,6 +1593,9 @@ mod tests {
         ));
         assert!(output.contains(
             "INFO client tunnel connection connected: server-address=tunnel.example.test:443"
+        ));
+        assert!(output.contains(
+            "INFO client tunnel connection retiring: server-address=tunnel.example.test:443"
         ));
         assert!(output.contains("INFO client ready: server-address=tunnel.example.test:443"));
         assert!(output.contains(

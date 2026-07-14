@@ -28,10 +28,10 @@ use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, CONTROL_ALPN_H2,
     ClientAssignmentAdapter, ClientAssignmentApply, ClientConfig, ClientIdentity, ClientTlsMode,
     ControlAddress, ControlClientIdentityMaterial, ControlTrust, LogLevel, MaintenanceIntent,
-    ManagedSession, ManagedSessionEvent, ManagedSessionRole, PreparedClient, PublicHostname,
-    Server, ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
-    ServerTunnelConfig, ServiceConfig, SessionMaterial, ShutdownMode,
-    client_identity_from_certificate_der, events_path,
+    ManagedSession, ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PreparedClient,
+    PublicHostname, QUIC_CLOSE_FLUSH_DURATION, Server, ServerAddress, ServerAdmission,
+    ServerAuthorization, ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
+    SessionMaterial, ShutdownMode, client_identity_from_certificate_der, events_path,
     make_server_quic_config_with_client_admission, state_path,
 };
 use rustls::RootCertStore;
@@ -145,7 +145,16 @@ impl ControlFixture {
 struct QuicServerNode {
     public_addr: SocketAddr,
     tunnel_addr: SocketAddr,
+    shutdown: OrderlyShutdown,
     task: JoinHandle<io::Result<()>>,
+}
+
+impl QuicServerNode {
+    /// Close Tunnel connections from the Server side (remote closure for Retiring Clients).
+    async fn close_remotely(self) {
+        let _ = self.shutdown.begin_fast();
+        let _ = timeout(Duration::from_secs(2), self.task).await;
+    }
 }
 
 struct ManagedClientHarness {
@@ -159,6 +168,7 @@ struct ManagedClientHarness {
     stop_tx: Option<oneshot::Sender<()>>,
     runtime_task: JoinHandle<Result<(), String>>,
     worker_count: Arc<Mutex<usize>>,
+    dial_attempts: Arc<AtomicUsize>,
     convergence: AssignmentConvergenceTracker,
 }
 
@@ -215,6 +225,7 @@ impl ManagedClientHarness {
         };
         let settings = Arc::new(settings);
         let worker_count = Arc::new(Mutex::new(0usize));
+        let dial_attempts = Arc::new(AtomicUsize::new(0));
         let convergence = AssignmentConvergenceTracker::new();
 
         let mut controller = AddressController::new();
@@ -237,6 +248,7 @@ impl ManagedClientHarness {
         .unwrap();
 
         let worker_count_task = Arc::clone(&worker_count);
+        let dial_attempts_task = Arc::clone(&dial_attempts);
         let convergence_task = convergence.clone();
         let runtime_task = tokio::spawn(async move {
             let session_runtime = session.run(
@@ -266,9 +278,11 @@ impl ManagedClientHarness {
                         controller.replace_intent(&addresses, {
                             let settings = Arc::clone(&settings);
                             let convergence = convergence_task.clone();
+                            let dial_attempts = Arc::clone(&dial_attempts_task);
                             move |server_address, control| {
                                 let settings = Arc::clone(&settings);
                                 let convergence = Some(convergence.clone());
+                                let dial_attempts = Arc::clone(&dial_attempts);
                                 async move {
                                     run_test_address_worker(
                                         settings,
@@ -276,6 +290,7 @@ impl ManagedClientHarness {
                                         localhost(0),
                                         control,
                                         convergence,
+                                        dial_attempts,
                                     )
                                     .await
                                 }
@@ -288,7 +303,6 @@ impl ManagedClientHarness {
                             Some(Ok(_)) => {}
                             Some(Err((_address, error))) => {
                                 shutdown.request();
-                                let _ = session_runtime.await;
                                 return Err(error);
                             }
                             None => {}
@@ -318,6 +332,7 @@ impl ManagedClientHarness {
             stop_tx: Some(stop_tx),
             runtime_task,
             worker_count,
+            dial_attempts,
             convergence,
         }
     }
@@ -350,10 +365,13 @@ impl ManagedClientHarness {
         .unwrap();
         let public_addr = server.public_addr().unwrap();
         let tunnel_addr = server.tunnel_addr().unwrap();
-        let task = tokio::spawn(async move { server.run().await });
+        let shutdown = OrderlyShutdown::new(Duration::from_millis(50), QUIC_CLOSE_FLUSH_DURATION);
+        let server_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move { server.run_with_shutdown(&server_shutdown).await });
         QuicServerNode {
             public_addr,
             tunnel_addr,
+            shutdown,
             task,
         }
     }
@@ -366,6 +384,10 @@ impl ManagedClientHarness {
 
     fn worker_count(&self) -> usize {
         *self.worker_count.lock().unwrap()
+    }
+
+    fn dial_attempts(&self) -> usize {
+        self.dial_attempts.load(Ordering::SeqCst)
     }
 
     fn convergence(&self) -> AssignmentConvergence {
@@ -445,11 +467,311 @@ async fn managed_client_reconciles_assignments_across_real_servers() {
     wait_for_applied(&mut harness.event_rx, "rev-3").await;
     wait_until_visitor_ok(server_c.public_addr, &harness.backend_cert).await;
 
-    server_a.task.abort();
-    server_b.task.abort();
-    server_c.task.abort();
+    server_a.close_remotely().await;
+    server_b.close_remotely().await;
+    server_c.close_remotely().await;
     backend.1.abort();
     harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_client_retires_re_adopts_and_preserves_assignment_through_control_loss() {
+    let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
+    let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
+    let mut harness = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
+    let server_a = harness.spawn_server_node().await;
+    let addr_a = format!("localhost:{}", server_a.tunnel_addr.port());
+
+    harness.push_assignment("rev-1", &[&addr_a]);
+    wait_for_applied(&mut harness.event_rx, "rev-1").await;
+    wait_for_state_revision(&harness.control.metrics, "rev-1").await;
+    wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
+    wait_until(|| harness.convergence() == AssignmentConvergence::Converged).await;
+    let dials_after_connect = harness.dial_attempts();
+    assert!(dials_after_connect >= 1);
+    assert_eq!(harness.worker_count(), 1);
+
+    // Remove the connected address: Retiring leaves remote Server closure in charge.
+    harness.push_assignment("rev-retire", &[]);
+    wait_for_applied(&mut harness.event_rx, "rev-retire").await;
+    wait_for_state_revision(&harness.control.metrics, "rev-retire").await;
+    assert_eq!(harness.convergence(), AssignmentConvergence::Converged);
+    assert_eq!(harness.worker_count(), 1);
+    assert_eq!(harness.dial_attempts(), dials_after_connect);
+    wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
+
+    // Re-add before remote closure: re-adopt without a duplicate dial.
+    harness.push_assignment("rev-readopt", &[&addr_a]);
+    wait_for_applied(&mut harness.event_rx, "rev-readopt").await;
+    wait_for_state_revision(&harness.control.metrics, "rev-readopt").await;
+    wait_until(|| harness.convergence() == AssignmentConvergence::Converged).await;
+    assert_eq!(harness.worker_count(), 1);
+    assert_eq!(
+        harness.dial_attempts(),
+        dials_after_connect,
+        "re-adoption must not dial a duplicate Tunnel connection"
+    );
+    wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
+
+    // Control loss retains the last assignment and reconnect loops.
+    let tls_before = harness.control.metrics.tls_accepts.load(Ordering::SeqCst);
+    let reports_before = harness.control.metrics.state_bodies.lock().unwrap().len();
+    let dials_before_loss = harness.dial_attempts();
+    harness
+        .control
+        .push_snapshot("event: patch\ndata: {}\n\n".to_owned());
+    wait_for_reconnecting(&mut harness.event_rx).await;
+    wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
+    assert_eq!(harness.worker_count(), 1);
+    assert_eq!(harness.dial_attempts(), dials_before_loss);
+
+    // Repeated applied revision after reconnect resumes reporting without churn.
+    harness.push_assignment("rev-readopt", &[&addr_a]);
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let resumed = {
+                let bodies = harness.control.metrics.state_bodies.lock().unwrap();
+                if bodies.len() > reports_before {
+                    assert_eq!(
+                        bodies.last(),
+                        Some(&json!({ "revision": "rev-readopt" })),
+                        "equal revision after reconnect must resume state reporting"
+                    );
+                    true
+                } else {
+                    false
+                }
+            };
+            if resumed {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("equal revision after reconnect must resume state reporting");
+    assert!(
+        harness.control.metrics.tls_accepts.load(Ordering::SeqCst) > tls_before,
+        "Control reconnect must open a new TLS connection"
+    );
+    assert_eq!(
+        harness.dial_attempts(),
+        dials_before_loss,
+        "repeated revision must not churn address workers"
+    );
+    wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
+
+    // Retire again, then remote Server closure ends the worker without reconnect.
+    harness.push_assignment("rev-retire-2", &[]);
+    wait_for_applied(&mut harness.event_rx, "rev-retire-2").await;
+    wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
+    let dials_before_remote_close = harness.dial_attempts();
+    server_a.close_remotely().await;
+    wait_until(|| harness.worker_count() == 0).await;
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        harness.dial_attempts(),
+        dials_before_remote_close,
+        "Retiring workers must not reconnect after remote closure"
+    );
+
+    backend.1.abort();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_client_restart_fail_closed_requires_fresh_snapshot() {
+    let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
+    let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
+    let mut first = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
+    let server = first.spawn_server_node().await;
+    let addr = format!("localhost:{}", server.tunnel_addr.port());
+
+    first.push_assignment("rev-live", &[&addr]);
+    wait_for_applied(&mut first.event_rx, "rev-live").await;
+    wait_until_visitor_ok(server.public_addr, &first.backend_cert).await;
+    first.shutdown().await;
+    server.close_remotely().await;
+
+    // Process restart restores no managed input: a fresh runtime dials nothing
+    // until Control publishes a new full snapshot (no static fallback).
+    let mut second = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
+    sleep(Duration::from_millis(150)).await;
+    assert_eq!(second.worker_count(), 0);
+    assert_eq!(second.dial_attempts(), 0);
+    assert_eq!(second.convergence(), AssignmentConvergence::Converged);
+
+    let server_fresh = second.spawn_server_node().await;
+    let addr_fresh = format!("localhost:{}", server_fresh.tunnel_addr.port());
+    second.push_assignment("rev-fresh", &[&addr_fresh]);
+    wait_for_applied(&mut second.event_rx, "rev-fresh").await;
+    wait_until_visitor_ok(server_fresh.public_addr, &second.backend_cert).await;
+    assert!(second.dial_attempts() >= 1);
+
+    server_fresh.close_remotely().await;
+    backend.1.abort();
+    second.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_client_isolates_per_address_failures() {
+    let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
+    let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
+    let mut harness = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
+    let server_ok = harness.spawn_server_node().await;
+    let failing_port = {
+        let sock = std::net::UdpSocket::bind(localhost(0)).unwrap();
+        let port = sock.local_addr().unwrap().port();
+        drop(sock);
+        port
+    };
+    let addr_ok = format!("localhost:{}", server_ok.tunnel_addr.port());
+    let addr_fail = format!("localhost:{failing_port}");
+
+    harness.push_assignment("rev-partial", &[&addr_ok, &addr_fail]);
+    wait_for_applied(&mut harness.event_rx, "rev-partial").await;
+    wait_until_visitor_ok(server_ok.public_addr, &harness.backend_cert).await;
+    wait_until(|| {
+        matches!(
+            harness.convergence(),
+            AssignmentConvergence::PartiallyConverged
+        )
+    })
+    .await;
+    assert_eq!(harness.worker_count(), 2);
+    // Healthy traffic continues while the unavailable address keeps its own worker.
+    sleep(Duration::from_millis(100)).await;
+    wait_until_visitor_ok(server_ok.public_addr, &harness.backend_cert).await;
+    assert_eq!(harness.worker_count(), 2);
+    assert!(
+        matches!(
+            harness.convergence(),
+            AssignmentConvergence::PartiallyConverged
+        ),
+        "partial failure must not withdraw the whole Client assignment"
+    );
+
+    server_ok.close_remotely().await;
+    backend.1.abort();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_client_fatal_worker_exits_the_runtime() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let material = generate_control_mtls_material("runewarp-client-fatal");
+    let control = ControlFixture::start(&material).await;
+    let control_paths =
+        write_control_ca_and_certs(tempdir.path().join("control").as_path(), &material);
+    let client_identity = identity_from_cert_pem(&material.client_cert_pem);
+    let identity_dir = tempdir.path().join("client-identity");
+    fs::create_dir_all(&identity_dir).unwrap();
+    fs::write(
+        identity_dir.join(CLIENT_CERT_FILENAME),
+        &material.client_cert_pem,
+    )
+    .unwrap();
+    fs::write(
+        identity_dir.join(CLIENT_KEY_FILENAME),
+        &material.client_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        identity_dir.join(CLIENT_IDENTITY_FILENAME),
+        client_identity.to_string(),
+    )
+    .unwrap();
+
+    let mut controller = AddressController::new();
+    controller.disable_client_ready_log();
+    let (apply_tx, mut apply_rx) = mpsc::unbounded_channel::<ClientAssignmentApply>();
+    let mut adapter = ClientAssignmentAdapter::new(apply_tx);
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (_stop_tx, stop_rx) = oneshot::channel::<()>();
+    let mut session = ManagedSession::new(
+        ControlAddress::parse(&format!("localhost:{}", control.port)).unwrap(),
+        ManagedSessionRole::Client,
+        SessionMaterial {
+            control_hostname: "localhost".to_owned(),
+            trust: ControlTrust::CaFile(control_paths.ca_cert),
+            identity: ControlClientIdentityMaterial::from_client_identity_dir(&identity_dir),
+        },
+    )
+    .unwrap();
+
+    let runtime_task = tokio::spawn(async move {
+        let session_runtime = session.run(
+            &mut adapter,
+            move |event| {
+                let event_tx = event_tx.clone();
+                async move {
+                    let _ = event_tx.send(event);
+                }
+            },
+            async {
+                let _ = stop_rx.await;
+            },
+        );
+        tokio::pin!(session_runtime);
+        let shutdown = controller.shutdown_handle();
+        loop {
+            let drive_workers = controller.has_inflight_workers();
+            tokio::select! {
+                biased;
+                apply = apply_rx.recv() => {
+                    let Some(ClientAssignmentApply { addresses, done }) = apply else {
+                        break;
+                    };
+                    controller.replace_intent(&addresses, |_address, _control| async {
+                        Err("worker exploded".to_owned())
+                    });
+                    let _ = done.send(Ok(()));
+                }
+                completion = controller.next_completion(), if drive_workers => {
+                    match completion {
+                        Some(Ok(_)) => {}
+                        Some(Err((_address, error))) => {
+                            shutdown.request();
+                            return Err(error);
+                        }
+                        None => {}
+                    }
+                }
+                () = &mut session_runtime => {
+                    shutdown.request();
+                    controller.run_until_idle().await?;
+                    return Ok(());
+                }
+            }
+        }
+        shutdown.request();
+        controller.run_until_idle().await
+    });
+
+    control.push_snapshot(snapshot_sse(
+        "rev-fatal",
+        &json!({ "server_addresses": ["localhost:9"] }).to_string(),
+    ));
+    wait_for_applied(&mut event_rx, "rev-fatal").await;
+    let result = timeout(Duration::from_secs(5), runtime_task)
+        .await
+        .expect("fatal worker should end the runtime")
+        .expect("runtime join");
+    assert_eq!(result, Err("worker exploded".to_owned()));
+    control.shutdown().await;
+}
+
+async fn wait_for_reconnecting(events: &mut mpsc::UnboundedReceiver<ManagedSessionEvent>) {
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = events.recv().await {
+            if matches!(event, ManagedSessionEvent::Reconnecting { .. }) {
+                return;
+            }
+        }
+        panic!("event stream closed before reconnecting");
+    })
+    .await
+    .expect("timed out waiting for managed session reconnect");
 }
 
 async fn run_test_address_worker(
@@ -458,11 +780,16 @@ async fn run_test_address_worker(
     local_bind_addr: SocketAddr,
     control: AddressWorkerControl,
     convergence: Option<AssignmentConvergenceTracker>,
+    dial_attempts: Arc<AtomicUsize>,
 ) -> Result<(), String> {
     let mut maintenance = control.subscribe_maintenance();
     loop {
-        if control.shutdown_requested() || control.maintenance_intent() == MaintenanceIntent::Retire
-        {
+        if control.shutdown_requested() {
+            return Ok(());
+        }
+        // Establishing / reconnecting work stops on Retire. Connected retirement is
+        // handled inside the tunnel run below and must not locally close the connection.
+        if control.maintenance_intent() == MaintenanceIntent::Retire {
             return Ok(());
         }
 
@@ -506,6 +833,7 @@ async fn run_test_address_worker(
             return Ok(());
         }
 
+        dial_attempts.fetch_add(1, Ordering::SeqCst);
         let client = match tokio::select! {
             _ = wait_for_shutdown(&control) => return Ok(()),
             changed = maintenance.changed() => {
@@ -536,12 +864,31 @@ async fn run_test_address_worker(
             let _ = tracker.mark_connected(&server_address);
         }
 
+        // Retire must not locally close: only process shutdown ends the tunnel run.
         let _run_result = client
             .run_until_shutdown({
                 let control = control.clone();
                 async move {
-                    wait_for_shutdown(&control).await;
-                    ShutdownMode::Graceful
+                    let mut maintenance = control.subscribe_maintenance();
+                    let mut shutdown = control.subscribe_shutdown();
+                    if control.shutdown_requested() {
+                        return ShutdownMode::Graceful;
+                    }
+                    loop {
+                        tokio::select! {
+                            changed = shutdown.changed() => {
+                                if changed.is_err() || control.shutdown_requested() {
+                                    return ShutdownMode::Graceful;
+                                }
+                            }
+                            changed = maintenance.changed() => {
+                                // Observe Retire without closing; re-adopt restores Maintain.
+                                if changed.is_err() {
+                                    return ShutdownMode::Graceful;
+                                }
+                            }
+                        }
+                    }
                 }
             })
             .await;
@@ -767,17 +1114,9 @@ async fn handle_request(
 ) -> Result<Response<HttpBoxBody<Bytes, Infallible>>, hyper::Error> {
     let path = request.uri().path().to_owned();
     if path == events_path(ManagedSessionRole::Client) {
-        let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, Infallible>>(16);
-        tokio::spawn(async move {
-            let mut snapshots = snapshots.lock().await;
-            while let Some(sse) = snapshots.recv().await {
-                if tx.send(Ok(Frame::data(Bytes::from(sse)))).await.is_err() {
-                    break;
-                }
-            }
-        });
-        let stream = ReceiverStream { receiver: rx };
-        let body = HttpBoxBody::new(StreamBody::new(stream));
+        // Poll the shared snapshot channel without holding the mutex across
+        // awaits so a replaced Control connection can receive later snapshots.
+        let body = HttpBoxBody::new(StreamBody::new(SnapshotFeedStream { snapshots }));
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "text/event-stream")
@@ -799,14 +1138,26 @@ async fn handle_request(
         .unwrap())
 }
 
-struct ReceiverStream {
-    receiver: mpsc::Receiver<Result<Frame<Bytes>, Infallible>>,
+struct SnapshotFeedStream {
+    snapshots: Arc<AsyncMutex<mpsc::UnboundedReceiver<String>>>,
 }
 
-impl Stream for ReceiverStream {
+impl Stream for SnapshotFeedStream {
     type Item = Result<Frame<Bytes>, Infallible>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.receiver).poll_recv(cx)
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let mut guard = match this.snapshots.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+        };
+        match guard.poll_recv(cx) {
+            Poll::Ready(Some(payload)) => Poll::Ready(Some(Ok(Frame::data(Bytes::from(payload))))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }

@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use crate::opaque_control_token::{OpaqueControlTokenError, validate_opaque_control_token};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -21,6 +22,7 @@ pub enum SnapshotError {
     InvalidJson,
     MissingRevision,
     EmptyRevision,
+    InvalidRevision(OpaqueControlTokenError),
     MissingInput,
     UnknownEventType(String),
     MissingEventType,
@@ -32,6 +34,9 @@ impl fmt::Display for SnapshotError {
             Self::InvalidJson => formatter.write_str("snapshot JSON was invalid"),
             Self::MissingRevision => formatter.write_str("snapshot omitted revision"),
             Self::EmptyRevision => formatter.write_str("snapshot revision was empty"),
+            Self::InvalidRevision(error) => {
+                write!(formatter, "snapshot revision was invalid: {error}")
+            }
             Self::MissingInput => {
                 formatter.write_str("snapshot input was missing or not an object")
             }
@@ -64,9 +69,10 @@ pub fn parse_snapshot_event(
 
     let raw: RawSnapshot = serde_json::from_str(data).map_err(|_| SnapshotError::InvalidJson)?;
     let revision = raw.revision.ok_or(SnapshotError::MissingRevision)?;
-    if revision.is_empty() {
-        return Err(SnapshotError::EmptyRevision);
-    }
+    validate_opaque_control_token(&revision).map_err(|error| match error {
+        OpaqueControlTokenError::Empty => SnapshotError::EmptyRevision,
+        other => SnapshotError::InvalidRevision(other),
+    })?;
     let input = raw.input.ok_or(SnapshotError::MissingInput)?;
     if !input.is_object() {
         return Err(SnapshotError::MissingInput);
@@ -129,5 +135,20 @@ mod tests {
             invalid_input.to_string(),
             "snapshot input was missing or not an object"
         );
+    }
+
+    #[test]
+    fn rejects_revision_with_whitespace_or_oversize() {
+        assert!(matches!(
+            parse_snapshot_event(Some("snapshot"), r#"{"revision":"bad rev","input":{}}"#)
+                .unwrap_err(),
+            SnapshotError::InvalidRevision(_)
+        ));
+        let oversize = "a".repeat(crate::OPAQUE_CONTROL_TOKEN_MAX_CHARS + 1);
+        let payload = format!(r#"{{"revision":"{oversize}","input":{{}}}}"#);
+        assert!(matches!(
+            parse_snapshot_event(Some("snapshot"), &payload).unwrap_err(),
+            SnapshotError::InvalidRevision(_)
+        ));
     }
 }

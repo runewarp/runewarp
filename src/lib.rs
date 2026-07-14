@@ -8,6 +8,7 @@ mod control_address;
 mod hostname;
 mod identity;
 pub mod managed_session;
+mod opaque_control_token;
 mod paths;
 mod proxy;
 mod quic;
@@ -21,6 +22,7 @@ mod shutdown;
 mod startup;
 mod tls_material;
 mod trust;
+mod tunnel_id;
 
 pub use client::{
     AddressController, AddressControllerShutdown, AddressWorkerControl, AssignmentConvergence,
@@ -65,6 +67,9 @@ pub use managed_session::{
     SILENCE_TIMEOUT, STATE_HEARTBEAT, ServerManagedInput, SessionMaterial, SnapshotEnvelope,
     events_path, load_control_tls_material, parse_client_input, parse_server_input, state_path,
 };
+pub use opaque_control_token::{
+    OPAQUE_CONTROL_TOKEN_MAX_CHARS, OpaqueControlTokenError, validate_opaque_control_token,
+};
 pub use paths::{
     XdgPathError, default_client_acme_state_dir, default_client_identity_material_dir,
     default_client_public_cert_material_dir, default_client_server_ca_path, default_config_path,
@@ -95,3 +100,4 @@ pub use server_identity::{
 };
 pub use shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
 pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};
+pub use tunnel_id::TunnelId;

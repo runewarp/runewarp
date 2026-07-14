@@ -675,6 +675,7 @@ mod tests {
         let authorization = ServerAuthorization::from_tunnels(
             &server_hostname("localhost"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],

@@ -2356,6 +2356,7 @@ fn configured_tunnel(
     client_identity: &GeneratedClientIdentity,
 ) -> ServerTunnelConfig {
     ServerTunnelConfig {
+        id: None,
         public_hostnames: public_hostnames
             .iter()
             .map(|hostname| public_hostname(hostname))

@@ -142,17 +142,44 @@ impl TunnelRegistry {
             closed
         };
 
-        // Continuity is by Client identity, not Tunnel index. Take members from
-        // every existing pool before resizing, then adopt survivors into the
-        // pool that matches their identity under the new snapshot.
+        // Continuity prefers Tunnel ID when present (Managed mode). Otherwise
+        // pools follow ordinal layout. Surviving members are always rehomed by
+        // Client identity under the new snapshot.
         let mut taken = Vec::new();
         for pool in pools.iter() {
             taken.extend(pool.take_members().await);
         }
-        while pools.len() < next.tunnel_count() {
-            pools.push(ActiveClientPool::new());
+
+        if previous.uses_tunnel_ids() && next.uses_tunnel_ids() {
+            let mut pools_by_id = std::collections::HashMap::new();
+            for (index, id) in previous.tunnel_ids().iter().enumerate() {
+                let Some(id) = id.clone() else {
+                    continue;
+                };
+                if index < pools.len() {
+                    pools_by_id.insert(id, pools[index].clone());
+                }
+            }
+            let mut rebuilt = Vec::with_capacity(next.tunnel_count());
+            for id in next.tunnel_ids() {
+                let Some(id) = id.clone() else {
+                    rebuilt.push(ActiveClientPool::new());
+                    continue;
+                };
+                rebuilt.push(
+                    pools_by_id
+                        .remove(&id)
+                        .unwrap_or_else(ActiveClientPool::new),
+                );
+            }
+            *pools = rebuilt;
+        } else {
+            while pools.len() < next.tunnel_count() {
+                pools.push(ActiveClientPool::new());
+            }
+            pools.truncate(next.tunnel_count());
         }
-        pools.truncate(next.tunnel_count());
+
         for member in taken {
             let Some(tunnel_index) = next.tunnel_index_for_client_identity(&member.client_identity)
             else {
@@ -437,6 +464,7 @@ mod tests {
         let registry = TunnelRegistry::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
@@ -459,6 +487,7 @@ mod tests {
         let registry = TunnelRegistry::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
@@ -485,10 +514,12 @@ mod tests {
             &server_hostname("tunnel.example.test"),
             &[
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("app.example.test")],
                     authorized_client_identities: vec![first_identity.client_identity.clone()],
                 },
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("api.example.test")],
                     authorized_client_identities: vec![second_identity.client_identity.clone()],
                 },
@@ -511,6 +542,7 @@ mod tests {
         let revoke_first = registry.authorization().prepare(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("api.example.test")],
                 authorized_client_identities: vec![second_identity.client_identity.clone()],
             }],
@@ -543,12 +575,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_authorization_reuses_pools_by_tunnel_id_when_order_changes() -> io::Result<()> {
+        use crate::TunnelId;
+
+        let first_identity = generate_test_client_identity()?;
+        let second_identity = generate_test_client_identity()?;
+        let id_a = TunnelId::parse("tunnel-a").unwrap();
+        let id_b = TunnelId::parse("tunnel-b").unwrap();
+        let registry = TunnelRegistry::configured(
+            &server_hostname("tunnel.example.test"),
+            &[
+                ServerTunnelConfig {
+                    id: Some(id_a.clone()),
+                    public_hostnames: vec![public_hostname("app.example.test")],
+                    authorized_client_identities: vec![first_identity.client_identity.clone()],
+                },
+                ServerTunnelConfig {
+                    id: Some(id_b.clone()),
+                    public_hostnames: vec![public_hostname("api.example.test")],
+                    authorized_client_identities: vec![second_identity.client_identity.clone()],
+                },
+            ],
+        )?;
+
+        let first_fixture = TunnelConnectionFixture::connect(&first_identity).await?;
+        let second_fixture = TunnelConnectionFixture::connect(&second_identity).await?;
+        registry.register(first_fixture.server_connection).await;
+        registry
+            .register(second_fixture.server_connection.clone())
+            .await;
+
+        // Swap order only — same Tunnel IDs and identities.
+        let reordered = registry.authorization().prepare(
+            &server_hostname("tunnel.example.test"),
+            &[
+                ServerTunnelConfig {
+                    id: Some(id_b.clone()),
+                    public_hostnames: vec![public_hostname("api.example.test")],
+                    authorized_client_identities: vec![second_identity.client_identity.clone()],
+                },
+                ServerTunnelConfig {
+                    id: Some(id_a.clone()),
+                    public_hostnames: vec![public_hostname("app.example.test")],
+                    authorized_client_identities: vec![first_identity.client_identity.clone()],
+                },
+            ],
+        )?;
+        let dispatch = registry.commit_authorization(reordered).await;
+        assert_eq!(dispatch.connections_closed, 0);
+        assert_eq!(registry.pool_count().await, 2);
+        assert!(matches!(
+            registry
+                .route_tunnel_connection(&public_hostname("app.example.test"))
+                .await,
+            TunnelRouteOutcome::Connected(_)
+        ));
+        assert!(matches!(
+            registry
+                .route_tunnel_connection(&public_hostname("api.example.test"))
+                .await,
+            TunnelRouteOutcome::Connected(_)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn commit_authorization_grows_pools_and_revokes_removed_identities() -> io::Result<()> {
         let first_identity = generate_test_client_identity()?;
         let second_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![first_identity.client_identity.clone()],
             }],
@@ -564,10 +662,12 @@ mod tests {
             &server_hostname("tunnel.example.test"),
             &[
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("app.example.test")],
                     authorized_client_identities: vec![first_identity.client_identity.clone()],
                 },
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("api.example.test")],
                     authorized_client_identities: vec![second_identity.client_identity.clone()],
                 },
@@ -587,6 +687,7 @@ mod tests {
         let revoke = registry.authorization().prepare(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("api.example.test")],
                 authorized_client_identities: vec![second_identity.client_identity.clone()],
             }],
@@ -669,6 +770,7 @@ mod tests {
         let registry = TunnelRegistry::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![
                     public_hostname("app.example.test"),
                     public_hostname("shared.example.test"),
@@ -714,10 +816,12 @@ mod tests {
             &server_hostname("tunnel.example.test"),
             &[
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("app.example.test")],
                     authorized_client_identities: vec![first_identity.client_identity.clone()],
                 },
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("shared.example.test")],
                     authorized_client_identities: vec![second_identity.client_identity.clone()],
                 },
@@ -747,12 +851,14 @@ mod tests {
             &server_hostname("tunnel.example.test"),
             &[
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("app.example.test")],
                     authorized_client_identities: vec![
                         generate_test_client_identity()?.client_identity,
                     ],
                 },
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("shared.example.test")],
                     authorized_client_identities: vec![second_identity.client_identity.clone()],
                 },
@@ -784,6 +890,7 @@ mod tests {
         let registry = TunnelRegistry::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![
                     public_hostname("app.example.test"),
                     public_hostname("api.example.test"),
@@ -822,6 +929,7 @@ mod tests {
         let hostname_only = registry.authorization().prepare(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![identity.client_identity.clone()],
             }],
@@ -861,6 +969,7 @@ mod tests {
         let registry = TunnelRegistry::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![first.client_identity.clone()],
             }],
@@ -869,6 +978,7 @@ mod tests {
         let revoke = registry.authorization().prepare(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![second.client_identity.clone()],
             }],
@@ -884,6 +994,7 @@ mod tests {
         let invalid = registry.authorization().prepare(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![],
                 authorized_client_identities: vec![first.client_identity.clone()],
             }],

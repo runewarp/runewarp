@@ -5,11 +5,13 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustls::RootCertStore;
 use rustls::pki_types::CertificateDer;
 use tokio::net::lookup_host;
+use tokio::task::JoinHandle;
 
 use crate::acme::{
     AcmeLifecycle, ManagedAcmeRuntime, build_acme_state, build_client_acme_state, run_acme_state,
@@ -211,10 +213,124 @@ impl PreparedServer {
     }
 }
 
+/// Client-instance preparation shared across independent Tunnel-connection workers.
+///
+/// Owns validated Services, Terminate-mode TLS resolver state, and Client ACME
+/// managers for the process lifetime. Address workers reload trust and identity
+/// material on each Tunnel connection attempt but consume this shared state
+/// instead of rebuilding it.
+pub struct ClientInstancePrep {
+    services: Vec<ServiceConfig>,
+    termination_tls_configs: TerminationTlsConfigs,
+    acme_manager_count: usize,
+    acme: Mutex<ClientAcmeDrive>,
+}
+
+enum ClientAcmeDrive {
+    Idle(Vec<ManagedAcmeRuntime>),
+    Running(Vec<JoinHandle<()>>),
+    Stopped,
+}
+
+impl ClientInstancePrep {
+    /// Validates Services and builds Terminate-mode TLS / Client ACME state once.
+    pub async fn prepare(config: &ClientConfig) -> Result<Arc<Self>, ClientStartupError> {
+        if config.services.is_empty() {
+            return Err(ClientStartupError::InvalidSettings(
+                "client config must include at least one Service".to_owned(),
+            ));
+        }
+        let services = validate_services(&config.services)
+            .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
+        prepare_default_client_acme_state_dir(config)?;
+
+        let (termination_tls_configs, acme_runtimes) =
+            load_termination_tls_configs(config)
+                .await
+                .map_err(ClientStartupError::InvalidSettings)?;
+        let acme_manager_count = acme_runtimes.len();
+
+        Ok(Arc::new(Self {
+            services,
+            termination_tls_configs,
+            acme_manager_count,
+            acme: Mutex::new(ClientAcmeDrive::Idle(acme_runtimes)),
+        }))
+    }
+
+    pub fn acme_manager_count(&self) -> usize {
+        self.acme_manager_count
+    }
+
+    pub fn services(&self) -> &[ServiceConfig] {
+        &self.services
+    }
+
+    pub(crate) fn termination_tls_configs(&self) -> TerminationTlsConfigs {
+        self.termination_tls_configs.clone()
+    }
+
+    /// Starts Client ACME tasks at most once for this Client instance.
+    pub fn start_acme_once(&self) {
+        let mut guard = self
+            .acme
+            .lock()
+            .expect("Client ACME drive lock should not be poisoned");
+        let ClientAcmeDrive::Idle(_) = &*guard else {
+            return;
+        };
+        let ClientAcmeDrive::Idle(runtimes) =
+            std::mem::replace(&mut *guard, ClientAcmeDrive::Stopped)
+        else {
+            return;
+        };
+        let handles = runtimes
+            .into_iter()
+            .map(|acme_runtime| {
+                tokio::spawn(async move {
+                    let _ = run_acme_state(acme_runtime.state, acme_runtime.lifecycle).await;
+                })
+            })
+            .collect();
+        *guard = ClientAcmeDrive::Running(handles);
+    }
+
+    /// Stops supervised Client ACME tasks and awaits their exit.
+    pub async fn stop_acme(&self) {
+        let handles = {
+            let mut guard = self
+                .acme
+                .lock()
+                .expect("Client ACME drive lock should not be poisoned");
+            match std::mem::replace(&mut *guard, ClientAcmeDrive::Stopped) {
+                ClientAcmeDrive::Running(handles) => handles,
+                ClientAcmeDrive::Idle(_) | ClientAcmeDrive::Stopped => return,
+            }
+        };
+        for handle in handles {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for ClientInstancePrep {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.acme.lock()
+            && let ClientAcmeDrive::Running(handles) =
+                std::mem::replace(&mut *guard, ClientAcmeDrive::Stopped)
+        {
+            for handle in handles {
+                handle.abort();
+            }
+        }
+    }
+}
+
 pub struct PreparedClient {
     client: Client,
     native_root_error_count: usize,
-    acme_runtimes: Vec<ManagedAcmeRuntime>,
+    instance: Arc<ClientInstancePrep>,
 }
 
 type LoadedTerminationTls = (TerminationTlsConfigs, Vec<ManagedAcmeRuntime>);
@@ -236,7 +352,15 @@ impl PreparedClient {
                 server_hostname: server_address.hostname().to_string(),
             });
         };
-        Self::connect_to_server_address(config, local_bind_addr, server_address, server_addr).await
+        let instance = ClientInstancePrep::prepare(config).await?;
+        Self::connect_to_server_address(
+            config,
+            &instance,
+            local_bind_addr,
+            server_address,
+            server_addr,
+        )
+        .await
     }
 
     pub async fn connect_to(
@@ -247,29 +371,28 @@ impl PreparedClient {
         let Some(server_address) = config.server_addresses.first() else {
             return Err(ClientStartupError::NoConfiguredServerAddress);
         };
-        Self::connect_to_server_address(config, local_bind_addr, server_address, server_addr).await
+        let instance = ClientInstancePrep::prepare(config).await?;
+        Self::connect_to_server_address(
+            config,
+            &instance,
+            local_bind_addr,
+            server_address,
+            server_addr,
+        )
+        .await
     }
 
+    /// Opens one Tunnel connection using Client-instance preparation shared across workers.
+    ///
+    /// Reloads Server trust roots and Client identity material for this attempt. Does not
+    /// rebuild validated Services, Terminate-mode TLS state, or Client ACME managers.
     pub async fn connect_to_server_address(
         config: &ClientConfig,
+        instance: &Arc<ClientInstancePrep>,
         local_bind_addr: SocketAddr,
         server_address: &ServerAddress,
         server_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
-        if config.services.is_empty() {
-            return Err(ClientStartupError::InvalidSettings(
-                "client config must include at least one Service".to_owned(),
-            ));
-        }
-        let services = validate_services(&config.services)
-            .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
-        prepare_default_client_acme_state_dir(config)?;
-
-        let (termination_tls_configs, acme_runtimes) =
-            load_termination_tls_configs(config)
-                .await
-                .map_err(ClientStartupError::InvalidSettings)?;
-
         let loaded_roots = load_root_store(config.server_ca_file.as_deref())?;
         let cert_chain =
             load_certificate_chain(&config.identity_directory.join(CLIENT_CERT_FILENAME))
@@ -283,9 +406,9 @@ impl PreparedClient {
             local_bind_addr,
             server_addr,
             server_name: server_address.hostname().to_string(),
-            services,
+            services: instance.services().to_vec(),
             quic_client_config,
-            termination_tls_configs,
+            termination_tls_configs: instance.termination_tls_configs(),
         })
         .await
         .map_err(ClientStartupError::Connect)?;
@@ -293,7 +416,7 @@ impl PreparedClient {
         Ok(Self {
             client,
             native_root_error_count: loaded_roots.native_root_error_count,
-            acme_runtimes,
+            instance: Arc::clone(instance),
         })
     }
 
@@ -305,18 +428,13 @@ impl PreparedClient {
         self.native_root_error_count
     }
 
+    pub fn instance(&self) -> &Arc<ClientInstancePrep> {
+        &self.instance
+    }
+
     pub async fn run(self) -> Result<(), quinn::ConnectionError> {
-        let Self {
-            client,
-            acme_runtimes,
-            ..
-        } = self;
-        for acme_runtime in acme_runtimes {
-            tokio::spawn(async move {
-                let _ = run_acme_state(acme_runtime.state, acme_runtime.lifecycle).await;
-            });
-        }
-        client.run().await
+        self.run_tunnel_then_maybe_stop_acme(|client| client.run())
+            .await
     }
 
     pub async fn run_until_shutdown<Shutdown>(
@@ -348,17 +466,29 @@ impl PreparedClient {
         self,
         shutdown: &OrderlyShutdown,
     ) -> Result<(), quinn::ConnectionError> {
+        self.run_tunnel_then_maybe_stop_acme(|client| client.run_with_shutdown(shutdown))
+            .await
+    }
+
+    async fn run_tunnel_then_maybe_stop_acme<F, Fut>(
+        self,
+        run_tunnel: F,
+    ) -> Result<(), quinn::ConnectionError>
+    where
+        F: FnOnce(Client) -> Fut,
+        Fut: Future<Output = Result<(), quinn::ConnectionError>>,
+    {
         let Self {
-            client,
-            acme_runtimes,
-            ..
+            client, instance, ..
         } = self;
-        for acme_runtime in acme_runtimes {
-            tokio::spawn(async move {
-                let _ = run_acme_state(acme_runtime.state, acme_runtime.lifecycle).await;
-            });
+        instance.start_acme_once();
+        let result = run_tunnel(client).await;
+        // Exclusive owner (single-shot connect helpers) stops ACME here. The process
+        // runtime keeps an Arc and stops ACME after all address workers exit.
+        if Arc::strong_count(&instance) == 1 {
+            instance.stop_acme().await;
         }
-        client.run_with_shutdown(shutdown).await
+        result
     }
 }
 
@@ -786,11 +916,12 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use std::str::FromStr;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
     use super::{
-        ClientStartupError, NativeRootsLoad, PreparedClient, PreparedServer, ServerStartupError,
-        acme_terminating_hostnames, build_root_store,
+        ClientInstancePrep, ClientStartupError, NativeRootsLoad, PreparedClient, PreparedServer,
+        ServerStartupError, acme_terminating_hostnames, build_root_store,
     };
     use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
     use crate::{
@@ -1102,6 +1233,102 @@ mod tests {
                 .is_some()
         );
         assert_eq!(acme_runtimes.len(), 2);
+    }
+
+    fn acme_client_settings(tempdir: &tempfile::TempDir, hostname: &str) -> ClientConfig {
+        ClientConfig {
+            server_addresses: vec![
+                server_address("tunnel-a.example.test"),
+                server_address("tunnel-b.example.test"),
+            ],
+            server_hostname: server_hostname("tunnel-a.example.test"),
+            server_port: 443,
+            log_level: LogLevel::Off,
+            server_ca_file: None,
+            identity_directory: tempdir.path().join("client-identity"),
+            services: vec![ServiceConfig {
+                public_hostnames: Some(vec![public_hostname(hostname)]),
+                backend_address: "127.0.0.1:8080".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+            }],
+            public_cert_config: Some(ClientPublicCertConfig::Acme {
+                email: "admin@example.test".to_owned(),
+                state_directory: tempdir.path().join("acme-state"),
+                state_directory_was_defaulted: false,
+            }),
+            control: None,
+        }
+    }
+
+    /// Regression for #193: multi-address workers and reconnects must not rebuild Client ACME.
+    #[tokio::test]
+    async fn client_instance_prep_owns_acme_once_across_shared_tunnel_connects() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let settings = acme_client_settings(&tempdir, "app.example.test");
+
+        let instance = ClientInstancePrep::prepare(&settings)
+            .await
+            .expect("Client-instance preparation should succeed without contacting ACME");
+        assert_eq!(instance.acme_manager_count(), 1);
+
+        // Shared workers must reuse the same Terminate-mode TLS resolver state.
+        let tls_a = instance.termination_tls_configs();
+        let tls_b = instance.termination_tls_configs();
+        assert!(tls_a.default_server_config("app.example.test").is_some());
+        assert!(
+            tls_b
+                .acme_challenge_server_config("app.example.test")
+                .is_some()
+        );
+        assert!(std::ptr::eq(
+            tls_a
+                .default_server_config("app.example.test")
+                .expect("default config")
+                .as_ref(),
+            tls_b
+                .default_server_config("app.example.test")
+                .expect("default config")
+                .as_ref()
+        ));
+
+        // Rebuilding termination TLS (the old per-worker / per-reconnect path) yields a
+        // separate manager set; Client-instance ownership keeps the live count at one.
+        let (_configs, duplicated) = super::load_termination_tls_configs(&settings)
+            .await
+            .expect("second load still builds without network");
+        assert_eq!(duplicated.len(), 1);
+        assert_eq!(instance.acme_manager_count(), 1);
+
+        instance.start_acme_once();
+        instance.start_acme_once();
+        instance.stop_acme().await;
+        instance.stop_acme().await;
+    }
+
+    #[tokio::test]
+    async fn client_instance_prep_stop_acme_awaits_supervised_tasks() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let settings = acme_client_settings(&tempdir, "app.example.test");
+        let instance = ClientInstancePrep::prepare(&settings).await.unwrap();
+        instance.start_acme_once();
+        instance.stop_acme().await;
+        // A second stop after tasks have exited must remain a no-op.
+        instance.stop_acme().await;
+    }
+
+    #[tokio::test]
+    async fn dropping_one_tunnel_client_does_not_stop_shared_acme() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let settings = acme_client_settings(&tempdir, "app.example.test");
+        let instance = ClientInstancePrep::prepare(&settings).await.unwrap();
+        instance.start_acme_once();
+        let retained = Arc::clone(&instance);
+        // Process runtime keeps an Arc while workers come and go; exclusive-owner
+        // stop must not fire while shared references remain.
+        assert!(Arc::strong_count(&instance) > 1);
+        drop(retained);
+        assert_eq!(Arc::strong_count(&instance), 1);
+        instance.stop_acme().await;
     }
 
     #[test]

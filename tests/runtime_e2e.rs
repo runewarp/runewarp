@@ -6,14 +6,14 @@ use std::time::Duration;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
-    ClientConfigResolutionDefaults, ClientConnectConfig, ClientPublicCertConfig, ClientRuntimeArgs,
-    ClientTlsMode, GeneratedClientIdentity, LogLevel, OrderlyShutdown, PreparedClient,
-    PreparedServer, PublicHostname, QUIC_CLOSE_FLUSH_DURATION, SelectedClientConfig, Server,
-    ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
-    ServerTunnelConfig, ServiceConfig, ShutdownMode, generate_client_identity,
-    initialize_manual_server_certificate, load_client_config, load_server_config,
-    make_client_quic_config, make_client_quic_config_with_client_auth, make_server_quic_config,
-    make_server_quic_config_with_client_admission,
+    ClientConfigResolutionDefaults, ClientConnectConfig, ClientInstancePrep,
+    ClientPublicCertConfig, ClientRuntimeArgs, ClientTlsMode, GeneratedClientIdentity, LogLevel,
+    OrderlyShutdown, PreparedClient, PreparedServer, PublicHostname, QUIC_CLOSE_FLUSH_DURATION,
+    SelectedClientConfig, Server, ServerAddress, ServerAdmission, ServerAuthorization,
+    ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, ShutdownMode,
+    generate_client_identity, initialize_manual_server_certificate, load_client_config,
+    load_server_config, make_client_quic_config, make_client_quic_config_with_client_auth,
+    make_server_quic_config, make_server_quic_config_with_client_admission,
     make_server_quic_config_with_client_admission_resolver, resolve_selected_client_config,
 };
 use rustls::RootCertStore;
@@ -2059,6 +2059,228 @@ client-identity = "{}"
     client_task.abort();
     let _ = server_task.await;
     let _ = client_task.await;
+}
+
+/// #193: one Client-instance ACME manager set serves multi-address dials and reconnect
+/// redials while real terminating Visitor traffic still succeeds.
+#[tokio::test]
+async fn shared_client_instance_acme_serves_multi_address_and_reconnect_traffic() {
+    let tempdir = tempdir().unwrap();
+
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+
+    let client_identity = generate_client_identity().unwrap();
+    std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
+        &client_identity.certificate_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
+        &client_identity.private_key_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_IDENTITY_FILENAME),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let acme_state_dir = tempdir.path().join("acme-state");
+    std::fs::create_dir(&acme_state_dir).unwrap();
+    let cached_public_cert =
+        generate_simple_self_signed(vec!["app.example.test".to_owned()]).unwrap();
+    let cached_public_pem = format!(
+        "{}\n{}",
+        cached_public_cert.signing_key.serialize_pem(),
+        cached_public_cert.cert.pem()
+    );
+    DirCache::new(acme_state_dir.clone())
+        .store_cert(
+            &["app.example.test".to_owned()],
+            LETS_ENCRYPT_PRODUCTION_DIRECTORY,
+            cached_public_pem.as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let backend_address = backend_listener.local_addr().unwrap();
+    let backend_task = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (mut backend_stream, _) = backend_listener.accept().await.unwrap();
+            let mut request = [0_u8; 4];
+            backend_stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"ping");
+            backend_stream.write_all(b"pong").await.unwrap();
+            backend_stream.shutdown().await.unwrap();
+        }
+    });
+
+    let server_settings = load_server_config(&{
+        let path = tempdir.path().join("server.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+"#,
+                client_identity.client_identity
+            ),
+        )
+        .unwrap();
+        path
+    })
+    .unwrap();
+
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = ClientConfig {
+        server_addresses: vec![
+            server_address("tunnel.example.test:1"),
+            server_address("tunnel.example.test:2"),
+        ],
+        server_hostname: server_hostname("tunnel.example.test"),
+        server_port: 443,
+        log_level: LogLevel::Off,
+        server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
+        identity_directory: tempdir.path().join("client-identity"),
+        services: vec![ServiceConfig {
+            public_hostnames: Some(vec![public_hostname("app.example.test")]),
+            backend_address: backend_address.to_string(),
+            tls_mode: ClientTlsMode::Terminate,
+        }],
+        public_cert_config: Some(ClientPublicCertConfig::Acme {
+            email: "test@example.test".to_owned(),
+            state_directory: acme_state_dir,
+            state_directory_was_defaulted: false,
+        }),
+        control: None,
+    };
+
+    let instance = ClientInstancePrep::prepare(&client_settings).await.unwrap();
+    instance.start_acme_once();
+    assert_eq!(instance.acme_manager_count(), 1);
+
+    async fn visitor_ping_pong(
+        public_addr: SocketAddr,
+        trust_der: CertificateDer<'static>,
+    ) -> [u8; 4] {
+        let mut client_tls_config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store_with(&trust_der))
+            .with_no_client_auth();
+        client_tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let connector = TlsConnector::from(Arc::new(client_tls_config));
+        let tcp_stream = TcpStream::connect(public_addr).await.unwrap();
+        let mut tls_stream = connector
+            .connect(
+                ServerName::try_from("app.example.test").unwrap(),
+                tcp_stream,
+            )
+            .await
+            .unwrap();
+        tls_stream.write_all(b"ping").await.unwrap();
+        let mut response = [0_u8; 4];
+        tls_stream.read_exact(&mut response).await.unwrap();
+        response
+    }
+
+    let trust_der = CertificateDer::from(cached_public_cert.cert);
+
+    let first = PreparedClient::connect_to_server_address(
+        &client_settings,
+        &instance,
+        localhost(0),
+        &client_settings.server_addresses[0],
+        tunnel_addr,
+    )
+    .await
+    .unwrap();
+    let first_task = tokio::spawn(first.run());
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        visitor_ping_pong(public_addr, trust_der.clone()).await,
+        *b"pong"
+    );
+    assert_eq!(instance.acme_manager_count(), 1);
+
+    // Reconnect-style redial reuses the same Client-instance ACME managers.
+    first_task.abort();
+    let _ = first_task.await;
+    assert_eq!(instance.acme_manager_count(), 1);
+
+    let redial = PreparedClient::connect_to_server_address(
+        &client_settings,
+        &instance,
+        localhost(0),
+        &client_settings.server_addresses[0],
+        tunnel_addr,
+    )
+    .await
+    .unwrap();
+    let redial_task = tokio::spawn(redial.run());
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        visitor_ping_pong(public_addr, trust_der.clone()).await,
+        *b"pong"
+    );
+    assert_eq!(instance.acme_manager_count(), 1);
+
+    // A second address worker shares the same prep / ACME lifecycle.
+    let second = PreparedClient::connect_to_server_address(
+        &client_settings,
+        &instance,
+        localhost(0),
+        &client_settings.server_addresses[1],
+        tunnel_addr,
+    )
+    .await
+    .unwrap();
+    assert_eq!(instance.acme_manager_count(), 1);
+    assert!(std::ptr::eq(
+        second.instance().as_ref() as *const _,
+        instance.as_ref() as *const _
+    ));
+    let second_task = tokio::spawn(second.run());
+    // Dropping one live tunnel must not stop shared ACME needed by the other worker.
+    redial_task.abort();
+    let _ = redial_task.await;
+    assert_eq!(instance.acme_manager_count(), 1);
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(visitor_ping_pong(public_addr, trust_der).await, *b"pong");
+    assert_eq!(instance.acme_manager_count(), 1);
+
+    backend_task.await.unwrap();
+    instance.stop_acme().await;
+    second_task.abort();
+    server_task.abort();
+    let _ = second_task.await;
+    let _ = server_task.await;
 }
 
 #[tokio::test]

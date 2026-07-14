@@ -1,8 +1,8 @@
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    ClientConfig, ClientPublicCertConfig, ClientTlsMode, LogLevel, PreparedClient, PublicHostname,
-    Server, ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
-    ServerTunnelConfig, ServiceConfig, generate_client_identity,
+    ClientConfig, ClientInstancePrep, ClientPublicCertConfig, ClientTlsMode, LogLevel,
+    PreparedClient, PublicHostname, Server, ServerAddress, ServerAdmission, ServerAuthorization,
+    ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, generate_client_identity,
     initialize_manual_client_public_cert, load_client_config,
     make_server_quic_config_with_client_admission,
 };
@@ -779,6 +779,138 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
         _ => {} // connection errors (wrong CA) are acceptable; we only check startup
     }
 
+    server_task.abort();
+    let _ = server_task.await;
+}
+
+/// Shared Client-instance preparation survives reconnect-style redials without duplicating
+/// Terminate-mode TLS / ACME ownership (#193).
+#[tokio::test]
+async fn shared_client_instance_prep_survives_reconnect_style_redials() {
+    let tempdir = tempdir().unwrap();
+    let certified_server =
+        generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+    let server_cert_pem = certified_server.cert.pem();
+    let server_cert = CertificateDer::from(certified_server.cert);
+    let server_key = certified_server.signing_key.serialize_der();
+    let client_identity = generate_client_identity().unwrap();
+    let authorization = ServerAuthorization::from_tunnels(
+        &server_hostname("tunnel.example.test"),
+        &[ServerTunnelConfig {
+            id: None,
+            public_hostnames: vec![public_hostname("app.example.test")],
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
+        }],
+    )
+    .unwrap();
+    let server = Server::bind(ServerBindConfig {
+        public_bind_addr: localhost(0),
+        tunnel_connection_bind_addr: localhost(0),
+        readiness_bind_addr: None,
+        server_hostname: server_hostname("tunnel.example.test"),
+        authorization: authorization.clone(),
+        public_tls_config: None,
+        quic_server_config: make_server_quic_config_with_client_admission(
+            vec![server_cert.clone()],
+            private_key_from_der(&server_key),
+            Arc::new(authorization.clone()),
+        )
+        .unwrap(),
+        admission: ServerAdmission::Static,
+    })
+    .await
+    .unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    fs::write(tempdir.path().join("server-ca.pem"), server_cert_pem).unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        client_identity.certificate_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        client_identity.private_key_pem,
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+    let public_cert_dir = tempdir.path().join("public-cert");
+    initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
+
+    let settings = ClientConfig {
+        server_addresses: vec![
+            server_address("tunnel.example.test:1"),
+            server_address("tunnel.example.test:2"),
+        ],
+        server_hostname: server_hostname("tunnel.example.test"),
+        server_port: 443,
+        log_level: LogLevel::Off,
+        server_ca_file: Some(tempdir.path().join("server-ca.pem")),
+        identity_directory: tempdir.path().join("client-identity"),
+        services: vec![ServiceConfig {
+            public_hostnames: Some(vec![public_hostname("app.example.test")]),
+            backend_address: "localhost:443".to_owned(),
+            tls_mode: ClientTlsMode::Terminate,
+        }],
+        public_cert_config: Some(ClientPublicCertConfig::Manual {
+            directory: public_cert_dir,
+        }),
+        control: None,
+    };
+
+    let instance = ClientInstancePrep::prepare(&settings).await.unwrap();
+    instance.start_acme_once();
+    assert_eq!(instance.acme_manager_count(), 0);
+
+    let first = PreparedClient::connect_to_server_address(
+        &settings,
+        &instance,
+        localhost(0),
+        &settings.server_addresses[0],
+        tunnel_addr,
+    )
+    .await
+    .unwrap();
+    assert!(std::ptr::eq(
+        first.instance().as_ref() as *const _,
+        instance.as_ref() as *const _
+    ));
+    drop(first);
+
+    // Reconnect-style redial and a second address worker share the same preparation.
+    let second = PreparedClient::connect_to_server_address(
+        &settings,
+        &instance,
+        localhost(0),
+        &settings.server_addresses[1],
+        tunnel_addr,
+    )
+    .await
+    .unwrap();
+    let third = PreparedClient::connect_to_server_address(
+        &settings,
+        &instance,
+        localhost(0),
+        &settings.server_addresses[0],
+        tunnel_addr,
+    )
+    .await
+    .unwrap();
+    assert_eq!(instance.acme_manager_count(), 0);
+    assert!(std::ptr::eq(
+        second.instance().as_ref() as *const _,
+        third.instance().as_ref() as *const _
+    ));
+
+    instance.stop_acme().await;
+    drop(second);
+    drop(third);
     server_task.abort();
     let _ = server_task.await;
 }

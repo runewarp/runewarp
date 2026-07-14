@@ -26,12 +26,13 @@ use rcgen::generate_simple_self_signed;
 use runewarp::{
     AddressController, AddressWorkerControl, AssignmentConvergence, AssignmentConvergenceTracker,
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, CONTROL_ALPN_H2,
-    ClientAssignmentAdapter, ClientAssignmentApply, ClientConfig, ClientIdentity, ClientTlsMode,
-    ControlAddress, ControlClientIdentityMaterial, ControlTrust, LogLevel, MaintenanceIntent,
-    ManagedSession, ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PreparedClient,
-    PublicHostname, QUIC_CLOSE_FLUSH_DURATION, Server, ServerAddress, ServerAdmission,
-    ServerAuthorization, ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
-    SessionMaterial, ShutdownMode, client_identity_from_certificate_der, events_path,
+    ClientAssignmentAdapter, ClientAssignmentApply, ClientConfig, ClientIdentity,
+    ClientInstancePrep, ClientTlsMode, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
+    LogLevel, MaintenanceIntent, ManagedSession, ManagedSessionEvent, ManagedSessionRole,
+    OrderlyShutdown, PreparedClient, PublicHostname, QUIC_CLOSE_FLUSH_DURATION, Server,
+    ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
+    ServerTunnelConfig, ServiceConfig, SessionMaterial, ShutdownMode,
+    client_identity_from_certificate_der, events_path,
     make_server_quic_config_with_client_admission, state_path,
 };
 use rustls::RootCertStore;
@@ -251,6 +252,11 @@ impl ManagedClientHarness {
         let dial_attempts_task = Arc::clone(&dial_attempts);
         let convergence_task = convergence.clone();
         let runtime_task = tokio::spawn(async move {
+            let instance = match ClientInstancePrep::prepare(settings.as_ref()).await {
+                Ok(instance) => instance,
+                Err(error) => return Err(error.to_string()),
+            };
+            instance.start_acme_once();
             let session_runtime = session.run(
                 &mut adapter,
                 move |event| {
@@ -277,15 +283,18 @@ impl ManagedClientHarness {
                         let _ = convergence_task.set_assigned(&addresses);
                         controller.replace_intent(&addresses, {
                             let settings = Arc::clone(&settings);
+                            let instance = Arc::clone(&instance);
                             let convergence = convergence_task.clone();
                             let dial_attempts = Arc::clone(&dial_attempts_task);
                             move |server_address, control| {
                                 let settings = Arc::clone(&settings);
+                                let instance = Arc::clone(&instance);
                                 let convergence = Some(convergence.clone());
                                 let dial_attempts = Arc::clone(&dial_attempts);
                                 async move {
                                     run_test_address_worker(
                                         settings,
+                                        instance,
                                         server_address,
                                         localhost(0),
                                         control,
@@ -303,6 +312,7 @@ impl ManagedClientHarness {
                             Some(Ok(_)) => {}
                             Some(Err((_address, error))) => {
                                 shutdown.request();
+                                instance.stop_acme().await;
                                 return Err(error);
                             }
                             None => {}
@@ -311,12 +321,15 @@ impl ManagedClientHarness {
                     () = &mut session_runtime => {
                         shutdown.request();
                         controller.run_until_idle().await?;
+                        instance.stop_acme().await;
                         return Ok(());
                     }
                 }
             }
             shutdown.request();
-            controller.run_until_idle().await
+            let result = controller.run_until_idle().await;
+            instance.stop_acme().await;
+            result
         });
 
         sleep(Duration::from_millis(50)).await;
@@ -777,6 +790,7 @@ async fn wait_for_reconnecting(events: &mut mpsc::UnboundedReceiver<ManagedSessi
 
 async fn run_test_address_worker(
     settings: Arc<ClientConfig>,
+    instance: Arc<ClientInstancePrep>,
     server_address: ServerAddress,
     local_bind_addr: SocketAddr,
     control: AddressWorkerControl,
@@ -847,6 +861,7 @@ async fn run_test_address_worker(
             }
             result = PreparedClient::connect_to_server_address(
                 &settings,
+                &instance,
                 local_bind_addr,
                 &server_address,
                 resolved,

@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Changed Managed-session state reporting to one revision acknowledgment per successfully handled snapshot, removed periodic Core state heartbeats, and made failed or stalled acknowledgments replace the session while retaining Control-owned SSE keepalives. (#198)
 - Removed automatic and manual self-signed Client identity certificate renewal. New Client identities receive a 100-year certificate, the Server continues to authorize the pinned public key without validating certificate expiry, and `runewarp client identity renew` is gone. (#161)
 - Added standard top-level `--version` and `-V` output, with `-dev` builds now appending the baked-in 12-character commit SHA for traceability. (#135)
 

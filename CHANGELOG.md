@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added managed Client assignment reconciliation: the Managed-session Client adapter atomically replaces Address-controller maintenance intent from Control-published Server-address snapshots, acknowledges revisions without awaiting network convergence, tracks Unconverged / Partially converged / Converged assignment progress (excluding Retiring connections), and keeps independent per-address reconnect loops while skipping the static one-shot Client-ready event. (#188)
 - Added managed Server authorization apply: the Managed-session Server adapter atomically commits Control-published Tunnel authorization, defers **Server readiness** until the first successful apply, retains prior authorization on rejected candidates, and reports applied revisions over the Control session. (#185)
 - Added managed Server revocation and drain enforcement: Client-identity and Public-hostname authorization changes apply immediately (including during bounded graceful drain), surviving work is remapped by identity continuity, the Managed session stays active through drain until final process exit, and unrecoverable post-commit readiness failures drop readiness and exit nonzero. (#187)
 - Added the role-neutral Managed-session engine that validates Server/Client snapshot inputs, applies them through a role-adapter seam, and reports the last successfully applied opaque revision on the same authenticated HTTP/2 connection as the SSE downlink. (#184)

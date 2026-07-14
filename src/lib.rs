@@ -23,7 +23,8 @@ mod tls_material;
 mod trust;
 
 pub use client::{
-    AddressController, AddressControllerShutdown, AddressWorkerControl, Client,
+    AddressController, AddressControllerShutdown, AddressWorkerControl, AssignmentConvergence,
+    AssignmentConvergenceTracker, Client, ClientAssignmentAdapter, ClientAssignmentApply,
     ClientConfigResolutionDefaults, ClientConfigResolutionError, ClientConnectConfig,
     ClientConnectError, ClientRuntimeArgs, MaintenanceIntent, SelectedClientConfig,
     resolve_client_config_from_cli, resolve_selected_client_config, select_client_config,

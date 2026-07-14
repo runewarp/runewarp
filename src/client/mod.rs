@@ -1,4 +1,6 @@
 mod address_controller;
+mod assignment_convergence;
+mod managed_adapter;
 mod service;
 mod termination_tls;
 mod tunnel_stream;
@@ -6,6 +8,8 @@ mod tunnel_stream;
 pub use address_controller::{
     AddressController, AddressControllerShutdown, AddressWorkerControl, MaintenanceIntent,
 };
+pub use assignment_convergence::{AssignmentConvergence, AssignmentConvergenceTracker};
+pub use managed_adapter::{ClientAssignmentAdapter, ClientAssignmentApply};
 
 use std::fmt;
 use std::future::Future;

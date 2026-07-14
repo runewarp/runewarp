@@ -1,6 +1,6 @@
 //! Role-adapter seam for Managed-session reconciliation.
 //!
-//! The shared session owns transport, revision tracking, and state reporting.
+//! The shared session owns transport, revision tracking, and state acknowledgment.
 //! Role-specific apply behavior lives behind this trait so Server and Client
 //! do not duplicate those concerns.
 

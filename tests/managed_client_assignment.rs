@@ -536,7 +536,7 @@ async fn managed_client_retires_re_adopts_and_preserves_assignment_through_contr
                     assert_eq!(
                         bodies.last(),
                         Some(&json!({ "revision": "rev-readopt" })),
-                        "equal revision after reconnect must resume state reporting"
+                        "equal revision after reconnect must be acknowledged"
                     );
                     true
                 } else {
@@ -550,7 +550,7 @@ async fn managed_client_retires_re_adopts_and_preserves_assignment_through_contr
         }
     })
     .await
-    .expect("equal revision after reconnect must resume state reporting");
+    .expect("equal revision after reconnect must be acknowledged");
     assert!(
         harness.control.metrics.tls_accepts.load(Ordering::SeqCst) > tls_before,
         "Control reconnect must open a new TLS connection"

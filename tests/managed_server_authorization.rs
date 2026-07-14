@@ -456,7 +456,7 @@ async fn managed_server_authorization_apply_controls_traffic_and_readiness() {
         .await
         .expect("visitor traffic must not succeed before authorization apply");
 
-    // 2. First valid apply: readiness opens, state reports revision, traffic succeeds.
+    // 2. First valid apply: readiness opens, state acknowledges revision, traffic succeeds.
     let first_identity = harness.trusted_client.client_identity.to_string();
     harness.push_authorization(
         "rev-1",
@@ -862,7 +862,7 @@ async fn managed_server_retains_authorization_through_control_session_loss() {
                     assert_eq!(
                         bodies.last(),
                         Some(&json!({ "revision": "rev-1" })),
-                        "equal revision after reconnect must resume state reporting"
+                        "equal revision after reconnect must be acknowledged"
                     );
                     true
                 } else {
@@ -876,7 +876,7 @@ async fn managed_server_retains_authorization_through_control_session_loss() {
         }
     })
     .await
-    .expect("equal revision after reconnect must resume state reporting");
+    .expect("equal revision after reconnect must be acknowledged");
     assert!(
         harness.control.metrics.tls_accepts.load(Ordering::SeqCst) > tls_before,
         "Control reconnect must open a new TLS connection"
@@ -1039,7 +1039,7 @@ async fn managed_server_closes_managed_session_immediately_on_fast_shutdown() {
     let reports_after = harness.control.metrics.state_bodies.lock().unwrap().len();
     assert_eq!(
         reports_after, reports_before,
-        "closed Managed session must not continue state reporting"
+        "closed Managed session must not send state acknowledgments"
     );
 
     harness.stop_tx.take();

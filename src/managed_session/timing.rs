@@ -11,9 +11,6 @@ pub const FIRST_SNAPSHOT_DEADLINE: Duration = Duration::from_secs(60);
 /// Maximum silence between any SSE bytes before the session is replaced.
 pub const SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Cadence for repeating the last successfully applied revision to Control.
-pub const STATE_HEARTBEAT: Duration = Duration::from_secs(20);
-
 /// Clock used by the Managed-session loop so tests can pause Tokio time.
 pub trait SessionClock {
     fn now(&self) -> Instant;

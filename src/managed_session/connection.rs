@@ -1,5 +1,5 @@
 //! One authenticated HTTP/2 Control connection carrying the SSE downlink and
-//! concurrent applied-state writes.
+//! concurrent applied-state acknowledgments.
 
 use std::fmt;
 
@@ -67,7 +67,7 @@ impl std::error::Error for ConnectionError {
 
 /// Authenticated HTTP/2 connection with an open SSE downlink.
 ///
-/// The sender half remains available so applied-state writes can open concurrent
+/// The sender half remains available so applied-state acknowledgments can open concurrent
 /// streams on the same connection. Dropping this value closes the connection.
 pub struct ManagedSessionConnection {
     sender: SendRequest<Full<Bytes>>,
@@ -144,7 +144,7 @@ impl ManagedSessionConnection {
         !self.sender.is_closed()
     }
 
-    /// PUT the applied revision on a concurrent stream of this connection.
+    /// Acknowledge the applied revision on a concurrent stream of this connection.
     ///
     /// State writes are valid only after the matching SSE downlink is active,
     /// which is true for any constructed [`ManagedSessionConnection`].

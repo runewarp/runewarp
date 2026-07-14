@@ -1,4 +1,4 @@
-//! Managed-session status policy for SSE downlink and state-report responses.
+//! Managed-session status policy for SSE downlink and state-acknowledgment responses.
 
 use http::{HeaderMap, StatusCode, header};
 use http_body_util::BodyExt;
@@ -13,7 +13,7 @@ pub enum SseResponseClass {
     RetryableFailure,
 }
 
-/// Outcome of classifying a state-report response.
+/// Outcome of classifying a state-acknowledgment response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StateResponseClass {
     /// Exact status 204 with an empty body.
@@ -37,7 +37,7 @@ pub fn classify_sse_response(status: StatusCode, headers: &HeaderMap) -> SseResp
     SseResponseClass::Success
 }
 
-/// Classify a state-report response from status alone before reading the body.
+/// Classify a state-acknowledgment response from status alone before reading the body.
 pub fn classify_state_status(status: StatusCode) -> StateResponseClass {
     if status == StatusCode::NO_CONTENT {
         StateResponseClass::Success
@@ -46,7 +46,7 @@ pub fn classify_state_status(status: StatusCode) -> StateResponseClass {
     }
 }
 
-/// Classify a fully read state-report response. Success requires exact status
+/// Classify a fully read state-acknowledgment response. Success requires exact status
 /// 204 and an empty body.
 pub fn classify_state_response(status: StatusCode, body: &[u8]) -> StateResponseClass {
     if classify_state_status(status) != StateResponseClass::Success {

@@ -2272,10 +2272,7 @@ client-identity = "{}"
     let _ = redial_task.await;
     assert_eq!(instance.acme_manager_count(), 1);
     sleep(Duration::from_millis(50)).await;
-    assert_eq!(
-        visitor_ping_pong(public_addr, trust_der).await,
-        *b"pong"
-    );
+    assert_eq!(visitor_ping_pong(public_addr, trust_der).await, *b"pong");
     assert_eq!(instance.acme_manager_count(), 1);
 
     backend_task.await.unwrap();

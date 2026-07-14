@@ -244,9 +244,10 @@ impl ClientInstancePrep {
             .map_err(|error| ClientStartupError::InvalidSettings(error.to_string()))?;
         prepare_default_client_acme_state_dir(config)?;
 
-        let (termination_tls_configs, acme_runtimes) = load_termination_tls_configs(config)
-            .await
-            .map_err(ClientStartupError::InvalidSettings)?;
+        let (termination_tls_configs, acme_runtimes) =
+            load_termination_tls_configs(config)
+                .await
+                .map_err(ClientStartupError::InvalidSettings)?;
         let acme_manager_count = acme_runtimes.len();
 
         Ok(Arc::new(Self {

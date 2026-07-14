@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added required managed Server **Tunnel ID** (`tunnels[].id`): opaque Control-owned continuity keys (shared validation with revision), ID-keyed live pool rematch on apply, and static mode remains ID-less. (#192)
 - Added the Managed-session protocol and Control interoperability guide in `docs/managed.md`, with cross-links from architecture, protocol, security, configuration, usage, and the README documentation index. (#190)
 - Added managed Client retirement and recovery: connected address removal marks workers Retiring without local closure or Infrastructure drain, re-adding re-adopts without duplicate dialing, Control loss and repeated-revision reconnect preserve the last assignment, process restart fail-closes until a fresh snapshot, and per-address failures stay isolated while fatal workers exit nonzero. (#189)
 - Added managed Client assignment reconciliation: the Managed-session Client adapter atomically replaces Address-controller maintenance intent from Control-published Server-address snapshots, acknowledges revisions without awaiting network convergence, tracks Unconverged / Partially converged / Converged assignment progress (excluding Retiring connections), and keeps independent per-address reconnect loops while skipping the static one-shot Client-ready event. (#188)

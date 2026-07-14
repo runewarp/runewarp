@@ -461,7 +461,7 @@ async fn managed_server_authorization_apply_controls_traffic_and_readiness() {
     harness.push_authorization(
         "rev-1",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{first_identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{first_identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-1").await;
@@ -485,7 +485,7 @@ async fn managed_server_authorization_apply_controls_traffic_and_readiness() {
     harness.push_authorization(
         "rev-2",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{API_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t2","public_hostnames":["{API_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-2").await;
@@ -529,7 +529,7 @@ async fn managed_server_authorization_apply_controls_traffic_and_readiness() {
     harness.push_authorization(
         "rev-bad",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{SERVER_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"bad-tunnel","public_hostnames":["{SERVER_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
         ),
     );
     wait_for_rejected(&mut harness.event_rx, "rev-bad").await;
@@ -552,7 +552,7 @@ async fn managed_server_authorization_apply_controls_traffic_and_readiness() {
     harness.push_authorization(
         "rev-1",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{first_identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{first_identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-1").await;
@@ -609,7 +609,7 @@ async fn managed_server_identity_revocation_closes_live_work_and_denies_new_hand
     harness.push_authorization(
         "rev-1",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{first_identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{first_identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-1").await;
@@ -629,7 +629,7 @@ async fn managed_server_identity_revocation_closes_live_work_and_denies_new_hand
     harness.push_authorization(
         "rev-2",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-2").await;
@@ -688,7 +688,7 @@ async fn managed_server_hostname_only_revocation_resets_only_affected_streams() 
     harness.push_authorization(
         "rev-both",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}","{API_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}","{API_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-both").await;
@@ -712,7 +712,7 @@ async fn managed_server_hostname_only_revocation_resets_only_affected_streams() 
     harness.push_authorization(
         "rev-app-only",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-app-only").await;
@@ -754,7 +754,7 @@ async fn managed_server_unrelated_identity_survives_targeted_revocation() {
     harness.push_authorization(
         "rev-both",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{first_identity}"]}},{{"public_hostnames":["{API_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{first_identity}"]}},{{"id":"t2","public_hostnames":["{API_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-both").await;
@@ -786,7 +786,7 @@ async fn managed_server_unrelated_identity_survives_targeted_revocation() {
     harness.push_authorization(
         "rev-drop-one",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{API_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t2","public_hostnames":["{API_HOSTNAME}"],"client_identities":["{second_identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-drop-one").await;
@@ -819,7 +819,7 @@ async fn managed_server_retains_authorization_through_control_session_loss() {
 
     let identity = harness.trusted_client.client_identity.to_string();
     let auth_input = format!(
-        r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+        r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
     );
     harness.push_authorization("rev-1", &auth_input);
     wait_for_applied(&mut harness.event_rx, "rev-1").await;
@@ -902,7 +902,7 @@ async fn managed_server_applies_authorization_change_during_graceful_drain() {
     harness.push_authorization(
         "rev-live",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-live").await;
@@ -981,7 +981,7 @@ async fn managed_server_closes_managed_session_immediately_on_fast_shutdown() {
     harness.push_authorization(
         "rev-live",
         &format!(
-            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-live").await;

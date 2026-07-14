@@ -9,7 +9,7 @@ use std::io;
 use std::sync::{Arc, RwLock};
 
 use crate::quic::ClientIdentityAdmission;
-use crate::{ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig};
+use crate::{ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig, TunnelId};
 
 /// Shared Server authorization handle used by routing and QUIC handshake admission.
 #[derive(Clone, Debug)]
@@ -72,6 +72,8 @@ pub struct AuthorizationSnapshot {
     client_identity_to_tunnel: HashMap<ClientIdentity, usize>,
     public_hostname_to_tunnel: HashMap<PublicHostname, usize>,
     trusted_client_identities: HashSet<ClientIdentity>,
+    /// Parallel to tunnel indices. All `Some` in Managed mode; all `None` in static mode.
+    tunnel_ids: Vec<Option<TunnelId>>,
     tunnel_count: usize,
 }
 
@@ -84,6 +86,17 @@ impl AuthorizationSnapshot {
         let mut public_hostname_to_tunnel = HashMap::new();
         let mut seen_client_identities = HashSet::new();
         let mut seen_public_hostnames = HashSet::new();
+        let mut seen_tunnel_ids = HashSet::new();
+        let mut tunnel_ids = Vec::with_capacity(tunnels.len());
+
+        let id_count = tunnels.iter().filter(|tunnel| tunnel.id.is_some()).count();
+        if id_count != 0 && id_count != tunnels.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Server Tunnel IDs must be present on every tunnel or on none",
+            ));
+        }
+
         for (index, tunnel) in tunnels.iter().enumerate() {
             if tunnel.public_hostnames.is_empty() {
                 return Err(io::Error::new(
@@ -91,6 +104,15 @@ impl AuthorizationSnapshot {
                     "server.tunnels[].public-hostnames must not be empty",
                 ));
             }
+            if let Some(id) = &tunnel.id
+                && !seen_tunnel_ids.insert(id.clone())
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Tunnel IDs must be unique across all Server Tunnels: {id}"),
+                ));
+            }
+            tunnel_ids.push(tunnel.id.clone());
             for client_identity in &tunnel.authorized_client_identities {
                 if !seen_client_identities.insert(client_identity.clone()) {
                     return Err(io::Error::new(
@@ -127,12 +149,21 @@ impl AuthorizationSnapshot {
             trusted_client_identities: client_identity_to_tunnel.keys().cloned().collect(),
             client_identity_to_tunnel,
             public_hostname_to_tunnel,
+            tunnel_ids,
             tunnel_count: tunnels.len(),
         })
     }
 
     pub fn tunnel_count(&self) -> usize {
         self.tunnel_count
+    }
+
+    pub fn tunnel_ids(&self) -> &[Option<TunnelId>] {
+        &self.tunnel_ids
+    }
+
+    pub fn uses_tunnel_ids(&self) -> bool {
+        !self.tunnel_ids.is_empty() && self.tunnel_ids.iter().all(|id| id.is_some())
     }
 
     pub fn tunnel_index_for_public_hostname(
@@ -172,6 +203,7 @@ impl AuthorizationSnapshot {
             client_identity_to_tunnel,
             public_hostname_to_tunnel,
             trusted_client_identities,
+            tunnel_ids: vec![None; tunnel_count],
             tunnel_count,
         }
     }
@@ -276,10 +308,12 @@ mod tests {
             &server_hostname("tunnel.example.test"),
             &[
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("app.example.test")],
                     authorized_client_identities: vec![first_identity.clone()],
                 },
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("api.example.test")],
                     authorized_client_identities: vec![second_identity.clone()],
                 },
@@ -317,10 +351,12 @@ mod tests {
             &server_hostname("tunnel.example.test"),
             &[
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("app.example.test")],
                     authorized_client_identities: vec![identity.clone()],
                 },
                 ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![public_hostname("app.example.test")],
                     authorized_client_identities: vec![client_identity()],
                 },
@@ -342,6 +378,7 @@ mod tests {
         let state = AuthorizationState::from_static_config(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![identity.clone()],
             }],
@@ -352,6 +389,7 @@ mod tests {
             .prepare(
                 &server_hostname("tunnel.example.test"),
                 &[ServerTunnelConfig {
+                    id: None,
                     public_hostnames: vec![],
                     authorized_client_identities: vec![client_identity()],
                 }],
@@ -371,6 +409,7 @@ mod tests {
         let state = AuthorizationState::from_static_config(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![first_identity.clone()],
             }],
@@ -379,6 +418,7 @@ mod tests {
         let prepared = state.prepare(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("api.example.test")],
                 authorized_client_identities: vec![second_identity.clone()],
             }],
@@ -410,6 +450,7 @@ mod tests {
         let state = Arc::new(AuthorizationState::from_static_config(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![old_hostname.clone()],
                 authorized_client_identities: vec![old_identity.clone()],
             }],
@@ -463,6 +504,7 @@ mod tests {
         let prepared = state.prepare(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![new_hostname],
                 authorized_client_identities: vec![new_identity],
             }],
@@ -499,6 +541,7 @@ mod tests {
         let authorization = ServerAuthorization::from_tunnels(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![first_identity.clone()],
             }],
@@ -511,6 +554,7 @@ mod tests {
         let prepared = authorization.prepare(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("api.example.test")],
                 authorized_client_identities: vec![second_identity.clone()],
             }],

@@ -12,6 +12,10 @@ _Avoid_: Edge proxy, gateway
 A configured routing and trust unit that owns one slice of public traffic.
 _Avoid_: Connection, session
 
+**Tunnel ID**:
+The Control-owned opaque identifier for one **Tunnel** in **Managed mode**. It is unique within a Server authorization snapshot; Core uses it as the continuity key for that Tunnel's live pool. Static mode has no Tunnel ID.
+_Avoid_: Cloud Tunnel ID, tunnel UUID, ordinal, tunnel index
+
 **Tunnel connection**:
 A live session opened by one **Client instance** and accepted under one **Tunnel**.
 _Avoid_: Tunnel, route
@@ -206,6 +210,8 @@ _Avoid_: CI environment, deploy target
 - A **Client** can run as one or more **Client instances**
 - A **Tunnel** can have zero or more live **Tunnel connections**
 - A **Tunnel** authorizes one or more **Client identities**
+- In **Managed mode**, each **Tunnel** has exactly one **Tunnel ID**
+- A **Tunnel ID** identifies exactly one **Tunnel** within one Server authorization snapshot
 - Each **Tunnel connection** belongs to exactly one **Tunnel**
 - Each **Tunnel connection** belongs to exactly one **Client instance**
 - A **Client instance** establishes one or more **Tunnel connections**
@@ -328,6 +334,7 @@ _Avoid_: CI environment, deploy target
 ## Flagged ambiguities
 
 - "tunnel" was used to mean both a configured routing entry and a live QUIC session — resolved: **Tunnel** is the configured unit; **Tunnel connection** is the live session.
+- "tunnel id" / Cloud tunnel identifiers were easy to treat as optional log sugar — resolved: in **Managed mode**, **Tunnel ID** is the Control-owned continuity key for a **Tunnel**; static mode has none.
 - "client" was used to mean both the operator-run component and the outside network peer — resolved: **Client** is the operator-run component; **Visitor** is the outside public caller.
 - "client" was also used to blur the component and one running process — resolved: **Client** is the component; **Client instance** is one running copy.
 - "server hostname" and routed application hostnames were easy to blur — resolved: **Server hostname** names the Runewarp edge; **Public hostname** names operator application traffic.

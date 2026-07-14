@@ -16,7 +16,8 @@ This document describes what Core implements today. Control-owned product policy
 | **Managed session** | Authenticated live relationship between one Server or Client instance and Control for versioned snapshots and revision reports; Core implements it as one mutually authenticated HTTP/2 connection |
 | **Server** / **Client instance** | Runtimes that open a Managed session; they still own the data-path listeners and Tunnel connections |
 | **Tunnel connection** | QUIC data-path session between Client and Server; separate from the Managed session |
-| **Authorization snapshot** | Server-side Public-hostname routing plus trusted Client identities applied from Control |
+| **Authorization snapshot** | Server-side Public-hostname routing plus trusted Client identities applied from Control; managed tunnels are keyed by **Tunnel ID** |
+| **Tunnel ID** | Control-owned opaque identifier for one managed Server **Tunnel**; continuity key for live pools; absent in static mode |
 | **Address controller** | Client-side maintenance of at most one worker per normalized Server address |
 | **Assignment convergence** | Client aggregate of whether assigned Server addresses are Connected (separate from revision acknowledgment) |
 | **Retiring** | Connected address removed from assignment intent: reconnect stops; live Tunnel connection stays until remote Server closure |
@@ -100,6 +101,8 @@ Every v1 data event must be `event: snapshot`. The first data event on every con
 }
 ```
 
+`revision` uses the same opaque-string rules as **Tunnel ID**: non-empty, at most 128 Unicode scalars, no ASCII whitespace or control characters. Core compares equality only.
+
 Unknown JSON fields in a known v1 snapshot are ignored. Behavior-changing fields require a new protocol version.
 
 ### Server `input`
@@ -108,6 +111,7 @@ Unknown JSON fields in a known v1 snapshot are ignored. Behavior-changing fields
 {
   "tunnels": [
     {
+      "id": "<opaque Tunnel ID>",
       "public_hostnames": ["app.example.com"],
       "client_identities": ["4f7b6f7a9b0f0d2b..."]
     }
@@ -118,7 +122,8 @@ Unknown JSON fields in a known v1 snapshot are ignored. Behavior-changing fields
 Rules (as implemented):
 
 - `tunnels` is required and may be `[]`
-- each entry requires non-empty plural `public_hostnames` and `client_identities` only (no singular aliases, no Cloud Tunnel IDs)
+- each entry requires non-empty `id`, plural `public_hostnames`, and `client_identities` (no singular aliases)
+- `id` is a **Tunnel ID**: non-empty opaque string, at most 128 Unicode scalars, no ASCII whitespace or control characters; unique across the whole set
 - normalized Public hostnames and Client identities must be unique across the whole set
 - unknown per-tunnel JSON fields are ignored
 
@@ -140,8 +145,9 @@ Rules (as implemented):
 
 | Rule | Behavior |
 | --- | --- |
-| Opacity | Revisions are opaque strings; Core compares equality only |
+| Opacity | Revisions and Tunnel IDs are opaque strings; Core compares equality only |
 | Immutability expectation | A revision always names one complete role input; changed input needs a changed revision (Control responsibility) |
+| Tunnel ID | Required on every managed Server tunnel; keys live Tunnel pools across applies; static mode has no Tunnel ID |
 | Desired versus applied | Control owns desired publication and any drift comparison; Core reports only the last successfully applied revision |
 | Equal while idle | Skip apply; continue reporting |
 | Rollback | Previously applied non-current revisions remain valid candidates |
@@ -191,10 +197,12 @@ Any downlink failure closes the whole connection. Reconnect resets only after a 
 1. Startup validates local credentials and binds listeners, but **Server readiness** stays unavailable and no Tunnel or Visitor work is admitted until the first successful Server input apply.
 2. Candidates are prepared beside the live **Authorization snapshot** and committed atomically across Public-hostname routing and Client-identity handshake admission.
 3. A valid empty `tunnels` collection may keep **Server readiness** available while authorizing no work.
-4. Live continuity uses Client identity and Public hostname facts (no Cloud Tunnel ID):
+4. Live continuity uses **Tunnel ID** for pool identity, plus Client identity and Public hostname facts for admission and revocation:
+   - surviving Tunnel pools are rematched by Tunnel ID when Control reorders tunnels
+   - a Client identity that moves to another Tunnel ID is rehomed without closing the live Tunnel connection
    - removing a Client identity denies new handshakes and closes that identity's live Tunnel connections and streams
    - removing only a Public hostname resets matching Visitor streams
-   - unrelated authorized work survives; surviving Tunnel connections remap when Tunnel ordinals change
+   - unrelated authorized work survives
 5. After the first successful apply, Control loss retains the last authorization and readiness while the session reconnects.
 6. **Graceful shutdown** drops readiness immediately but keeps the Managed session, snapshot application, and revision reporting active through bounded drain so Authorization changes still apply; the session ends when the HTTP/2 connection closes at final process exit. **Fast shutdown** may close the session immediately.
 7. A pre-commit failure retains prior authorization. An unrecoverable failure after commit begins never restores revoked authorization: readiness drops and the process exits nonzero.
@@ -238,7 +246,7 @@ Before the first successful apply, remote and protocol failures keep the process
 
 ```text
 event: snapshot
-data: {"revision":"srv-42","input":{"tunnels":[{"public_hostnames":["app.example.com"],"client_identities":["4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef"]}]}}
+data: {"revision":"srv-42","input":{"tunnels":[{"id":"550e8400-e29b-41d4-a716-446655440000","public_hostnames":["app.example.com"],"client_identities":["4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef"]}]}}
 
 ```
 
@@ -296,7 +304,8 @@ Label each requirement as **Control must** (wire contract Control implements) or
 - [ ] Respond to SSE with status `200` and `Content-Type: text/event-stream`
 - [ ] Emit `event: snapshot` full documents only (no v1 patches)
 - [ ] Send a current full snapshot as the first data event on every connection
-- [ ] Use non-empty opaque `revision` values that identify immutable complete inputs
+- [ ] Use non-empty opaque `revision` values that identify immutable complete inputs (max 128 Unicode scalars; no ASCII whitespace or controls)
+- [ ] Require unique opaque `tunnels[].id` (**Tunnel ID**) on every managed Server tunnel (same opaque-string rules as revision)
 - [ ] Use plural-only Server fields `tunnels[].public_hostnames` / `tunnels[].client_identities` and Client field `server_addresses`
 - [ ] Allow empty overall `tunnels` / `server_addresses` collections
 - [ ] Emit SSE comment keepalives often enough that silence stays under 60 s (20 s cadence recommended)

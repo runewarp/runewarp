@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::ServerTunnelConfig;
-use crate::{ClientIdentity, PublicHostname, ServerAddress};
+use crate::{ClientIdentity, PublicHostname, ServerAddress, TunnelId};
 
 /// Validated Server role input from a Managed-session snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,6 +53,7 @@ struct RawServerInput {
 
 #[derive(Debug, Deserialize)]
 struct RawServerTunnel {
+    id: Option<String>,
     public_hostnames: Option<Vec<String>>,
     client_identities: Option<Vec<String>>,
 }
@@ -76,6 +77,7 @@ pub fn parse_server_input(input: &Value) -> Result<ServerManagedInput, InputErro
         tunnels.push(parse_server_tunnel(index, tunnel)?);
     }
 
+    validate_unique_tunnel_ids(&tunnels)?;
     validate_unique_public_hostnames(&tunnels)?;
     validate_unique_client_identities(&tunnels)?;
 
@@ -109,6 +111,17 @@ fn parse_server_tunnel(
     index: usize,
     tunnel: RawServerTunnel,
 ) -> Result<ServerTunnelConfig, InputError> {
+    let Some(raw_id) = tunnel.id else {
+        return Err(InputError::InvalidShape(format!(
+            "tunnels[{index}] omitted id"
+        )));
+    };
+    let id = TunnelId::parse(&raw_id).map_err(|error| {
+        InputError::InvalidShape(format!(
+            "tunnels[{index}].id is invalid `{raw_id}`: {error}"
+        ))
+    })?;
+
     let Some(raw_hostnames) = tunnel.public_hostnames else {
         return Err(InputError::InvalidShape(format!(
             "tunnels[{index}] omitted public_hostnames"
@@ -152,9 +165,27 @@ fn parse_server_tunnel(
     }
 
     Ok(ServerTunnelConfig {
+        id: Some(id),
         public_hostnames,
         authorized_client_identities,
     })
+}
+
+fn validate_unique_tunnel_ids(tunnels: &[ServerTunnelConfig]) -> Result<(), InputError> {
+    let mut seen = HashSet::new();
+    for tunnel in tunnels {
+        let Some(id) = tunnel.id.as_ref() else {
+            return Err(InputError::InvalidShape(
+                "managed tunnels must include an id".into(),
+            ));
+        };
+        if !seen.insert(id.clone()) {
+            return Err(InputError::InvalidShape(format!(
+                "tunnel ids must be unique across all tunnels: {id}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_unique_public_hostnames(tunnels: &[ServerTunnelConfig]) -> Result<(), InputError> {
@@ -206,7 +237,7 @@ mod tests {
     use super::{
         ClientManagedInput, InputError, ServerManagedInput, parse_client_input, parse_server_input,
     };
-    use crate::{ClientIdentity, PublicHostname, ServerAddress, ServerTunnelConfig};
+    use crate::{ClientIdentity, PublicHostname, ServerAddress, ServerTunnelConfig, TunnelId};
 
     const IDENTITY_A: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     const IDENTITY_B: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -221,6 +252,7 @@ mod tests {
     fn server_input_accepts_plural_fields_and_normalizes_hostnames() {
         let input = parse_server_input(&json!({
             "tunnels": [{
+                "id": "tunnel-a",
                 "public_hostnames": ["App.Example.Test."],
                 "client_identities": [IDENTITY_A],
                 "ignored": true
@@ -231,6 +263,7 @@ mod tests {
             input,
             ServerManagedInput {
                 tunnels: vec![ServerTunnelConfig {
+                    id: Some(TunnelId::parse("tunnel-a").unwrap()),
                     public_hostnames: vec![PublicHostname::try_from("app.example.test").unwrap()],
                     authorized_client_identities: vec![
                         IDENTITY_A.parse::<ClientIdentity>().unwrap()
@@ -247,28 +280,72 @@ mod tests {
             InputError::MissingTunnels
         );
         assert!(matches!(
-            parse_server_input(&json!({"tunnels": [{"client_identities": [IDENTITY_A]}]}))
-                .unwrap_err(),
+            parse_server_input(&json!({
+                "tunnels": [{"public_hostnames": ["app.example.test"], "client_identities": [IDENTITY_A]}]
+            }))
+            .unwrap_err(),
+            InputError::InvalidShape(message) if message.contains("omitted id")
+        ));
+        assert!(matches!(
+            parse_server_input(&json!({
+                "tunnels": [{"id": "t1", "client_identities": [IDENTITY_A]}]
+            }))
+            .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("public_hostnames")
         ));
         assert!(matches!(
-            parse_server_input(&json!({"tunnels": [{"public_hostnames": ["app.example.test"]}]}))
-                .unwrap_err(),
+            parse_server_input(&json!({
+                "tunnels": [{"id": "t1", "public_hostnames": ["app.example.test"]}]
+            }))
+            .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("client_identities")
         ));
         assert!(matches!(
             parse_server_input(&json!({
-                "tunnels": [{"public_hostnames": [], "client_identities": [IDENTITY_A]}]
+                "tunnels": [{"id": "t1", "public_hostnames": [], "client_identities": [IDENTITY_A]}]
             }))
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("public_hostnames must not be empty")
         ));
         assert!(matches!(
             parse_server_input(&json!({
-                "tunnels": [{"public_hostnames": ["app.example.test"], "client_identities": []}]
+                "tunnels": [{"id": "t1", "public_hostnames": ["app.example.test"], "client_identities": []}]
             }))
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("client_identities must not be empty")
+        ));
+    }
+
+    #[test]
+    fn server_input_rejects_invalid_and_duplicate_tunnel_ids() {
+        assert!(matches!(
+            parse_server_input(&json!({
+                "tunnels": [{
+                    "id": "bad id",
+                    "public_hostnames": ["app.example.test"],
+                    "client_identities": [IDENTITY_A]
+                }]
+            }))
+            .unwrap_err(),
+            InputError::InvalidShape(message) if message.contains("id is invalid")
+        ));
+        assert!(matches!(
+            parse_server_input(&json!({
+                "tunnels": [
+                    {
+                        "id": "same",
+                        "public_hostnames": ["app.example.test"],
+                        "client_identities": [IDENTITY_A]
+                    },
+                    {
+                        "id": "same",
+                        "public_hostnames": ["api.example.test"],
+                        "client_identities": [IDENTITY_B]
+                    }
+                ]
+            }))
+            .unwrap_err(),
+            InputError::InvalidShape(message) if message.contains("tunnel ids must be unique")
         ));
     }
 
@@ -278,10 +355,12 @@ mod tests {
             parse_server_input(&json!({
                 "tunnels": [
                     {
+                        "id": "t1",
                         "public_hostnames": ["app.example.test"],
                         "client_identities": [IDENTITY_A]
                     },
                     {
+                        "id": "t2",
                         "public_hostnames": ["App.Example.Test."],
                         "client_identities": [IDENTITY_B]
                     }
@@ -294,10 +373,12 @@ mod tests {
             parse_server_input(&json!({
                 "tunnels": [
                     {
+                        "id": "t1",
                         "public_hostnames": ["app.example.test"],
                         "client_identities": [IDENTITY_A]
                     },
                     {
+                        "id": "t2",
                         "public_hostnames": ["api.example.test"],
                         "client_identities": [IDENTITY_A]
                     }
@@ -314,6 +395,7 @@ mod tests {
         assert!(matches!(
             parse_server_input(&json!({
                 "tunnels": [{
+                    "id": "t1",
                     "public_hostname": "app.example.test",
                     "client_identity": IDENTITY_A
                 }]

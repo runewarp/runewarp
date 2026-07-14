@@ -1363,6 +1363,7 @@ mod tests {
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             tunnels: vec![ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],
                 authorized_client_identities: vec![
                     ClientIdentity::from_str(

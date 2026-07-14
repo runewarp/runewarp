@@ -358,6 +358,7 @@ mod tests {
         let registry = TunnelRegistry::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("App.Example.Test.")],
                 authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
@@ -598,6 +599,7 @@ mod tests {
         let registry = TunnelRegistry::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("App.Example.Test.")],
                 authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],
@@ -624,6 +626,7 @@ mod tests {
         let registry = TunnelRegistry::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![public_hostname("App.Example.Test.")],
                 authorized_client_identities: vec![client_identity.client_identity.clone()],
             }],

@@ -86,6 +86,8 @@ pub struct ServerConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerTunnelConfig {
+    /// Control-owned continuity key in Managed mode; always `None` in static mode.
+    pub id: Option<crate::TunnelId>,
     pub public_hostnames: Vec<PublicHostname>,
     pub authorized_client_identities: Vec<ClientIdentity>,
 }
@@ -1100,6 +1102,7 @@ fn validate_prepared_server_tunnel(
 
     let settings = if public_hostnames.is_valid {
         (!authorized_client_identities.is_empty()).then(|| ServerTunnelConfig {
+            id: None,
             public_hostnames: public_hostnames.values.clone(),
             authorized_client_identities: authorized_client_identities.clone(),
         })

@@ -341,6 +341,7 @@ impl ManagedClientHarness {
         let authorization = ServerAuthorization::from_tunnels(
             &ServerHostname::try_from("localhost").unwrap(),
             &[ServerTunnelConfig {
+                id: None,
                 public_hostnames: vec![PublicHostname::try_from(APP_HOSTNAME).unwrap()],
                 authorized_client_identities: vec![self.client_identity.clone()],
             }],

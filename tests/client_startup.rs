@@ -36,6 +36,7 @@ async fn prepared_client_connects_from_validated_settings() {
     let authorization = ServerAuthorization::from_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
+            id: None,
             public_hostnames: vec![public_hostname("app.example.test")],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
@@ -115,6 +116,7 @@ async fn prepared_client_uses_the_configured_server_address_port() {
     let authorization = ServerAuthorization::from_tunnels(
         &server_hostname("localhost"),
         &[ServerTunnelConfig {
+            id: None,
             public_hostnames: vec![public_hostname("app.example.test")],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
@@ -208,6 +210,7 @@ async fn prepared_client_rejects_settings_without_services() {
     let authorization = ServerAuthorization::from_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
+            id: None,
             public_hostnames: vec![public_hostname("app.example.test")],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
@@ -470,6 +473,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     let authorization = ServerAuthorization::from_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
+            id: None,
             public_hostnames: vec![public_hostname("app.example.test")],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
@@ -584,6 +588,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     let authorization = ServerAuthorization::from_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
+            id: None,
             public_hostnames: vec![
                 public_hostname("app.example.test"),
                 public_hostname("api.example.test"),
@@ -688,6 +693,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
     let authorization = ServerAuthorization::from_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
+            id: None,
             public_hostnames: vec![public_hostname("app.example.test")],
             authorized_client_identities: vec![client_identity.client_identity.clone()],
         }],
@@ -791,6 +797,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
     let authorization = ServerAuthorization::from_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
+            id: None,
             public_hostnames: vec![
                 public_hostname("app.example.test"),
                 public_hostname("api.example.test"),

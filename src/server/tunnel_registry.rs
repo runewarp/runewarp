@@ -14,6 +14,9 @@ use crate::{ClientIdentity, PublicHostname, client_identity_from_certificate_der
 use crate::{ServerHostname, ServerTunnelConfig};
 
 use super::active_client::{ActiveClientPool, SelectedTunnelConnection};
+#[cfg(test)]
+use super::admission::ServerAdmissionLimits;
+use super::admission::{AdmissionRejection, TunnelConnectionAdmission};
 use super::authorization::{
     AuthorizationSnapshot, AuthorizationState, PreparedAuthorization, ServerAuthorization,
 };
@@ -22,6 +25,12 @@ pub(crate) enum TunnelRouteOutcome {
     Unauthorized,
     NoActiveTunnelConnection,
     Connected(SelectedTunnelConnection),
+}
+
+pub(crate) enum TunnelRegistrationOutcome {
+    Registered,
+    Rejected(AdmissionRejection),
+    Closed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +56,7 @@ pub(crate) struct TunnelRegistry {
     next_stream_id: Arc<AtomicU64>,
     accepting_tunnel_connections: Arc<AtomicBool>,
     admitting_streams: Arc<AtomicBool>,
+    tunnel_connection_admission: TunnelConnectionAdmission,
 }
 
 impl TunnelRegistry {
@@ -75,13 +85,18 @@ impl TunnelRegistry {
             HashSet::new(),
             1,
         );
+        let tunnel_connection_admission =
+            TunnelConnectionAdmission::new(ServerAdmissionLimits::default());
         Ok(Self {
             authorization: Arc::new(AuthorizationState::from_snapshot_for_test(snapshot)),
-            tunnel_pools: Arc::new(RwLock::new(vec![ActiveClientPool::new()])),
+            tunnel_pools: Arc::new(RwLock::new(vec![ActiveClientPool::with_admission(
+                tunnel_connection_admission.clone(),
+            )])),
             visitor_streams: Arc::new(StdRwLock::new(Vec::new())),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
             admitting_streams: Arc::new(AtomicBool::new(true)),
+            tunnel_connection_admission,
         })
     }
 
@@ -93,11 +108,24 @@ impl TunnelRegistry {
         Self::from_authorization(ServerAuthorization::from_tunnels(server_hostname, tunnels)?)
     }
 
+    #[cfg(test)]
     pub(crate) fn from_authorization(authorization: ServerAuthorization) -> io::Result<Self> {
+        Self::from_authorization_with_admission(
+            authorization,
+            TunnelConnectionAdmission::new(ServerAdmissionLimits::default()),
+        )
+    }
+
+    pub(crate) fn from_authorization_with_admission(
+        authorization: ServerAuthorization,
+        tunnel_connection_admission: TunnelConnectionAdmission,
+    ) -> io::Result<Self> {
         let tunnel_count = authorization.current_tunnel_count();
         let mut tunnel_pools = Vec::with_capacity(tunnel_count);
         for _ in 0..tunnel_count {
-            tunnel_pools.push(ActiveClientPool::new());
+            tunnel_pools.push(ActiveClientPool::with_admission(
+                tunnel_connection_admission.clone(),
+            ));
         }
         Ok(Self {
             authorization: authorization.state().clone(),
@@ -106,6 +134,7 @@ impl TunnelRegistry {
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
             admitting_streams: Arc::new(AtomicBool::new(true)),
+            tunnel_connection_admission,
         })
     }
 
@@ -163,19 +192,21 @@ impl TunnelRegistry {
             let mut rebuilt = Vec::with_capacity(next.tunnel_count());
             for id in next.tunnel_ids() {
                 let Some(id) = id.clone() else {
-                    rebuilt.push(ActiveClientPool::new());
+                    rebuilt.push(ActiveClientPool::with_admission(
+                        self.tunnel_connection_admission.clone(),
+                    ));
                     continue;
                 };
-                rebuilt.push(
-                    pools_by_id
-                        .remove(&id)
-                        .unwrap_or_else(ActiveClientPool::new),
-                );
+                rebuilt.push(pools_by_id.remove(&id).unwrap_or_else(|| {
+                    ActiveClientPool::with_admission(self.tunnel_connection_admission.clone())
+                }));
             }
             *pools = rebuilt;
         } else {
             while pools.len() < next.tunnel_count() {
-                pools.push(ActiveClientPool::new());
+                pools.push(ActiveClientPool::with_admission(
+                    self.tunnel_connection_admission.clone(),
+                ));
             }
             pools.truncate(next.tunnel_count());
         }
@@ -185,7 +216,9 @@ impl TunnelRegistry {
             else {
                 // Identity was revoked; close already signaled above. Drop the
                 // detached member and leave its prior close watcher to log
-                // termination against the empty previous pool list.
+                // termination against the empty previous pool list. Admission
+                // capacity remains charged until peer closure completes.
+                member.release_admission_after_close();
                 continue;
             };
             if let Some(pool) = pools.get(tunnel_index) {
@@ -226,24 +259,30 @@ impl TunnelRegistry {
         TunnelRouteOutcome::Connected(connection)
     }
 
-    pub(crate) async fn register(&self, connection: Connection) {
+    pub(crate) async fn register(&self, connection: Connection) -> TunnelRegistrationOutcome {
         if !self.accepting_tunnel_connections.load(Ordering::SeqCst) {
             connection.close(0_u32.into(), b"server shutting down");
-            return;
+            return TunnelRegistrationOutcome::Closed;
         }
         // Same pools-before-authorization lock order as route_tunnel_connection.
         let pools = self.tunnel_pools.read().await;
         let Some((tunnel_index, client_identity)) = self.tunnel_registration_context(&connection)
         else {
             connection.close(0_u32.into(), b"unmapped client identity");
-            return;
+            return TunnelRegistrationOutcome::Closed;
         };
         let Some(pool) = pools.get(tunnel_index).cloned() else {
             connection.close(0_u32.into(), b"unmapped client identity");
-            return;
+            return TunnelRegistrationOutcome::Closed;
         };
         drop(pools);
-        pool.register(connection, client_identity).await;
+        match pool.try_register(connection.clone(), client_identity).await {
+            Ok(()) => TunnelRegistrationOutcome::Registered,
+            Err(rejection) => {
+                connection.close(0_u32.into(), b"server tunnel admission saturated");
+                TunnelRegistrationOutcome::Rejected(rejection)
+            }
+        }
     }
 
     pub(crate) async fn close_all(&self, reason: &'static [u8]) -> usize {
@@ -403,6 +442,7 @@ fn stream_remains_authorized(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
@@ -415,11 +455,14 @@ mod tests {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use tokio::time::timeout;
 
-    use super::{TunnelRegistry, TunnelRouteOutcome};
+    use super::{TunnelRegistrationOutcome, TunnelRegistry, TunnelRouteOutcome};
+    use crate::server::admission::{
+        AdmissionLimit, AdmissionRejection, ServerAdmissionLimits, TunnelConnectionAdmission,
+    };
     use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
     use crate::{
-        GeneratedClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig,
-        generate_client_identity, make_client_quic_config_with_client_auth,
+        GeneratedClientIdentity, PublicHostname, ServerAuthorization, ServerHostname,
+        ServerTunnelConfig, generate_client_identity, make_client_quic_config_with_client_auth,
         make_server_quic_config_with_client_auth,
     };
 
@@ -573,6 +616,100 @@ mod tests {
                 .await,
             TunnelRouteOutcome::Unauthorized
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn realignment_grandfathers_existing_connections_but_rejects_newest_over_limit()
+    -> io::Result<()> {
+        let first_identity = generate_test_client_identity()?;
+        let second_identity = generate_test_client_identity()?;
+        let initial_tunnels = [
+            ServerTunnelConfig {
+                id: None,
+                public_hostnames: vec![public_hostname("app.example.test")],
+                authorized_client_identities: vec![first_identity.client_identity.clone()],
+            },
+            ServerTunnelConfig {
+                id: None,
+                public_hostnames: vec![public_hostname("api.example.test")],
+                authorized_client_identities: vec![second_identity.client_identity.clone()],
+            },
+        ];
+        let authorization = ServerAuthorization::from_tunnels(
+            &server_hostname("tunnel.example.test"),
+            &initial_tunnels,
+        )?;
+        let limits = ServerAdmissionLimits {
+            max_tunnel_connections: 4,
+            max_tunnel_connections_per_tunnel: 1,
+            max_tunnel_connections_per_identity: 4,
+            ..ServerAdmissionLimits::for_test()
+        };
+        let registry = TunnelRegistry::from_authorization_with_admission(
+            authorization,
+            TunnelConnectionAdmission::new(limits),
+        )?;
+
+        let first_fixture = TunnelConnectionFixture::connect(&first_identity).await?;
+        let second_fixture = TunnelConnectionFixture::connect(&second_identity).await?;
+        assert!(matches!(
+            registry
+                .register(first_fixture.server_connection.clone())
+                .await,
+            TunnelRegistrationOutcome::Registered
+        ));
+        assert!(matches!(
+            registry
+                .register(second_fixture.server_connection.clone())
+                .await,
+            TunnelRegistrationOutcome::Registered
+        ));
+
+        let combined = registry.authorization().prepare(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                id: None,
+                public_hostnames: vec![
+                    public_hostname("app.example.test"),
+                    public_hostname("api.example.test"),
+                ],
+                authorized_client_identities: vec![
+                    first_identity.client_identity.clone(),
+                    second_identity.client_identity.clone(),
+                ],
+            }],
+        )?;
+        let dispatch = registry.commit_authorization(combined).await;
+        assert_eq!(dispatch.connections_closed, 0);
+        assert_eq!(registry.active_connection_count().await, 2);
+        let mut retained_identities = HashSet::new();
+        for _ in 0..2 {
+            let TunnelRouteOutcome::Connected(connection) = registry
+                .route_tunnel_connection(&public_hostname("app.example.test"))
+                .await
+            else {
+                panic!("grandfathered connection should remain routable");
+            };
+            retained_identities.insert(connection.client_identity().clone());
+        }
+        assert_eq!(
+            retained_identities,
+            HashSet::from([
+                first_identity.client_identity.clone(),
+                second_identity.client_identity.clone(),
+            ])
+        );
+
+        let newest_fixture = TunnelConnectionFixture::connect(&first_identity).await?;
+        assert!(matches!(
+            registry.register(newest_fixture.server_connection).await,
+            TunnelRegistrationOutcome::Rejected(AdmissionRejection {
+                limit: AdmissionLimit::TunnelConnectionsPerTunnel,
+                active_work: 2,
+            })
+        ));
+        assert_eq!(registry.active_connection_count().await, 2);
         Ok(())
     }
 
@@ -1186,6 +1323,7 @@ mod tests {
     struct TunnelConnectionFixture {
         _server_endpoint: Endpoint,
         _client_endpoint: Endpoint,
+        _client_connection: Connection,
         server_connection: Connection,
     }
 
@@ -1233,12 +1371,13 @@ mod tests {
                     .await
                     .map_err(io::Error::other)
             };
-            let (server_connection, _client_connection) =
+            let (server_connection, client_connection) =
                 tokio::try_join!(accept_connection, connect_client)?;
 
             Ok(Self {
                 _server_endpoint: server_endpoint,
                 _client_endpoint: client_endpoint,
+                _client_connection: client_connection,
                 server_connection,
             })
         }

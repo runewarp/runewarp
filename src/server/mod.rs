@@ -1,4 +1,5 @@
 mod active_client;
+mod admission;
 mod authorization;
 mod managed_adapter;
 mod tunnel_registry;
@@ -25,8 +26,11 @@ use crate::{
     shutdown::{OrderlyShutdown, ShutdownMode},
 };
 
+use self::admission::{
+    AcceptBackoff, AdmissionLimit, AdmissionRejection, ServerAdmissionLimits, ServerAdmissionPolicy,
+};
 use self::managed_adapter::ReadinessGate;
-use self::tunnel_registry::TunnelRegistry;
+use self::tunnel_registry::{TunnelRegistrationOutcome, TunnelRegistry};
 use self::visitor_stream::VisitorStreamHandler;
 
 pub const QUIC_CLOSE_FLUSH_DURATION: Duration = Duration::from_millis(100);
@@ -95,6 +99,7 @@ pub struct Server {
     visitor_stream_handler: VisitorStreamHandler,
     authorization_adapter: ServerAuthorizationAdapter,
     fatal: FatalSignal,
+    admission_policy: ServerAdmissionPolicy,
 }
 
 struct ReadinessProbe {
@@ -227,6 +232,13 @@ async fn accept_readiness_connections(listener: TcpListener) {
 
 impl Server {
     pub async fn bind(config: ServerBindConfig) -> io::Result<Self> {
+        Self::bind_with_admission_limits(config, ServerAdmissionLimits::default()).await
+    }
+
+    pub(crate) async fn bind_with_admission_limits(
+        config: ServerBindConfig,
+        admission_limits: ServerAdmissionLimits,
+    ) -> io::Result<Self> {
         if config.admission == ServerAdmission::Static
             && config.authorization.current_tunnel_count() == 0
         {
@@ -235,7 +247,11 @@ impl Server {
                 "server bind requires at least one configured Tunnel",
             ));
         }
-        let tunnel_registry = TunnelRegistry::from_authorization(config.authorization)?;
+        let admission_policy = ServerAdmissionPolicy::new(admission_limits);
+        let tunnel_registry = TunnelRegistry::from_authorization_with_admission(
+            config.authorization,
+            admission_policy.tunnel_connections(),
+        )?;
         let visitor_stream_handler = VisitorStreamHandler::new(
             config.server_hostname.clone(),
             tunnel_registry.clone(),
@@ -295,6 +311,7 @@ impl Server {
             visitor_stream_handler,
             authorization_adapter,
             fatal,
+            admission_policy,
         })
     }
 
@@ -326,14 +343,17 @@ impl Server {
             visitor_stream_handler,
             authorization_adapter: _,
             fatal,
+            admission_policy,
         } = self;
+        let mut accept_backoff = AcceptBackoff::default();
+        let mut public_accept_not_before = None;
         loop {
             match next_server_event(
                 async {
                     fatal.wait().await;
                 },
                 std::future::pending::<()>(),
-                public_listener.accept(),
+                accept_public_connection(&public_listener, public_accept_not_before),
                 tunnel_endpoint.accept(),
             )
             .await
@@ -349,21 +369,29 @@ impl Server {
                 }
                 NextServerEvent::Shutdown => return Ok(()),
                 NextServerEvent::Visitor(accept_result) => {
-                    let (visitor_stream, _) = accept_result?;
-                    let visitor_stream_handler = visitor_stream_handler.clone();
-                    tokio::spawn(async move {
-                        let _ = visitor_stream_handler.handle(visitor_stream).await;
-                    });
+                    match process_public_accept(
+                        accept_result,
+                        &mut accept_backoff,
+                        &admission_policy,
+                        &visitor_stream_handler,
+                        None,
+                    ) {
+                        Ok(not_before) => public_accept_not_before = not_before,
+                        Err(error) => {
+                            if let Some(readiness_probe) = readiness_probe {
+                                runtime_log::server_readiness_lost(readiness_probe.bind_address());
+                                readiness_probe.close();
+                            }
+                            return Err(error);
+                        }
+                    }
                 }
                 NextServerEvent::Tunnel(incoming) => {
                     let Some(incoming) = incoming else {
                         return Ok(());
                     };
 
-                    let tunnel_registry = tunnel_registry.clone();
-                    tokio::spawn(async move {
-                        register_tunnel_connection(tunnel_registry, incoming).await;
-                    });
+                    admit_tunnel_handshake(&admission_policy, tunnel_registry.clone(), incoming);
                 }
             }
         }
@@ -397,7 +425,10 @@ impl Server {
             visitor_stream_handler,
             authorization_adapter: _,
             fatal,
+            admission_policy,
         } = self;
+        let mut accept_backoff = AcceptBackoff::default();
+        let mut public_accept_not_before = None;
         loop {
             match next_server_event(
                 async {
@@ -406,7 +437,7 @@ impl Server {
                 async {
                     let _ = shutdown.wait_started().await;
                 },
-                public_listener.accept(),
+                accept_public_connection(&public_listener, public_accept_not_before),
                 tunnel_endpoint.accept(),
             )
             .await
@@ -424,21 +455,31 @@ impl Server {
                 }
                 NextServerEvent::Shutdown => break,
                 NextServerEvent::Visitor(accept_result) => {
-                    let (visitor_stream, _) = accept_result?;
-                    let visitor_stream_handler = visitor_stream_handler.clone();
-                    tokio::spawn(async move {
-                        let _ = visitor_stream_handler.handle(visitor_stream).await;
-                    });
+                    match process_public_accept(
+                        accept_result,
+                        &mut accept_backoff,
+                        &admission_policy,
+                        &visitor_stream_handler,
+                        Some(shutdown.clone()),
+                    ) {
+                        Ok(not_before) => public_accept_not_before = not_before,
+                        Err(error) => {
+                            if let Some(readiness_probe) = readiness_probe {
+                                runtime_log::server_readiness_lost(readiness_probe.bind_address());
+                                readiness_probe.close();
+                            }
+                            drop(public_listener);
+                            drop(tunnel_endpoint);
+                            return Err(error);
+                        }
+                    }
                 }
                 NextServerEvent::Tunnel(incoming) => {
                     let Some(incoming) = incoming else {
                         return Ok(());
                     };
 
-                    let tunnel_registry = tunnel_registry.clone();
-                    tokio::spawn(async move {
-                        register_tunnel_connection(tunnel_registry, incoming).await;
-                    });
+                    admit_tunnel_handshake(&admission_policy, tunnel_registry.clone(), incoming);
                 }
             }
         }
@@ -478,6 +519,162 @@ impl Server {
     }
 }
 
+async fn accept_public_connection(
+    listener: &TcpListener,
+    not_before: Option<tokio::time::Instant>,
+) -> io::Result<(tokio::net::TcpStream, SocketAddr)> {
+    wait_before_public_accept(not_before).await;
+    listener.accept().await
+}
+
+async fn wait_before_public_accept(not_before: Option<tokio::time::Instant>) {
+    if let Some(not_before) = not_before {
+        tokio::time::sleep_until(not_before).await;
+    }
+}
+
+fn process_public_accept(
+    accept_result: io::Result<(tokio::net::TcpStream, SocketAddr)>,
+    accept_backoff: &mut AcceptBackoff,
+    admission_policy: &ServerAdmissionPolicy,
+    visitor_stream_handler: &VisitorStreamHandler,
+    shutdown: Option<OrderlyShutdown>,
+) -> io::Result<Option<tokio::time::Instant>> {
+    match accept_result {
+        Ok((visitor_stream, peer_address)) => {
+            if accept_backoff.on_success() {
+                runtime_log::server_public_listener_accept_recovered();
+            }
+            admit_visitor_connection(
+                admission_policy,
+                visitor_stream_handler,
+                visitor_stream,
+                peer_address,
+                shutdown,
+            );
+            Ok(None)
+        }
+        Err(error) => {
+            let Some(delay) = accept_backoff.on_error(&error) else {
+                return Err(error);
+            };
+            if admission_policy.should_log_public_accept_retry() {
+                runtime_log::server_public_listener_accept_retry(&error, delay);
+            }
+            Ok(Some(tokio::time::Instant::now() + delay))
+        }
+    }
+}
+
+fn admit_visitor_connection(
+    admission_policy: &ServerAdmissionPolicy,
+    visitor_stream_handler: &VisitorStreamHandler,
+    visitor_stream: tokio::net::TcpStream,
+    peer_address: SocketAddr,
+    shutdown: Option<OrderlyShutdown>,
+) {
+    let permit = match admission_policy.try_admit_visitor(peer_address.ip()) {
+        Ok(permit) => permit,
+        Err(rejection) => {
+            drop(visitor_stream);
+            report_admission_saturation(admission_policy, rejection);
+            return;
+        }
+    };
+    report_admission_recovery(
+        admission_policy,
+        &[
+            AdmissionLimit::VisitorsGlobal,
+            AdmissionLimit::VisitorSource,
+        ],
+    );
+    let visitor_stream_handler = visitor_stream_handler.clone();
+    let client_hello_timeout = admission_policy.limits().client_hello_timeout;
+    match shutdown {
+        Some(shutdown) => {
+            tokio::spawn(async move {
+                let _ = visitor_stream_handler
+                    .handle_admitted_until(
+                        visitor_stream,
+                        client_hello_timeout,
+                        permit,
+                        async move {
+                            let _ = shutdown.wait_started().await;
+                        },
+                    )
+                    .await;
+            });
+        }
+        None => {
+            tokio::spawn(async move {
+                let _ = visitor_stream_handler
+                    .handle_admitted(visitor_stream, client_hello_timeout, permit)
+                    .await;
+            });
+        }
+    }
+}
+
+fn admit_tunnel_handshake(
+    admission_policy: &ServerAdmissionPolicy,
+    tunnel_registry: TunnelRegistry,
+    incoming: quinn::Incoming,
+) {
+    let handshake_permit = match admission_policy.try_admit_handshake() {
+        Ok(permit) => permit,
+        Err(rejection) => {
+            incoming.refuse();
+            report_admission_saturation(admission_policy, rejection);
+            return;
+        }
+    };
+    report_admission_recovery(admission_policy, &[AdmissionLimit::Handshakes]);
+    let admission_policy = admission_policy.clone();
+    tokio::spawn(async move {
+        register_tunnel_connection(
+            tunnel_registry,
+            incoming,
+            handshake_permit,
+            admission_policy,
+        )
+        .await;
+    });
+}
+
+fn report_admission_saturation(
+    admission_policy: &ServerAdmissionPolicy,
+    rejection: AdmissionRejection,
+) {
+    if let Some(limit_value) = admission_policy.limit_value(rejection.limit)
+        && admission_policy.should_log_saturation(rejection.limit)
+    {
+        runtime_log::server_admission_saturated(
+            admission_limit_name(rejection.limit),
+            rejection.active_work,
+            limit_value,
+        );
+    }
+}
+
+fn report_admission_recovery(admission_policy: &ServerAdmissionPolicy, limits: &[AdmissionLimit]) {
+    for limit in limits {
+        if admission_policy.take_recovered(*limit) {
+            runtime_log::server_admission_recovered(admission_limit_name(*limit));
+        }
+    }
+}
+
+fn admission_limit_name(limit: AdmissionLimit) -> &'static str {
+    match limit {
+        AdmissionLimit::VisitorsGlobal => "visitor-global",
+        AdmissionLimit::VisitorSource => "visitor-source",
+        AdmissionLimit::Handshakes => "quic-handshake-global",
+        AdmissionLimit::TunnelConnectionsGlobal => "tunnel-connection-global",
+        AdmissionLimit::TunnelConnectionsPerTunnel => "tunnel-connection-per-tunnel",
+        AdmissionLimit::TunnelConnectionsPerIdentity => "tunnel-connection-per-client-identity",
+    }
+}
+
 async fn wait_for_no_active_streams(tunnel_registry: &TunnelRegistry) {
     loop {
         if tunnel_registry.active_stream_count().await == 0 {
@@ -487,21 +684,51 @@ async fn wait_for_no_active_streams(tunnel_registry: &TunnelRegistry) {
     }
 }
 
-async fn register_tunnel_connection(tunnel_registry: TunnelRegistry, incoming: quinn::Incoming) {
+async fn register_tunnel_connection(
+    tunnel_registry: TunnelRegistry,
+    incoming: quinn::Incoming,
+    handshake_permit: tokio::sync::OwnedSemaphorePermit,
+    admission_policy: ServerAdmissionPolicy,
+) {
     let connecting = match incoming.accept() {
         Ok(connecting) => connecting,
         Err(error) => {
-            runtime_log::server_tunnel_connection_failed(&error.to_string());
+            report_tunnel_handshake_failure(&admission_policy, &error.to_string());
             return;
         }
     };
-    match with_handshake_timeout(connecting, HANDSHAKE_TIMEOUT, || {
+    let handshake = with_handshake_timeout(connecting, HANDSHAKE_TIMEOUT, || {
         quinn::ConnectionError::TimedOut
     })
-    .await
-    {
-        Ok(connection) => tunnel_registry.register(connection).await,
-        Err(error) => runtime_log::server_tunnel_connection_failed(&error.to_string()),
+    .await;
+    drop(handshake_permit);
+    match handshake {
+        Ok(connection) => {
+            if admission_policy.take_tunnel_handshake_failure_recovered() {
+                runtime_log::server_admission_recovered("quic-handshake-failure");
+            }
+            match tunnel_registry.register(connection).await {
+                TunnelRegistrationOutcome::Rejected(rejection) => {
+                    report_admission_saturation(&admission_policy, rejection);
+                }
+                TunnelRegistrationOutcome::Registered => report_admission_recovery(
+                    &admission_policy,
+                    &[
+                        AdmissionLimit::TunnelConnectionsGlobal,
+                        AdmissionLimit::TunnelConnectionsPerTunnel,
+                        AdmissionLimit::TunnelConnectionsPerIdentity,
+                    ],
+                ),
+                TunnelRegistrationOutcome::Closed => {}
+            }
+        }
+        Err(error) => report_tunnel_handshake_failure(&admission_policy, &error.to_string()),
+    }
+}
+
+fn report_tunnel_handshake_failure(admission_policy: &ServerAdmissionPolicy, error: &str) {
+    if admission_policy.should_log_tunnel_handshake_failure() {
+        runtime_log::server_tunnel_connection_failed(error);
     }
 }
 
@@ -510,7 +737,10 @@ mod tests {
     use std::future::ready;
     use std::time::Duration;
 
-    use super::{FatalSignal, NextServerEvent, QUIC_CLOSE_FLUSH_DURATION, next_server_event};
+    use super::{
+        FatalSignal, NextServerEvent, QUIC_CLOSE_FLUSH_DURATION, next_server_event,
+        wait_before_public_accept,
+    };
     use crate::shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
 
     #[tokio::test]
@@ -534,6 +764,29 @@ mod tests {
             next_server_event(fatal.wait(), ready(()), ready("visitor"), ready("tunnel")).await;
 
         assert!(matches!(event, NextServerEvent::Fatal));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tunnel_events_do_not_restart_public_accept_backoff() {
+        let not_before = tokio::time::Instant::now() + Duration::from_millis(10);
+        let event = next_server_event(
+            std::future::pending::<()>(),
+            std::future::pending::<()>(),
+            wait_before_public_accept(Some(not_before)),
+            ready(()),
+        )
+        .await;
+        assert!(matches!(event, NextServerEvent::Tunnel(())));
+
+        tokio::time::advance(Duration::from_millis(9)).await;
+        let retry = tokio::spawn(wait_before_public_accept(Some(not_before)));
+        tokio::task::yield_now().await;
+        assert!(!retry.is_finished());
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        retry
+            .await
+            .expect("retry wait should finish at original deadline");
     }
 
     #[test]

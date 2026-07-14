@@ -8,9 +8,12 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
+use super::admission::VisitorAdmissionPermit;
 use super::tunnel_registry::{TunnelRegistry, TunnelRouteOutcome};
 use crate::acme::ACME_TLS_ALPN;
+#[cfg(test)]
 use crate::client_hello::read_client_hello;
+use crate::client_hello::{ParsedClientHello, read_client_hello_with_timeout};
 use crate::proxy::proxy_tcp_over_quic;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ServerRouteOutcome};
@@ -36,6 +39,7 @@ impl VisitorStreamHandler {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn handle(&self, mut visitor_stream: TcpStream) -> io::Result<()> {
         let parsed_client_hello = match read_client_hello(&mut visitor_stream).await {
             Ok(parsed_client_hello) => parsed_client_hello,
@@ -44,6 +48,58 @@ impl VisitorStreamHandler {
                 return Ok(());
             }
         };
+        self.handle_parsed(visitor_stream, parsed_client_hello)
+            .await
+    }
+
+    pub(crate) async fn handle_admitted(
+        &self,
+        visitor_stream: TcpStream,
+        timeout: std::time::Duration,
+        admission_permit: VisitorAdmissionPermit,
+    ) -> io::Result<()> {
+        self.handle_admitted_until(
+            visitor_stream,
+            timeout,
+            admission_permit,
+            std::future::pending(),
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_admitted_until<Shutdown>(
+        &self,
+        mut visitor_stream: TcpStream,
+        timeout: std::time::Duration,
+        admission_permit: VisitorAdmissionPermit,
+        shutdown: Shutdown,
+    ) -> io::Result<()>
+    where
+        Shutdown: std::future::Future<Output = ()>,
+    {
+        let parsed_client_hello = tokio::select! {
+            parsed = read_client_hello_with_timeout(&mut visitor_stream, timeout) => parsed,
+            _ = shutdown => return Ok(()),
+        };
+        // Pre-routing capacity protects ClientHello completion only. Existing routed
+        // Visitor traffic must remain independent from admission saturation.
+        drop(admission_permit);
+        let parsed_client_hello = match parsed_client_hello {
+            Ok(parsed_client_hello) => parsed_client_hello,
+            Err(error) => {
+                runtime_log::server_route_rejected_client_hello(&error);
+                return Ok(());
+            }
+        };
+        self.handle_parsed(visitor_stream, parsed_client_hello)
+            .await
+    }
+
+    async fn handle_parsed(
+        &self,
+        visitor_stream: TcpStream,
+        parsed_client_hello: ParsedClientHello,
+    ) -> io::Result<()> {
         let serves_acme_tls_alpn_01 = parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN);
         let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
 
@@ -255,6 +311,7 @@ mod tests {
 
     use crate::LogLevel;
     use crate::acme::ACME_TLS_ALPN;
+    use crate::server::admission::{AdmissionLimit, ServerAdmissionLimits, ServerAdmissionPolicy};
     use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
     use crate::{
         CLIENT_HELLO_BUFFER_LIMIT, GeneratedClientIdentity, PublicHostname, ServerHostname,
@@ -400,6 +457,94 @@ mod tests {
         router_task
             .await
             .map_err(|error| join_error("router task failed", error))??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn releases_pre_routing_capacity_before_forwarded_visitor_finishes() -> io::Result<()> {
+        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await?;
+        let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
+            max_pending_visitors: 1,
+            max_pending_visitors_per_source: 1,
+            ..ServerAdmissionLimits::for_test()
+        });
+        let source = std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let permit = policy
+            .try_admit_visitor(source)
+            .expect("visitor should fit");
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let router_task = tokio::spawn(async move {
+            let (visitor_stream, _) = listener.accept().await?;
+            router
+                .handle_admitted(visitor_stream, Duration::from_secs(5), permit)
+                .await
+        });
+
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor
+            .write_all(&build_client_hello("app.example.test")?)
+            .await?;
+        let (send, recv) = timeout(Duration::from_secs(1), tunnel_connection.accept_bi())
+            .await
+            .map_err(|_| timeout_error("visitor should reach the Tunnel connection"))?
+            .map_err(io::Error::other)?;
+
+        assert!(policy.try_admit_visitor(source).is_ok());
+        visitor.shutdown().await?;
+        drop(send);
+        drop(recv);
+        router_task
+            .await
+            .map_err(|error| join_error("router task failed", error))??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_zero_byte_pre_routing_capacity() -> io::Result<()> {
+        let router = VisitorStreamHandler::new(
+            server_hostname("tunnel.example.test"),
+            TunnelRegistry::single(vec![public_hostname("app.example.test")])?,
+            None,
+        )?;
+        let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
+            max_pending_visitors: 1,
+            max_pending_visitors_per_source: 1,
+            ..ServerAdmissionLimits::for_test()
+        });
+        let source = std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let permit = policy
+            .try_admit_visitor(source)
+            .expect("visitor should fit");
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let shutdown_for_task = shutdown.clone();
+        let router_task = tokio::spawn(async move {
+            let (visitor_stream, _) = listener.accept().await?;
+            router
+                .handle_admitted_until(
+                    visitor_stream,
+                    Duration::from_secs(5),
+                    permit,
+                    shutdown_for_task.notified(),
+                )
+                .await
+        });
+        let _visitor = TcpStream::connect(visitor_addr).await?;
+
+        assert!(matches!(
+            policy.try_admit_visitor(source),
+            Err(crate::server::admission::AdmissionRejection {
+                limit: AdmissionLimit::VisitorsGlobal,
+                active_work: 1,
+            })
+        ));
+        shutdown.notify_one();
+        router_task
+            .await
+            .map_err(|error| join_error("router task failed", error))??;
+        assert!(policy.try_admit_visitor(source).is_ok());
         Ok(())
     }
 

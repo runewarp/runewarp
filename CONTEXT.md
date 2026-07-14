@@ -4,6 +4,10 @@ Runewarp is a private tunneling system for exposing operator-owned TLS services 
 
 ## Language
 
+**Core**:
+The open-source Runewarp implementation. Use this name when distinguishing implemented Runewarp behavior from the responsibilities of a compatible **Control**.
+_Avoid_: control plane, managed service
+
 **Server**:
 The public Runewarp component that accepts **Visitor** traffic, selects a **Tunnel**, and forwards encrypted traffic to a **Client**.
 _Avoid_: Edge proxy, gateway
@@ -14,7 +18,7 @@ _Avoid_: Connection, session
 
 **Tunnel ID**:
 The Control-owned opaque identifier for one **Tunnel** in **Managed mode**. It is unique within a Server authorization snapshot; Core uses it as the continuity key for that Tunnel's live pool. Static mode has no Tunnel ID.
-_Avoid_: Cloud Tunnel ID, tunnel UUID, ordinal, tunnel index
+_Avoid_: tunnel UUID, ordinal, tunnel index
 
 **Tunnel connection**:
 A live session opened by one **Client instance** and accepted under one **Tunnel**.
@@ -137,7 +141,7 @@ The operator-run local endpoint that a **Client** connects to after it selects a
 _Avoid_: Service, tunnel
 
 **Client identity**:
-The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime or issuer; self-signed Client identity certificates are operationally non-expiring key carriers, and Cloud-issued attestation preserves it, while explicit key rotation changes the identity. One **Tunnel** may authorize one or more **Client identities**.
+The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime or issuer; self-signed Client identity certificates are operationally non-expiring key carriers, and certificate renewal or attestation with the same key preserves it, while explicit key rotation changes the identity. One **Tunnel** may authorize one or more **Client identities**.
 _Avoid_: Certificate, serial number
 
 **Server identity**:
@@ -280,8 +284,8 @@ _Avoid_: CI environment, deploy target
 > **Dev:** "If the self-signed Client identity certificate expires, did the **Client identity** change?"
 > **Domain expert:** "No. The **Client identity** is the pinned public key. Encoded certificate expiry has no operational effect in pinned-key mode; only explicit key rotation changes the identity."
 >
-> **Dev:** "If Cloud signs a certificate for the Client's existing public key, does Cloud now own the **Client identity**?"
-> **Domain expert:** "No. The public key remains the **Client identity**, and the customer retains its private key. Cloud's certificate only attests that identity."
+> **Dev:** "If a managed control plane signs a certificate for the Client's existing public key, does it now own the **Client identity**?"
+> **Domain expert:** "No. The public key remains the **Client identity**, and the operator retains its private key. The certificate only attests that identity."
 >
 > **Dev:** "Why does the manual Server path trust a **Server CA** instead of the leaf cert directly?"
 > **Domain expert:** "Because the **Server CA** signs the **Server certificate**, so the Server leaf can renew without changing the Client's trust anchor."
@@ -334,7 +338,7 @@ _Avoid_: CI environment, deploy target
 ## Flagged ambiguities
 
 - "tunnel" was used to mean both a configured routing entry and a live QUIC session — resolved: **Tunnel** is the configured unit; **Tunnel connection** is the live session.
-- "tunnel id" / Cloud tunnel identifiers were easy to treat as optional log sugar — resolved: in **Managed mode**, **Tunnel ID** is the Control-owned continuity key for a **Tunnel**; static mode has none.
+- "tunnel id" / control-owned tunnel identifiers were easy to treat as optional log sugar — resolved: in **Managed mode**, **Tunnel ID** is the Control-owned continuity key for a **Tunnel**; static mode has none.
 - "client" was used to mean both the operator-run component and the outside network peer — resolved: **Client** is the operator-run component; **Visitor** is the outside public caller.
 - "client" was also used to blur the component and one running process — resolved: **Client** is the component; **Client instance** is one running copy.
 - "server hostname" and routed application hostnames were easy to blur — resolved: **Server hostname** names the Runewarp edge; **Public hostname** names operator application traffic.
@@ -342,7 +346,7 @@ _Avoid_: CI environment, deploy target
 - "service" and "backend" were used interchangeably — resolved: **Service** is the client-side config unit; **Local backend** is the actual local endpoint the **Client** dials, whether it terminates TLS or receives plaintext.
 - "passthrough" could blur Server behavior with Service behavior — resolved: **TLS passthrough** is the broad traffic behavior, while **TLS mode** is the **Service** setting that can keep passthrough or switch to **Terminate mode**.
 - "client certificate" and the durable trust anchor were easy to conflate — resolved: **Client identity** is the pinned public key; the self-signed certificate is only a key carrier, and only explicit key rotation changes that identity.
-- "Cloud-signed Client" could imply Cloud-owned key material — resolved: Cloud may attest an existing **Client identity**, but the customer retains the private key and identity ownership.
+- "issuer-signed Client" could imply issuer-owned key material — resolved: a certificate may attest an existing **Client identity**, but the operator retains the private key and identity ownership.
 - "control channel" could blur a live relationship with its eventual transport — resolved: **Managed session** names the relationship; Core implements it as mutually authenticated HTTP/2 with one role-specific SSE downlink.
 - "server certificate" and the trust anchor behind it were easy to conflate — resolved: **Server certificate** is the presented leaf; **Server CA** is the private issuer in the manual Server path.
 - "ca-file trust" sounded like a file-path detail instead of a trust model — resolved: **Exclusive CA trust** means the **Client** trusts only the configured CA bundle for the **Server certificate**.

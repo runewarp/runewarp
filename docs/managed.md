@@ -4,7 +4,7 @@ This is the Core contract for **Managed mode**: how a Runewarp **Server** or **C
 
 Use it when you operate managed Server or Client runtimes, or when you implement a compatible Control service. Operator config keys live in [`configuration.md`](configuration.md). Tunnel wire behavior stays in [`protocol.md`](protocol.md). Trust boundaries are in [`security.md`](security.md). System shape is in [`architecture.md`](architecture.md). Domain terms are in [`CONTEXT.md`](../CONTEXT.md).
 
-This document describes what Core implements today. Control-owned product policy (Cloud lifecycle labels, persistence, certificate issuance, identity cardinality) is out of scope and called out explicitly.
+This document describes what Core implements today. Product policy (lifecycle labels, persistence, certificate issuance, identity cardinality) is out of scope and called out explicitly.
 
 ## Domain boundary
 
@@ -332,9 +332,9 @@ Label each requirement as **Control must** (wire contract Control implements) or
 
 ## Outside the Core contract
 
-The following remain Control- or Cloud-owned and must not be assumed from Core:
+The following remain outside this contract and must not be assumed from Core:
 
-- Phoenix, Fly topology, Cloud persistence, publication transactions, and desired-versus-applied comparison
+- hosting topology, persistence, publication transactions, and desired-versus-applied comparison
 - Warming / Degraded / staleness product labels and health classification
 - Certificate issuance, enrollment, offline/delete APIs, and identity-cardinality policy
 - Lifecycle classification, capacity ownership, and Terraform/provider drain orchestration

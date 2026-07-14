@@ -478,7 +478,17 @@ async fn run_test_address_worker(
             }
             result = lookup_host((server_address.hostname().as_str(), server_address.port())) => {
                 match result {
-                    Ok(mut addrs) => addrs.next().ok_or_else(|| "no resolved address".to_owned()),
+                    Ok(addrs) => {
+                        let resolved: Vec<_> = addrs.collect();
+                        // Prefer IPv4 so Linux CI (where localhost often resolves
+                        // ::1 first) still reaches Servers bound to 127.0.0.1.
+                        resolved
+                            .iter()
+                            .copied()
+                            .find(SocketAddr::is_ipv4)
+                            .or_else(|| resolved.first().copied())
+                            .ok_or_else(|| "no resolved address".to_owned())
+                    }
                     Err(error) => Err(error.to_string()),
                 }
             }

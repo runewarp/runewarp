@@ -1,6 +1,6 @@
 # Configuration
 
-Use this document as the configuration reference: keys, defaults, validation rules, and example shapes. Use [`docs/usage.md`](usage.md) for the step-by-step operator workflow.
+Use this document as the configuration reference: keys, defaults, validation rules, and example shapes. Use [`docs/usage.md`](usage.md) for the step-by-step operator workflow. Use [`docs/managed.md`](managed.md) for the Managed-session Control protocol and interoperability contract.
 
 Runewarp `0.1.x` is a public pre-1.0 release line. Minor releases may include breaking CLI or configuration changes, so use the config reference that matches the version you deploy.
 
@@ -109,7 +109,23 @@ cert-dir = "/etc/runewarp/server-cert"
 identity-dir = "/etc/runewarp/server-identity"
 ```
 
-Managed mode requires an effective Control address, allows empty `[[server.tunnels]]`, and requires `server.identity-dir` material distinct from `server.cert-dir`. Authorization comes only from Control-published Server snapshots after process start; the Server stays Unready and admits no Tunnel or Visitor work until the first successful apply.
+Managed mode requires an effective Control address, allows empty `[[server.tunnels]]`, and requires `server.identity-dir` material distinct from `server.cert-dir`. Authorization comes only from Control-published Server snapshots after process start; the Server stays Unready and admits no Tunnel or Visitor work until the first successful apply. See [`managed.md`](managed.md) for the session wire contract.
+
+### Managed Client
+
+```toml
+[control]
+address = "control.example.com"
+trust = "system"
+
+[client]
+identity-dir = "/etc/runewarp/client"
+
+[[client.services]]
+backend-address = "127.0.0.1:443"
+```
+
+Managed Client mode omits static Server addresses. Assignment comes only from Control-published Client snapshots after process start; the Client maintains no Tunnel connections until the first successful apply. Services and TLS mode remain local.
 
 ### Client with exact-match routing
 

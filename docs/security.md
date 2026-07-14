@@ -72,15 +72,14 @@ Static fanout does not change these trust boundaries. When a Client dials multip
 
 ## Control authentication (managed mode)
 
-Managed mode introduces a separate trust boundary for the Control endpoint:
+The Managed-session protocol, endpoints, and Control interoperability checklist are in [`managed.md`](managed.md). Managed mode introduces a separate trust boundary for the Control endpoint:
 
 1. the Server authenticates to Control with **Server identity** material from `server.identity-dir`
 2. the Client authenticates to Control with the same Client identity material used for Tunnel mTLS from `client.identity-dir`
 3. the Client and Server validate the Control endpoint through `control.trust = "system"` or through `control.trust = "ca-file"` with an exclusive CA bundle
-4. Control sessions require mutually authenticated TLS with mandatory HTTP/2 ALPN; Core does not follow Control redirects and does not fall back to HTTP/1.1
+4. each **Managed session** requires mutually authenticated TLS with mandatory HTTP/2 ALPN; Core does not follow Control redirects and does not fall back to HTTP/1.1
 5. Applied-state reports share that same authenticated connection after the role-specific SSE downlink is active and carry only the last successfully applied opaque revision
-6. Managed Server authorization replaces Public-hostname routing and Client-identity handshake admission together from one immutable snapshot. Invalid candidates are rejected as a whole; the prior snapshot and readiness remain. A valid empty Tunnel collection may stay Ingress-ready while authorizing no work. Removing a Client identity immediately denies new QUIC handshakes and closes that identity's live Tunnel connections and streams; removing only a Public hostname resets matching Visitor streams. Continuity does not use a Cloud Tunnel ID. Unrecoverable failure after an authorization commit begins never restores revoked authorization: readiness drops and the process exits nonzero.
-7. Managed Client assignment removal does not locally close live Tunnel connections: removed connected addresses stay Retiring until the remote Server closes them, and re-adding before remote closure re-adopts without duplicate dialing. Assignment removal is not Infrastructure drain. After the first successful Client apply, Control loss retains the last assignment while the session reconnects; process restart restores no managed input. Per-address dependency failures retry in-process; unrecoverable worker-task failures exit nonzero.
+6. Managed Server authorization and managed Client assignment apply through the role adapters documented in [`managed.md`](managed.md): atomic snapshot replacement, selective revocation or Retiring without local close, Control-loss retention of last-applied state, and nonzero exit only for unrecoverable post-commit or worker-task failures
 
 **Server identity** is not the **Server certificate**. The Server certificate still identifies the tunnel endpoint to Clients. Server identity is a pinned public-key identity presented only to Control.
 

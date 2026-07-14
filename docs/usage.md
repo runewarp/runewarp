@@ -8,6 +8,7 @@ Use this guide to install Runewarp, prepare trust material, start the runtime, a
 | --- | --- | --- |
 | CLI | Running Runewarp directly on your own hosts or service manager | Follow [Operate the CLI](#operate-the-cli) |
 | Docker example | Proving the shipped topology end to end before adapting it | Follow [Evaluate with the Docker example](#evaluate-with-the-docker-example) |
+| Managed mode | Server or Client driven by a Control endpoint instead of static Tunnel / Server-address config | Configure `[control]` per [`configuration.md`](configuration.md) and follow [`managed.md`](managed.md) |
 
 ## Before you start
 
@@ -193,7 +194,9 @@ If you enable `server.readiness-bind-address`, probe that TCP listener for ingre
 | --- | --- | --- |
 | No traffic reaches the backend | No active **Tunnel connection** | Confirm the Client is running and can reach the Server on `server.tunnel-bind-address` |
 | Client cannot connect to the Server | Wrong Server trust path | Check `client.server-trust` and `client.server-ca-file`, or confirm the ACME/public-CA chain is trusted |
-| Server drops a Public hostname | No Server `[[server.tunnels]]` entry grants **Public hostname authorization** for it | Check `server.tunnels[].public-hostnames` |
+| Server drops a Public hostname | No Server `[[server.tunnels]]` entry grants **Public hostname authorization** for it | Check `server.tunnels[].public-hostnames`, or in managed mode confirm Control published that hostname |
 | Client rejects the stream | No matching **Service** on the Client | Check Client `public-hostnames`, or confirm the sole Service is intentionally Catch-all |
 | Passthrough backend handshake fails | Backend is not terminating TLS | Confirm the backend behind a passthrough Service speaks TLS |
 | Terminate-mode backend fails immediately | Backend still expects TLS after the Client terminated it | Confirm the matching Service uses `tls-mode = "terminate"` and the backend speaks plaintext TCP |
+| Managed Server stays Unready | No successful Server input apply yet | Confirm Control reaches the runtime and publishes a valid Server snapshot; see [`managed.md`](managed.md) |
+| Managed Client never dials | No successful Client input apply yet, or empty assignment | Confirm Control publishes `server_addresses` and the Managed session is connected |

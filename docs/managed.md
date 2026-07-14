@@ -1,6 +1,6 @@
 # Managed session protocol
 
-This is the Core contract for **Managed mode**: how a Runewarp **Server** or **Client instance** talks to a **Control** endpoint, applies versioned full-input snapshots, and reports the last successfully applied opaque revision.
+This is the Core contract for **Managed mode**: how a Runewarp **Server** or **Client instance** talks to a **Control** endpoint, applies versioned full-input snapshots, and acknowledges successfully applied opaque revisions.
 
 Use it when you operate managed Server or Client runtimes, or when you implement a compatible Control service. Operator config keys live in [`configuration.md`](configuration.md). Tunnel wire behavior stays in [`protocol.md`](protocol.md). Trust boundaries are in [`security.md`](security.md). System shape is in [`architecture.md`](architecture.md). Domain terms are in [`CONTEXT.md`](../CONTEXT.md).
 
@@ -13,7 +13,7 @@ This document describes what Core implements today. Control-owned product policy
 | **Control** | HTTPS endpoint that publishes desired inputs and observes applied revisions |
 | **Control address** | DNS hostname with optional port; HTTPS is mandatory and inferred |
 | **Managed mode** | Startup-selected shape when an effective Control address is present |
-| **Managed session** | Authenticated live relationship between one Server or Client instance and Control for versioned snapshots and revision reports; Core implements it as one mutually authenticated HTTP/2 connection |
+| **Managed session** | Authenticated live relationship between one Server or Client instance and Control for versioned snapshots and revision acknowledgments; Core implements it as one mutually authenticated HTTP/2 connection |
 | **Server** / **Client instance** | Runtimes that open a Managed session; they still own the data-path listeners and Tunnel connections |
 | **Tunnel connection** | QUIC data-path session between Client and Server; separate from the Managed session |
 | **Authorization snapshot** | Server-side Public-hostname routing plus trusted Client identities applied from Control; managed tunnels are keyed by **Tunnel ID** |
@@ -185,6 +185,7 @@ Rejected and superseded revisions are never acknowledged. Acknowledgments never 
 | --- | --- | --- |
 | First-snapshot deadline | **60 s** from connection start | Bounds dial + TLS + SSE open + first valid snapshot; keepalive comments do not extend it |
 | Silence timeout | **60 s** without any SSE bytes | Reset by any SSE bytes, including `:` comments |
+| State acknowledgment deadline | **60 s** | A stalled `PUT .../state` fails and replaces the whole Managed session |
 | Control keepalive cadence | Less than **60 s** between SSE bytes | `:` comments keep quiet sessions active; **20 s** is recommended, not required |
 | Reconnect backoff | `1, 2, 3, 5, 8, 12, 18, 27, 41, 60` s | Full jitter over `0..window`; same policy as Tunnel reconnect |
 
@@ -202,7 +203,7 @@ Any downlink or state-acknowledgment failure closes the whole connection. Reconn
    - removing only a Public hostname resets matching Visitor streams
    - unrelated authorized work survives
 5. After the first successful apply, Control loss retains the last authorization and readiness while the session reconnects.
-6. **Graceful shutdown** drops readiness immediately but keeps the Managed session, snapshot application, and revision reporting active through bounded drain so Authorization changes still apply; the session ends when the HTTP/2 connection closes at final process exit. **Fast shutdown** may close the session immediately.
+6. **Graceful shutdown** drops readiness immediately but keeps the Managed session, snapshot application, and revision acknowledgment active through bounded drain so Authorization changes still apply; the session ends when the HTTP/2 connection closes at final process exit. **Fast shutdown** may close the session immediately.
 7. A pre-commit failure retains prior authorization. An unrecoverable failure after commit begins never restores revoked authorization: readiness drops and the process exits nonzero.
 
 ## Managed Client behavior

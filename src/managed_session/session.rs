@@ -1,4 +1,4 @@
-//! Managed-session reconnect, reconciliation, and applied-revision reporting.
+//! Managed-session reconnect, reconciliation, and applied-revision acknowledgment.
 
 use std::fmt;
 use std::future::Future;
@@ -13,7 +13,9 @@ use super::reconcile::{AppliedRevision, QueuedSnapshot, SnapshotQueue};
 use super::role::ManagedSessionRole;
 use super::snapshot::{SnapshotEnvelope, SnapshotError, parse_snapshot_event};
 use super::sse::{SseParseError, SseParseItem, SseParser};
-use super::timing::{FIRST_SNAPSHOT_DEADLINE, SessionClock, SessionDeadlines, SystemSessionClock};
+use super::timing::{
+    FIRST_SNAPSHOT_DEADLINE, SILENCE_TIMEOUT, SessionClock, SessionDeadlines, SystemSessionClock,
+};
 use super::tls::{ControlTlsMaterialError, SessionMaterial, load_control_tls_material};
 use crate::ControlAddress;
 use crate::reconnect_policy::ReconnectPolicy;
@@ -46,6 +48,7 @@ pub enum ManagedSessionError {
     Snapshot(SnapshotError),
     SilenceTimeout,
     FirstSnapshotTimeout,
+    StateAcknowledgmentTimeout,
     StreamEnded,
 }
 
@@ -62,6 +65,9 @@ impl fmt::Display for ManagedSessionError {
             Self::FirstSnapshotTimeout => {
                 formatter.write_str("managed session timed out waiting for the first snapshot")
             }
+            Self::StateAcknowledgmentTimeout => {
+                formatter.write_str("managed session timed out waiting for state acknowledgment")
+            }
             Self::StreamEnded => formatter.write_str("managed session SSE stream ended"),
         }
     }
@@ -74,7 +80,10 @@ impl std::error::Error for ManagedSessionError {
             Self::Connection(error) => Some(error),
             Self::Sse(error) => Some(error),
             Self::Snapshot(error) => Some(error),
-            Self::SilenceTimeout | Self::FirstSnapshotTimeout | Self::StreamEnded => None,
+            Self::SilenceTimeout
+            | Self::FirstSnapshotTimeout
+            | Self::StateAcknowledgmentTimeout
+            | Self::StreamEnded => None,
         }
     }
 }
@@ -125,7 +134,7 @@ impl<C: SessionClock> ManagedSession<C> {
         self.applied.get()
     }
 
-    /// Run until `shutdown` completes, driving the role adapter and reporting.
+    /// Run until `shutdown` completes, driving the role adapter and acknowledgments.
     pub async fn run<A, F, Fut, S, Shut>(
         &mut self,
         adapter: &mut A,
@@ -413,11 +422,13 @@ impl<C: SessionClock> ManagedSession<C> {
         let Some(revision) = self.applied.get() else {
             return Ok(());
         };
-        loop_state
-            .connection
-            .put_applied_revision(revision)
-            .await
-            .map_err(ManagedSessionError::Connection)
+        tokio::time::timeout(
+            SILENCE_TIMEOUT,
+            loop_state.connection.put_applied_revision(revision),
+        )
+        .await
+        .map_err(|_| ManagedSessionError::StateAcknowledgmentTimeout)?
+        .map_err(ManagedSessionError::Connection)
     }
 }
 

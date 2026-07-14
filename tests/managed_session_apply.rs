@@ -23,7 +23,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
     ApplyError, CONTROL_ALPN_H2, ClientManagedInput, ControlAddress, ControlClientIdentityMaterial,
     ControlTrust, DeferredClientAdapter, ManagedSession, ManagedSessionEvent, ManagedSessionRole,
-    RoleAdapter, SessionMaterial, events_path, state_path,
+    RoleAdapter, SILENCE_TIMEOUT, SessionMaterial, events_path, state_path,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -43,6 +43,7 @@ use common::{ControlMtlsMaterial, generate_control_mtls_material, write_control_
 enum StateBehavior {
     Success,
     FailOnceThenSuccess,
+    HangOnceThenSuccess,
 }
 
 #[derive(Debug)]
@@ -175,7 +176,10 @@ impl ControlFixture {
     }
 
     fn set_state_behavior(&self, behavior: StateBehavior) {
-        if matches!(behavior, StateBehavior::FailOnceThenSuccess) {
+        if matches!(
+            behavior,
+            StateBehavior::FailOnceThenSuccess | StateBehavior::HangOnceThenSuccess
+        ) {
             self.metrics.state_fail_once.store(true, Ordering::SeqCst);
         }
         *self.state_behavior.lock().unwrap() = behavior;
@@ -233,6 +237,12 @@ fn snapshot_sse(revision: &str, input: &str) -> String {
     format!("event: snapshot\ndata: {{\"revision\":\"{revision}\",\"input\":{input}}}\n\n")
 }
 
+async fn yield_tasks() {
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn handle_request(
     request: Request<Incoming>,
     metrics: Arc<FixtureMetrics>,
@@ -273,12 +283,18 @@ async fn handle_request(
         metrics.state_bodies.lock().unwrap().push(parsed);
 
         let behavior = behavior.lock().unwrap().clone();
-        let fail = match behavior {
-            StateBehavior::Success => false,
+        let (fail, hang) = match behavior {
+            StateBehavior::Success => (false, false),
             StateBehavior::FailOnceThenSuccess => {
-                metrics.state_fail_once.swap(false, Ordering::SeqCst)
+                (metrics.state_fail_once.swap(false, Ordering::SeqCst), false)
+            }
+            StateBehavior::HangOnceThenSuccess => {
+                (false, metrics.state_fail_once.swap(false, Ordering::SeqCst))
             }
         };
+        if hang {
+            std::future::pending::<()>().await;
+        }
         metrics.end_stream();
         if fail {
             metrics.state_statuses.lock().unwrap().push(500);
@@ -559,20 +575,14 @@ async fn applied_revision_is_not_repeated_without_another_snapshot() {
     })
     .await
     .expect("expected immediate state acknowledgment");
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
+    yield_tasks().await;
     tokio::time::advance(Duration::from_millis(1)).await;
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
+    yield_tasks().await;
     let after_immediate = metrics.state_bodies.lock().unwrap().len();
     assert_eq!(after_immediate, 1);
 
     tokio::time::advance(Duration::from_secs(40)).await;
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
+    yield_tasks().await;
     assert_eq!(metrics.state_bodies.lock().unwrap().len(), after_immediate);
 
     let _ = stop_tx.send(());
@@ -663,6 +673,90 @@ async fn state_acknowledgment_failure_reconnects_and_reacks_equal_snapshot() {
     })
     .await
     .expect("fresh first snapshot should be re-acknowledged after reconnect");
+
+    let _ = stop_tx.send(());
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn state_acknowledgment_timeout_reconnects_session() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse("rev-1", "{\"server_addresses\":[]}")],
+    )
+    .await;
+    fixture.set_state_behavior(StateBehavior::HangOnceThenSuccess);
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let mut adapter = DeferredClientAdapter;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-1"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("snapshot should apply before its state acknowledgment stalls");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !fixture.metrics.state_bodies.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Control should receive the state acknowledgment request");
+
+    tokio::time::pause();
+    tokio::time::advance(SILENCE_TIMEOUT).await;
+    yield_tasks().await;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Reconnecting { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("stalled state acknowledgment should replace the Managed session");
 
     let _ = stop_tx.send(());
     let _ = runner.await;

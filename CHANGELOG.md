@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Security
 
-- Upgraded the Rust dependency baseline past RUSTSEC-2026-0185 (`quinn-proto`) and RUSTSEC-2026-0190 (`anyhow`), replaced unmaintained `rustls-pemfile` PEM parsing with maintained `rustls-pki-types` APIs (RUSTSEC-2025-0134), and added a required `./scripts/audit-dependencies` CI gate. (#202)
+- Upgraded the Rust dependency baseline past RUSTSEC-2026-0185 (`quinn-proto`) and RUSTSEC-2026-0190 (`anyhow`), replaced unmaintained `rustls-pemfile` PEM parsing with maintained `rustls-pki-types` APIs (RUSTSEC-2025-0134), and added a required `./scripts/audit-dependencies` CI gate. (#204)
 
 ### Fixed
 

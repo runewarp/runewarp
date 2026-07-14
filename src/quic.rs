@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use quinn::TransportConfig;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -29,6 +29,7 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_SERVER_OPENED_BIDI_STREAMS: u32 = 1024;
+const ADMISSION_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub enum QuicConfigError {
@@ -255,6 +256,7 @@ struct PinnedClientCertVerifier {
     admission: Arc<dyn ClientIdentityAdmission>,
     supported_algorithms: WebPkiSupportedAlgorithms,
     root_hint_subjects: Vec<DistinguishedName>,
+    last_unauthorized_log: Mutex<Option<Instant>>,
 }
 
 impl PinnedClientCertVerifier {
@@ -266,7 +268,23 @@ impl PinnedClientCertVerifier {
             admission,
             supported_algorithms,
             root_hint_subjects: Vec::new(),
+            last_unauthorized_log: Mutex::new(None),
         }
+    }
+
+    fn should_log_unauthorized(&self) -> bool {
+        let now = Instant::now();
+        let mut last_logged = self
+            .last_unauthorized_log
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last_logged.is_some_and(|last| {
+            now.saturating_duration_since(last) < ADMISSION_FAILURE_LOG_INTERVAL
+        }) {
+            return false;
+        }
+        *last_logged = Some(now);
+        true
     }
 }
 
@@ -294,7 +312,9 @@ impl ClientCertVerifier for PinnedClientCertVerifier {
         if self.admission.authorizes_client_identity(&client_identity) {
             Ok(ClientCertVerified::assertion())
         } else {
-            runtime_log::server_tunnel_connection_unauthorized(&client_identity);
+            if self.should_log_unauthorized() {
+                runtime_log::server_tunnel_connection_unauthorized(&client_identity);
+            }
             Err(rustls::Error::InvalidCertificate(
                 CertificateError::ApplicationVerificationFailure,
             ))
@@ -385,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn unauthorized_client_identity_verification_emits_a_warn_log() {
+    fn unauthorized_client_identity_verification_rate_limits_warn_logs() {
         let generated_client_identity = generate_client_identity().unwrap();
         let certificate = client_leaf_certificate(&generated_client_identity).unwrap();
         let client_identity = generated_client_identity.client_identity.clone();
@@ -399,6 +419,9 @@ mod tests {
             let result =
                 verifier.verify_client_cert(&certificate, &[], rustls::pki_types::UnixTime::now());
             assert!(result.is_err());
+            let repeated =
+                verifier.verify_client_cert(&certificate, &[], rustls::pki_types::UnixTime::now());
+            assert!(repeated.is_err());
         });
 
         assert!(
@@ -408,6 +431,12 @@ mod tests {
                 )
                 .as_str()
             )
+        );
+        assert_eq!(
+            output
+                .matches("WARN server tunnel connection unauthorized")
+                .count(),
+            1
         );
     }
 

@@ -223,6 +223,45 @@ pub fn server_tunnel_connection_failed(error: &str) {
     );
 }
 
+pub fn server_admission_saturated(scope: &str, active_work: usize, limit: usize) {
+    emit(
+        EventLevel::Warn,
+        &event_line(
+            "server admission saturated",
+            [
+                ("scope", Cow::Borrowed(scope)),
+                ("active-work", Cow::Owned(active_work.to_string())),
+                ("limit", Cow::Owned(limit.to_string())),
+            ],
+        ),
+    );
+}
+
+pub fn server_admission_recovered(scope: &str) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "server admission recovered",
+            [("scope", Cow::Borrowed(scope))],
+        ),
+    );
+}
+
+pub fn server_public_listener_accept_retry(error: &io::Error, delay: Duration) {
+    emit(
+        EventLevel::Warn,
+        &event_line_with_summary(
+            "server public listener accept retrying",
+            [("next-retry-delay", Cow::Owned(format_duration(delay)))],
+            &error.to_string(),
+        ),
+    );
+}
+
+pub fn server_public_listener_accept_recovered() {
+    emit(EventLevel::Info, "server public listener accept recovered");
+}
+
 pub fn warning(role: &str, message: &str) {
     emit(EventLevel::Warn, &warning_line(role, message));
 }
@@ -750,6 +789,7 @@ fn server_route_rejected_client_hello_event(error: &ClientHelloError) -> (EventL
         ClientHelloError::InvalidTls => "non-tls-client-hello",
         ClientHelloError::MissingSni => "missing-sni-client-hello",
         ClientHelloError::InvalidSni => "invalid-sni-client-hello",
+        ClientHelloError::TimedOut { .. } => "client-hello-timeout",
         ClientHelloError::TooLong { .. } => "oversized-client-hello",
         ClientHelloError::UnexpectedEof => "incomplete-client-hello",
         ClientHelloError::Io(_) => "client-hello-io-error",
@@ -1298,7 +1338,8 @@ mod tests {
         client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
         client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_retiring,
         client_tunnel_unauthorized, emit, emit_server_tunnel_connection_dropped, install,
-        installed_level, managed_session_event, server_graceful_shutdown_deadline_expired,
+        installed_level, managed_session_event, server_admission_saturated,
+        server_graceful_shutdown_deadline_expired,
         server_orderly_shutdown_closing_tunnel_connections, server_orderly_shutdown_escalated,
         server_orderly_shutdown_started, server_public_listener_ready, server_readiness_gained,
         server_readiness_listener_enabled, server_readiness_lost, server_route,
@@ -1370,6 +1411,17 @@ mod tests {
         });
 
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn admission_saturation_exposes_active_work_and_limit() {
+        let output = capture(LogLevel::Info, || {
+            server_admission_saturated("visitor-global", 4_096, 4_096);
+        });
+
+        assert!(output.contains(
+            "WARN server admission saturated: scope=visitor-global active-work=4096 limit=4096"
+        ));
     }
 
     #[test]

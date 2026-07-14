@@ -51,11 +51,26 @@ Runtime diagnostics follow the same boundary.
 
 - customer TLS is never terminated on the **Server**
 - the Server reads only enough of the ClientHello to route
+- the Server requires the complete initial ClientHello within 5 seconds and 16 KB
+- pre-routing admission is bounded to 4,096 Visitors globally and 256 per accepted socket peer IP; the Server never trusts a forwarded header as source identity
 - the Server routes only **Public hostnames** explicitly authorized on the matched **Tunnel**
 - public traffic must be TLS
 - non-TLS traffic and TLS without SNI are dropped
 - **Local backends** must terminate TLS when `tls-mode = "passthrough"` (default)
 - the **Client** terminates TLS when `tls-mode = "terminate"`; the Local backend receives plaintext
+
+## Admission and overload protection
+
+The Server applies one fixed admission policy across its distinct public and authenticated trust boundaries:
+
+- Visitor pre-routing capacity is acquired before spawning a handler and released immediately after ClientHello completion, rejection, error, timeout, cancellation, or shutdown. Existing routed Visitor streams do not retain this capacity.
+- The public limits are 4,096 concurrent pre-routing Visitors globally and 256 per accepted peer IP. A normal load balancer may collapse many Visitors into one source bucket; Core deliberately accepts that conservative behavior rather than trusting an unverified forwarded header.
+- QUIC handshake capacity is acquired before spawning handshake work and is limited to 256 concurrent handshakes.
+- Authenticated active Tunnel connections are limited to 4,096 globally, 256 per Tunnel, and 64 per Client identity.
+- Saturation always rejects the newest work. It never evicts an existing healthy Tunnel connection or consumes capacity reserved by already-admitted Visitor traffic.
+- Authorization replacement, Tunnel-pool realignment, selective revocation, readiness, and orderly shutdown retain their existing behavior. Connections keep their active-admission accounting while moving between pools. Existing healthy connections are grandfathered if realignment combines pools above the per-Tunnel admission limit; new connections remain rejected until churn restores capacity.
+- Transient public accept failures retry with exponential backoff from 10 ms to a 1-second cap. Other accept errors drop readiness and remain fatal.
+- Saturation warnings include active work and the applicable limit and are rate-limited per scope to one every 10 seconds. Repetitive unauthorized-identity and QUIC handshake-failure warnings use the same rate bound; recovery is emitted once when capacity becomes available. Logs do not add remote Tunnel socket addresses or buffered ClientHello data.
 
 ## Tunnel authentication
 

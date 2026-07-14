@@ -7,13 +7,17 @@ use tokio::task::AbortHandle;
 
 use crate::{ClientIdentity, runtime_log};
 
-#[derive(Clone)]
+use super::admission::{
+    AdmissionLimit, AdmissionRejection, TunnelConnectionAdmission, TunnelConnectionPermit,
+};
+
 struct PoolMember {
     member_id: u64,
     client_identity: ClientIdentity,
     connection: Connection,
     active_streams: Arc<AtomicUsize>,
     close_watcher: AbortHandle,
+    _admission_permit: TunnelConnectionPermit,
 }
 
 #[derive(Clone)]
@@ -65,6 +69,7 @@ pub(crate) struct ActiveClientPool {
     members: Arc<RwLock<Vec<PoolMember>>>,
     next_member_id: Arc<AtomicU64>,
     next_round_robin_offset: Arc<AtomicU64>,
+    admission: TunnelConnectionAdmission,
 }
 
 /// A pool member detached from its previous Tunnel pool without closing the connection.
@@ -73,19 +78,41 @@ pub(crate) struct TakenPoolMember {
     connection: Connection,
     active_streams: Arc<AtomicUsize>,
     close_watcher: AbortHandle,
+    admission_permit: TunnelConnectionPermit,
+}
+
+impl TakenPoolMember {
+    /// Keep global and Client-identity capacity charged while a revoked
+    /// connection finishes closing after it has left every Tunnel pool.
+    pub(crate) fn release_admission_after_close(self) {
+        let connection = self.connection;
+        let admission_permit = self.admission_permit;
+        tokio::spawn(async move {
+            let _ = connection.closed().await;
+            drop(admission_permit);
+        });
+    }
 }
 
 impl ActiveClientPool {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::with_admission(TunnelConnectionAdmission::new(
+            super::admission::ServerAdmissionLimits::default(),
+        ))
+    }
+
+    pub(crate) fn with_admission(admission: TunnelConnectionAdmission) -> Self {
         Self {
             members: Arc::new(RwLock::new(Vec::new())),
             next_member_id: Arc::new(AtomicU64::new(1)),
             next_round_robin_offset: Arc::new(AtomicU64::new(0)),
+            admission,
         }
     }
 
     pub(crate) async fn select_connection(&self) -> Option<SelectedTunnelConnection> {
-        let members = self.members.read().await.clone();
+        let members = self.members.read().await;
         let len = members.len();
         if len == 0 {
             return None;
@@ -113,7 +140,19 @@ impl ActiveClientPool {
             })
     }
 
-    pub(crate) async fn register(&self, connection: Connection, client_identity: ClientIdentity) {
+    pub(crate) async fn try_register(
+        &self,
+        connection: Connection,
+        client_identity: ClientIdentity,
+    ) -> Result<(), AdmissionRejection> {
+        let mut members_guard = self.members.write().await;
+        if members_guard.len() >= self.admission.max_per_tunnel() {
+            return Err(AdmissionRejection {
+                limit: AdmissionLimit::TunnelConnectionsPerTunnel,
+                active_work: members_guard.len(),
+            });
+        }
+        let admission_permit = self.admission.try_acquire(&client_identity)?;
         let member_id = self.next_member_id.fetch_add(1, Ordering::Relaxed);
         let members = self.members.clone();
         let client_identity_for_close = client_identity.clone();
@@ -129,25 +168,38 @@ impl ActiveClientPool {
         })
         .abort_handle();
 
-        {
-            let mut members = self.members.write().await;
-            members.push(PoolMember {
-                member_id,
-                client_identity: client_identity.clone(),
-                connection,
-                active_streams: Arc::new(AtomicUsize::new(0)),
-                close_watcher,
-            });
-        }
+        members_guard.push(PoolMember {
+            member_id,
+            client_identity: client_identity.clone(),
+            connection,
+            active_streams: Arc::new(AtomicUsize::new(0)),
+            close_watcher,
+            _admission_permit: admission_permit,
+        });
+        drop(members_guard);
         runtime_log::server_tunnel_connection_accepted(&client_identity);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn register(&self, connection: Connection, client_identity: ClientIdentity) {
+        self.try_register(connection, client_identity)
+            .await
+            .expect("default test admission limits should accept the connection");
     }
 
     pub(crate) async fn close_all_connections(&self, reason: &'static [u8]) -> usize {
-        let members = self.members.read().await.clone();
-        for member in &members {
-            member.connection.close(0_u32.into(), reason);
+        let connections = self
+            .members
+            .read()
+            .await
+            .iter()
+            .map(|member| member.connection.clone())
+            .collect::<Vec<_>>();
+        for connection in &connections {
+            connection.close(0_u32.into(), reason);
         }
-        members.len()
+        connections.len()
     }
 
     pub(crate) async fn close_connections_for_identities(
@@ -155,13 +207,18 @@ impl ActiveClientPool {
         identities: &std::collections::HashSet<ClientIdentity>,
         reason: &'static [u8],
     ) -> usize {
-        let members = self.members.read().await.clone();
+        let connections = self
+            .members
+            .read()
+            .await
+            .iter()
+            .filter(|member| identities.contains(&member.client_identity))
+            .map(|member| member.connection.clone())
+            .collect::<Vec<_>>();
         let mut closed = 0;
-        for member in &members {
-            if identities.contains(&member.client_identity) {
-                member.connection.close(0_u32.into(), reason);
-                closed += 1;
-            }
+        for connection in connections {
+            connection.close(0_u32.into(), reason);
+            closed += 1;
         }
         closed
     }
@@ -183,6 +240,7 @@ impl ActiveClientPool {
                 connection: member.connection,
                 active_streams: member.active_streams,
                 close_watcher: member.close_watcher,
+                admission_permit: member._admission_permit,
             })
             .collect()
     }
@@ -191,12 +249,16 @@ impl ActiveClientPool {
     ///
     /// Aborts the watcher from the previous pool and starts a new one bound to
     /// this pool so remaps do not accumulate duplicate termination tasks.
+    /// Realignment preserves existing healthy connections even if combining
+    /// pools temporarily exceeds the per-Tunnel admission limit; subsequent
+    /// registrations remain rejected until churn restores capacity.
     pub(crate) async fn adopt_member(&self, member: TakenPoolMember) {
         let TakenPoolMember {
             client_identity,
             connection,
             active_streams,
             close_watcher,
+            admission_permit,
         } = member;
         close_watcher.abort();
 
@@ -222,6 +284,7 @@ impl ActiveClientPool {
             connection,
             active_streams,
             close_watcher,
+            _admission_permit: admission_permit,
         });
     }
 
@@ -265,6 +328,9 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     use super::ActiveClientPool;
+    use crate::server::admission::{
+        AdmissionLimit, ServerAdmissionLimits, TunnelConnectionAdmission,
+    };
     use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
     use crate::{
         GeneratedClientIdentity, generate_client_identity,
@@ -370,6 +436,65 @@ mod tests {
         assert!(!output.contains(first_remote_addr.to_string().as_str()));
         assert!(!output.contains(second_remote_addr.to_string().as_str()));
         assert_eq!(pool.connection_count().await, 2);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn per_tunnel_saturation_preserves_existing_connection_and_recovers_after_churn()
+    -> io::Result<()> {
+        let client_identity = generate_test_client_identity()?;
+        let first_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        let rejected_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        let limits = ServerAdmissionLimits {
+            max_tunnel_connections: 4,
+            max_tunnel_connections_per_tunnel: 1,
+            max_tunnel_connections_per_identity: 4,
+            ..ServerAdmissionLimits::for_test()
+        };
+        let pool = ActiveClientPool::with_admission(TunnelConnectionAdmission::new(limits));
+
+        assert!(
+            pool.try_register(
+                first_fixture.server_connection.clone(),
+                client_identity.client_identity.clone(),
+            )
+            .await
+            .is_ok()
+        );
+        assert!(matches!(
+            pool.try_register(
+                rejected_fixture.server_connection,
+                client_identity.client_identity.clone(),
+            )
+            .await,
+            Err(crate::server::admission::AdmissionRejection {
+                limit: AdmissionLimit::TunnelConnectionsPerTunnel,
+                active_work: 1,
+            })
+        ));
+        assert_eq!(pool.connection_count().await, 1);
+
+        first_fixture
+            .server_connection
+            .close(0_u32.into(), b"test churn");
+        timeout(Duration::from_secs(1), async {
+            while pool.connection_count().await != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "pool should release capacity"))?;
+
+        let recovered_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        assert!(
+            pool.try_register(
+                recovered_fixture.server_connection,
+                client_identity.client_identity,
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(pool.connection_count().await, 1);
         Ok(())
     }
 

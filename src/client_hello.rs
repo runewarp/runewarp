@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io::Cursor;
+use std::time::Duration;
 
 use rustls::server::Acceptor;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -45,6 +46,7 @@ pub enum ClientHelloError {
     InvalidTls,
     InvalidSni,
     MissingSni,
+    TimedOut { timeout: Duration },
     TooLong { limit: usize },
     UnexpectedEof,
 }
@@ -56,6 +58,12 @@ impl fmt::Display for ClientHelloError {
             Self::InvalidTls => formatter.write_str("invalid TLS client hello"),
             Self::InvalidSni => formatter.write_str("invalid SNI in client hello"),
             Self::MissingSni => formatter.write_str("missing SNI in client hello"),
+            Self::TimedOut { timeout } => {
+                write!(
+                    formatter,
+                    "client hello did not complete within {timeout:?}"
+                )
+            }
             Self::TooLong { limit } => {
                 write!(formatter, "client hello exceeded the {limit}-byte limit")
             }
@@ -73,10 +81,23 @@ impl std::error::Error for ClientHelloError {
             Self::InvalidTls
             | Self::InvalidSni
             | Self::MissingSni
+            | Self::TimedOut { .. }
             | Self::TooLong { .. }
             | Self::UnexpectedEof => None,
         }
     }
+}
+
+pub(crate) async fn read_client_hello_with_timeout<R>(
+    reader: &mut R,
+    timeout: Duration,
+) -> Result<ParsedClientHello, ClientHelloError>
+where
+    R: AsyncRead + Unpin,
+{
+    tokio::time::timeout(timeout, read_client_hello(reader))
+        .await
+        .map_err(|_| ClientHelloError::TimedOut { timeout })?
 }
 
 pub async fn read_client_hello<R>(reader: &mut R) -> Result<ParsedClientHello, ClientHelloError>
@@ -152,13 +173,41 @@ mod tests {
     use rustls::ClientConnection;
     use rustls::RootCertStore;
     use rustls::pki_types::{CertificateDer, ServerName};
+    use tokio::io::AsyncWriteExt;
     use tokio::io::{AsyncRead, ReadBuf};
+    use tokio::time::Duration;
 
     use crate::hostname::PublicHostname;
 
     use super::{
         CLIENT_HELLO_BUFFER_LIMIT, ClientHelloError, ParsedClientHello, read_client_hello,
+        read_client_hello_with_timeout,
     };
+
+    #[tokio::test(start_paused = true)]
+    async fn times_out_zero_byte_input() {
+        let (mut reader, _writer) = tokio::io::duplex(64);
+        let timeout = Duration::from_secs(5);
+
+        let error = read_client_hello_with_timeout(&mut reader, timeout)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ClientHelloError::TimedOut { timeout: value } if value == timeout));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn times_out_partial_input() {
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(&[0x16, 0x03, 0x03]).await.unwrap();
+        let timeout = Duration::from_secs(5);
+
+        let error = read_client_hello_with_timeout(&mut reader, timeout)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ClientHelloError::TimedOut { timeout: value } if value == timeout));
+    }
 
     #[tokio::test]
     async fn parses_sni_from_a_valid_client_hello() {

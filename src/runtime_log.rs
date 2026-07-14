@@ -314,6 +314,13 @@ pub fn client_ready(configured_server_addr: &str) {
     emit(EventLevel::Info, &client_ready_line(configured_server_addr));
 }
 
+pub fn client_assignment_convergence(status: crate::AssignmentConvergence) {
+    emit(
+        EventLevel::Info,
+        &client_assignment_convergence_line(status),
+    );
+}
+
 pub fn client_tunnel_disconnected(
     configured_server_addr: &str,
     resolved_server_addr: SocketAddr,
@@ -1093,6 +1100,18 @@ fn client_ready_line(configured_server_addr: &str) -> String {
     event_line(
         "client ready",
         [("server-address", Cow::Borrowed(configured_server_addr))],
+    )
+}
+
+fn client_assignment_convergence_line(status: crate::AssignmentConvergence) -> String {
+    let status = match status {
+        crate::AssignmentConvergence::Unconverged => "unconverged",
+        crate::AssignmentConvergence::PartiallyConverged => "partially-converged",
+        crate::AssignmentConvergence::Converged => "converged",
+    };
+    event_line(
+        "client assignment convergence",
+        [("status", Cow::Borrowed(status))],
     )
 }
 

@@ -66,7 +66,7 @@ impl RoleAdapter for DeferredServerAdapter {
 }
 
 /// Temporary Client adapter that accepts validated inputs without wiring the
-/// address controller yet (see issue #157).
+/// address controller. Production managed Clients use [`crate::ClientAssignmentAdapter`].
 #[derive(Clone, Debug, Default)]
 pub struct DeferredClientAdapter;
 

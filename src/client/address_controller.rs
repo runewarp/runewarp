@@ -3,8 +3,8 @@
 //! Static Client startup seeds the controller from configured Server addresses.
 //! Explicit add / remove / re-adopt operations replace maintenance intent without
 //! process restart, while preventing duplicate active dialing loops for one
-//! normalized address. Managed-session reconciliation builds on this seam later;
-//! this module does not introduce Managed-session behavior itself.
+//! normalized address. Managed-session reconciliation drives the same seam through
+//! [`crate::ClientAssignmentAdapter`].
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -33,6 +33,7 @@ pub struct AddressWorkerControl {
     maintenance: watch::Receiver<MaintenanceIntent>,
     shutdown: watch::Receiver<bool>,
     ready_logged: Arc<AtomicBool>,
+    client_ready_enabled: bool,
 }
 
 impl AddressWorkerControl {
@@ -53,8 +54,11 @@ impl AddressWorkerControl {
     }
 
     /// Returns true exactly once across all workers for the one-shot Client-ready log.
+    ///
+    /// Managed mode disables this so assignment convergence replaces the static
+    /// one-shot Client-ready event.
     pub fn claim_client_ready_log(&self) -> bool {
-        !self.ready_logged.swap(true, Ordering::SeqCst)
+        self.client_ready_enabled && !self.ready_logged.swap(true, Ordering::SeqCst)
     }
 }
 
@@ -70,6 +74,7 @@ pub struct AddressController {
     workers: HashMap<ServerAddress, WorkerSlot>,
     running: FuturesUnordered<RunningWorker>,
     ready_logged: Arc<AtomicBool>,
+    client_ready_enabled: bool,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     next_generation: u64,
@@ -100,14 +105,25 @@ impl AddressController {
             workers: HashMap::new(),
             running: FuturesUnordered::new(),
             ready_logged: Arc::new(AtomicBool::new(false)),
+            client_ready_enabled: true,
             shutdown_tx,
             shutdown_rx,
             next_generation: 1,
         }
     }
 
+    /// Disable the static one-shot Client-ready log for managed assignment mode.
+    pub fn disable_client_ready_log(&mut self) {
+        self.client_ready_enabled = false;
+    }
+
     pub fn worker_count(&self) -> usize {
         self.workers.len()
+    }
+
+    /// True while at least one address-worker future is still outstanding.
+    pub fn has_inflight_workers(&self) -> bool {
+        !self.running.is_empty()
     }
 
     pub fn contains(&self, address: &ServerAddress) -> bool {
@@ -285,6 +301,7 @@ impl AddressController {
             maintenance: maintenance_rx,
             shutdown: self.shutdown_rx.clone(),
             ready_logged: Arc::clone(&self.ready_logged),
+            client_ready_enabled: self.client_ready_enabled,
         };
         let worker_address = address.clone();
         let future = spawn(address.clone(), control);

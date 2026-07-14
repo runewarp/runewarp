@@ -73,7 +73,7 @@ The immutable Server-owned Public-hostname routing and trusted Client-identity s
 _Avoid_: Tunnel registry, handshake config, routing table
 
 **Address controller**:
-The Client-owned runtime that maintains at most one address worker per normalized **Server address**, and that can replace maintenance intent through add, remove, and re-adopt operations without process restart. Static Client startup seeds it from the configured address set; Managed-session reconciliation builds on the same seam later.
+The Client-owned runtime that maintains at most one address worker per normalized **Server address**, and that can replace maintenance intent through add, remove, and re-adopt operations without process restart. Static Client startup seeds it from the configured address set; Managed-session Client reconciliation drives the same seam through complete Server-address snapshots.
 _Avoid_: fanout loop, connection pool, dial manager
 
 **Control**:

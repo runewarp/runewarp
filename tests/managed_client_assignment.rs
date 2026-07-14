@@ -24,14 +24,15 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    AddressController, AddressWorkerControl, AssignmentConvergenceTracker, CLIENT_CERT_FILENAME,
-    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, CONTROL_ALPN_H2, ClientAssignmentAdapter,
-    ClientAssignmentApply, ClientConfig, ClientIdentity, ClientTlsMode, ControlAddress,
-    ControlClientIdentityMaterial, ControlTrust, LogLevel, MaintenanceIntent, ManagedSession,
-    ManagedSessionEvent, ManagedSessionRole, PreparedClient, PublicHostname, Server, ServerAddress,
-    ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname, ServerTunnelConfig,
-    ServiceConfig, SessionMaterial, ShutdownMode, client_identity_from_certificate_der,
-    events_path, make_server_quic_config_with_client_admission, state_path,
+    AddressController, AddressWorkerControl, AssignmentConvergence, AssignmentConvergenceTracker,
+    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, CONTROL_ALPN_H2,
+    ClientAssignmentAdapter, ClientAssignmentApply, ClientConfig, ClientIdentity, ClientTlsMode,
+    ControlAddress, ControlClientIdentityMaterial, ControlTrust, LogLevel, MaintenanceIntent,
+    ManagedSession, ManagedSessionEvent, ManagedSessionRole, PreparedClient, PublicHostname,
+    Server, ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
+    ServerTunnelConfig, ServiceConfig, SessionMaterial, ShutdownMode,
+    client_identity_from_certificate_der, events_path,
+    make_server_quic_config_with_client_admission, state_path,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -158,6 +159,7 @@ struct ManagedClientHarness {
     stop_tx: Option<oneshot::Sender<()>>,
     runtime_task: JoinHandle<Result<(), String>>,
     worker_count: Arc<Mutex<usize>>,
+    convergence: AssignmentConvergenceTracker,
 }
 
 impl ManagedClientHarness {
@@ -213,10 +215,10 @@ impl ManagedClientHarness {
         };
         let settings = Arc::new(settings);
         let worker_count = Arc::new(Mutex::new(0usize));
+        let convergence = AssignmentConvergenceTracker::new();
 
         let mut controller = AddressController::new();
         controller.disable_client_ready_log();
-        let convergence = AssignmentConvergenceTracker::new();
         let (apply_tx, mut apply_rx) = mpsc::unbounded_channel::<ClientAssignmentApply>();
         let mut adapter = ClientAssignmentAdapter::new(apply_tx);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -235,6 +237,7 @@ impl ManagedClientHarness {
         .unwrap();
 
         let worker_count_task = Arc::clone(&worker_count);
+        let convergence_task = convergence.clone();
         let runtime_task = tokio::spawn(async move {
             let session_runtime = session.run(
                 &mut adapter,
@@ -259,10 +262,10 @@ impl ManagedClientHarness {
                         let Some(ClientAssignmentApply { addresses, done }) = apply else {
                             break;
                         };
-                        let _ = convergence.set_assigned(&addresses);
+                        let _ = convergence_task.set_assigned(&addresses);
                         controller.replace_intent(&addresses, {
                             let settings = Arc::clone(&settings);
-                            let convergence = convergence.clone();
+                            let convergence = convergence_task.clone();
                             move |server_address, control| {
                                 let settings = Arc::clone(&settings);
                                 let convergence = Some(convergence.clone());
@@ -315,6 +318,7 @@ impl ManagedClientHarness {
             stop_tx: Some(stop_tx),
             runtime_task,
             worker_count,
+            convergence,
         }
     }
 
@@ -364,6 +368,10 @@ impl ManagedClientHarness {
         *self.worker_count.lock().unwrap()
     }
 
+    fn convergence(&self) -> AssignmentConvergence {
+        self.convergence.current()
+    }
+
     async fn shutdown(mut self) {
         if let Some(stop_tx) = self.stop_tx.take() {
             let _ = stop_tx.send(());
@@ -399,6 +407,13 @@ async fn managed_client_reconciles_assignments_across_real_servers() {
     wait_for_state_revision(&harness.control.metrics, "rev-1").await;
     wait_until(|| harness.worker_count() == 2).await;
     wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
+    wait_until(|| {
+        matches!(
+            harness.convergence(),
+            AssignmentConvergence::PartiallyConverged
+        )
+    })
+    .await;
 
     // 3. Cancel the never-connected failing address; healthy traffic continues.
     harness.push_assignment("rev-1b", &[&addr_a]);
@@ -406,6 +421,7 @@ async fn managed_client_reconciles_assignments_across_real_servers() {
     wait_for_state_revision(&harness.control.metrics, "rev-1b").await;
     wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
     wait_until(|| harness.worker_count() <= 1).await;
+    wait_until(|| harness.convergence() == AssignmentConvergence::Converged).await;
 
     // 4. Add a second healthy Server; both serve during convergence.
     let addr_b = format!("localhost:{}", server_b.tunnel_addr.port());
@@ -414,11 +430,13 @@ async fn managed_client_reconciles_assignments_across_real_servers() {
     wait_for_state_revision(&harness.control.metrics, "rev-2").await;
     wait_until_visitor_ok(server_b.public_addr, &harness.backend_cert).await;
     wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
+    wait_until(|| harness.convergence() == AssignmentConvergence::Converged).await;
 
-    // 5. Empty assignment applies immediately and reports without awaiting Retiring exit.
+    // 5. Empty assignment applies immediately, is Converged, and reports.
     harness.push_assignment("rev-empty", &[]);
     wait_for_applied(&mut harness.event_rx, "rev-empty").await;
     wait_for_state_revision(&harness.control.metrics, "rev-empty").await;
+    assert_eq!(harness.convergence(), AssignmentConvergence::Converged);
 
     // 6. Fresh assignment after empty starts a new independent worker.
     let server_c = harness.spawn_server_node().await;

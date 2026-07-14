@@ -81,13 +81,16 @@ impl AssignmentConvergenceTracker {
 
     /// Replace the assigned address set. Retiring connections remain tracked as
     /// Connected but are excluded from aggregate convergence until re-adopted.
-    pub fn set_assigned(&self, addresses: &[ServerAddress]) -> AssignmentConvergence {
+    /// Returns the new status when it changed.
+    pub fn set_assigned(&self, addresses: &[ServerAddress]) -> Option<AssignmentConvergence> {
         let mut state = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = state.current();
         state.assigned = addresses.iter().cloned().collect();
-        state.current()
+        let next = state.current();
+        (next != previous).then_some(next)
     }
 
     /// Record that an address reached Connected. Returns the new convergence
@@ -166,20 +169,25 @@ mod tests {
         let tracker = AssignmentConvergenceTracker::new();
         let a = address("a.example.test");
         let b = address("b.example.test");
-        tracker.set_assigned(&[a.clone(), b.clone()]);
+        assert_eq!(
+            tracker.set_assigned(&[a.clone(), b.clone()]),
+            Some(AssignmentConvergence::Unconverged)
+        );
         assert_eq!(
             tracker.mark_connected(&a),
             Some(AssignmentConvergence::PartiallyConverged)
         );
-        assert_eq!(tracker.set_assigned(&[]), AssignmentConvergence::Converged);
+        assert_eq!(
+            tracker.set_assigned(&[]),
+            Some(AssignmentConvergence::Converged)
+        );
         assert_eq!(tracker.current(), AssignmentConvergence::Converged);
         // Still Connected but Retiring: excluded until re-adopted.
         assert_eq!(tracker.mark_connected(&a), None);
         assert_eq!(tracker.current(), AssignmentConvergence::Converged);
-        assert_eq!(
-            tracker.set_assigned(std::slice::from_ref(&a)),
-            AssignmentConvergence::Converged
-        );
+        // Re-adopt restores Converged without a status change from empty Converged.
+        assert_eq!(tracker.set_assigned(std::slice::from_ref(&a)), None);
+        assert_eq!(tracker.current(), AssignmentConvergence::Converged);
     }
 
     #[test]
@@ -189,7 +197,7 @@ mod tests {
         let b = address("b.example.test");
         assert_eq!(
             tracker.set_assigned(&[a.clone(), b.clone()]),
-            AssignmentConvergence::Unconverged
+            Some(AssignmentConvergence::Unconverged)
         );
         assert_eq!(
             tracker.mark_connected(&a),

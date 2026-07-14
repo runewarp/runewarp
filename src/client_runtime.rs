@@ -6,9 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use runewarp::{
-    AddressController, AddressWorkerControl, AssignmentConvergence, AssignmentConvergenceTracker,
-    ClientAssignmentAdapter, ClientAssignmentApply, MaintenanceIntent, PreparedClient,
-    ServerAddress, ShutdownMode,
+    AddressController, AddressWorkerControl, AssignmentConvergenceTracker, ClientAssignmentAdapter,
+    ClientAssignmentApply, MaintenanceIntent, PreparedClient, ServerAddress, ShutdownMode,
 };
 use tokio::net::lookup_host;
 use tokio::sync::mpsc;
@@ -120,7 +119,6 @@ where
     );
     tokio::pin!(session_runtime);
 
-    let mut previous_convergence: Option<AssignmentConvergence> = None;
     loop {
         let drive_workers = controller.has_inflight_workers();
         tokio::select! {
@@ -129,11 +127,12 @@ where
                 let Some(ClientAssignmentApply { addresses, done }) = apply else {
                     break;
                 };
-                let next = convergence.set_assigned(&addresses);
-                if previous_convergence != Some(next) {
-                    runewarp::runtime_log::client_assignment_convergence(next);
-                    previous_convergence = Some(next);
-                }
+                // Emit the post-apply aggregate even when status is unchanged so
+                // operators see assignment transitions independently of workers.
+                let status = convergence
+                    .set_assigned(&addresses)
+                    .unwrap_or_else(|| convergence.current());
+                runewarp::runtime_log::client_assignment_convergence(status);
                 // Dispatch maintenance intent without awaiting network convergence.
                 controller.replace_intent(&addresses, {
                     let settings = Arc::clone(&settings);

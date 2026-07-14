@@ -62,8 +62,8 @@ pub use managed_session::{
     ApplyError, CONTROL_ALPN_H2, ClientManagedInput, ConnectionError,
     ControlClientIdentityMaterial, DeferredClientAdapter, DeferredServerAdapter, InputError,
     ManagedSession, ManagedSessionConnection, ManagedSessionEvent, ManagedSessionRole, RoleAdapter,
-    STATE_HEARTBEAT, ServerManagedInput, SessionMaterial, SnapshotEnvelope, events_path,
-    load_control_tls_material, parse_client_input, parse_server_input, state_path,
+    SILENCE_TIMEOUT, STATE_HEARTBEAT, ServerManagedInput, SessionMaterial, SnapshotEnvelope,
+    events_path, load_control_tls_material, parse_client_input, parse_server_input, state_path,
 };
 pub use paths::{
     XdgPathError, default_client_acme_state_dir, default_client_identity_material_dir,

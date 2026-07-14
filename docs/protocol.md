@@ -133,9 +133,9 @@ When more than one authenticated connection is live for the same **Tunnel** on o
 
 ## Managed-session Control protocol
 
-In **Managed mode**, each Server or Client runtime opens one mutually authenticated HTTP/2 **Managed session** to the configured **Control address**: one role-specific SSE downlink (`GET /v1/server/events` or `GET /v1/client/events`) plus concurrent revision-only state writes (`PUT /v1/server/state` or `PUT /v1/client/state`) on the same connection.
+In **Managed mode**, each Server or Client runtime opens one mutually authenticated HTTP/2 **Managed session** to the configured **Control address**: one role-specific SSE downlink (`GET /v1/server/events` or `GET /v1/client/events`) plus one revision-only state acknowledgment (`PUT /v1/server/state` or `PUT /v1/client/state`) for each successfully handled snapshot on the same connection.
 
-Tunnel reconnect backoff, 20-second state heartbeats, and 60-second first-snapshot/silence windows apply as documented in [`managed.md`](managed.md). That document is the canonical Core contract for endpoints, SSE framing, input schemas, revision semantics, Server authorization, Client assignment/Retiring, failure taxonomy, wire examples, and Control interoperability.
+The 60-second first-snapshot/silence windows and Tunnel reconnect backoff apply as documented in [`managed.md`](managed.md). Quiet SSE downlinks use Control-owned comment keepalives; Core sends no periodic state heartbeat. That document is the canonical Core contract for endpoints, SSE framing, input schemas, revision semantics, Server authorization, Client assignment/Retiring, failure taxonomy, wire examples, and Control interoperability.
 
 ## Runtime invariants
 

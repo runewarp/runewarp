@@ -1,4 +1,4 @@
-//! Managed-session reconnect, reconciliation, and applied-revision reporting.
+//! Managed-session reconnect, reconciliation, and applied-revision acknowledgment.
 
 use std::fmt;
 use std::future::Future;
@@ -14,7 +14,7 @@ use super::role::ManagedSessionRole;
 use super::snapshot::{SnapshotEnvelope, SnapshotError, parse_snapshot_event};
 use super::sse::{SseParseError, SseParseItem, SseParser};
 use super::timing::{
-    FIRST_SNAPSHOT_DEADLINE, STATE_HEARTBEAT, SessionClock, SessionDeadlines, SystemSessionClock,
+    FIRST_SNAPSHOT_DEADLINE, SILENCE_TIMEOUT, SessionClock, SessionDeadlines, SystemSessionClock,
 };
 use super::tls::{ControlTlsMaterialError, SessionMaterial, load_control_tls_material};
 use crate::ControlAddress;
@@ -48,6 +48,7 @@ pub enum ManagedSessionError {
     Snapshot(SnapshotError),
     SilenceTimeout,
     FirstSnapshotTimeout,
+    StateAcknowledgmentTimeout,
     StreamEnded,
 }
 
@@ -64,6 +65,9 @@ impl fmt::Display for ManagedSessionError {
             Self::FirstSnapshotTimeout => {
                 formatter.write_str("managed session timed out waiting for the first snapshot")
             }
+            Self::StateAcknowledgmentTimeout => {
+                formatter.write_str("managed session timed out waiting for state acknowledgment")
+            }
             Self::StreamEnded => formatter.write_str("managed session SSE stream ended"),
         }
     }
@@ -76,7 +80,10 @@ impl std::error::Error for ManagedSessionError {
             Self::Connection(error) => Some(error),
             Self::Sse(error) => Some(error),
             Self::Snapshot(error) => Some(error),
-            Self::SilenceTimeout | Self::FirstSnapshotTimeout | Self::StreamEnded => None,
+            Self::SilenceTimeout
+            | Self::FirstSnapshotTimeout
+            | Self::StateAcknowledgmentTimeout
+            | Self::StreamEnded => None,
         }
     }
 }
@@ -127,7 +134,7 @@ impl<C: SessionClock> ManagedSession<C> {
         self.applied.get()
     }
 
-    /// Run until `shutdown` completes, driving the role adapter and reporting.
+    /// Run until `shutdown` completes, driving the role adapter and acknowledgments.
     pub async fn run<A, F, Fut, S, Shut>(
         &mut self,
         adapter: &mut A,
@@ -151,7 +158,7 @@ impl<C: SessionClock> ManagedSession<C> {
             match outcome {
                 Ok(()) => {}
                 Err(error) => {
-                    tracing::warn!(error = %error, "managed session downlink failed");
+                    tracing::warn!(error = %error, "managed session failed");
                 }
             }
 
@@ -194,10 +201,6 @@ impl<C: SessionClock> ManagedSession<C> {
             deadlines: SessionDeadlines::new(self.clock.now()),
             received_valid_snapshot: false,
             queue: SnapshotQueue::new(),
-            next_heartbeat: self
-                .applied
-                .get()
-                .map(|_| self.clock.now() + STATE_HEARTBEAT),
         };
 
         loop {
@@ -223,17 +226,13 @@ impl<C: SessionClock> ManagedSession<C> {
             if let Some(pending) = loop_state.queue.take_next() {
                 if self.applied.matches(&pending.revision) {
                     loop_state.queue.finish_apply();
-                    self.report_applied(loop_state).await;
+                    self.acknowledge_applied(loop_state).await?;
                     continue;
                 }
                 return Ok(pending);
             }
 
-            let wait = next_wait(
-                &loop_state.deadlines,
-                loop_state.next_heartbeat,
-                self.clock.now(),
-            );
+            let wait = next_wait(&loop_state.deadlines, self.clock.now());
             tokio::select! {
                 chunk = loop_state.connection.next_chunk() => {
                     self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, false)
@@ -267,11 +266,7 @@ impl<C: SessionClock> ManagedSession<C> {
         tokio::pin!(apply);
 
         let apply_result = loop {
-            let wait = next_wait(
-                &loop_state.deadlines,
-                loop_state.next_heartbeat,
-                self.clock.now(),
-            );
+            let wait = next_wait(&loop_state.deadlines, self.clock.now());
             tokio::select! {
                 result = &mut apply => break result,
                 chunk = loop_state.connection.next_chunk() => {
@@ -291,7 +286,7 @@ impl<C: SessionClock> ManagedSession<C> {
                     revision: revision.clone(),
                 })
                 .await;
-                self.report_applied(loop_state).await;
+                self.acknowledge_applied(loop_state).await?;
             }
             Err(error) => {
                 tracing::warn!(
@@ -347,7 +342,7 @@ impl<C: SessionClock> ManagedSession<C> {
                     }
                     on_event(ManagedSessionEvent::Snapshot(envelope.clone())).await;
                     self.accept_envelope::<A, _, _>(envelope, loop_state, on_event, applying)
-                        .await;
+                        .await?;
                 }
             }
         }
@@ -360,14 +355,15 @@ impl<C: SessionClock> ManagedSession<C> {
         loop_state: &mut ConnectionLoop<A::Input>,
         on_event: &mut F,
         applying: bool,
-    ) where
+    ) -> Result<(), ManagedSessionError>
+    where
         A: RoleAdapter,
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
     {
         if !applying && self.applied.matches(&envelope.revision) {
-            self.report_applied(loop_state).await;
-            return;
+            self.acknowledge_applied(loop_state).await?;
+            return Ok(());
         }
 
         // Validate through the role adapter before queueing so invalid or
@@ -384,7 +380,7 @@ impl<C: SessionClock> ManagedSession<C> {
                     revision: envelope.revision,
                 })
                 .await;
-                return;
+                return Ok(());
             }
         };
 
@@ -400,6 +396,7 @@ impl<C: SessionClock> ManagedSession<C> {
         if let Some(revision) = superseded {
             on_event(ManagedSessionEvent::Superseded { revision }).await;
         }
+        Ok(())
     }
 
     async fn handle_timer<I>(
@@ -415,32 +412,23 @@ impl<C: SessionClock> ManagedSession<C> {
             }
             return Err(ManagedSessionError::SilenceTimeout);
         }
-        if let Some(deadline) = loop_state.next_heartbeat
-            && now >= deadline
-        {
-            self.report_applied(loop_state).await;
-        }
         Ok(())
     }
 
-    async fn report_applied<I>(&self, loop_state: &mut ConnectionLoop<I>) {
+    async fn acknowledge_applied<I>(
+        &self,
+        loop_state: &mut ConnectionLoop<I>,
+    ) -> Result<(), ManagedSessionError> {
         let Some(revision) = self.applied.get() else {
-            return;
+            return Ok(());
         };
-        match loop_state.connection.put_applied_revision(revision).await {
-            Ok(()) => {
-                loop_state.next_heartbeat = Some(self.clock.now() + STATE_HEARTBEAT);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "managed session state report failed"
-                );
-                // Retain the latest full state and retry on the next heartbeat.
-                // Do not disturb the SSE downlink or introduce a second backoff.
-                loop_state.next_heartbeat = Some(self.clock.now() + STATE_HEARTBEAT);
-            }
-        }
+        tokio::time::timeout(
+            SILENCE_TIMEOUT,
+            loop_state.connection.put_applied_revision(revision),
+        )
+        .await
+        .map_err(|_| ManagedSessionError::StateAcknowledgmentTimeout)?
+        .map_err(ManagedSessionError::Connection)
     }
 }
 
@@ -450,19 +438,10 @@ struct ConnectionLoop<I> {
     deadlines: SessionDeadlines,
     received_valid_snapshot: bool,
     queue: SnapshotQueue<I>,
-    next_heartbeat: Option<Instant>,
 }
 
-fn next_wait(
-    deadlines: &SessionDeadlines,
-    next_heartbeat: Option<Instant>,
-    now: Instant,
-) -> Duration {
-    let mut deadline = deadlines.next_deadline();
-    if let Some(heartbeat) = next_heartbeat {
-        deadline = deadline.min(heartbeat);
-    }
-    let wait = deadline.saturating_duration_since(now);
+fn next_wait(deadlines: &SessionDeadlines, now: Instant) -> Duration {
+    let wait = deadlines.next_deadline().saturating_duration_since(now);
     if wait.is_zero() {
         Duration::from_millis(1)
     } else {

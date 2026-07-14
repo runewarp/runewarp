@@ -1,4 +1,4 @@
-//! Black-box integration tests for Managed-session apply and state reporting (#154).
+//! Black-box integration tests for Managed-session apply and state acknowledgment (#154).
 
 mod common;
 
@@ -23,7 +23,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
     ApplyError, CONTROL_ALPN_H2, ClientManagedInput, ControlAddress, ControlClientIdentityMaterial,
     ControlTrust, DeferredClientAdapter, ManagedSession, ManagedSessionEvent, ManagedSessionRole,
-    RoleAdapter, STATE_HEARTBEAT, SessionMaterial, events_path, state_path,
+    RoleAdapter, SILENCE_TIMEOUT, SessionMaterial, events_path, state_path,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -43,6 +43,7 @@ use common::{ControlMtlsMaterial, generate_control_mtls_material, write_control_
 enum StateBehavior {
     Success,
     FailOnceThenSuccess,
+    HangOnceThenSuccess,
 }
 
 #[derive(Debug)]
@@ -175,7 +176,10 @@ impl ControlFixture {
     }
 
     fn set_state_behavior(&self, behavior: StateBehavior) {
-        if matches!(behavior, StateBehavior::FailOnceThenSuccess) {
+        if matches!(
+            behavior,
+            StateBehavior::FailOnceThenSuccess | StateBehavior::HangOnceThenSuccess
+        ) {
             self.metrics.state_fail_once.store(true, Ordering::SeqCst);
         }
         *self.state_behavior.lock().unwrap() = behavior;
@@ -233,6 +237,12 @@ fn snapshot_sse(revision: &str, input: &str) -> String {
     format!("event: snapshot\ndata: {{\"revision\":\"{revision}\",\"input\":{input}}}\n\n")
 }
 
+async fn yield_tasks() {
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn handle_request(
     request: Request<Incoming>,
     metrics: Arc<FixtureMetrics>,
@@ -273,12 +283,18 @@ async fn handle_request(
         metrics.state_bodies.lock().unwrap().push(parsed);
 
         let behavior = behavior.lock().unwrap().clone();
-        let fail = match behavior {
-            StateBehavior::Success => false,
+        let (fail, hang) = match behavior {
+            StateBehavior::Success => (false, false),
             StateBehavior::FailOnceThenSuccess => {
-                metrics.state_fail_once.swap(false, Ordering::SeqCst)
+                (metrics.state_fail_once.swap(false, Ordering::SeqCst), false)
+            }
+            StateBehavior::HangOnceThenSuccess => {
+                (false, metrics.state_fail_once.swap(false, Ordering::SeqCst))
             }
         };
+        if hang {
+            std::future::pending::<()>().await;
+        }
         metrics.end_stream();
         if fail {
             metrics.state_statuses.lock().unwrap().push(500);
@@ -427,7 +443,7 @@ impl RoleAdapter for GatedAdapter {
 }
 
 #[tokio::test]
-async fn apply_reports_revision_on_same_connection_with_exact_payload() {
+async fn apply_acknowledges_revision_on_same_connection_with_exact_payload() {
     let material = generate_control_mtls_material("runewarp-client-a");
     let fixture = ControlFixture::start(
         &material,
@@ -485,7 +501,7 @@ async fn apply_reports_revision_on_same_connection_with_exact_payload() {
         }
     })
     .await
-    .expect("expected immediate state report");
+    .expect("expected immediate state acknowledgment");
 
     {
         let bodies = fixture.metrics.state_bodies.lock().unwrap();
@@ -521,7 +537,7 @@ async fn apply_reports_revision_on_same_connection_with_exact_payload() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn periodic_heartbeat_repeats_applied_revision_every_20_seconds() {
+async fn applied_revision_is_not_repeated_without_another_snapshot() {
     let material = generate_control_mtls_material("runewarp-client-a");
     let fixture = ControlFixture::start(
         &material,
@@ -558,34 +574,16 @@ async fn periodic_heartbeat_repeats_applied_revision_every_20_seconds() {
         }
     })
     .await
-    .expect("expected immediate state report");
+    .expect("expected immediate state acknowledgment");
+    yield_tasks().await;
+    tokio::time::advance(Duration::from_millis(1)).await;
+    yield_tasks().await;
     let after_immediate = metrics.state_bodies.lock().unwrap().len();
-    assert!(after_immediate >= 1);
+    assert_eq!(after_immediate, 1);
 
-    let mut saw_heartbeat = false;
-    for _ in 0..20 {
-        if metrics.state_bodies.lock().unwrap().len() > after_immediate {
-            saw_heartbeat = true;
-            break;
-        }
-        // Advancing may race the session entering its heartbeat sleep; keep
-        // advancing until the periodic report lands.
-        tokio::time::advance(STATE_HEARTBEAT).await;
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-    }
-    assert!(saw_heartbeat, "expected heartbeat state report");
-
-    {
-        let bodies = metrics.state_bodies.lock().unwrap();
-        assert!(bodies.len() >= 2);
-        assert!(
-            bodies
-                .iter()
-                .all(|body| body == &serde_json::json!({"revision":"rev-1"}))
-        );
-    }
+    tokio::time::advance(Duration::from_secs(40)).await;
+    yield_tasks().await;
+    assert_eq!(metrics.state_bodies.lock().unwrap().len(), after_immediate);
 
     let _ = stop_tx.send(());
     let _ = runner.await;
@@ -593,7 +591,7 @@ async fn periodic_heartbeat_repeats_applied_revision_every_20_seconds() {
 }
 
 #[tokio::test]
-async fn state_report_failure_leaves_sse_open_and_retries_later() {
+async fn state_acknowledgment_failure_reconnects_and_reacks_equal_snapshot() {
     let material = generate_control_mtls_material("runewarp-client-a");
     let fixture = ControlFixture::start(
         &material,
@@ -644,33 +642,28 @@ async fn state_report_failure_leaves_sse_open_and_retries_later() {
     .await
     .unwrap();
 
-    // First report fails; SSE connection must remain the only TLS session.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(metrics.tls_accepts.load(Ordering::SeqCst), 1);
-
-    // Push another snapshot while still on the same connection to prove SSE
-    // survived the failed state write.
-    fixture.push_snapshot(snapshot_sse("rev-2", "{\"server_addresses\":[]}"));
-
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if matches!(
                 event_rx.recv().await,
-                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-2"
+                Some(ManagedSessionEvent::Reconnecting { .. })
             ) {
                 break;
             }
         }
     })
     .await
-    .expect("SSE must survive state-report failure");
+    .expect("failed state acknowledgment should replace the Managed session");
 
-    assert_eq!(metrics.tls_accepts.load(Ordering::SeqCst), 1);
+    fixture.push_snapshot(snapshot_sse("rev-1", "{\"server_addresses\":[]}"));
+
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let ready = {
                 let statuses = metrics.state_statuses.lock().unwrap();
-                statuses.contains(&500) && statuses.contains(&204)
+                metrics.tls_accepts.load(Ordering::SeqCst) >= 2
+                    && statuses.contains(&500)
+                    && statuses.contains(&204)
             };
             if ready {
                 break;
@@ -679,7 +672,7 @@ async fn state_report_failure_leaves_sse_open_and_retries_later() {
         }
     })
     .await
-    .expect("failed report should retry successfully on a later write");
+    .expect("fresh first snapshot should be re-acknowledged after reconnect");
 
     let _ = stop_tx.send(());
     let _ = runner.await;
@@ -687,7 +680,91 @@ async fn state_report_failure_leaves_sse_open_and_retries_later() {
 }
 
 #[tokio::test]
-async fn repeated_revision_skips_reconciliation_and_keeps_reporting() {
+async fn state_acknowledgment_timeout_reconnects_session() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse("rev-1", "{\"server_addresses\":[]}")],
+    )
+    .await;
+    fixture.set_state_behavior(StateBehavior::HangOnceThenSuccess);
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let mut adapter = DeferredClientAdapter;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-1"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("snapshot should apply before its state acknowledgment stalls");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !fixture.metrics.state_bodies.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Control should receive the state acknowledgment request");
+
+    tokio::time::pause();
+    tokio::time::advance(SILENCE_TIMEOUT).await;
+    yield_tasks().await;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Reconnecting { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("stalled state acknowledgment should replace the Managed session");
+
+    let _ = stop_tx.send(());
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn repeated_revision_skips_reconciliation_and_is_acknowledged_again() {
     let material = generate_control_mtls_material("runewarp-client-a");
     let fixture = ControlFixture::start(
         &material,
@@ -831,8 +908,7 @@ async fn invalid_input_is_not_acknowledged_and_preserves_prior_revision() {
     .await
     .expect("invalid input should be rejected locally");
 
-    // Control keeps receiving the prior successfully applied revision on heartbeat
-    // cadence; force an equal-revision resume report via another equal snapshot.
+    // An equal snapshot re-acknowledges the prior successfully applied revision.
     fixture.push_snapshot(snapshot_sse("rev-1", "{\"server_addresses\":[]}"));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -965,7 +1041,7 @@ async fn rollback_to_previously_applied_revision_is_applied() {
 }
 
 #[tokio::test]
-async fn mid_apply_keeps_prior_revision_reports_and_collapses_to_newest() {
+async fn mid_apply_collapses_to_newest() {
     let material = generate_control_mtls_material("runewarp-client-a");
     let fixture = ControlFixture::start(
         &material,
@@ -1041,39 +1117,6 @@ async fn mid_apply_keeps_prior_revision_reports_and_collapses_to_newest() {
     .await
     .expect("gated apply should start");
 
-    // Pause only after the gated apply is in flight so heartbeat sleeps advance
-    // deterministically without racing connection setup.
-    tokio::time::pause();
-
-    // While apply is held, Control must keep receiving the prior applied revision.
-    let reports_before_heartbeat = fixture.metrics.state_bodies.lock().unwrap().len();
-    for _ in 0..20 {
-        if fixture.metrics.state_bodies.lock().unwrap().len() > reports_before_heartbeat {
-            break;
-        }
-        tokio::time::advance(STATE_HEARTBEAT).await;
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-    }
-    {
-        let bodies = fixture.metrics.state_bodies.lock().unwrap();
-        assert!(
-            bodies.len() > reports_before_heartbeat,
-            "expected prior-revision heartbeat during in-flight apply"
-        );
-        assert!(
-            bodies
-                .iter()
-                .all(|body| body == &serde_json::json!({"revision":"rev-1"})),
-            "during apply, reports must stay on the prior successfully applied revision"
-        );
-    }
-
-    // Resume before I/O-driven waits. Under pause, tokio timeouts can auto-advance
-    // while the gated apply is blocked on Notify and fire before SSE events land.
-    tokio::time::resume();
-
     // Supersede mid-apply: only the newest pending candidate should remain.
     fixture.push_snapshot(snapshot_sse(
         "rev-mid",
@@ -1145,7 +1188,7 @@ async fn mid_apply_keeps_prior_revision_reports_and_collapses_to_newest() {
 }
 
 #[tokio::test]
-async fn state_reports_begin_only_after_first_successful_apply() {
+async fn state_acknowledgments_begin_only_after_first_successful_apply() {
     let material = generate_control_mtls_material("runewarp-client-a");
     let fixture = ControlFixture::start(&material, Vec::new()).await;
     let dir = tempdir().unwrap();
@@ -1199,7 +1242,7 @@ async fn state_reports_begin_only_after_first_successful_apply() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         fixture.metrics.state_bodies.lock().unwrap().is_empty(),
-        "state reporting must not begin before the first successful apply"
+        "state acknowledgment must not begin before the first successful apply"
     );
 
     fixture.push_snapshot(snapshot_sse("rev-1", "{\"server_addresses\":[]}"));
@@ -1225,7 +1268,7 @@ async fn state_reports_begin_only_after_first_successful_apply() {
         }
     })
     .await
-    .expect("first successful apply must start state reporting");
+    .expect("first successful apply must produce a state acknowledgment");
 
     {
         let bodies = fixture.metrics.state_bodies.lock().unwrap();

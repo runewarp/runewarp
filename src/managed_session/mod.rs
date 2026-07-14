@@ -2,7 +2,7 @@
 //!
 //! Establishes one mutually authenticated HTTP/2 connection, opens the
 //! role-specific SSE stream, validates role inputs, sequences reconciliation
-//! through a role adapter, and reports the last successfully applied revision
+//! through a role adapter, and acknowledges successfully applied revisions
 //! on the same connection.
 
 mod adapter;
@@ -29,9 +29,7 @@ pub use sse::{SseEvent, SseParseError, SseParseItem, SseParser};
 pub use status::{
     SseResponseClass, StateResponseClass, classify_sse_response, classify_state_response,
 };
-pub use timing::{
-    FIRST_SNAPSHOT_DEADLINE, SILENCE_TIMEOUT, STATE_HEARTBEAT, SessionClock, SystemSessionClock,
-};
+pub use timing::{FIRST_SNAPSHOT_DEADLINE, SILENCE_TIMEOUT, SessionClock, SystemSessionClock};
 pub use tls::{
     CONTROL_ALPN_H2, ControlClientIdentityMaterial, ControlTlsMaterial, ControlTlsMaterialError,
     SessionMaterial, load_control_tls_material,

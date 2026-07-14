@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Security
+
+- Upgraded the Rust dependency baseline past RUSTSEC-2026-0185 (`quinn-proto`) and RUSTSEC-2026-0190 (`anyhow`), replaced unmaintained `rustls-pemfile` PEM parsing with maintained `rustls-pki-types` APIs (RUSTSEC-2025-0134), and added a required `./scripts/audit-dependencies` CI gate. (#204)
+
 ### Fixed
 
 - Fixed Client ACME and Terminate-mode TLS preparation so one **Client instance** owns validated Services and ACME managers once across multi-address fanout and Tunnel reconnects, with supervised ACME shutdown instead of per-connection fire-and-forget tasks. (#203)

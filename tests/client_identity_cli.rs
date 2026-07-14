@@ -1,10 +1,10 @@
 use std::fs;
-use std::io::Cursor;
 use std::path::Path;
 
 use assert_cmd::Command;
 use runewarp::client_identity_from_certificate_der;
-use rustls_pemfile::certs;
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use tempfile::tempdir;
 use time::OffsetDateTime;
 
@@ -186,10 +186,8 @@ fn client_identity_init_writes_pem_artifacts_and_a_client_identity() {
     assert!(!stdout.contains("Renew after (UTC):"));
     assert!(!stdout.contains("Expires at (UTC):"));
 
-    let certificate_der = certs(&mut Cursor::new(certificate.as_bytes()))
-        .next()
-        .expect("generated certificate")
-        .expect("parse generated certificate");
+    let certificate_der =
+        CertificateDer::from_pem_slice(certificate.as_bytes()).expect("generated certificate");
     let (_, parsed) = x509_parser::parse_x509_certificate(certificate_der.as_ref()).unwrap();
     let lifetime =
         parsed.validity().not_after.to_datetime() - parsed.validity().not_before.to_datetime();
@@ -206,10 +204,8 @@ fn client_identity_init_leaves_complete_expired_material_unchanged() {
     let original_private_key = fs::read(directory.join("client.key")).unwrap();
     let original_certificate = fs::read(directory.join("client.crt")).unwrap();
     let original_identity = fs::read_to_string(directory.join("client-identity.txt")).unwrap();
-    let certificate_der = certs(&mut Cursor::new(original_certificate.as_slice()))
-        .next()
-        .expect("expired certificate")
-        .expect("parse expired certificate");
+    let certificate_der = CertificateDer::from_pem_slice(original_certificate.as_slice())
+        .expect("expired certificate");
     let (_, parsed) = x509_parser::parse_x509_certificate(certificate_der.as_ref()).unwrap();
     assert!(
         parsed.validity().not_after.to_datetime() < OffsetDateTime::now_utc(),
@@ -276,10 +272,8 @@ fn client_identity_init_matches_the_generated_certificate_subject_public_key_inf
         .success();
 
     let certificate_pem = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
-    let certificate = certs(&mut Cursor::new(certificate_pem))
-        .next()
-        .expect("generated certificate")
-        .expect("parse generated certificate");
+    let certificate =
+        CertificateDer::from_pem_slice(&certificate_pem).expect("generated certificate");
     let stored_identity =
         fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
 
@@ -359,10 +353,8 @@ fn client_identity_rotate_replaces_the_key_and_client_identity() {
     let rotated_certificate = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
     let rotated_identity =
         fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
-    let rotated_certificate_der = certs(&mut Cursor::new(rotated_certificate.clone()))
-        .next()
-        .expect("rotated certificate")
-        .expect("parse rotated certificate");
+    let rotated_certificate_der =
+        CertificateDer::from_pem_slice(&rotated_certificate).expect("rotated certificate");
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
     assert_ne!(rotated_private_key, original_private_key);

@@ -26,10 +26,10 @@ use runewarp::{
     DeferredClientAdapter, ManagedSession, ManagedSessionConnection, ManagedSessionEvent,
     ManagedSessionRole, SILENCE_TIMEOUT, SessionMaterial, events_path, load_control_tls_material,
 };
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
-use rustls_pemfile::{certs, pkcs8_private_keys};
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 use tempfile::tempdir;
@@ -203,9 +203,10 @@ fn cert_fingerprint(cert: &CertificateDer<'_>) -> String {
 }
 
 fn build_server_acceptor(material: &ControlMtlsMaterial) -> TlsAcceptor {
-    let ca_certs: Vec<CertificateDer<'static>> = certs(&mut material.ca_cert_pem.as_bytes())
-        .map(|result| result.unwrap())
-        .collect();
+    let ca_certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(material.ca_cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .unwrap();
     let mut roots = RootCertStore::empty();
     for cert in ca_certs {
         roots.add(cert).unwrap();
@@ -213,14 +214,10 @@ fn build_server_acceptor(material: &ControlMtlsMaterial) -> TlsAcceptor {
     let client_verifier = WebPkiClientVerifier::builder(roots.into()).build().unwrap();
 
     let server_certs: Vec<CertificateDer<'static>> =
-        certs(&mut material.server_cert_pem.as_bytes())
-            .map(|result| result.unwrap())
-            .collect();
-    let server_key = pkcs8_private_keys(&mut material.server_key_pem.as_bytes())
-        .next()
-        .unwrap()
-        .unwrap();
-    let server_key = PrivateKeyDer::Pkcs8(server_key);
+        CertificateDer::pem_slice_iter(material.server_cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .unwrap();
+    let server_key = PrivateKeyDer::from_pem_slice(material.server_key_pem.as_bytes()).unwrap();
 
     let mut server_config = ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
@@ -462,10 +459,7 @@ async fn mtls_peer_identity_is_observed_by_control_fixture() {
         let fingerprints = fixture.metrics.peer_cert_fingerprints.lock().unwrap();
         assert_eq!(fingerprints.len(), 1);
         let expected = cert_fingerprint(
-            &certs(&mut material.client_cert_pem.as_bytes())
-                .next()
-                .unwrap()
-                .unwrap(),
+            &CertificateDer::from_pem_slice(material.client_cert_pem.as_bytes()).unwrap(),
         );
         assert_eq!(fingerprints[0], expected);
     }
@@ -887,10 +881,7 @@ async fn reloading_identity_files_presents_new_client_certificate() {
         assert_ne!(fingerprints[0], fingerprints[1]);
         assert_eq!(fingerprints[0], first_fingerprint);
         let expected_b = cert_fingerprint(
-            &certs(&mut client_b_cert_pem.as_bytes())
-                .next()
-                .unwrap()
-                .unwrap(),
+            &CertificateDer::from_pem_slice(client_b_cert_pem.as_bytes()).unwrap(),
         );
         assert_eq!(fingerprints[1], expected_b);
     }

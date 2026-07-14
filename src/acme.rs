@@ -1,13 +1,13 @@
 use std::convert::Infallible;
 use std::io;
-use std::io::Cursor;
 use std::path::Path;
 
 use futures_util::StreamExt;
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY;
 use rustls_acme::caches::DirCache;
 use rustls_acme::{AcmeConfig, AcmeState, CertCache, EventError, EventOk};
-use rustls_pemfile::{Item, read_one};
 use time::{Duration as TimeDuration, OffsetDateTime};
 use x509_parser::parse_x509_certificate;
 
@@ -241,29 +241,24 @@ fn parse_cached_certificate_freshness(
     pem: &[u8],
     now: OffsetDateTime,
 ) -> Result<Option<(String, bool)>, String> {
-    let mut reader = Cursor::new(pem);
-    while let Some(item) =
-        read_one(&mut reader).map_err(|error| format!("cached cert parse: {error}"))?
-    {
-        let Item::X509Certificate(certificate) = item else {
-            continue;
-        };
-        let (_, certificate) = parse_x509_certificate(certificate.as_ref())
-            .map_err(|error| format!("cached cert parse: X509 parsing error: {error}"))?;
-        let validity = certificate.validity();
-        let not_before = OffsetDateTime::from_unix_timestamp(validity.not_before.timestamp())
-            .map_err(|error| format!("cached cert parse: {error}"))?;
-        let not_after = OffsetDateTime::from_unix_timestamp(validity.not_after.timestamp())
-            .map_err(|error| format!("cached cert parse: {error}"))?;
-        let remaining = not_after - now;
-        if remaining.is_negative() || remaining.is_zero() {
-            return Ok(None);
-        }
-        let validity_window = not_after - not_before;
-        let renewal_due = now >= not_after - validity_window / 3;
-        return Ok(Some((format_remaining_validity(remaining), renewal_due)));
+    let Some(certificate) = CertificateDer::pem_slice_iter(pem).next() else {
+        return Err("cached cert parse: no certificate PEM found".to_owned());
+    };
+    let certificate = certificate.map_err(|error| format!("cached cert parse: {error}"))?;
+    let (_, certificate) = parse_x509_certificate(certificate.as_ref())
+        .map_err(|error| format!("cached cert parse: X509 parsing error: {error}"))?;
+    let validity = certificate.validity();
+    let not_before = OffsetDateTime::from_unix_timestamp(validity.not_before.timestamp())
+        .map_err(|error| format!("cached cert parse: {error}"))?;
+    let not_after = OffsetDateTime::from_unix_timestamp(validity.not_after.timestamp())
+        .map_err(|error| format!("cached cert parse: {error}"))?;
+    let remaining = not_after - now;
+    if remaining.is_negative() || remaining.is_zero() {
+        return Ok(None);
     }
-    Err("cached cert parse: no certificate PEM found".to_owned())
+    let validity_window = not_after - not_before;
+    let renewal_due = now >= not_after - validity_window / 3;
+    Ok(Some((format_remaining_validity(remaining), renewal_due)))
 }
 
 fn format_remaining_validity(remaining: TimeDuration) -> String {

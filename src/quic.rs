@@ -327,12 +327,13 @@ impl ClientCertVerifier for PinnedClientCertVerifier {
 #[cfg(test)]
 mod tests {
     use std::future::pending;
-    use std::io::{self, Cursor, Write};
+    use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use rcgen::generate_simple_self_signed;
     use rustls::RootCertStore;
+    use rustls::pki_types::pem::{Error as PemError, PemObject};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::server::danger::ClientCertVerifier;
     use tracing_subscriber::fmt::writer::MakeWriter;
@@ -479,12 +480,13 @@ mod tests {
     fn client_leaf_certificate(
         generated_client_identity: &crate::GeneratedClientIdentity,
     ) -> io::Result<CertificateDer<'static>> {
-        rustls_pemfile::certs(&mut Cursor::new(
-            generated_client_identity.certificate_pem.as_bytes(),
-        ))
-        .next()
-        .transpose()
-        .map_err(io::Error::other)?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing client certificate"))
+        match CertificateDer::from_pem_slice(generated_client_identity.certificate_pem.as_bytes()) {
+            Ok(certificate) => Ok(certificate),
+            Err(PemError::NoItemsFound) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing client certificate",
+            )),
+            Err(source) => Err(io::Error::other(source)),
+        }
     }
 }

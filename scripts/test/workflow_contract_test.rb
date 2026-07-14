@@ -31,7 +31,18 @@ class WorkflowContractTest < Minitest::Test
     assert_includes(ci_workflow, "run: ./scripts/check-distribution package-readiness")
     assert_includes(ci_workflow, "./scripts/check-distribution docker-image")
     assert_includes(ci_workflow, "run: ./scripts/docker-example smoke")
+    assert_includes(ci_workflow, "run: ./scripts/audit-dependencies")
     refute_match(/run:\s+\S+\.sh\b/, ci_workflow)
+  end
+
+  def test_ci_requires_dependency_advisory_scan_in_rust_contract
+    assert_includes(ci_workflow, "- name: Audit Rust dependencies")
+    assert_includes(ci_workflow, "run: ./scripts/audit-dependencies")
+    assert_match(
+      /rust-contract:[\s\S]*Audit Rust dependencies[\s\S]*Run Rust tests/,
+      ci_workflow
+    )
+    assert_includes(ci_workflow, "RUST_CONTRACT_RESULT: ${{ needs.rust-contract.result }}")
   end
 
   def test_release_workflow_uses_ruby_release_helpers
@@ -134,6 +145,7 @@ class WorkflowContractTest < Minitest::Test
 
   def test_public_script_entrypoints_are_kebab_case_without_extensions
     expected_entrypoints = %w[
+      audit-dependencies
       check-crates-io-release
       check-distribution
       check-docker-hub-tag

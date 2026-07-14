@@ -1,0 +1,18 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "lib/runewarp"
+
+Runewarp::Core.run_cli do
+  repo_root = File.expand_path("..", __dir__)
+  Dir.chdir(repo_root) do
+    Runewarp::Core.section("Auditing Rust dependencies")
+    unless Runewarp::Shell.successful?("cargo", "audit", "--version")
+      Runewarp::Core.note("Installing cargo-audit")
+      Runewarp::Shell.run!("cargo", "install", "cargo-audit", "--locked")
+    end
+    # Policy (deny informational findings; narrow ignores) lives in `.cargo/audit.toml`.
+    Runewarp::Shell.run!("cargo", "audit")
+    Runewarp::Core.success("Rust dependency advisory scan passed")
+  end
+end

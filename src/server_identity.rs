@@ -1,11 +1,12 @@
 use std::fmt;
 use std::fs;
-use std::io::{self, Cursor};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use rcgen::{KeyPair, PublicKeyData};
-use rustls_pemfile::certs;
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use sha2::{Digest, Sha256};
 use x509_parser::parse_x509_certificate;
 
@@ -197,16 +198,11 @@ fn load_server_identity_material(
             path: certificate_path.clone(),
             source,
         })?;
-    let certificate_der = certs(&mut Cursor::new(certificate_pem))
-        .next()
-        .transpose()
-        .map_err(|source| ServerIdentityMaterialError::ReadFile {
+    let certificate_der = CertificateDer::from_pem_slice(&certificate_pem).map_err(|_| {
+        ServerIdentityMaterialError::ParseCertificate {
             path: certificate_path.clone(),
-            source,
-        })?
-        .ok_or_else(|| ServerIdentityMaterialError::ParseCertificate {
-            path: certificate_path.clone(),
-        })?;
+        }
+    })?;
     let certificate_identity = server_identity_from_certificate_der(certificate_der.as_ref())
         .map_err(|_| ServerIdentityMaterialError::ParseCertificate {
             path: certificate_path.clone(),

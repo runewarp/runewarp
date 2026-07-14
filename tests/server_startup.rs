@@ -10,6 +10,7 @@ use runewarp::{
     initialize_manual_server_certificate, load_client_config, load_server_config,
 };
 use rustls::RootCertStore;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls_acme::CertCache;
 use rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY;
@@ -256,11 +257,7 @@ async fn prepared_server_accepts_an_expired_pinned_client_identity_certificate()
 
     let (client_identity, certificate_pem, private_key_pem) =
         common::expired_client_identity_material();
-    let certificate_der =
-        rustls_pemfile::certs(&mut std::io::Cursor::new(certificate_pem.as_bytes()))
-            .next()
-            .unwrap()
-            .unwrap();
+    let certificate_der = CertificateDer::from_pem_slice(certificate_pem.as_bytes()).unwrap();
     let (_, certificate) = x509_parser::parse_x509_certificate(certificate_der.as_ref()).unwrap();
     assert!(
         certificate.validity().not_after.to_datetime() < OffsetDateTime::now_utc(),

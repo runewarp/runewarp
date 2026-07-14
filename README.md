@@ -81,7 +81,7 @@ How Runewarp compares to other tunnel tools:
 
 ### vs [ngrok](https://ngrok.com/)
 
-A managed cloud gateway focused on developer workflows, edge routing, and traffic policy.
+A managed gateway focused on developer workflows, edge routing, and traffic policy.
 
 - **Runewarp Server only operates on TLS:** no edge traffic policy, header inspection, or request transformation on the public Server.
 - **ngrok edge-side workflows:** managed policy, routing, and developer ergonomics are part of the platform.
@@ -104,7 +104,7 @@ A tailnet-based way to publish a local service publicly without exposing the dev
 
 A simple, open-source client/server tunneling tool whose config model and simple client/server architecture helped inspire Runewarp.
 
-- **Runewarp keeps routing explicit:** one QUIC/TLS Tunnel connection per Client instance and Server-authoritative routing by Public hostname. Configuration may be static or delivered over a separate **Managed session** to Control; Visitor traffic never shares that session.
+- **Runewarp keeps routing explicit:** one QUIC/TLS Tunnel connection per Client instance and Server-authoritative routing by Public hostname. Configuration may be static or delivered over a separate Managed session to Control; Visitor traffic never shares that session.
 - **rathole supports more protocols today:** service tokens, UDP forwarding, and more transport options.
 
 ## Documentation

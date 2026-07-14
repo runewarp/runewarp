@@ -97,5 +97,7 @@ pub use server_identity::{
     read_server_identity,
 };
 pub use shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
-pub use startup::{ClientStartupError, PreparedClient, PreparedServer, ServerStartupError};
+pub use startup::{
+    ClientInstancePrep, ClientStartupError, PreparedClient, PreparedServer, ServerStartupError,
+};
 pub use tunnel_id::TunnelId;

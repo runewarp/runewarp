@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use runewarp::{
     AddressController, AddressWorkerControl, AssignmentConvergenceTracker, ClientAssignmentAdapter,
-    ClientAssignmentApply, MaintenanceIntent, PreparedClient, ServerAddress, ShutdownMode,
+    ClientAssignmentApply, ClientInstancePrep, MaintenanceIntent, PreparedClient, ServerAddress,
+    ShutdownMode,
 };
 use tokio::net::lookup_host;
 use tokio::sync::mpsc;
@@ -36,11 +37,14 @@ where
 {
     let mut controller = AddressController::new();
     let settings = Arc::new(settings.clone());
+    let instance = ClientInstancePrep::prepare(settings.as_ref()).await?;
+    instance.ensure_acme_driven();
     let shutdown = controller.shutdown_handle();
 
     if let Some(control) = settings.control.as_ref() {
-        return run_managed_client(
+        let result = run_managed_client(
             Arc::clone(&settings),
+            Arc::clone(&instance),
             control,
             controller,
             local_bind_addr,
@@ -48,15 +52,26 @@ where
             shutdown_signal,
         )
         .await;
+        instance.stop_acme().await;
+        return result;
     }
 
     controller.seed_static(settings.server_addresses.clone(), {
         let settings = Arc::clone(&settings);
+        let instance = Arc::clone(&instance);
         move |server_address, control| {
             let settings = Arc::clone(&settings);
+            let instance = Arc::clone(&instance);
             async move {
-                run_server_address_worker(settings, server_address, local_bind_addr, control, None)
-                    .await
+                run_server_address_worker(
+                    settings,
+                    instance,
+                    server_address,
+                    local_bind_addr,
+                    control,
+                    None,
+                )
+                .await
             }
         }
     });
@@ -73,11 +88,13 @@ where
             runtime.await
         }
     };
+    instance.stop_acme().await;
     client_result.map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
 }
 
 async fn run_managed_client<F>(
     settings: Arc<runewarp::ClientConfig>,
+    instance: Arc<ClientInstancePrep>,
     control: &runewarp::ControlConfig,
     mut controller: AddressController,
     local_bind_addr: SocketAddr,
@@ -136,13 +153,16 @@ where
                 // Dispatch maintenance intent without awaiting network convergence.
                 controller.replace_intent(&addresses, {
                     let settings = Arc::clone(&settings);
+                    let instance = Arc::clone(&instance);
                     let convergence = convergence.clone();
                     move |server_address, control| {
                         let settings = Arc::clone(&settings);
+                        let instance = Arc::clone(&instance);
                         let convergence = Some(convergence.clone());
                         async move {
                             run_server_address_worker(
                                 settings,
+                                instance,
                                 server_address,
                                 local_bind_addr,
                                 control,
@@ -188,6 +208,7 @@ where
 
 async fn run_server_address_worker(
     settings: Arc<runewarp::ClientConfig>,
+    instance: Arc<ClientInstancePrep>,
     server_address: ServerAddress,
     local_bind_addr: SocketAddr,
     control: AddressWorkerControl,
@@ -266,6 +287,7 @@ async fn run_server_address_worker(
             }
             result = PreparedClient::connect_to_server_address(
                 &settings,
+                &instance,
                 local_bind_addr,
                 &server_address,
                 dial_target.resolved_server_addr,

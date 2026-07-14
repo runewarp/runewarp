@@ -127,7 +127,7 @@ When one or more Services use `tls-mode = "terminate"`, the Client needs public 
 
 Visitors must trust `public-ca.crt`; it stays stable across additional `init` calls and leaf renewals, but `runewarp client public-cert rotate-ca` replaces it. Per-host certificate material lives at `{public-cert-dir}/{hostname}/public.crt` and `{public-cert-dir}/{hostname}/public.key`. **Public hostname certificates** are **90 days** by default; the **Public hostname CA** is **3650 days**.
 
-**ACME path** (`[client.acme]`) — the Client automatically provisions and renews certificates from Let's Encrypt for the **Public hostnames** of all terminating Services. No pre-generated material is needed; configure `[client.acme]` in the Client config instead of `client.public-cert-dir`. The Client starts with a live ACME manager at startup without blocking on certificate readiness. Terminating hostnames without a ready certificate fail closed at the TLS handshake; there is no fallback to passthrough.
+**ACME path** (`[client.acme]`) — the Client automatically provisions and renews certificates from Let's Encrypt for the **Public hostnames** of all terminating Services. No pre-generated material is needed; configure `[client.acme]` in the Client config instead of `client.public-cert-dir`. The **Client instance** owns one live ACME manager per terminating **Public hostname** for the process lifetime (shared across Server-address workers and reconnects) without blocking on certificate readiness. Terminating hostnames without a ready certificate fail closed at the TLS handshake; there is no fallback to passthrough.
 
 ## ACME scope
 
@@ -147,7 +147,7 @@ Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode. The current ACME confi
 
 For Client ACME, `acme-tls/1` challenge connections for **Public hostnames** reach the Client through the Server's normal Visitor routing path — the Server does not inspect ALPN for Public hostname traffic and forwards the raw bytes to the Client through the Tunnel. The Client's ACME resolver handles both `acme-tls/1` challenge connections and regular TLS connections for those hostnames.
 
-The Client starts with a live ACME manager at startup and does not block on certificate readiness. Terminating hostnames without a ready ACME certificate fail closed at the TLS handshake; there is no fallback to passthrough.
+The **Client instance** owns one live ACME manager per terminating **Public hostname** for the process lifetime and does not block on certificate readiness. Independent Server-address workers and Tunnel-connection reconnects reuse that shared state; process shutdown stops and awaits the ACME tasks. Terminating hostnames without a ready ACME certificate fail closed at the TLS handshake; there is no fallback to passthrough.
 
 - `client.acme.state-dir` defaults to the XDG client ACME state path and is created at startup when omitted
 - Client ACME depends on the same public TCP 443 reachability at the Server edge because TLS-ALPN-01 challenge traffic still enters through the Server's public listener before it reaches the Client

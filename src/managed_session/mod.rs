@@ -8,6 +8,7 @@
 mod adapter;
 mod connection;
 mod input;
+mod limits;
 mod reconcile;
 mod role;
 mod session;
@@ -22,6 +23,7 @@ pub use connection::{ConnectionError, ManagedSessionConnection};
 pub use input::{
     ClientManagedInput, InputError, ServerManagedInput, parse_client_input, parse_server_input,
 };
+pub use limits::{ManagedSessionLimitKind, ManagedSessionLimits};
 pub use role::{ManagedSessionRole, events_path, state_path};
 pub use session::{ManagedSession, ManagedSessionError, ManagedSessionEvent};
 pub use snapshot::{SnapshotEnvelope, SnapshotError, parse_snapshot_event};

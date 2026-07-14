@@ -561,7 +561,7 @@ pub fn managed_session_event(role: ManagedSessionRole, event: &ManagedSessionEve
         ManagedSessionRole::Client => "client",
     };
     match event {
-        ManagedSessionEvent::Snapshot(_) => emit(
+        ManagedSessionEvent::Snapshot { revision: _ } => emit(
             EventLevel::Info,
             &event_line(
                 "managed session snapshot received",
@@ -1349,7 +1349,7 @@ mod tests {
     };
     use crate::{
         ClientHelloError, ClientIdentity, LogLevel, ManagedSessionEvent, ManagedSessionRole,
-        ShutdownMode, SnapshotEnvelope,
+        ShutdownMode,
     };
 
     static INSTALL_LOCK: Mutex<()> = Mutex::new(());
@@ -1467,10 +1467,9 @@ mod tests {
         let output = capture(LogLevel::Info, || {
             managed_session_event(
                 ManagedSessionRole::Client,
-                &ManagedSessionEvent::Snapshot(SnapshotEnvelope {
+                &ManagedSessionEvent::Snapshot {
                     revision: "control-supplied-secret".to_owned(),
-                    input: serde_json::json!({}),
-                }),
+                },
             );
         });
 

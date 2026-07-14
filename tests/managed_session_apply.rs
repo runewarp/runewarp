@@ -22,8 +22,8 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
     ApplyError, CONTROL_ALPN_H2, ClientManagedInput, ControlAddress, ControlClientIdentityMaterial,
-    ControlTrust, DeferredClientAdapter, ManagedSession, ManagedSessionEvent, ManagedSessionRole,
-    RoleAdapter, SILENCE_TIMEOUT, SessionMaterial, events_path, state_path,
+    ControlTrust, DeferredClientAdapter, ManagedSession, ManagedSessionEvent, ManagedSessionLimits,
+    ManagedSessionRole, RoleAdapter, SessionMaterial, events_path, state_path,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -44,6 +44,10 @@ enum StateBehavior {
     Success,
     FailOnceThenSuccess,
     HangOnceThenSuccess,
+    /// Return 204 with a non-empty body (must be rejected without unbounded collect).
+    BodyBearing204,
+    /// Hold the state response until `release` is notified, then succeed.
+    HoldUntil(Arc<Notify>),
 }
 
 #[derive(Debug)]
@@ -281,17 +285,28 @@ async fn handle_request(
         metrics.state_bodies.lock().unwrap().push(parsed);
 
         let behavior = behavior.lock().unwrap().clone();
-        let (fail, hang) = match behavior {
-            StateBehavior::Success => (false, false),
-            StateBehavior::FailOnceThenSuccess => {
-                (metrics.state_fail_once.swap(false, Ordering::SeqCst), false)
-            }
-            StateBehavior::HangOnceThenSuccess => {
-                (false, metrics.state_fail_once.swap(false, Ordering::SeqCst))
-            }
+        let (fail, hang, body_bearing, hold) = match behavior {
+            StateBehavior::Success => (false, false, false, None),
+            StateBehavior::FailOnceThenSuccess => (
+                metrics.state_fail_once.swap(false, Ordering::SeqCst),
+                false,
+                false,
+                None,
+            ),
+            StateBehavior::HangOnceThenSuccess => (
+                false,
+                metrics.state_fail_once.swap(false, Ordering::SeqCst),
+                false,
+                None,
+            ),
+            StateBehavior::BodyBearing204 => (false, false, true, None),
+            StateBehavior::HoldUntil(notify) => (false, false, false, Some(notify)),
         };
         if hang {
             std::future::pending::<()>().await;
+        }
+        if let Some(notify) = hold {
+            notify.notified().await;
         }
         metrics.end_stream();
         if fail {
@@ -300,6 +315,17 @@ async fn handle_request(
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(
                     Full::new(Bytes::from_static(b"nope"))
+                        .map_err(|never| match never {})
+                        .boxed(),
+                )
+                .unwrap());
+        }
+        if body_bearing {
+            metrics.state_statuses.lock().unwrap().push(204);
+            return Ok(Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(
+                    Full::new(Bytes::from_static(b"not-empty"))
                         .map_err(|never| match never {})
                         .boxed(),
                 )
@@ -385,8 +411,11 @@ impl RecordingAdapter {
 impl RoleAdapter for RecordingAdapter {
     type Input = ClientManagedInput;
 
-    fn parse_input(input: &Value) -> Result<Self::Input, runewarp::InputError> {
-        DeferredClientAdapter::parse_input(input)
+    fn parse_input(
+        input: Value,
+        limits: &runewarp::ManagedSessionLimits,
+    ) -> Result<Self::Input, runewarp::InputError> {
+        DeferredClientAdapter::parse_input(input, limits)
     }
 
     async fn apply(&mut self, input: Self::Input) -> Result<(), ApplyError> {
@@ -425,8 +454,11 @@ impl GatedAdapter {
 impl RoleAdapter for GatedAdapter {
     type Input = ClientManagedInput;
 
-    fn parse_input(input: &Value) -> Result<Self::Input, runewarp::InputError> {
-        DeferredClientAdapter::parse_input(input)
+    fn parse_input(
+        input: Value,
+        limits: &runewarp::ManagedSessionLimits,
+    ) -> Result<Self::Input, runewarp::InputError> {
+        DeferredClientAdapter::parse_input(input, limits)
     }
 
     async fn apply(&mut self, input: Self::Input) -> Result<(), ApplyError> {
@@ -740,7 +772,7 @@ async fn state_acknowledgment_timeout_reconnects_session() {
     .expect("Control should receive the state acknowledgment request");
 
     tokio::time::pause();
-    tokio::time::advance(SILENCE_TIMEOUT).await;
+    tokio::time::advance(ManagedSessionLimits::default().state_request_deadline).await;
     yield_tasks().await;
 
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1272,6 +1304,348 @@ async fn state_acknowledgments_begin_only_after_first_successful_apply() {
         let bodies = fixture.metrics.state_bodies.lock().unwrap();
         assert_eq!(bodies[0], serde_json::json!({"revision":"rev-1"}));
     }
+
+    let _ = stop_tx.send(());
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn body_bearing_204_reconnects_session() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse("rev-1", "{\"server_addresses\":[]}")],
+    )
+    .await;
+    fixture.set_state_behavior(StateBehavior::BodyBearing204);
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let mut adapter = DeferredClientAdapter;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-1"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("snapshot should apply");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Reconnecting { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("body-bearing 204 must replace the Managed session");
+
+    let _ = stop_tx.send(());
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn stalled_report_does_not_block_later_snapshot_apply() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse(
+            "rev-1",
+            "{\"server_addresses\":[\"a.example.test\"]}",
+        )],
+    )
+    .await;
+    fixture.set_state_behavior(StateBehavior::HangOnceThenSuccess);
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let mut adapter = DeferredClientAdapter;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-1"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("first snapshot should apply");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !fixture.metrics.state_bodies.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("first state acknowledgment should start and stall");
+
+    // While the report is stalled, a later assignment revocation (empty
+    // server_addresses) must still apply on the critical path.
+    fixture.push_snapshot(snapshot_sse("rev-2", "{\"server_addresses\":[]}"));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-2"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("later snapshot must apply while a prior state report is stalled");
+
+    let _ = stop_tx.send(());
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn cardinality_limit_violation_replaces_session() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse(
+            "rev-over",
+            "{\"server_addresses\":[\"a.example.test\",\"b.example.test\"]}",
+        )],
+    )
+    .await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let limits = ManagedSessionLimits {
+        max_server_addresses: 1,
+        ..ManagedSessionLimits::default()
+    };
+    let mut session = ManagedSession::with_limits(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+        limits,
+    )
+    .unwrap();
+    let mut adapter = DeferredClientAdapter;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Reconnecting { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("cardinality limit violation must replace the Managed session");
+
+    assert!(
+        fixture.metrics.state_bodies.lock().unwrap().is_empty(),
+        "oversized input must not be acknowledged"
+    );
+
+    let _ = stop_tx.send(());
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn reporting_coalesces_to_latest_pending_revision() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let release = Arc::new(Notify::new());
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse("rev-1", "{\"server_addresses\":[]}")],
+    )
+    .await;
+    fixture.set_state_behavior(StateBehavior::HoldUntil(release.clone()));
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let mut adapter = DeferredClientAdapter;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-1"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("first snapshot should apply");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !fixture.metrics.state_bodies.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("first state report should be in flight and held");
+
+    fixture.push_snapshot(snapshot_sse(
+        "rev-2",
+        "{\"server_addresses\":[\"a.example.test\"]}",
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-2"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("second snapshot should apply while first report is held");
+
+    fixture.push_snapshot(snapshot_sse("rev-3", "{\"server_addresses\":[]}"));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-3"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("third snapshot should apply and coalesce pending report");
+
+    fixture.set_state_behavior(StateBehavior::Success);
+    release.notify_waiters();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let bodies = fixture.metrics.state_bodies.lock().unwrap().clone();
+            let revisions: Vec<_> = bodies
+                .iter()
+                .filter_map(|body| body.get("revision").and_then(Value::as_str))
+                .collect();
+            if revisions == ["rev-1", "rev-3"] {
+                break;
+            }
+            drop(bodies);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("reports must coalesce to rev-1 then latest pending rev-3 (skipping rev-2)");
 
     let _ = stop_tx.send(());
     let _ = runner.await;

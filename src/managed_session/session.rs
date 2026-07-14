@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use rand::rngs::StdRng;
@@ -9,13 +10,13 @@ use tokio::time::Instant;
 
 use super::adapter::RoleAdapter;
 use super::connection::{ConnectionError, ManagedSessionConnection};
+use super::input::InputError;
+use super::limits::{ManagedSessionLimitKind, ManagedSessionLimits};
 use super::reconcile::{AppliedRevision, QueuedSnapshot, SnapshotQueue};
 use super::role::ManagedSessionRole;
 use super::snapshot::{SnapshotEnvelope, SnapshotError, parse_snapshot_event};
 use super::sse::{SseParseError, SseParseItem, SseParser};
-use super::timing::{
-    FIRST_SNAPSHOT_DEADLINE, SILENCE_TIMEOUT, SessionClock, SessionDeadlines, SystemSessionClock,
-};
+use super::timing::{FIRST_SNAPSHOT_DEADLINE, SessionClock, SessionDeadlines, SystemSessionClock};
 use super::tls::{ControlTlsMaterialError, SessionMaterial, load_control_tls_material};
 use crate::ControlAddress;
 use crate::reconnect_policy::ReconnectPolicy;
@@ -27,7 +28,7 @@ use crate::reconnect_policy::ReconnectPolicy;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManagedSessionEvent {
     /// A validated snapshot envelope was received on the active downlink.
-    Snapshot(SnapshotEnvelope),
+    Snapshot { revision: String },
     /// Role-adapter apply has started for this revision.
     Applying { revision: String },
     /// A revision was successfully applied through the role adapter.
@@ -49,6 +50,7 @@ pub enum ManagedSessionError {
     SilenceTimeout,
     FirstSnapshotTimeout,
     StateAcknowledgmentTimeout,
+    InputLimit(InputError),
     StreamEnded,
 }
 
@@ -68,6 +70,7 @@ impl fmt::Display for ManagedSessionError {
             Self::StateAcknowledgmentTimeout => {
                 formatter.write_str("managed session timed out waiting for state acknowledgment")
             }
+            Self::InputLimit(error) => write!(formatter, "{error}"),
             Self::StreamEnded => formatter.write_str("managed session SSE stream ended"),
         }
     }
@@ -80,6 +83,7 @@ impl std::error::Error for ManagedSessionError {
             Self::Connection(error) => Some(error),
             Self::Sse(error) => Some(error),
             Self::Snapshot(error) => Some(error),
+            Self::InputLimit(error) => Some(error),
             Self::SilenceTimeout
             | Self::FirstSnapshotTimeout
             | Self::StateAcknowledgmentTimeout
@@ -93,6 +97,7 @@ pub struct ManagedSession<C = SystemSessionClock> {
     address: ControlAddress,
     role: ManagedSessionRole,
     material: SessionMaterial,
+    limits: ManagedSessionLimits,
     clock: C,
     reconnect: ReconnectPolicy<StdRng>,
     applied: AppliedRevision,
@@ -104,7 +109,16 @@ impl ManagedSession<SystemSessionClock> {
         role: ManagedSessionRole,
         material: SessionMaterial,
     ) -> Result<Self, ControlTlsMaterialError> {
-        Self::with_clock(address, role, material, SystemSessionClock)
+        Self::with_limits(address, role, material, ManagedSessionLimits::default())
+    }
+
+    pub fn with_limits(
+        address: ControlAddress,
+        role: ManagedSessionRole,
+        material: SessionMaterial,
+        limits: ManagedSessionLimits,
+    ) -> Result<Self, ControlTlsMaterialError> {
+        Self::with_clock_and_limits(address, role, material, SystemSessionClock, limits)
     }
 }
 
@@ -115,6 +129,22 @@ impl<C: SessionClock> ManagedSession<C> {
         material: SessionMaterial,
         clock: C,
     ) -> Result<Self, ControlTlsMaterialError> {
+        Self::with_clock_and_limits(
+            address,
+            role,
+            material,
+            clock,
+            ManagedSessionLimits::default(),
+        )
+    }
+
+    pub fn with_clock_and_limits(
+        address: ControlAddress,
+        role: ManagedSessionRole,
+        material: SessionMaterial,
+        clock: C,
+        limits: ManagedSessionLimits,
+    ) -> Result<Self, ControlTlsMaterialError> {
         // Initial local material is a startup invariant. Later connection
         // attempts reload the same paths so post-start replacement failures
         // remain recoverable through the reconnect loop.
@@ -123,6 +153,7 @@ impl<C: SessionClock> ManagedSession<C> {
             address,
             role,
             material,
+            limits,
             clock,
             reconnect: ReconnectPolicy::new(),
             applied: AppliedRevision::new(),
@@ -132,6 +163,11 @@ impl<C: SessionClock> ManagedSession<C> {
     /// Last successfully applied revision retained in this process only.
     pub fn applied_revision(&self) -> Option<&str> {
         self.applied.get()
+    }
+
+    /// Injected limits for this session (production defaults unless overridden).
+    pub fn limits(&self) -> ManagedSessionLimits {
+        self.limits
     }
 
     /// Run until `shutdown` completes, driving the role adapter and acknowledgments.
@@ -197,10 +233,11 @@ impl<C: SessionClock> ManagedSession<C> {
         .map_err(ManagedSessionError::Connection)?;
         let mut loop_state = ConnectionLoop::<A::Input> {
             connection,
-            parser: SseParser::new(),
+            parser: SseParser::new(self.limits),
             deadlines: SessionDeadlines::new(self.clock.now()),
             received_valid_snapshot: false,
             queue: SnapshotQueue::new(),
+            report: ReportState::default(),
         };
 
         loop {
@@ -223,23 +260,41 @@ impl<C: SessionClock> ManagedSession<C> {
         Fut: Future<Output = ()>,
     {
         loop {
+            self.drive_report(loop_state)?;
+
             if let Some(pending) = loop_state.queue.take_next() {
                 if self.applied.matches(&pending.revision) {
                     loop_state.queue.finish_apply();
-                    self.acknowledge_applied(loop_state).await?;
+                    self.schedule_report(loop_state, pending.revision);
                     continue;
                 }
                 return Ok(pending);
             }
 
             let wait = next_wait(&loop_state.deadlines, self.clock.now());
-            tokio::select! {
-                chunk = loop_state.connection.next_chunk() => {
-                    self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, false)
-                        .await?;
+            if let Some(report) = loop_state.report.in_flight.as_mut() {
+                tokio::select! {
+                    chunk = loop_state.connection.next_chunk() => {
+                        self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, false)
+                            .await?;
+                    }
+                    result = report.as_mut() => {
+                        loop_state.report.in_flight = None;
+                        self.on_report_finished(loop_state, result)?;
+                    }
+                    _ = tokio::time::sleep(wait) => {
+                        self.handle_timer(loop_state).await?;
+                    }
                 }
-                _ = tokio::time::sleep(wait) => {
-                    self.handle_timer(loop_state).await?;
+            } else {
+                tokio::select! {
+                    chunk = loop_state.connection.next_chunk() => {
+                        self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, false)
+                            .await?;
+                    }
+                    _ = tokio::time::sleep(wait) => {
+                        self.handle_timer(loop_state).await?;
+                    }
                 }
             }
         }
@@ -266,15 +321,33 @@ impl<C: SessionClock> ManagedSession<C> {
         tokio::pin!(apply);
 
         let apply_result = loop {
+            self.drive_report(loop_state)?;
             let wait = next_wait(&loop_state.deadlines, self.clock.now());
-            tokio::select! {
-                result = &mut apply => break result,
-                chunk = loop_state.connection.next_chunk() => {
-                    self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, true)
-                        .await?;
+            if let Some(report) = loop_state.report.in_flight.as_mut() {
+                tokio::select! {
+                    result = &mut apply => break result,
+                    chunk = loop_state.connection.next_chunk() => {
+                        self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, true)
+                            .await?;
+                    }
+                    result = report.as_mut() => {
+                        loop_state.report.in_flight = None;
+                        self.on_report_finished(loop_state, result)?;
+                    }
+                    _ = tokio::time::sleep(wait) => {
+                        self.handle_timer(loop_state).await?;
+                    }
                 }
-                _ = tokio::time::sleep(wait) => {
-                    self.handle_timer(loop_state).await?;
+            } else {
+                tokio::select! {
+                    result = &mut apply => break result,
+                    chunk = loop_state.connection.next_chunk() => {
+                        self.ingest_chunk::<A, _, _>(chunk, loop_state, on_event, true)
+                            .await?;
+                    }
+                    _ = tokio::time::sleep(wait) => {
+                        self.handle_timer(loop_state).await?;
+                    }
                 }
             }
         };
@@ -286,7 +359,7 @@ impl<C: SessionClock> ManagedSession<C> {
                     revision: revision.clone(),
                 })
                 .await;
-                self.acknowledge_applied(loop_state).await?;
+                self.schedule_report(loop_state, revision);
             }
             Err(error) => {
                 tracing::warn!(
@@ -322,10 +395,12 @@ impl<C: SessionClock> ManagedSession<C> {
         let now = self.clock.now();
         loop_state.deadlines.note_bytes(now);
 
-        let items = loop_state
-            .parser
-            .push(&bytes)
-            .map_err(ManagedSessionError::Sse)?;
+        let items = loop_state.parser.push(&bytes).map_err(|error| {
+            if let SseParseError::LimitExceeded { limit, value, max } = error {
+                log_limit_exceeded(limit, value, max);
+            }
+            ManagedSessionError::Sse(error)
+        })?;
         for item in items {
             match item {
                 SseParseItem::Comment => {}
@@ -333,14 +408,26 @@ impl<C: SessionClock> ManagedSession<C> {
                     if event.event_type.is_none() && event.data.is_empty() {
                         continue;
                     }
-                    let envelope = parse_snapshot_event(event.event_type.as_deref(), &event.data)
-                        .map_err(ManagedSessionError::Snapshot)?;
+                    let envelope = parse_snapshot_event(
+                        event.event_type.as_deref(),
+                        &event.data,
+                        &self.limits,
+                    )
+                    .map_err(|error| {
+                        if let SnapshotError::LimitExceeded { limit, value, max } = error {
+                            log_limit_exceeded(limit, value, max);
+                        }
+                        ManagedSessionError::Snapshot(error)
+                    })?;
                     loop_state.deadlines.note_valid_snapshot(now);
                     if !loop_state.received_valid_snapshot {
                         loop_state.received_valid_snapshot = true;
                         self.reconnect.reset();
                     }
-                    on_event(ManagedSessionEvent::Snapshot(envelope.clone())).await;
+                    on_event(ManagedSessionEvent::Snapshot {
+                        revision: envelope.revision.clone(),
+                    })
+                    .await;
                     self.accept_envelope::<A, _, _>(envelope, loop_state, on_event, applying)
                         .await?;
                 }
@@ -362,32 +449,31 @@ impl<C: SessionClock> ManagedSession<C> {
         Fut: Future<Output = ()>,
     {
         if !applying && self.applied.matches(&envelope.revision) {
-            self.acknowledge_applied(loop_state).await?;
+            self.schedule_report(loop_state, envelope.revision);
             return Ok(());
         }
 
         // Validate through the role adapter before queueing so invalid or
         // adapter-rejected candidates never displace a newer valid pending
         // snapshot. The parsed input is retained so apply does not re-parse.
-        let input = match A::parse_input(&envelope.input) {
+        let SnapshotEnvelope { revision, input } = envelope;
+        let input = match A::parse_input(input, &self.limits) {
             Ok(input) => input,
+            Err(error @ InputError::LimitExceeded { limit, value, max }) => {
+                log_limit_exceeded(limit, value, max);
+                return Err(ManagedSessionError::InputLimit(error));
+            }
             Err(error) => {
                 tracing::warn!(
                     error = %error,
                     "managed session role input invalid"
                 );
-                on_event(ManagedSessionEvent::Rejected {
-                    revision: envelope.revision,
-                })
-                .await;
+                on_event(ManagedSessionEvent::Rejected { revision }).await;
                 return Ok(());
             }
         };
 
-        let queued = QueuedSnapshot {
-            revision: envelope.revision,
-            input,
-        };
+        let queued = QueuedSnapshot { revision, input };
         let superseded = if applying {
             loop_state.queue.note_while_applying(queued)
         } else {
@@ -415,20 +501,50 @@ impl<C: SessionClock> ManagedSession<C> {
         Ok(())
     }
 
-    async fn acknowledge_applied<I>(
+    fn schedule_report<I>(&self, loop_state: &mut ConnectionLoop<I>, revision: String) {
+        if loop_state.report.in_flight.is_some() {
+            // Newer successful applies replace any older pending report.
+            loop_state.report.pending = Some(revision);
+            return;
+        }
+        let future = loop_state
+            .connection
+            .begin_put_applied_revision(&revision, &self.limits);
+        loop_state.report.in_flight = Some(future);
+    }
+
+    fn drive_report<I>(
         &self,
         loop_state: &mut ConnectionLoop<I>,
     ) -> Result<(), ManagedSessionError> {
-        let Some(revision) = self.applied.get() else {
+        if loop_state.report.in_flight.is_some() {
             return Ok(());
-        };
-        tokio::time::timeout(
-            SILENCE_TIMEOUT,
-            loop_state.connection.put_applied_revision(revision),
-        )
-        .await
-        .map_err(|_| ManagedSessionError::StateAcknowledgmentTimeout)?
-        .map_err(ManagedSessionError::Connection)
+        }
+        if let Some(revision) = loop_state.report.pending.take() {
+            let future = loop_state
+                .connection
+                .begin_put_applied_revision(&revision, &self.limits);
+            loop_state.report.in_flight = Some(future);
+        }
+        Ok(())
+    }
+
+    fn on_report_finished<I>(
+        &self,
+        loop_state: &mut ConnectionLoop<I>,
+        result: Result<(), ConnectionError>,
+    ) -> Result<(), ManagedSessionError> {
+        match result {
+            Ok(()) => {
+                // Start the coalesced latest pending revision, if any.
+                self.drive_report(loop_state)?;
+                Ok(())
+            }
+            Err(ConnectionError::StateRequestTimeout | ConnectionError::StateResponseTimeout) => {
+                Err(ManagedSessionError::StateAcknowledgmentTimeout)
+            }
+            Err(error) => Err(ManagedSessionError::Connection(error)),
+        }
     }
 }
 
@@ -438,6 +554,15 @@ struct ConnectionLoop<I> {
     deadlines: SessionDeadlines,
     received_valid_snapshot: bool,
     queue: SnapshotQueue<I>,
+    report: ReportState,
+}
+
+type StateReportFuture = Pin<Box<dyn Future<Output = Result<(), ConnectionError>> + Send>>;
+
+#[derive(Default)]
+struct ReportState {
+    in_flight: Option<StateReportFuture>,
+    pending: Option<String>,
 }
 
 fn next_wait(deadlines: &SessionDeadlines, now: Instant) -> Duration {
@@ -447,4 +572,13 @@ fn next_wait(deadlines: &SessionDeadlines, now: Instant) -> Duration {
     } else {
         wait
     }
+}
+
+fn log_limit_exceeded(limit: ManagedSessionLimitKind, value: usize, max: usize) {
+    tracing::warn!(
+        limit = limit.as_str(),
+        value,
+        max,
+        "managed session input limit exceeded"
+    );
 }

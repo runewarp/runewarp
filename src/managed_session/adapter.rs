@@ -12,6 +12,7 @@ use serde_json::Value;
 use super::input::{
     ClientManagedInput, InputError, ServerManagedInput, parse_client_input, parse_server_input,
 };
+use super::limits::ManagedSessionLimits;
 
 /// Failure applying a validated role input. The session keeps the prior
 /// successfully applied revision and does not acknowledge the rejected one.
@@ -41,7 +42,7 @@ pub trait RoleAdapter: Send {
     type Input: Send;
 
     /// Validate role-specific snapshot `input` JSON.
-    fn parse_input(input: &Value) -> Result<Self::Input, InputError>;
+    fn parse_input(input: Value, limits: &ManagedSessionLimits) -> Result<Self::Input, InputError>;
 
     /// Atomically apply a validated input. Returning `Err` rejects the
     /// candidate without acknowledging its revision.
@@ -56,8 +57,8 @@ pub struct DeferredServerAdapter;
 impl RoleAdapter for DeferredServerAdapter {
     type Input = ServerManagedInput;
 
-    fn parse_input(input: &Value) -> Result<Self::Input, InputError> {
-        parse_server_input(input)
+    fn parse_input(input: Value, limits: &ManagedSessionLimits) -> Result<Self::Input, InputError> {
+        parse_server_input(input, limits)
     }
 
     async fn apply(&mut self, _input: Self::Input) -> Result<(), ApplyError> {
@@ -73,8 +74,8 @@ pub struct DeferredClientAdapter;
 impl RoleAdapter for DeferredClientAdapter {
     type Input = ClientManagedInput;
 
-    fn parse_input(input: &Value) -> Result<Self::Input, InputError> {
-        parse_client_input(input)
+    fn parse_input(input: Value, limits: &ManagedSessionLimits) -> Result<Self::Input, InputError> {
+        parse_client_input(input, limits)
     }
 
     async fn apply(&mut self, _input: Self::Input) -> Result<(), ApplyError> {

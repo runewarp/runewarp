@@ -2,6 +2,9 @@
 //! concurrent applied-state acknowledgments.
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::{Request, Uri};
@@ -14,6 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
+use super::limits::ManagedSessionLimits;
 use super::role::{ManagedSessionRole, events_path, state_path};
 use super::status::{
     SseResponseClass, StateResponseClass, classify_sse_response, classify_state_incoming,
@@ -32,6 +36,8 @@ pub enum ConnectionError {
     Http(hyper::Error),
     SseRejected,
     StateRejected,
+    StateRequestTimeout,
+    StateResponseTimeout,
     Body(hyper::Error),
 }
 
@@ -50,6 +56,12 @@ impl fmt::Display for ConnectionError {
             Self::StateRejected => {
                 formatter.write_str("control state response was not status 204 with an empty body")
             }
+            Self::StateRequestTimeout => {
+                formatter.write_str("control state request timed out waiting for response headers")
+            }
+            Self::StateResponseTimeout => {
+                formatter.write_str("control state response timed out waiting for an ended body")
+            }
             Self::Body(error) => write!(formatter, "control SSE body error: {error}"),
         }
     }
@@ -60,7 +72,12 @@ impl std::error::Error for ConnectionError {
         match self {
             Self::Dns(error) | Self::Connect(error) | Self::Tls(error) => Some(error),
             Self::Http(error) | Self::Body(error) => Some(error),
-            Self::Alpn | Self::ServerName(_) | Self::SseRejected | Self::StateRejected => None,
+            Self::Alpn
+            | Self::ServerName(_)
+            | Self::SseRejected
+            | Self::StateRejected
+            | Self::StateRequestTimeout
+            | Self::StateResponseTimeout => None,
         }
     }
 }
@@ -144,42 +161,89 @@ impl ManagedSessionConnection {
         !self.sender.is_closed()
     }
 
+    /// Start an applied-revision acknowledgment on a concurrent stream.
+    ///
+    /// Uses a cloned HTTP/2 sender so the SSE body can keep being read while
+    /// the report is in flight. Deadlines bound request headers and body
+    /// classification separately.
+    pub fn begin_put_applied_revision(
+        &self,
+        revision: &str,
+        limits: &ManagedSessionLimits,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ConnectionError>> + Send>> {
+        let mut sender = self.sender.clone();
+        let authority = self.authority.clone();
+        let role = self.role;
+        let revision = revision.to_owned();
+        let request_deadline = limits.state_request_deadline;
+        let response_deadline = limits.state_response_deadline;
+        Box::pin(async move {
+            put_applied_revision_on_sender(
+                &mut sender,
+                &authority,
+                role,
+                &revision,
+                request_deadline,
+                response_deadline,
+            )
+            .await
+        })
+    }
+
     /// Acknowledge the applied revision on a concurrent stream of this connection.
     ///
     /// State writes are valid only after the matching SSE downlink is active,
     /// which is true for any constructed [`ManagedSessionConnection`].
-    pub async fn put_applied_revision(&mut self, revision: &str) -> Result<(), ConnectionError> {
-        let uri = Uri::builder()
-            .scheme("https")
-            .authority(self.authority.clone())
-            .path_and_query(state_path(self.role))
-            .build()
-            .expect("control state URI is valid by construction");
-        let payload = serde_json::json!({ "revision": revision });
-        let body = Full::new(Bytes::from(
-            serde_json::to_vec(&payload).expect("revision payload serializes"),
-        ));
-        let request = Request::builder()
-            .method("PUT")
-            .uri(uri)
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .expect("state request is valid by construction");
-
-        let response = self
-            .sender
-            .send_request(request)
-            .await
-            .map_err(ConnectionError::Http)?;
-        let status = response.status();
-        let class = classify_state_incoming(status, response.into_body())
-            .await
-            .map_err(ConnectionError::Http)?;
-        if class != StateResponseClass::Success {
-            return Err(ConnectionError::StateRejected);
-        }
-        Ok(())
+    pub async fn put_applied_revision(
+        &self,
+        revision: &str,
+        limits: &ManagedSessionLimits,
+    ) -> Result<(), ConnectionError> {
+        self.begin_put_applied_revision(revision, limits).await
     }
+}
+
+async fn put_applied_revision_on_sender(
+    sender: &mut SendRequest<Full<Bytes>>,
+    authority: &str,
+    role: ManagedSessionRole,
+    revision: &str,
+    request_deadline: Duration,
+    response_deadline: Duration,
+) -> Result<(), ConnectionError> {
+    let uri = Uri::builder()
+        .scheme("https")
+        .authority(authority.to_owned())
+        .path_and_query(state_path(role))
+        .build()
+        .expect("control state URI is valid by construction");
+    let payload = serde_json::json!({ "revision": revision });
+    let body = Full::new(Bytes::from(
+        serde_json::to_vec(&payload).expect("revision payload serializes"),
+    ));
+    let request = Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .expect("state request is valid by construction");
+
+    let response = tokio::time::timeout(request_deadline, sender.send_request(request))
+        .await
+        .map_err(|_| ConnectionError::StateRequestTimeout)?
+        .map_err(ConnectionError::Http)?;
+    let status = response.status();
+    let class = tokio::time::timeout(
+        response_deadline,
+        classify_state_incoming(status, response.into_body()),
+    )
+    .await
+    .map_err(|_| ConnectionError::StateResponseTimeout)?
+    .map_err(ConnectionError::Http)?;
+    if class != StateResponseClass::Success {
+        return Err(ConnectionError::StateRejected);
+    }
+    Ok(())
 }
 
 async fn handshake_and_open_sse<S>(

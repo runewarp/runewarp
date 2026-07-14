@@ -104,7 +104,7 @@ A tailnet-based way to publish a local service publicly without exposing the dev
 
 A simple, open-source client/server tunneling tool whose config model and simple client/server architecture helped inspire Runewarp.
 
-- **Runewarp keeps routing explicit:** one QUIC/TLS Tunnel connection per Client instance, Server-authoritative routing by Public hostname, and no separate control channel.
+- **Runewarp keeps routing explicit:** one QUIC/TLS Tunnel connection per Client instance and Server-authoritative routing by Public hostname. Configuration may be static or delivered over a separate **Managed session** to Control; Visitor traffic never shares that session.
 - **rathole supports more protocols today:** service tokens, UDP forwarding, and more transport options.
 
 ## Documentation
@@ -115,7 +115,8 @@ A simple, open-source client/server tunneling tool whose config model and simple
 | [`docs/configuration.md`](docs/configuration.md) | Config reference, defaults, validation rules, and examples |
 | [`docs/architecture.md`](docs/architecture.md) | System shape, routing model, trust model, and topology diagrams |
 | [`docs/security.md`](docs/security.md) | Visibility limits, authentication, certificate handling, and trade-offs |
-| [`docs/protocol.md`](docs/protocol.md) | Wire behavior and runtime invariants |
+| [`docs/protocol.md`](docs/protocol.md) | Tunnel wire behavior and runtime invariants |
+| [`docs/managed.md`](docs/managed.md) | Managed-session Control protocol and Control interoperability |
 | [`docs/release-automation.md`](docs/release-automation.md) | Release CI and publication automation |
 | [`docs/release-guide.md`](docs/release-guide.md) | Maintainer release procedure and recovery steps |
 | [`docs/roadmap.md`](docs/roadmap.md) | Forward-looking roadmap and planned features |

@@ -267,7 +267,7 @@ This track covers harder privacy and trust-distribution problems.
 
 ## Managed service and control plane
 
-This track explores what a future managed Runewarp offering would need without redefining the current self-hosted baseline too early.
+Core's shared **Managed session** contract is documented in [`docs/managed.md`](managed.md). The items below remain exploratory Cloud / managed-service work beyond that Core wire contract.
 
 ### Managed Client authentication
 

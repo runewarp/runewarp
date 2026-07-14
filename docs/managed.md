@@ -277,7 +277,7 @@ Successful response: `204` with an empty body.
 | Client `server_addresses` containing an IP literal | `Rejected`; SSE stays open | `tests/managed_session_apply.rs` |
 | SSE response `307` redirect | Session failure → reconnect (redirects not followed) | `tests/managed_session_downlink.rs` |
 | State response `500` | State write fails; SSE undisturbed; retry on heartbeat | `tests/managed_session_apply.rs` |
-| 60 s silence after first snapshot | Session failure → reconnect | Managed-session timing tests |
+| 60 s silence after first snapshot | Session failure → reconnect | `tests/managed_session_downlink.rs` |
 | Snapshot with empty `"revision":""` | Session failure → reconnect | Unit coverage in `src/managed_session/snapshot.rs` |
 
 Black-box fixtures under `tests/managed_session_*.rs`, `tests/managed_server_authorization.rs`, and `tests/managed_client_assignment.rs` are the executable reference for session, Server, and Client outcomes.

@@ -1163,3 +1163,134 @@ backend-address = "localhost:8443"
         "unexpected error: {error}"
     );
 }
+
+#[test]
+fn managed_client_config_rejects_static_server_addresses() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[control]
+address = "control.example.test"
+
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "client-identity"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "localhost:8443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "client.server-address and client.server-addresses may not be configured in managed mode"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn managed_client_config_rejects_plural_static_server_addresses() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[control]
+address = "control.example.test"
+
+[client]
+server-addresses = ["tunnel.example.test", "backup.example.test"]
+identity-dir = "client-identity"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "localhost:8443"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_config(&tempdir.path().join("config.toml")).unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "client.server-address and client.server-addresses may not be configured in managed mode"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn managed_client_config_loads_without_static_server_addresses() {
+    let tempdir = tempdir().unwrap();
+    fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.crt"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client.key"),
+        "placeholder",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("client-identity/client-identity.txt"),
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .unwrap();
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[control]
+address = "control.example.test"
+
+[client]
+identity-dir = "client-identity"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "localhost:8443"
+"#,
+    )
+    .unwrap();
+
+    let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
+    assert!(settings.server_addresses.is_empty());
+    let control = settings.control.expect("managed client control config");
+    assert_eq!(control.address.to_string(), "control.example.test");
+}

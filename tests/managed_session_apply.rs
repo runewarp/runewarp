@@ -1089,18 +1089,30 @@ async fn mid_apply_keeps_prior_revision_reports_and_collapses_to_newest() {
         "{\"server_addresses\":[\"127.0.0.1\"]}",
     ));
 
+    let mut saw_superseded_mid = false;
+    let mut saw_rejected_bad = false;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if matches!(
-                event_rx.recv().await,
-                Some(ManagedSessionEvent::Rejected { revision }) if revision == "rev-bad"
-            ) {
-                break;
+            match event_rx.recv().await {
+                Some(ManagedSessionEvent::Superseded { revision }) if revision == "rev-mid" => {
+                    saw_superseded_mid = true;
+                }
+                Some(ManagedSessionEvent::Rejected { revision }) if revision == "rev-bad" => {
+                    saw_rejected_bad = true;
+                    break;
+                }
+                Some(_) => {}
+                None => panic!("event channel closed before invalid mid-apply rejection"),
             }
         }
     })
     .await
     .expect("invalid mid-apply input should be rejected without ack");
+    assert!(
+        saw_superseded_mid,
+        "queued mid-apply candidate must emit Superseded when collapsed by a newer snapshot"
+    );
+    assert!(saw_rejected_bad);
 
     release.notify_waiters();
 
@@ -1126,6 +1138,99 @@ async fn mid_apply_keeps_prior_revision_reports_and_collapses_to_newest() {
         ],
         "superseded mid-apply candidate must be discarded"
     );
+
+    let _ = stop_tx.send(());
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn state_reports_begin_only_after_first_successful_apply() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(&material, Vec::new()).await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let mut adapter = RecordingAdapter::new();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let opened = {
+                let paths = fixture.metrics.request_paths.lock().unwrap();
+                paths
+                    .iter()
+                    .any(|path| path.contains(events_path(ManagedSessionRole::Client)))
+            };
+            if opened {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("SSE downlink should open before the first snapshot");
+
+    // Give the session time on the open downlink before any snapshot arrives.
+    // Reporting starts only after apply, so state_bodies must stay empty.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        fixture.metrics.state_bodies.lock().unwrap().is_empty(),
+        "state reporting must not begin before the first successful apply"
+    );
+
+    fixture.push_snapshot(snapshot_sse("rev-1", "{\"server_addresses\":[]}"));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { revision }) if revision == "rev-1"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("first snapshot should apply");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !fixture.metrics.state_bodies.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("first successful apply must start state reporting");
+
+    {
+        let bodies = fixture.metrics.state_bodies.lock().unwrap();
+        assert_eq!(bodies[0], serde_json::json!({"revision":"rev-1"}));
+    }
 
     let _ = stop_tx.send(());
     let _ = runner.await;

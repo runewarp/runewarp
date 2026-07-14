@@ -23,8 +23,8 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
     CONTROL_ALPN_H2, ConnectionError, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
-    DeferredClientAdapter, ManagedSession, ManagedSessionConnection, ManagedSessionRole,
-    SessionMaterial, events_path, load_control_tls_material,
+    DeferredClientAdapter, ManagedSession, ManagedSessionConnection, ManagedSessionEvent,
+    ManagedSessionRole, SILENCE_TIMEOUT, SessionMaterial, events_path, load_control_tls_material,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -729,10 +729,96 @@ async fn response_header_stall_reconnects_after_first_snapshot_deadline() {
         .await
         .expect("connection establishment should time out")
         .expect("session should emit a reconnect event");
-    assert!(matches!(
-        event,
-        runewarp::ManagedSessionEvent::Reconnecting { .. }
-    ));
+    assert!(matches!(event, ManagedSessionEvent::Reconnecting { .. }));
+
+    runner.abort();
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn silence_after_snapshot_reconnects_the_session() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    // SuccessSnapshot sends one valid snapshot, then holds the SSE body open with
+    // no further bytes (including no keepalive comments).
+    let fixture = ControlFixture::start(&material, SseBehavior::SuccessSnapshot).await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(
+        "localhost",
+        &paths.ca_cert,
+        &paths.client_cert,
+        &paths.client_key,
+    );
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut DeferredClientAdapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                std::future::pending::<()>(),
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Applied { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("first snapshot should apply before silence starts");
+
+    let accepts_after_apply = fixture.metrics.tls_accepts.load(Ordering::SeqCst);
+    assert_eq!(accepts_after_apply, 1);
+
+    // Pause only after apply so connection setup uses real I/O timing.
+    tokio::time::pause();
+    tokio::time::advance(SILENCE_TIMEOUT + Duration::from_secs(1)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match event_rx.recv().await {
+                Some(ManagedSessionEvent::Reconnecting { .. }) => break,
+                Some(_) => {}
+                None => panic!("event channel closed before silence reconnect"),
+            }
+        }
+    })
+    .await
+    .expect("60s silence after a valid snapshot must fail the session");
+
+    // Resume for the replacement TLS handshake after silence failure.
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture.metrics.tls_accepts.load(Ordering::SeqCst) > accepts_after_apply {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("silence failure must replace the whole Managed-session TLS connection");
 
     runner.abort();
     let _ = runner.await;

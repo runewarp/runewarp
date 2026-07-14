@@ -29,8 +29,9 @@ use runewarp::{
     ControlAddress, ControlClientIdentityMaterial, ControlTrust, GeneratedClientIdentity,
     ManagedSession, ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PreparedClient,
     PreparedServer, QUIC_CLOSE_FLUSH_DURATION, SERVER_IDENTITY_CERT_FILENAME,
-    SERVER_IDENTITY_KEY_FILENAME, SessionMaterial, events_path, generate_client_identity,
-    initialize_manual_server_certificate, load_client_config, load_server_config, state_path,
+    SERVER_IDENTITY_KEY_FILENAME, SessionMaterial, ShutdownMode, events_path,
+    generate_client_identity, initialize_manual_server_certificate, load_client_config,
+    load_server_config, state_path,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -211,6 +212,13 @@ impl ManagedServerHarness {
             .begin_graceful();
     }
 
+    fn begin_fast(&self) {
+        self.shutdown
+            .as_ref()
+            .expect("fast shutdown harness required")
+            .begin_fast();
+    }
+
     async fn start_inner(shutdown: Option<OrderlyShutdown>) -> Self {
         let tempdir = tempfile::tempdir().unwrap();
         let material = generate_control_mtls_material("runewarp-server-a");
@@ -300,6 +308,9 @@ tunnel-bind-address = "127.0.0.1:0"
             .expect("managed Server exposes authorization adapter");
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        // Match production: keep the Managed session through graceful drain, but
+        // close it immediately on Fast shutdown (or escalation to Fast).
+        let shutdown_for_session = shutdown.clone();
         let session_task = tokio::spawn(async move {
             session
                 .run(
@@ -311,7 +322,22 @@ tunnel-bind-address = "127.0.0.1:0"
                         }
                     },
                     async {
-                        let _ = stop_rx.await;
+                        if let Some(shutdown) = shutdown_for_session {
+                            tokio::select! {
+                                biased;
+                                _ = stop_rx => {}
+                                _ = async {
+                                    match shutdown.wait_started().await {
+                                        ShutdownMode::Fast => {}
+                                        ShutdownMode::Graceful => {
+                                            shutdown.wait_for_fast().await;
+                                        }
+                                    }
+                                } => {}
+                            }
+                        } else {
+                            let _ = stop_rx.await;
+                        }
                     },
                 )
                 .await;
@@ -946,6 +972,78 @@ async fn managed_server_applies_authorization_change_during_graceful_drain() {
     backend_task.abort();
     let _ = backend_task.await;
     harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_server_closes_managed_session_immediately_on_fast_shutdown() {
+    let mut harness = ManagedServerHarness::start_with_graceful_drain(Duration::from_secs(5)).await;
+    let identity = harness.trusted_client.client_identity.to_string();
+    harness.push_authorization(
+        "rev-live",
+        &format!(
+            r#"{{"tunnels":[{{"public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+        ),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-live").await;
+    wait_for_readiness_open(harness.readiness_addr).await;
+    wait_for_state_revision(&harness.control.metrics, "rev-live").await;
+
+    assert!(
+        harness
+            .control
+            .metrics
+            .concurrent_streams
+            .load(Ordering::SeqCst)
+            >= 1,
+        "SSE downlink should remain open after the first apply"
+    );
+
+    let reports_before = harness.control.metrics.state_bodies.lock().unwrap().len();
+    harness.begin_fast();
+
+    let mut session_task = std::mem::replace(&mut harness.session_task, tokio::spawn(async {}));
+    timeout(Duration::from_secs(2), &mut session_task)
+        .await
+        .expect("fast shutdown must close the Managed session immediately")
+        .expect("session task should join cleanly");
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if harness
+                .control
+                .metrics
+                .concurrent_streams
+                .load(Ordering::SeqCst)
+                == 0
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("fast shutdown must drop the SSE downlink");
+
+    let mut server_task = harness
+        .server_task
+        .take()
+        .expect("fast shutdown harness owns the server task");
+    timeout(Duration::from_secs(2), &mut server_task)
+        .await
+        .expect("fast shutdown must complete Server runtime promptly")
+        .expect("server task should join cleanly")
+        .expect("server shutdown should succeed");
+
+    // After the session closes, Control must not receive further applied-state writes.
+    sleep(Duration::from_millis(100)).await;
+    let reports_after = harness.control.metrics.state_bodies.lock().unwrap().len();
+    assert_eq!(
+        reports_after, reports_before,
+        "closed Managed session must not continue state reporting"
+    );
+
+    harness.stop_tx.take();
+    harness.control.shutdown().await;
 }
 
 fn write_client_identity_material(directory: &std::path::Path, identity: &GeneratedClientIdentity) {

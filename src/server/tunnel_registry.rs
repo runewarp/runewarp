@@ -640,6 +640,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_authorization_rehomes_identity_moving_between_tunnel_ids() -> io::Result<()> {
+        use crate::TunnelId;
+
+        let identity = generate_test_client_identity()?;
+        let other = generate_test_client_identity()?;
+        let id_a = TunnelId::parse("tunnel-a").unwrap();
+        let id_b = TunnelId::parse("tunnel-b").unwrap();
+        let registry = TunnelRegistry::configured(
+            &server_hostname("tunnel.example.test"),
+            &[
+                ServerTunnelConfig {
+                    id: Some(id_a.clone()),
+                    public_hostnames: vec![public_hostname("app.example.test")],
+                    authorized_client_identities: vec![identity.client_identity.clone()],
+                },
+                ServerTunnelConfig {
+                    id: Some(id_b.clone()),
+                    public_hostnames: vec![public_hostname("api.example.test")],
+                    authorized_client_identities: vec![other.client_identity.clone()],
+                },
+            ],
+        )?;
+
+        let fixture = TunnelConnectionFixture::connect(&identity).await?;
+        registry.register(fixture.server_connection.clone()).await;
+        assert!(matches!(
+            registry
+                .route_tunnel_connection(&public_hostname("app.example.test"))
+                .await,
+            TunnelRouteOutcome::Connected(_)
+        ));
+
+        // Move `identity` from Tunnel A to Tunnel B; swap `other` onto A.
+        let moved = registry.authorization().prepare(
+            &server_hostname("tunnel.example.test"),
+            &[
+                ServerTunnelConfig {
+                    id: Some(id_a.clone()),
+                    public_hostnames: vec![public_hostname("app.example.test")],
+                    authorized_client_identities: vec![other.client_identity.clone()],
+                },
+                ServerTunnelConfig {
+                    id: Some(id_b.clone()),
+                    public_hostnames: vec![public_hostname("api.example.test")],
+                    authorized_client_identities: vec![identity.client_identity.clone()],
+                },
+            ],
+        )?;
+        let dispatch = registry.commit_authorization(moved).await;
+        assert_eq!(
+            dispatch.connections_closed, 0,
+            "identity move between Tunnel IDs must rehome, not close"
+        );
+        assert!(matches!(
+            registry
+                .route_tunnel_connection(&public_hostname("api.example.test"))
+                .await,
+            TunnelRouteOutcome::Connected(_)
+        ));
+        assert!(matches!(
+            registry
+                .route_tunnel_connection(&public_hostname("app.example.test"))
+                .await,
+            TunnelRouteOutcome::NoActiveTunnelConnection
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn commit_authorization_grows_pools_and_revokes_removed_identities() -> io::Result<()> {
         let first_identity = generate_test_client_identity()?;
         let second_identity = generate_test_client_identity()?;

@@ -6,7 +6,7 @@
 use std::fmt;
 
 /// Maximum Unicode scalar count for revision and Tunnel ID strings.
-pub const OPAQUE_CONTROL_TOKEN_MAX_CHARS: usize = 128;
+pub(crate) const OPAQUE_CONTROL_TOKEN_MAX_CHARS: usize = 128;
 
 /// Why an opaque Control token was rejected.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,7 +36,7 @@ impl std::error::Error for OpaqueControlTokenError {}
 ///
 /// Rules: non-empty, at most [`OPAQUE_CONTROL_TOKEN_MAX_CHARS`] Unicode scalars,
 /// and no ASCII whitespace or control characters. No trim.
-pub fn validate_opaque_control_token(value: &str) -> Result<(), OpaqueControlTokenError> {
+pub(crate) fn validate_opaque_control_token(value: &str) -> Result<(), OpaqueControlTokenError> {
     if value.is_empty() {
         return Err(OpaqueControlTokenError::Empty);
     }

@@ -144,7 +144,7 @@ mod tests {
                 .unwrap_err(),
             SnapshotError::InvalidRevision(_)
         ));
-        let oversize = "a".repeat(crate::OPAQUE_CONTROL_TOKEN_MAX_CHARS + 1);
+        let oversize = "a".repeat(crate::opaque_control_token::OPAQUE_CONTROL_TOKEN_MAX_CHARS + 1);
         let payload = format!(r#"{{"revision":"{oversize}","input":{{}}}}"#);
         assert!(matches!(
             parse_snapshot_event(Some("snapshot"), &payload).unwrap_err(),

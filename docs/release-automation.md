@@ -17,7 +17,7 @@ The `CI` workflow is the required aggregate check for normal changes. It current
 - Linux Cargo install from source through `./scripts/check-distribution cargo-install`
 - macOS Cargo install from source through the same distribution-check script
 - crate packaging readiness through `./scripts/check-distribution package-readiness`
-- Rust formatting, Clippy, tests, and docs
+- Rust formatting, Clippy, dependency advisory scanning through `./scripts/audit-dependencies`, tests, and docs
 - Docker image build plus `--version` startup through `./scripts/check-distribution docker-image`
 - the end-to-end Docker example smoke test
 - workflow syntax through `./scripts/lint-workflows`

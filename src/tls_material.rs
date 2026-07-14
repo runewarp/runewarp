@@ -1,11 +1,12 @@
 use std::fmt;
 use std::fs;
-use std::io::{self, BufReader, Cursor};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustls::RootCertStore;
 use rustls::client::{VerifierBuilderError, WebPkiServerVerifier, danger::ServerCertVerifier};
+use rustls::pki_types::pem::{Error as PemError, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use x509_parser::parse_x509_certificate;
 
@@ -28,7 +29,7 @@ pub(crate) enum TlsMaterialError {
     },
     ParsePem {
         path: PathBuf,
-        source: io::Error,
+        source: PemError,
     },
     ParseX509 {
         path: PathBuf,
@@ -117,6 +118,16 @@ impl std::error::Error for TlsMaterialError {
     }
 }
 
+pub(crate) fn certificate_chain_from_pem(
+    bytes: &[u8],
+) -> Result<Vec<CertificateDer<'static>>, PemError> {
+    CertificateDer::pem_slice_iter(bytes).collect()
+}
+
+pub(crate) fn private_key_from_pem(bytes: &[u8]) -> Result<PrivateKeyDer<'static>, PemError> {
+    PrivateKeyDer::from_pem_slice(bytes)
+}
+
 pub(crate) fn load_certificate_chain(
     path: &Path,
 ) -> Result<Vec<CertificateDer<'static>>, TlsMaterialError> {
@@ -124,10 +135,8 @@ pub(crate) fn load_certificate_chain(
         path: path.to_path_buf(),
         source,
     })?;
-    let mut reader = BufReader::new(Cursor::new(bytes));
-    let certs = rustls_pemfile::certs(&mut reader)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| TlsMaterialError::ParsePem {
+    let certs =
+        certificate_chain_from_pem(&bytes).map_err(|source| TlsMaterialError::ParsePem {
             path: path.to_path_buf(),
             source,
         })?;
@@ -144,15 +153,16 @@ pub(crate) fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, Tl
         path: path.to_path_buf(),
         source,
     })?;
-    let mut reader = BufReader::new(Cursor::new(bytes));
-    let private_key =
-        rustls_pemfile::private_key(&mut reader).map_err(|source| TlsMaterialError::ParsePem {
+    match private_key_from_pem(&bytes) {
+        Ok(private_key) => Ok(private_key),
+        Err(PemError::NoItemsFound) => Err(TlsMaterialError::MissingPrivateKey {
+            path: path.to_path_buf(),
+        }),
+        Err(source) => Err(TlsMaterialError::ParsePem {
             path: path.to_path_buf(),
             source,
-        })?;
-    private_key.ok_or_else(|| TlsMaterialError::MissingPrivateKey {
-        path: path.to_path_buf(),
-    })
+        }),
+    }
 }
 
 pub(crate) fn validate_server_tls_material(

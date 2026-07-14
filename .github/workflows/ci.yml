@@ -180,6 +180,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Audit Rust dependencies
+        run: ./scripts/audit-dependencies
+
       - name: Run Rust tests
         run: cargo test --quiet
 

@@ -25,10 +25,10 @@ use runewarp::{
     ControlTrust, DeferredClientAdapter, ManagedSession, ManagedSessionEvent, ManagedSessionRole,
     RoleAdapter, SILENCE_TIMEOUT, SessionMaterial, events_path, state_path,
 };
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
-use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde_json::Value;
 use std::sync::Mutex;
 use tempfile::tempdir;
@@ -192,25 +192,23 @@ impl ControlFixture {
 }
 
 fn build_server_acceptor(material: &ControlMtlsMaterial) -> TlsAcceptor {
-    let ca_certs: Vec<CertificateDer<'static>> = certs(&mut material.ca_cert_pem.as_bytes())
-        .map(|result| result.unwrap())
-        .collect();
+    let ca_certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(material.ca_cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .unwrap();
     let mut roots = RootCertStore::empty();
     for cert in ca_certs {
         roots.add(cert).unwrap();
     }
     let client_verifier = WebPkiClientVerifier::builder(roots.into()).build().unwrap();
     let server_certs: Vec<CertificateDer<'static>> =
-        certs(&mut material.server_cert_pem.as_bytes())
-            .map(|result| result.unwrap())
-            .collect();
-    let server_key = pkcs8_private_keys(&mut material.server_key_pem.as_bytes())
-        .next()
-        .unwrap()
-        .unwrap();
+        CertificateDer::pem_slice_iter(material.server_cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .unwrap();
+    let server_key = PrivateKeyDer::from_pem_slice(material.server_key_pem.as_bytes()).unwrap();
     let mut server_config = ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
-        .with_single_cert(server_certs, PrivateKeyDer::Pkcs8(server_key))
+        .with_single_cert(server_certs, server_key)
         .unwrap();
     server_config.alpn_protocols = vec![CONTROL_ALPN_H2.to_vec()];
     TlsAcceptor::from(Arc::new(server_config))

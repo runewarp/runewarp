@@ -36,10 +36,10 @@ use runewarp::{
     make_server_quic_config_with_client_admission, state_path,
 };
 use rustls::RootCertStore;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{ServerConfig, ServerConfig as RustlsServerConfig};
-use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use tempfile::TempDir;
@@ -1069,7 +1069,7 @@ async fn spawn_tls_backend(
 }
 
 fn identity_from_cert_pem(cert_pem: &str) -> ClientIdentity {
-    let cert = certs(&mut cert_pem.as_bytes()).next().unwrap().unwrap();
+    let cert = CertificateDer::from_pem_slice(cert_pem.as_bytes()).unwrap();
     client_identity_from_certificate_der(cert.as_ref()).unwrap()
 }
 
@@ -1100,8 +1100,10 @@ fn root_store_with(certificate: &CertificateDer<'static>) -> RootCertStore {
 }
 
 fn build_server_acceptor(material: &ControlMtlsMaterial) -> TlsAcceptor {
-    let mut reader = std::io::Cursor::new(material.ca_cert_pem.as_bytes());
-    let ca_certs: Vec<_> = certs(&mut reader).map(|cert| cert.unwrap()).collect();
+    let ca_certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(material.ca_cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .unwrap();
     let mut roots = RootCertStore::empty();
     for cert in ca_certs {
         roots.add(cert).unwrap();
@@ -1110,14 +1112,15 @@ fn build_server_acceptor(material: &ControlMtlsMaterial) -> TlsAcceptor {
         .build()
         .unwrap();
 
-    let mut cert_reader = std::io::Cursor::new(material.server_cert_pem.as_bytes());
-    let server_certs: Vec<_> = certs(&mut cert_reader).map(|cert| cert.unwrap()).collect();
-    let mut key_reader = std::io::Cursor::new(material.server_key_pem.as_bytes());
-    let server_key = pkcs8_private_keys(&mut key_reader).next().unwrap().unwrap();
+    let server_certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(material.server_cert_pem.as_bytes())
+            .collect::<Result<_, _>>()
+            .unwrap();
+    let server_key = PrivateKeyDer::from_pem_slice(material.server_key_pem.as_bytes()).unwrap();
 
     let mut config = ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
-        .with_single_cert(server_certs, PrivateKeyDer::Pkcs8(server_key))
+        .with_single_cert(server_certs, server_key)
         .unwrap();
     config.alpn_protocols = vec![CONTROL_ALPN_H2.to_vec()];
     TlsAcceptor::from(Arc::new(config))

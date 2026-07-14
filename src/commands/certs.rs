@@ -4,7 +4,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use runewarp::{ConfigFileError, XdgPathError, default_config_path};
-use rustls_pemfile::certs;
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::{Error as PemError, PemObject};
 use time::OffsetDateTime;
 use x509_parser::parse_x509_certificate;
 
@@ -46,10 +47,15 @@ pub(super) struct CertificateWindow {
 
 pub(super) fn read_certificate_window(path: &Path) -> Result<CertificateWindow, Box<dyn Error>> {
     let certificate_pem = fs::read(path)?;
-    let certificate_der = certs(&mut std::io::Cursor::new(certificate_pem))
-        .next()
-        .transpose()?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing certificate"))?;
+    let certificate_der = match CertificateDer::from_pem_slice(&certificate_pem) {
+        Ok(certificate_der) => certificate_der,
+        Err(PemError::NoItemsFound) => {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "missing certificate").into());
+        }
+        Err(source) => {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, source).into());
+        }
+    };
     let (_, certificate) = parse_x509_certificate(certificate_der.as_ref())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid X.509 certificate"))?;
 

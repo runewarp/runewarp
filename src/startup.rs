@@ -514,7 +514,7 @@ pub enum ServerStartupError {
     },
     ParsePem {
         path: std::path::PathBuf,
-        source: io::Error,
+        source: rustls::pki_types::pem::Error,
     },
     InvalidTlsMaterial(String),
     QuicConfig(QuicConfigError),

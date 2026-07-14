@@ -27,6 +27,8 @@ Runewarp::Core.run_cli do
     Runewarp::Core.section("Running Clippy")
     Runewarp::Shell.run!("cargo", "clippy", "--all-targets", "--", "-D", "warnings")
 
+    Runewarp::Shell.run!("./scripts/audit-dependencies")
+
     Runewarp::Core.section("Running Rust tests")
     Runewarp::Shell.run!("cargo", "test", "--quiet")
 
@@ -40,6 +42,6 @@ Runewarp::Core.run_cli do
     Runewarp::Shell.run!("./scripts/check-distribution", "docker-image", "--probe-arg", "--help", "--expected-text", "Usage: runewarp", "--image-tag", "runewarp:ci")
 
     Runewarp::Core.success("CI contract passed")
-    Runewarp::Core.note("Release metadata, distribution checks, Rust checks, docs, and Docker validation all succeeded")
+    Runewarp::Core.note("Release metadata, distribution checks, Rust checks, dependency advisory scan, docs, and Docker validation all succeeded")
   end
 end

@@ -232,14 +232,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::io::Write;
-    use std::io::{self, Cursor};
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
 
     use super::*;
     use quinn::{Connection, Endpoint};
     use rcgen::generate_simple_self_signed;
+    use rustls::pki_types::pem::Error as PemError;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
     use rustls::{ClientConnection, RootCertStore};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -254,6 +255,7 @@ mod tests {
 
     use crate::LogLevel;
     use crate::acme::ACME_TLS_ALPN;
+    use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
     use crate::{
         CLIENT_HELLO_BUFFER_LIMIT, GeneratedClientIdentity, PublicHostname, ServerHostname,
         ServerTunnelConfig, generate_client_identity, make_client_quic_config_with_client_auth,
@@ -816,17 +818,21 @@ mod tests {
     fn client_certificate_chain(
         client_identity: &GeneratedClientIdentity,
     ) -> io::Result<Vec<CertificateDer<'static>>> {
-        rustls_pemfile::certs(&mut Cursor::new(client_identity.certificate_pem.as_bytes()))
-            .collect::<Result<Vec<_>, _>>()
+        certificate_chain_from_pem(client_identity.certificate_pem.as_bytes())
             .map_err(io::Error::other)
     }
 
     fn client_private_key(
         client_identity: &GeneratedClientIdentity,
     ) -> io::Result<PrivateKeyDer<'static>> {
-        rustls_pemfile::private_key(&mut Cursor::new(client_identity.private_key_pem.as_bytes()))
-            .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing client private key"))
+        private_key_from_pem(client_identity.private_key_pem.as_bytes()).map_err(|source| {
+            match source {
+                PemError::NoItemsFound => {
+                    io::Error::new(io::ErrorKind::InvalidData, "missing client private key")
+                }
+                other => io::Error::other(other),
+            }
+        })
     }
 
     fn root_store_with(certificate: &CertificateDer<'static>) -> io::Result<RootCertStore> {

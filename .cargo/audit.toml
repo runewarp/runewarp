@@ -1,0 +1,16 @@
+# Repository-owned RustSec advisory policy for `./scripts/audit-dependencies`.
+#
+# Vulnerabilities always fail the scan. `output.deny = ["warnings"]` also fails
+# on unmaintained, unsound, and yanked crates.
+#
+# Checked-in exceptions must be listed under `[advisories].ignore` with a nearby
+# comment that records: advisory id, why it is not exploitable or cannot yet be
+# removed, an owner, and a removal condition. Do not blanket-ignore advisory
+# classes.
+
+[advisories]
+ignore = []
+
+[output]
+quiet = false
+deny = ["warnings"]

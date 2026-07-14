@@ -153,6 +153,14 @@ The **Client instance** owns one live ACME manager per terminating **Public host
 - Client ACME depends on the same public TCP 443 reachability at the Server edge because TLS-ALPN-01 challenge traffic still enters through the Server's public listener before it reaches the Client
 - any explicit `client.acme.state-dir` should be protected like secret-bearing material
 
+## Dependency advisory scanning
+
+Core keeps a repository-owned RustSec gate at `./scripts/audit-dependencies`. That command installs `cargo-audit` when needed, then scans the resolved `Cargo.lock` graph. Vulnerabilities always fail. Informational findings (unmaintained, unsound, and yanked crates) also fail through `.cargo/audit.toml` (`output.deny = ["warnings"]`).
+
+Checked-in exceptions belong only under `[advisories].ignore` in `.cargo/audit.toml`, each with the advisory id plus a comment that records why the finding is not exploitable or cannot yet be removed, an owner, and a removal condition. Do not blanket-ignore advisory classes.
+
+CI runs the same command as a required Rust-contract step. Certificate and private-key PEM parsing uses maintained `rustls-pki-types` APIs rather than unmaintained `rustls-pemfile`.
+
 ## Operational limits and trade-offs
 
 | Concern | Behavior |

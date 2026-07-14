@@ -1,4 +1,4 @@
-use std::io::{self, Cursor};
+use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,6 +17,7 @@ use runewarp::{
     make_server_quic_config_with_client_admission_resolver, resolve_selected_client_config,
 };
 use rustls::RootCertStore;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -1531,10 +1532,7 @@ async fn forwards_tls_terminate_end_to_end() {
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
     let public_ca_cert_pem =
         std::fs::read_to_string(public_cert_dir.join("public-ca.crt")).unwrap();
-    let public_ca_cert = rustls_pemfile::certs(&mut public_ca_cert_pem.as_bytes())
-        .next()
-        .unwrap()
-        .unwrap();
+    let public_ca_cert = CertificateDer::from_pem_slice(public_ca_cert_pem.as_bytes()).unwrap();
 
     // Plain TCP backend — receives decrypted traffic after Client terminates TLS
     let backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
@@ -1661,10 +1659,7 @@ async fn forwards_mixed_tls_terminate_and_passthrough_end_to_end() {
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
     let public_ca_cert_pem =
         std::fs::read_to_string(public_cert_dir.join("public-ca.crt")).unwrap();
-    let terminate_ca_cert = rustls_pemfile::certs(&mut public_ca_cert_pem.as_bytes())
-        .next()
-        .unwrap()
-        .unwrap();
+    let terminate_ca_cert = CertificateDer::from_pem_slice(public_ca_cert_pem.as_bytes()).unwrap();
 
     // Plain TCP backend for the terminating service (receives decrypted bytes)
     let term_backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
@@ -2615,15 +2610,13 @@ fn make_authenticated_client_quic_config(
 fn client_certificate_chain(
     client_identity: &GeneratedClientIdentity,
 ) -> Vec<CertificateDer<'static>> {
-    rustls_pemfile::certs(&mut Cursor::new(client_identity.certificate_pem.as_bytes()))
+    CertificateDer::pem_slice_iter(client_identity.certificate_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
 }
 
 fn client_private_key(client_identity: &GeneratedClientIdentity) -> PrivateKeyDer<'static> {
-    rustls_pemfile::private_key(&mut Cursor::new(client_identity.private_key_pem.as_bytes()))
-        .unwrap()
-        .unwrap()
+    PrivateKeyDer::from_pem_slice(client_identity.private_key_pem.as_bytes()).unwrap()
 }
 
 fn root_store_with(certificate: &CertificateDer<'static>) -> RootCertStore {

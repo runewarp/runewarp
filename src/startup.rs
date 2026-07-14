@@ -270,7 +270,7 @@ impl ClientInstancePrep {
     }
 
     /// Starts Client ACME tasks at most once for this Client instance.
-    pub fn ensure_acme_driven(&self) {
+    pub fn start_acme_once(&self) {
         let mut guard = self
             .acme
             .lock()
@@ -432,7 +432,8 @@ impl PreparedClient {
     }
 
     pub async fn run(self) -> Result<(), quinn::ConnectionError> {
-        self.run_with_owned_instance().await
+        self.run_tunnel_then_maybe_stop_acme(|client| client.run())
+            .await
     }
 
     pub async fn run_until_shutdown<Shutdown>(
@@ -464,23 +465,25 @@ impl PreparedClient {
         self,
         shutdown: &OrderlyShutdown,
     ) -> Result<(), quinn::ConnectionError> {
-        let Self {
-            client, instance, ..
-        } = self;
-        instance.ensure_acme_driven();
-        let result = client.run_with_shutdown(shutdown).await;
-        if Arc::strong_count(&instance) == 1 {
-            instance.stop_acme().await;
-        }
-        result
+        self.run_tunnel_then_maybe_stop_acme(|client| client.run_with_shutdown(shutdown))
+            .await
     }
 
-    async fn run_with_owned_instance(self) -> Result<(), quinn::ConnectionError> {
+    async fn run_tunnel_then_maybe_stop_acme<F, Fut>(
+        self,
+        run_tunnel: F,
+    ) -> Result<(), quinn::ConnectionError>
+    where
+        F: FnOnce(Client) -> Fut,
+        Fut: Future<Output = Result<(), quinn::ConnectionError>>,
+    {
         let Self {
             client, instance, ..
         } = self;
-        instance.ensure_acme_driven();
-        let result = client.run().await;
+        instance.start_acme_once();
+        let result = run_tunnel(client).await;
+        // Exclusive owner (single-shot connect helpers) stops ACME here. The process
+        // runtime keeps an Arc and stops ACME after all address workers exit.
         if Arc::strong_count(&instance) == 1 {
             instance.stop_acme().await;
         }
@@ -912,6 +915,7 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use std::str::FromStr;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
     use super::{
@@ -1294,8 +1298,8 @@ mod tests {
         assert_eq!(duplicated.len(), 1);
         assert_eq!(instance.acme_manager_count(), 1);
 
-        instance.ensure_acme_driven();
-        instance.ensure_acme_driven();
+        instance.start_acme_once();
+        instance.start_acme_once();
         instance.stop_acme().await;
         instance.stop_acme().await;
     }
@@ -1305,9 +1309,24 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let settings = acme_client_settings(&tempdir, "app.example.test");
         let instance = ClientInstancePrep::prepare(&settings).await.unwrap();
-        instance.ensure_acme_driven();
+        instance.start_acme_once();
         instance.stop_acme().await;
         // A second stop after tasks have exited must remain a no-op.
+        instance.stop_acme().await;
+    }
+
+    #[tokio::test]
+    async fn dropping_one_tunnel_client_does_not_stop_shared_acme() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let settings = acme_client_settings(&tempdir, "app.example.test");
+        let instance = ClientInstancePrep::prepare(&settings).await.unwrap();
+        instance.start_acme_once();
+        let retained = Arc::clone(&instance);
+        // Process runtime keeps an Arc while workers come and go; exclusive-owner
+        // stop must not fire while shared references remain.
+        assert!(Arc::strong_count(&instance) > 1);
+        drop(retained);
+        assert_eq!(Arc::strong_count(&instance), 1);
         instance.stop_acme().await;
     }
 

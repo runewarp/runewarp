@@ -865,7 +865,7 @@ async fn shared_client_instance_prep_survives_reconnect_style_redials() {
     };
 
     let instance = ClientInstancePrep::prepare(&settings).await.unwrap();
-    instance.ensure_acme_driven();
+    instance.start_acme_once();
     assert_eq!(instance.acme_manager_count(), 0);
 
     let first = PreparedClient::connect_to_server_address(

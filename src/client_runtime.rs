@@ -38,7 +38,7 @@ where
     let mut controller = AddressController::new();
     let settings = Arc::new(settings.clone());
     let instance = ClientInstancePrep::prepare(settings.as_ref()).await?;
-    instance.ensure_acme_driven();
+    instance.start_acme_once();
     let shutdown = controller.shutdown_handle();
 
     if let Some(control) = settings.control.as_ref() {

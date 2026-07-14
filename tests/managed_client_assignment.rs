@@ -255,7 +255,7 @@ impl ManagedClientHarness {
                 Ok(instance) => instance,
                 Err(error) => return Err(error.to_string()),
             };
-            instance.ensure_acme_driven();
+            instance.start_acme_once();
             let session_runtime = session.run(
                 &mut adapter,
                 move |event| {

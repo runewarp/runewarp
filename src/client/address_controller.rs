@@ -638,6 +638,111 @@ mod tests {
             .expect("shutdown should drain workers");
     }
 
+    #[tokio::test]
+    async fn remove_during_backoff_then_re_add_does_not_duplicate_workers() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let backoff_entered = Arc::new(AtomicUsize::new(0));
+        let mut controller = AddressController::new();
+        let target = address("tunnel.example.test");
+        let starts_for_spawn = Arc::clone(&starts);
+        let backoff_for_spawn = Arc::clone(&backoff_entered);
+
+        assert!(controller.add(target.clone(), move |_address, control| {
+            starts_for_spawn.fetch_add(1, Ordering::SeqCst);
+            let backoff_for_spawn = Arc::clone(&backoff_for_spawn);
+            async move {
+                // Simulate reconnect backoff interrupted by Retire, then re-adopt.
+                backoff_for_spawn.fetch_add(1, Ordering::SeqCst);
+                let mut maintenance = control.subscribe_maintenance();
+                loop {
+                    if control.shutdown_requested() {
+                        return Ok(());
+                    }
+                    tokio::select! {
+                        changed = maintenance.changed() => {
+                            if changed.is_err() {
+                                return Ok(());
+                            }
+                            // Stay alive across Retire so re-adopt can restore Maintain.
+                        }
+                        _ = wait_for_shutdown(&control) => return Ok(()),
+                    }
+                }
+            }
+        }));
+
+        wait_until(|| backoff_entered.load(Ordering::SeqCst) == 1).await;
+        assert!(controller.remove(&target));
+        wait_until(|| controller.maintenance_intent(&target) == Some(MaintenanceIntent::Retire))
+            .await;
+        assert!(controller.re_adopt(&target));
+        assert_eq!(
+            controller.maintenance_intent(&target),
+            Some(MaintenanceIntent::Maintain)
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        // Rapid remove / re-add / remove races must keep a single live worker slot.
+        assert!(controller.remove(&target));
+        assert!(controller.re_adopt(&target));
+        assert!(controller.remove(&target));
+        assert_eq!(controller.worker_count(), 1);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            controller.maintenance_intent(&target),
+            Some(MaintenanceIntent::Retire)
+        );
+
+        controller.request_shutdown();
+        controller
+            .run_until_idle()
+            .await
+            .expect("shutdown should drain workers");
+    }
+
+    #[tokio::test]
+    async fn empty_desired_set_leaves_retiring_workers_live() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let mut controller = AddressController::new();
+        let target = address("tunnel.example.test");
+        let starts_for_spawn = Arc::clone(&starts);
+
+        assert!(controller.add(target.clone(), move |_address, control| {
+            starts_for_spawn.fetch_add(1, Ordering::SeqCst);
+            async move {
+                let mut maintenance = control.subscribe_maintenance();
+                loop {
+                    if control.shutdown_requested() {
+                        return Ok(());
+                    }
+                    tokio::select! {
+                        changed = maintenance.changed() => {
+                            if changed.is_err() {
+                                return Ok(());
+                            }
+                        }
+                        _ = wait_for_shutdown(&control) => return Ok(()),
+                    }
+                }
+            }
+        }));
+        wait_until(|| starts.load(Ordering::SeqCst) == 1).await;
+
+        controller.replace_intent(&[], |_address, _control| async { Ok(()) });
+        assert_eq!(
+            controller.maintenance_intent(&target),
+            Some(MaintenanceIntent::Retire)
+        );
+        assert_eq!(controller.worker_count(), 1);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        controller.request_shutdown();
+        controller
+            .run_until_idle()
+            .await
+            .expect("shutdown should drain workers");
+    }
+
     async fn wait_for_shutdown(control: &AddressWorkerControl) {
         let mut shutdown = control.subscribe_shutdown();
         if control.shutdown_requested() {

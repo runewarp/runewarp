@@ -158,8 +158,9 @@ where
                 match completion {
                     Some(Ok(_)) => {}
                     Some(Err((_address, error))) => {
+                        // Internal fatal failure: stop address workers and exit
+                        // nonzero without waiting for an external shutdown signal.
                         shutdown.request();
-                        let _ = session_runtime.await;
                         return Err(Box::new(io::Error::other(error)) as Box<dyn Error>);
                     }
                     None => {}
@@ -200,8 +201,8 @@ async fn run_server_address_worker(
     loop {
         if control.shutdown_requested() || control.maintenance_intent() == MaintenanceIntent::Retire
         {
-            // Establishing / reconnecting work stops on remove. Connected retirement is
-            // handled inside the tunnel run below and exits here only after that run ends.
+            // Establishing / reconnecting work stops on remove. Connected workers reach
+            // this check only after their tunnel run ends (Retire does not locally close).
             return Ok(());
         }
 
@@ -330,8 +331,10 @@ async fn run_server_address_worker(
         let run_result = client
             .run_until_shutdown({
                 let control = control.clone();
+                let configured_server_addr = dial_target.configured_server_addr.clone();
                 async move {
-                    wait_for_shutdown(&control).await;
+                    wait_for_process_shutdown_observing_retire(&control, &configured_server_addr)
+                        .await;
                     ShutdownMode::Graceful
                 }
             })
@@ -460,6 +463,43 @@ async fn wait_for_shutdown(control: &AddressWorkerControl) {
     while shutdown.changed().await.is_ok() {
         if *shutdown.borrow() {
             return;
+        }
+    }
+}
+
+/// Wait for process shutdown while observing Retire without closing the live tunnel.
+async fn wait_for_process_shutdown_observing_retire(
+    control: &AddressWorkerControl,
+    configured_server_addr: &str,
+) {
+    let mut maintenance = control.subscribe_maintenance();
+    let mut shutdown = control.subscribe_shutdown();
+    let mut logged_retiring = false;
+    if control.maintenance_intent() == MaintenanceIntent::Retire {
+        runewarp::runtime_log::client_tunnel_retiring(configured_server_addr);
+        logged_retiring = true;
+    }
+    if control.shutdown_requested() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || control.shutdown_requested() {
+                    return;
+                }
+            }
+            changed = maintenance.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                if !logged_retiring
+                    && control.maintenance_intent() == MaintenanceIntent::Retire
+                {
+                    runewarp::runtime_log::client_tunnel_retiring(configured_server_addr);
+                    logged_retiring = true;
+                }
+            }
         }
     }
 }

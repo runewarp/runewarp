@@ -80,6 +80,14 @@ _Avoid_: fanout loop, connection pool, dial manager
 The managed Client aggregate of whether currently assigned **Server addresses** have live Connected tunnels: Unconverged when none of a non-empty assignment are connected, Partially converged when some are connected, and Converged when every assigned address is connected or the assignment is empty. Retiring connections are excluded. Distinct from applied revision acknowledgment.
 _Avoid_: Client-ready, readiness, applied revision
 
+**Retiring**:
+The managed Client address-worker state after a connected **Server address** is removed from assignment intent: reconnect stops, the live **Tunnel connection** stays open until remote **Server** closure or process shutdown, and re-adding the address before remote closure re-adopts that connection without dialing a duplicate.
+_Avoid_: drain, local close, cancelled
+
+**Infrastructure drain**:
+Provider-controlled graceful process shutdown of a runtime (for example Kubernetes termination). Distinct from managed assignment or authorization removal, which never initiate drain.
+_Avoid_: Retiring, authorization revocation, assignment removal
+
 **Control**:
 The managed-service endpoint that assigns configuration and authenticates Server and Client roles over HTTPS.
 _Avoid_: tunnel endpoint, Server address

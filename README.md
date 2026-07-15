@@ -28,9 +28,11 @@ docker pull runewarp/runewarp
 
 ## Get started
 
-1. See the Docker example in [`examples/docker/README.md`](examples/docker/README.md) for the end-to-end path.
-2. Use [`docs/usage.md`](docs/usage.md) for the operator workflow.
-3. Use [`docs/configuration.md`](docs/configuration.md) for config keys, defaults, and examples.
+Choose the path that matches what you want to do:
+
+- **Evaluate locally:** follow the tested [Docker example](examples/docker/README.md)
+- **Operate a self-hosted deployment:** use the [operator guide](docs/usage.md), then the [configuration reference](docs/configuration.md)
+- **Understand the design:** start with [architecture](docs/architecture.md) and [security](docs/security.md)
 
 ## Goals
 
@@ -109,18 +111,31 @@ A simple, open-source client/server tunneling tool whose config model and simple
 
 ## Documentation
 
-| Document | Purpose |
-| --- | --- |
-| [`docs/usage.md`](docs/usage.md) | Install, configure, start, verify, and troubleshoot Runewarp |
-| [`docs/configuration.md`](docs/configuration.md) | Config reference, defaults, validation rules, and examples |
-| [`docs/architecture.md`](docs/architecture.md) | System shape, routing model, trust model, and topology diagrams |
-| [`docs/security.md`](docs/security.md) | Visibility limits, authentication, certificate handling, and trade-offs |
-| [`docs/protocol.md`](docs/protocol.md) | Tunnel wire behavior and runtime invariants |
-| [`docs/managed.md`](docs/managed.md) | Managed-session Control protocol and Control interoperability |
-| [`docs/release-automation.md`](docs/release-automation.md) | Release CI and publication automation |
-| [`docs/release-guide.md`](docs/release-guide.md) | Maintainer release procedure and recovery steps |
-| [`docs/roadmap.md`](docs/roadmap.md) | Forward-looking roadmap and planned features |
-| [`examples/docker/README.md`](examples/docker/README.md) | Walkthrough of the Docker example |
+### Start here
+
+- [Docker example](examples/docker/README.md) — verify the complete topology locally
+- [Operator guide](docs/usage.md) — install, configure, start, verify, and troubleshoot
+
+### Operators
+
+- [Configuration reference](docs/configuration.md) — config shapes, keys, defaults, and validation
+- [Architecture](docs/architecture.md) — system structure, data paths, and current limits
+- [Security](docs/security.md) — trust boundaries, visibility, certificates, and deployment trade-offs
+
+### Protocol specifications
+
+- [Tunnel protocol](docs/protocol.md) — Tunnel wire behavior and runtime invariants
+- [Managed-session protocol](docs/managed.md) — normative Control contract and interoperability checklist
+
+### Contributors and maintainers
+
+- [Contributing](CONTRIBUTING.md) — development checks and documentation expectations
+- [Release guide](docs/release-guide.md) — human release and recovery runbook
+- [Release automation](docs/release-automation.md) — CI, publication gates, and artifact lineage
+
+### Roadmap
+
+- [Roadmap](docs/roadmap.md) — forward-looking themes and live work
 
 ## License
 

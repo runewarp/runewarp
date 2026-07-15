@@ -12,6 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Newly initialized and rotated Client identities use Ed25519 self-signed certificates with `digitalSignature` and `clientAuth`, while pin-only Tunnel authentication continues to accept existing ECDSA P-256 material and certificates without extended key usage. (#214)
 - Deepened Managed session so production runtimes and integration tests share one domain seam (`ManagedSession` + `RoleAdapter` + session material/limits); transport, SSE framing, snapshot parsing, reporting, and TLS-load helpers are no longer crate-root exports. (#196)
 - Contracted redundant `config::client` / `config::server` config aliases to role-qualified entry points and exposed preparation-owned material outcomes (`resolve_server_cert_material_dir`, `resolve_server_cert_hostname`, `resolve_client_identity_material_dir`, `resolve_client_public_cert_material_dir`) for public Rust consumers. (#210)
+- Changed Managed-session state reporting to one revision acknowledgment per successfully handled snapshot, removed periodic Core state heartbeats, and made failed or stalled acknowledgments replace the session while retaining Control-owned SSE keepalives. (#198)
+- Removed automatic and manual self-signed Client identity certificate renewal. New Client identities receive a 100-year certificate, the Server continues to authorize the pinned public key without validating certificate expiry, and `runewarp client identity renew` is gone. (#161)
+- Added standard top-level `--version` and `-V` output, with `-dev` builds now appending the baked-in 12-character commit SHA for traceability. (#135)
 
 ### Security
 
@@ -39,12 +42,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added the runtime-only `runewarp server --hostname <HOSTNAME>` override so one shared Server config can inject the effective Server hostname before validation, Server certificate checks, and Server ACME setup. (#138)
 - Added the narrow `RUNEWARP_SERVER_HOSTNAME` override for `runewarp server`, `runewarp server cert init`, and `runewarp server cert rotate-ca`, with precedence between `--hostname` and `server.hostname`. (#144)
 - Added opt-in `server.readiness-bind-address` TCP readiness probes plus `server.graceful-shutdown-duration` so Server ingress admission and orderly shutdown mode are explicit and operator-configurable. (#148)
-
-### Changed
-
-- Changed Managed-session state reporting to one revision acknowledgment per successfully handled snapshot, removed periodic Core state heartbeats, and made failed or stalled acknowledgments replace the session while retaining Control-owned SSE keepalives. (#198)
-- Removed automatic and manual self-signed Client identity certificate renewal. New Client identities receive a 100-year certificate, the Server continues to authorize the pinned public key without validating certificate expiry, and `runewarp client identity renew` is gone. (#161)
-- Added standard top-level `--version` and `-V` output, with `-dev` builds now appending the baked-in 12-character commit SHA for traceability. (#135)
 
 ## [0.2.0] - 2026-06-30
 

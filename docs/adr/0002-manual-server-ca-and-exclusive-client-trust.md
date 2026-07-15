@@ -1,3 +1,20 @@
 # Manual Server CA and exclusive Client trust
 
-Runewarp's manual Server certificate path uses a private Server CA that issues the leaf certificate for the Server hostname, and a Client selects exclusive CA-bundle trust with `client.server-trust = "ca-file"` while `client.server-ca-file` optionally overrides the default bundle path. We chose this so ordinary manual Server leaf renewal can happen without changing Client trust, and so operators who configure their own Runewarp trust anchor do not silently keep trusting unrelated public roots. The simple manual path may colocate the private Server CA key with the public Server in `state/` for operational simplicity, but that trade-off must stay documented and ACME remains the expected default for most operators.
+## Status
+
+Accepted
+
+## Context
+
+Private deployments need a stable trust anchor for the Server hostname without silently retaining trust in unrelated public roots.
+
+## Decision
+
+The manual Server certificate path uses a private Server CA to issue the Server leaf. A Client selects exclusive CA-bundle trust with `client.server-trust = "ca-file"`; `client.server-ca-file` may override the default bundle path.
+
+## Consequences
+
+- ordinary Server leaf renewal does not change Client trust
+- configured private trust does not combine with the system trust store
+- the simple path may colocate the private Server CA key with the public Server in `state/`, trading stronger key separation for operational simplicity
+- ACME remains the expected default for most publicly reachable deployments

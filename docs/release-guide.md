@@ -1,6 +1,6 @@
 # Maintainer release guide
 
-This guide covers the maintainer release path for stable Runewarp releases: the human workflow, the trust boundaries around publication, and the recovery rules for partial publication. For the automation contract enforced by the repository, see [`release-automation.md`](release-automation.md).
+This is the human runbook for stable releases: prerequisites, actions, verification, and recovery. Workflow triggers, gates, trust boundaries, cache scopes, and artifact lineage are canonical in [`release-automation.md`](release-automation.md).
 
 ## Release flow
 
@@ -30,19 +30,7 @@ Before cutting a stable release, make sure all of these are already true:
 | CI | The aggregate `CI` check is green on the release commit before the release tag is pushed. |
 | Images | The `Images` workflow already published and smoke tested the immutable 12-character commit-tag image lineage for that release commit, and `Release` will re-check that lineage against the tagged commit before promotion. |
 
-## Trust boundaries
-
-The release workflow is intentionally narrow about what can cross from untrusted changes into privileged publish jobs.
-
-| Surface | Current trust rule | Why it matters |
-| --- | --- | --- |
-| Fork and PR code | PR validation runs in `CI` on `pull_request`; it does not publish and does not unlock release secrets. | Untrusted contributions can exercise the normal contract without crossing into privileged automation. |
-| Secrets | Real publication secrets exist only in the GitHub `release` environment and are consumed only by the publish jobs. | Ordinary CI jobs do not need registry credentials. |
-| OIDC | Only the Docker publish job requests `id-token: write`, and only for the real tag-driven release path. | Sigstore signing stays scoped to the job that actually publishes images. |
-| Caches | Rust and Docker caches are split between PR CI, trusted `main` CI, and trusted release scopes. Trusted `main` CI warms the shared trusted-`main` Docker cache that `Images` reuses for publish-time builds, while release rehearsal warms only the separate release Rust cache for the selected tag. Release publish still promotes trusted mainline images instead of consuming PR artifacts. | Cache poisoning and artifact handoff do not bridge the untrusted-to-trusted boundary. |
-| Allowed actions | Workflow dependencies stay intentionally curated and third-party actions are pinned to full commit SHAs. | The workflow dependency surface does not drift through mutable action tags. |
-| Release tags | Real publication starts only from an SSH-signed stable `vX.Y.Z` tag, and the workflow also verifies the tagged commit already passed `CI` and is reachable from `origin/main`. | A tag alone is not enough; it still has to point at a trusted, already-validated release commit. |
-| Token permissions | Each workflow declares minimal job permissions instead of inheriting broad defaults. | A compromised job gets the smallest GitHub API surface that still lets it do its work. |
+The automation revalidates signed-tag, trusted-commit, prior-CI, published-image lineage, and secret-scope requirements. See [Release workflow](release-automation.md#release-workflow) and [Release environment and secrets](release-automation.md#release-environment-and-secrets) for those mechanics.
 
 ## Release-prep PR
 

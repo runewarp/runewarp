@@ -2,7 +2,17 @@
 
 Use this document as the configuration reference: keys, defaults, validation rules, and example shapes. Use [`docs/usage.md`](usage.md) for the step-by-step operator workflow. Use [`docs/managed.md`](managed.md) for the Managed-session Control protocol and interoperability contract.
 
-Runewarp `0.1.x` is a public pre-1.0 release line. Minor releases may include breaking CLI or configuration changes, so use the config reference that matches the version you deploy.
+Runewarp is pre-1.0. Minor releases may include breaking CLI or configuration changes, so use the config reference that matches the version you deploy.
+
+## Contents
+
+- [Choose a routing shape](#routing-shapes)
+- [Config discovery and precedence](#runtime-config-discovery)
+- [Default locations](#default-locations)
+- [Minimal valid examples](#examples)
+- [Key reference](#key-reference)
+- [Certificates and trust](#certificates-and-trust)
+- [Validation rules](#validation-rules)
 
 ## Who configures what
 
@@ -79,6 +89,8 @@ When the matching config key is omitted, Runewarp uses:
 | Client ACME state | `$XDG_STATE_HOME/runewarp/client/acme/` or `~/.local/state/runewarp/client/acme/` |
 
 ## Examples
+
+These are minimal valid shapes. For certificate preparation, DNS, startup, verification, and troubleshooting, use the [operator guide](usage.md).
 
 ### Minimal Server
 
@@ -221,7 +233,7 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `server.graceful-shutdown-duration` | no | Operator-facing graceful drain window for the Server role. Defaults to `"60s"`. Supports non-negative integer durations with `ms`, `s`, `m`, or `h` suffixes. `"0s"` disables the longer drain window and makes graceful Server shutdown converge to fast Server behavior. |
 | `server.acme.email` | with ACME | Let's Encrypt ACME contact address. TLS-ALPN-01 only. |
 | `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp uses the XDG default state path and creates it during startup after validation succeeds. |
-| `server.tunnels[].public-hostnames` | yes | One or more exact **Public hostnames** routed through this Tunnel. |
+| `server.tunnels[].public-hostnames` | per static Tunnel | One or more exact **Public hostnames** routed through this Tunnel. Managed Server authorization comes from Control instead. |
 | `server.tunnels[].client-identity` | with singular authorization | Lowercase hex SHA-256 fingerprint of one authorized Client public key's SubjectPublicKeyInfo. Mutually exclusive with `server.tunnels[].client-identities`. |
 | `server.tunnels[].client-identities` | with plural authorization | One or more lowercase hex SHA-256 fingerprints of authorized Client public keys' SubjectPublicKeyInfo values. Mutually exclusive with `server.tunnels[].client-identity`. |
 
@@ -230,7 +242,7 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | Key | Required | Notes |
 | --- | --- | --- |
 | `client.server-address` | runtime or config | Ergonomic single-target **Server address** shortcut, written as `hostname[:port]`. Mutually exclusive with `client.server-addresses`. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, one `--server-address` may supply or replace this value before validation. |
-| `client.server-addresses` | no | One or more explicit **Server addresses** for static fanout. Mutually exclusive with `client.server-address`. Each entry uses the same `hostname[:port]` rules as the singular field. Repeated `--server-address` flags replace this list before validation. |
+| `client.server-addresses` | static runtime or config | One or more explicit **Server addresses** for static fanout. Mutually exclusive with `client.server-address`. Each entry uses the same `hostname[:port]` rules as the singular field. Repeated `--server-address` flags replace this list before validation. |
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
 | `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG Client identity path. |

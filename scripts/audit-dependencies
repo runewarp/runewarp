@@ -11,7 +11,7 @@ Runewarp::Core.run_cli do
     Runewarp::Core.section("Auditing Rust dependencies")
     installed_version = Runewarp::Shell.capture!("cargo", "audit", "--version", allow_failure: true).strip
     unless installed_version.split.last == CARGO_AUDIT_VERSION
-      if Runewarp::Shell.successful?("cargo", "binstall", "--version")
+      if Runewarp::Shell.successful?("cargo", "binstall", "-V")
         Runewarp::Core.note("Installing cargo-audit #{CARGO_AUDIT_VERSION} with cargo-binstall")
         Runewarp::Shell.run!("cargo", "binstall", "cargo-audit@#{CARGO_AUDIT_VERSION}", "--no-confirm", "--locked", "--force", "--disable-telemetry", "--only-signed")
       else

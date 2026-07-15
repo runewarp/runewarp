@@ -6,10 +6,76 @@ use rcgen::{
     KeyUsagePurpose, PublicKeyData,
 };
 use runewarp::{
-    ClientIdentity, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_FILENAME,
-    SERVER_IDENTITY_KEY_FILENAME, ServerIdentity,
+    ClientIdentity, ClientManagedInput, ManagedSessionLimits, RoleAdapter,
+    SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_FILENAME, SERVER_IDENTITY_KEY_FILENAME,
+    ServerIdentity, ServerManagedInput,
 };
+use serde_json::Value;
 use time::{Duration, OffsetDateTime};
+
+/// Wire-contract ALPN for Control fixtures (HTTP/2 only).
+#[allow(dead_code)]
+pub const CONTROL_ALPN_H2: &[u8] = b"h2";
+
+/// Exact Client SSE downlink path from the Managed-session wire contract.
+#[allow(dead_code)]
+pub const CLIENT_EVENTS_PATH: &str = "/v1/client/events";
+
+/// Exact Server SSE downlink path from the Managed-session wire contract.
+#[allow(dead_code)]
+pub const SERVER_EVENTS_PATH: &str = "/v1/server/events";
+
+/// Exact Client applied-state path from the Managed-session wire contract.
+#[allow(dead_code)]
+pub const CLIENT_STATE_PATH: &str = "/v1/client/state";
+
+/// Exact Server applied-state path from the Managed-session wire contract.
+#[allow(dead_code)]
+pub const SERVER_STATE_PATH: &str = "/v1/server/state";
+
+/// Documented Managed-session silence window (bytes inactivity).
+#[allow(dead_code)]
+pub const MANAGED_SESSION_SILENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Accepting Client role adapter for Managed-session protocol tests.
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct AcceptingClientAdapter;
+
+impl RoleAdapter for AcceptingClientAdapter {
+    type Input = ClientManagedInput;
+
+    fn parse_input(
+        input: Value,
+        limits: &ManagedSessionLimits,
+    ) -> Result<Self::Input, runewarp::InputError> {
+        runewarp::parse_client_input(input, limits)
+    }
+
+    async fn apply(&mut self, _input: Self::Input) -> Result<(), runewarp::ApplyError> {
+        Ok(())
+    }
+}
+
+/// Accepting Server role adapter for Managed-session protocol tests.
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct AcceptingServerAdapter;
+
+impl RoleAdapter for AcceptingServerAdapter {
+    type Input = ServerManagedInput;
+
+    fn parse_input(
+        input: Value,
+        limits: &ManagedSessionLimits,
+    ) -> Result<Self::Input, runewarp::InputError> {
+        runewarp::parse_server_input(input, limits)
+    }
+
+    async fn apply(&mut self, _input: Self::Input) -> Result<(), runewarp::ApplyError> {
+        Ok(())
+    }
+}
 
 /// PEM material for a private Control CA, server leaf, and client identity leaf.
 #[derive(Clone, Debug)]

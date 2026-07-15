@@ -64,12 +64,10 @@ pub use identity::{
     rotate_client_identity,
 };
 pub use managed_session::{
-    ApplyError, CONTROL_ALPN_H2, ClientManagedInput, ConnectionError,
-    ControlClientIdentityMaterial, DeferredClientAdapter, DeferredServerAdapter, InputError,
-    ManagedSession, ManagedSessionConnection, ManagedSessionEvent, ManagedSessionLimitKind,
-    ManagedSessionLimits, ManagedSessionRole, RoleAdapter, SILENCE_TIMEOUT, ServerManagedInput,
-    SessionMaterial, SnapshotEnvelope, events_path, load_control_tls_material, parse_client_input,
-    parse_server_input, state_path,
+    ApplyError, ClientManagedInput, ControlClientIdentityMaterial, ControlTlsMaterialError,
+    InputError, ManagedSession, ManagedSessionEvent, ManagedSessionLimitKind, ManagedSessionLimits,
+    ManagedSessionRole, RoleAdapter, ServerManagedInput, SessionMaterial, TrustLoadError,
+    parse_client_input, parse_server_input,
 };
 pub use opaque_control_token::OpaqueControlTokenError;
 pub use paths::{

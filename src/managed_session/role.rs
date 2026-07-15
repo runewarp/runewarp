@@ -8,7 +8,7 @@ pub enum ManagedSessionRole {
 }
 
 /// Exact role-specific SSE downlink path. No role selector query is used.
-pub fn events_path(role: ManagedSessionRole) -> &'static str {
+pub(crate) fn events_path(role: ManagedSessionRole) -> &'static str {
     match role {
         ManagedSessionRole::Server => "/v1/server/events",
         ManagedSessionRole::Client => "/v1/client/events",
@@ -16,7 +16,7 @@ pub fn events_path(role: ManagedSessionRole) -> &'static str {
 }
 
 /// Exact role-specific applied-state path on the same HTTP/2 connection.
-pub fn state_path(role: ManagedSessionRole) -> &'static str {
+pub(crate) fn state_path(role: ManagedSessionRole) -> &'static str {
     match role {
         ManagedSessionRole::Server => "/v1/server/state",
         ManagedSessionRole::Client => "/v1/client/state",

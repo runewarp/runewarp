@@ -153,7 +153,7 @@ The certificate a **Server** presents to authenticate its **Server identity** to
 _Avoid_: Server certificate, Server identity
 
 **Managed session**:
-The authenticated live relationship between one **Server** or **Client instance** and a managed control plane for receiving versioned full-input snapshots and acknowledging successfully applied revisions. It is separate from **Server readiness**, Visitor traffic, and **Tunnel connections**.
+The authenticated live relationship between one **Server** or **Client instance** and a managed control plane for receiving versioned full-input snapshots and acknowledging successfully applied revisions. Core exposes it as one domain seam (`ManagedSession` plus a role adapter); transport framing and reporting stay behind that seam. It is separate from **Server readiness**, Visitor traffic, and **Tunnel connections**.
 _Avoid_: Tunnel connection, data path, control channel
 
 **Tunnel pool**:

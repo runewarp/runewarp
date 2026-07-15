@@ -27,7 +27,7 @@ use crate::ControlAddress;
 
 /// Error establishing or using a Managed-session connection.
 #[derive(Debug)]
-pub enum ConnectionError {
+pub(crate) enum ConnectionError {
     Dns(std::io::Error),
     Connect(std::io::Error),
     Tls(std::io::Error),
@@ -86,7 +86,7 @@ impl std::error::Error for ConnectionError {
 ///
 /// The sender half remains available so applied-state acknowledgments can open concurrent
 /// streams on the same connection. Dropping this value closes the connection.
-pub struct ManagedSessionConnection {
+pub(crate) struct ManagedSessionConnection {
     sender: SendRequest<Full<Bytes>>,
     // Keep the connection driver alive for the lifetime of the session.
     conn: Option<tokio::task::JoinHandle<Result<(), hyper::Error>>>,
@@ -156,11 +156,6 @@ impl ManagedSessionConnection {
         }
     }
 
-    /// Whether another request can still be sent on this HTTP/2 connection.
-    pub fn can_send_additional_request(&self) -> bool {
-        !self.sender.is_closed()
-    }
-
     /// Start an applied-revision acknowledgment on a concurrent stream.
     ///
     /// Uses a cloned HTTP/2 sender so the SSE body can keep being read while
@@ -188,18 +183,6 @@ impl ManagedSessionConnection {
             )
             .await
         })
-    }
-
-    /// Acknowledge the applied revision on a concurrent stream of this connection.
-    ///
-    /// State writes are valid only after the matching SSE downlink is active,
-    /// which is true for any constructed [`ManagedSessionConnection`].
-    pub async fn put_applied_revision(
-        &self,
-        revision: &str,
-        limits: &ManagedSessionLimits,
-    ) -> Result<(), ConnectionError> {
-        self.begin_put_applied_revision(revision, limits).await
     }
 }
 

@@ -6,7 +6,7 @@ use hyper::body::Incoming;
 
 /// Outcome of classifying an SSE response before body parsing begins.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SseResponseClass {
+pub(crate) enum SseResponseClass {
     /// Exact status 200 with an event-stream media type.
     Success,
     /// Any other outcome: retry by replacing the Managed session.
@@ -15,7 +15,7 @@ pub enum SseResponseClass {
 
 /// Outcome of classifying a state-acknowledgment response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StateResponseClass {
+pub(crate) enum StateResponseClass {
     /// Exact status 204 with an already-ended empty body.
     Success,
     /// Any other outcome: leave SSE undisturbed and retry later.
@@ -24,7 +24,7 @@ pub enum StateResponseClass {
 
 /// Classify an SSE response. Redirects, 204, other non-success statuses, and
 /// wrong media types are all retryable session failures.
-pub fn classify_sse_response(status: StatusCode, headers: &HeaderMap) -> SseResponseClass {
+pub(crate) fn classify_sse_response(status: StatusCode, headers: &HeaderMap) -> SseResponseClass {
     if status.is_redirection() {
         return SseResponseClass::RetryableFailure;
     }
@@ -38,7 +38,7 @@ pub fn classify_sse_response(status: StatusCode, headers: &HeaderMap) -> SseResp
 }
 
 /// Classify a state-acknowledgment response from status alone before reading the body.
-pub fn classify_state_status(status: StatusCode) -> StateResponseClass {
+pub(crate) fn classify_state_status(status: StatusCode) -> StateResponseClass {
     if status == StatusCode::NO_CONTENT {
         StateResponseClass::Success
     } else {
@@ -48,7 +48,8 @@ pub fn classify_state_status(status: StatusCode) -> StateResponseClass {
 
 /// Classify a fully read state-acknowledgment response. Success requires exact status
 /// 204 and an empty body.
-pub fn classify_state_response(status: StatusCode, body: &[u8]) -> StateResponseClass {
+#[cfg(test)]
+pub(crate) fn classify_state_response(status: StatusCode, body: &[u8]) -> StateResponseClass {
     if classify_state_status(status) != StateResponseClass::Success {
         return StateResponseClass::Failure;
     }
@@ -65,7 +66,7 @@ pub fn classify_state_response(status: StatusCode, body: &[u8]) -> StateResponse
 /// exact status 204 with an already-ended body (no data frames). A body-bearing
 /// or still-open 204 is rejected after observing the first frame, without
 /// draining remaining bytes.
-pub async fn classify_state_incoming(
+pub(crate) async fn classify_state_incoming(
     status: StatusCode,
     mut body: Incoming,
 ) -> Result<StateResponseClass, hyper::Error> {

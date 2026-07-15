@@ -22,9 +22,8 @@ use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
-    CONTROL_ALPN_H2, ConnectionError, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
-    DeferredClientAdapter, ManagedSession, ManagedSessionConnection, ManagedSessionEvent,
-    ManagedSessionRole, SILENCE_TIMEOUT, SessionMaterial, events_path, load_control_tls_material,
+    ControlAddress, ControlClientIdentityMaterial, ControlTrust, ManagedSession,
+    ManagedSessionEvent, ManagedSessionRole, SessionMaterial,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -39,12 +38,16 @@ use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
 use common::{
-    ControlMtlsMaterial, generate_control_client_identity, generate_control_mtls_material,
+    AcceptingClientAdapter, AcceptingServerAdapter, CLIENT_EVENTS_PATH, CLIENT_STATE_PATH,
+    CONTROL_ALPN_H2, ControlMtlsMaterial, MANAGED_SESSION_SILENCE_TIMEOUT, SERVER_EVENTS_PATH,
+    SERVER_STATE_PATH, generate_control_client_identity, generate_control_mtls_material,
     write_control_ca_and_certs,
 };
 
-const SNAPSHOT_SSE: &str =
+const CLIENT_SNAPSHOT_SSE: &str =
     "event: snapshot\ndata: {\"revision\":\"rev-1\",\"input\":{\"server_addresses\":[]}}\n\n";
+const SERVER_SNAPSHOT_SSE: &str =
+    "event: snapshot\ndata: {\"revision\":\"rev-1\",\"input\":{\"tunnels\":[]}}\n\n";
 const REDIRECT_TARGET: &str = "/v1/client/events/redirect-target";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +200,23 @@ impl ControlFixture {
     }
 }
 
+struct SessionHandle {
+    stop_tx: tokio::sync::oneshot::Sender<()>,
+    runner: JoinHandle<()>,
+    event_rx: tokio::sync::mpsc::UnboundedReceiver<ManagedSessionEvent>,
+}
+
+impl SessionHandle {
+    async fn stop(self) {
+        let _ = self.stop_tx.send(());
+        let _ = self.runner.await;
+    }
+
+    fn abort(self) {
+        self.runner.abort();
+    }
+}
+
 fn cert_fingerprint(cert: &CertificateDer<'_>) -> String {
     let digest = Sha256::digest(cert.as_ref());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -261,14 +281,25 @@ async fn handle_request(
             .unwrap());
     }
 
-    if path != events_path(ManagedSessionRole::Client)
-        && path != events_path(ManagedSessionRole::Server)
-    {
+    if path == CLIENT_STATE_PATH || path == SERVER_STATE_PATH {
+        return Ok(Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(empty_body())
+            .unwrap());
+    }
+
+    if path != CLIENT_EVENTS_PATH && path != SERVER_EVENTS_PATH {
         return Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(empty_body())
             .unwrap());
     }
+
+    let snapshot_sse = if path == SERVER_EVENTS_PATH {
+        SERVER_SNAPSHOT_SSE
+    } else {
+        CLIENT_SNAPSHOT_SSE
+    };
 
     let behavior = *behavior.lock().unwrap();
     match behavior {
@@ -301,6 +332,7 @@ async fn handle_request(
             metrics.begin_sse();
             let metrics_drop = metrics.clone();
             let body = boxed_stream(HoldAfterSnapshotStream {
+                snapshot_sse,
                 sent_snapshot: false,
                 metrics: Some(metrics_drop),
             });
@@ -314,6 +346,7 @@ async fn handle_request(
 }
 
 struct HoldAfterSnapshotStream {
+    snapshot_sse: &'static str,
     sent_snapshot: bool,
     metrics: Option<Arc<FixtureMetrics>>,
 }
@@ -325,7 +358,7 @@ impl Stream for HoldAfterSnapshotStream {
         if !self.sent_snapshot {
             self.sent_snapshot = true;
             Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(
-                SNAPSHOT_SSE.as_bytes(),
+                self.snapshot_sse.as_bytes(),
             )))))
         } else {
             Poll::Pending
@@ -383,6 +416,94 @@ fn session_material(
     }
 }
 
+async fn spawn_client_session(address: ControlAddress, material: SessionMaterial) -> SessionHandle {
+    let mut session = ManagedSession::new(address, ManagedSessionRole::Client, material).unwrap();
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        let _ = session
+            .run(
+                &mut AcceptingClientAdapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+    SessionHandle {
+        stop_tx,
+        runner,
+        event_rx,
+    }
+}
+
+async fn spawn_server_session(address: ControlAddress, material: SessionMaterial) -> SessionHandle {
+    let mut session = ManagedSession::new(address, ManagedSessionRole::Server, material).unwrap();
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        let _ = session
+            .run(
+                &mut AcceptingServerAdapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+    SessionHandle {
+        stop_tx,
+        runner,
+        event_rx,
+    }
+}
+
+async fn wait_for_event<F>(
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ManagedSessionEvent>,
+    mut predicate: F,
+) -> ManagedSessionEvent
+where
+    F: FnMut(&ManagedSessionEvent) -> bool,
+{
+    loop {
+        match event_rx.recv().await {
+            Some(event) if predicate(&event) => return event,
+            Some(_) => {}
+            None => panic!("event channel closed before expected event"),
+        }
+    }
+}
+
+async fn wait_for_applied(
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ManagedSessionEvent>,
+) {
+    let _ = wait_for_event(event_rx, |event| {
+        matches!(event, ManagedSessionEvent::Applied { .. })
+    })
+    .await;
+}
+
+async fn wait_for_reconnecting(
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ManagedSessionEvent>,
+) {
+    let _ = wait_for_event(event_rx, |event| {
+        matches!(event, ManagedSessionEvent::Reconnecting { .. })
+    })
+    .await;
+}
+
 #[test]
 fn invalid_initial_tls_material_fails_session_construction() {
     let dir = tempdir().unwrap();
@@ -416,23 +537,12 @@ async fn session_returns_shutdown_result_to_runtime() {
         ManagedSession::new(address, ManagedSessionRole::Client, session_material).unwrap();
 
     let result = session
-        .run(&mut DeferredClientAdapter, |_event| async {}, async {
+        .run(&mut AcceptingClientAdapter, |_event| async {}, async {
             Err::<(), _>(std::io::Error::other("shutdown unavailable"))
         })
         .await;
 
     assert_eq!(result.unwrap_err().to_string(), "shutdown unavailable");
-}
-
-async fn connect_client(
-    address: &ControlAddress,
-    material: &SessionMaterial,
-    role: ManagedSessionRole,
-) -> ManagedSessionConnection {
-    let tls = load_control_tls_material(material).unwrap();
-    ManagedSessionConnection::connect(address, &tls, role)
-        .await
-        .unwrap()
 }
 
 #[tokio::test]
@@ -448,12 +558,13 @@ async fn mtls_peer_identity_is_observed_by_control_fixture() {
         &paths.client_key,
     );
 
-    let _connection = connect_client(
-        &fixture.control_address(),
-        &session,
-        ManagedSessionRole::Client,
+    let mut handle = spawn_client_session(fixture.control_address(), session).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_applied(&mut handle.event_rx),
     )
-    .await;
+    .await
+    .expect("session should apply the first snapshot");
 
     {
         let fingerprints = fixture.metrics.peer_cert_fingerprints.lock().unwrap();
@@ -464,6 +575,7 @@ async fn mtls_peer_identity_is_observed_by_control_fixture() {
         assert_eq!(fingerprints[0], expected);
     }
 
+    handle.stop().await;
     fixture.shutdown().await;
 }
 
@@ -480,12 +592,13 @@ async fn http2_alpn_is_negotiated_on_fixture_and_client() {
         &paths.client_key,
     );
 
-    let _connection = connect_client(
-        &fixture.control_address(),
-        &session,
-        ManagedSessionRole::Client,
+    let mut handle = spawn_client_session(fixture.control_address(), session).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_applied(&mut handle.event_rx),
     )
-    .await;
+    .await
+    .expect("session should apply the first snapshot");
 
     {
         let alpn = fixture.metrics.negotiated_alpn.lock().unwrap();
@@ -493,6 +606,7 @@ async fn http2_alpn_is_negotiated_on_fixture_and_client() {
         assert_eq!(alpn[0].as_deref(), Some(CONTROL_ALPN_H2));
     }
 
+    handle.stop().await;
     fixture.shutdown().await;
 }
 
@@ -509,18 +623,39 @@ async fn client_role_uses_exact_events_path_without_selectors() {
         &paths.client_key,
     );
 
-    let _connection = connect_client(
-        &fixture.control_address(),
-        &session,
-        ManagedSessionRole::Client,
+    let mut handle = spawn_client_session(fixture.control_address(), session).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_applied(&mut handle.event_rx),
     )
-    .await;
+    .await
+    .expect("session should apply the first snapshot");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture
+                .metrics
+                .request_paths
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path == CLIENT_STATE_PATH)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("applied revision should be reported on the state path");
 
     {
         let paths_seen = fixture.metrics.request_paths.lock().unwrap();
-        assert_eq!(*paths_seen, vec![events_path(ManagedSessionRole::Client)]);
+        assert_eq!(paths_seen[0], CLIENT_EVENTS_PATH);
+        assert!(paths_seen.iter().any(|path| path == CLIENT_STATE_PATH));
+        assert!(paths_seen.iter().all(|path| !path.contains('?')));
     }
 
+    handle.stop().await;
     fixture.shutdown().await;
 }
 
@@ -537,18 +672,39 @@ async fn server_role_uses_exact_events_path_without_selectors() {
         &paths.client_key,
     );
 
-    let _connection = connect_client(
-        &fixture.control_address(),
-        &session,
-        ManagedSessionRole::Server,
+    let mut handle = spawn_server_session(fixture.control_address(), session).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_applied(&mut handle.event_rx),
     )
-    .await;
+    .await
+    .expect("session should apply the first snapshot");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture
+                .metrics
+                .request_paths
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path == SERVER_STATE_PATH)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("applied revision should be reported on the state path");
 
     {
         let paths_seen = fixture.metrics.request_paths.lock().unwrap();
-        assert_eq!(*paths_seen, vec![events_path(ManagedSessionRole::Server)]);
+        assert_eq!(paths_seen[0], SERVER_EVENTS_PATH);
+        assert!(paths_seen.iter().any(|path| path == SERVER_STATE_PATH));
+        assert!(paths_seen.iter().all(|path| !path.contains('?')));
     }
 
+    handle.stop().await;
     fixture.shutdown().await;
 }
 
@@ -565,16 +721,18 @@ async fn exactly_one_sse_downlink_opens_per_connection() {
         &paths.client_key,
     );
 
-    let _connection = connect_client(
-        &fixture.control_address(),
-        &session,
-        ManagedSessionRole::Client,
+    let mut handle = spawn_client_session(fixture.control_address(), session).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_applied(&mut handle.event_rx),
     )
-    .await;
+    .await
+    .expect("session should apply the first snapshot");
 
     assert_eq!(fixture.metrics.concurrent_sse.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.metrics.max_concurrent_sse.load(Ordering::SeqCst), 1);
 
+    handle.stop().await;
     fixture.shutdown().await;
 }
 
@@ -590,54 +748,25 @@ async fn redirects_are_not_followed_and_fail_the_session() {
         &paths.client_cert,
         &paths.client_key,
     );
-    let tls = load_control_tls_material(&session).unwrap();
 
-    let error = match ManagedSessionConnection::connect(
-        &fixture.control_address(),
-        &tls,
-        ManagedSessionRole::Client,
+    let mut handle = spawn_client_session(fixture.control_address(), session).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_reconnecting(&mut handle.event_rx),
     )
     .await
-    {
-        Ok(_) => panic!("expected redirect to fail the SSE handshake"),
-        Err(error) => error,
-    };
-    assert!(matches!(error, ConnectionError::SseRejected));
+    .expect("redirect should fail the session into reconnect");
 
     {
         let paths_seen = fixture.metrics.request_paths.lock().unwrap();
-        assert_eq!(*paths_seen, vec![events_path(ManagedSessionRole::Client)]);
+        assert!(paths_seen.iter().all(|path| path == CLIENT_EVENTS_PATH));
         assert_eq!(
             fixture.metrics.redirect_target_hits.load(Ordering::SeqCst),
             0
         );
     }
 
-    fixture.shutdown().await;
-}
-
-#[tokio::test]
-async fn connection_is_ready_for_additional_streams_after_successful_sse() {
-    let material = generate_control_mtls_material("runewarp-client-a");
-    let fixture = ControlFixture::start(&material, SseBehavior::SuccessSnapshot).await;
-    let dir = tempdir().unwrap();
-    let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
-
-    let connection = connect_client(
-        &fixture.control_address(),
-        &session,
-        ManagedSessionRole::Client,
-    )
-    .await;
-
-    assert!(connection.can_send_additional_request());
-
+    handle.stop().await;
     fixture.shutdown().await;
 }
 
@@ -653,19 +782,9 @@ async fn sse_failure_establishes_a_new_tls_connection() {
         &paths.client_cert,
         &paths.client_key,
     );
-    let address = fixture.control_address();
-
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let mut session_runner =
-        ManagedSession::new(address, ManagedSessionRole::Client, session).unwrap();
     let metrics = fixture.metrics.clone();
-    let runner = tokio::spawn(async move {
-        session_runner
-            .run(&mut DeferredClientAdapter, |_event| async {}, async {
-                let _ = stop_rx.await;
-            })
-            .await;
-    });
+
+    let handle = spawn_client_session(fixture.control_address(), session).await;
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -678,10 +797,8 @@ async fn sse_failure_establishes_a_new_tls_connection() {
     .await
     .expect("expected a second TLS handshake after SSE failure");
 
-    let _ = stop_tx.send(());
-    let _ = runner.await;
     assert!(fixture.metrics.tls_accepts.load(Ordering::SeqCst) >= 2);
-
+    handle.stop().await;
     fixture.shutdown().await;
 }
 
@@ -707,7 +824,7 @@ async fn response_header_stall_reconnects_after_first_snapshot_deadline() {
     let runner = tokio::spawn(async move {
         session
             .run(
-                &mut DeferredClientAdapter,
+                &mut AcceptingClientAdapter,
                 move |event| {
                     let event_tx = event_tx.clone();
                     async move {
@@ -744,38 +861,12 @@ async fn silence_after_snapshot_reconnects_the_session() {
         &paths.client_cert,
         &paths.client_key,
     );
-    let mut session = ManagedSession::new(
-        fixture.control_address(),
-        ManagedSessionRole::Client,
-        session_material,
-    )
-    .unwrap();
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let runner = tokio::spawn(async move {
-        session
-            .run(
-                &mut DeferredClientAdapter,
-                move |event| {
-                    let event_tx = event_tx.clone();
-                    async move {
-                        let _ = event_tx.send(event);
-                    }
-                },
-                std::future::pending::<()>(),
-            )
-            .await;
-    });
+    let mut handle = spawn_client_session(fixture.control_address(), session_material).await;
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if matches!(
-                event_rx.recv().await,
-                Some(ManagedSessionEvent::Applied { .. })
-            ) {
-                break;
-            }
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_applied(&mut handle.event_rx),
+    )
     .await
     .expect("first snapshot should apply before silence starts");
 
@@ -784,20 +875,15 @@ async fn silence_after_snapshot_reconnects_the_session() {
 
     // Pause only after apply so connection setup uses real I/O timing.
     tokio::time::pause();
-    tokio::time::advance(SILENCE_TIMEOUT + Duration::from_secs(1)).await;
+    tokio::time::advance(MANAGED_SESSION_SILENCE_TIMEOUT + Duration::from_secs(1)).await;
     for _ in 0..20 {
         tokio::task::yield_now().await;
     }
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match event_rx.recv().await {
-                Some(ManagedSessionEvent::Reconnecting { .. }) => break,
-                Some(_) => {}
-                None => panic!("event channel closed before silence reconnect"),
-            }
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_reconnecting(&mut handle.event_rx),
+    )
     .await
     .expect("60s silence after a valid snapshot must fail the session");
 
@@ -814,8 +900,7 @@ async fn silence_after_snapshot_reconnects_the_session() {
     .await
     .expect("silence failure must replace the whole Managed-session TLS connection");
 
-    runner.abort();
-    let _ = runner.await;
+    handle.abort();
     fixture.shutdown().await;
 }
 
@@ -831,20 +916,16 @@ async fn wrong_content_type_is_treated_as_session_failure() {
         &paths.client_cert,
         &paths.client_key,
     );
-    let tls = load_control_tls_material(&session).unwrap();
 
-    let error = match ManagedSessionConnection::connect(
-        &fixture.control_address(),
-        &tls,
-        ManagedSessionRole::Client,
+    let mut handle = spawn_client_session(fixture.control_address(), session).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_reconnecting(&mut handle.event_rx),
     )
     .await
-    {
-        Ok(_) => panic!("expected wrong content type to fail the SSE handshake"),
-        Err(error) => error,
-    };
-    assert!(matches!(error, ConnectionError::SseRejected));
+    .expect("wrong content type should fail the session into reconnect");
 
+    handle.stop().await;
     fixture.shutdown().await;
 }
 
@@ -862,22 +943,51 @@ async fn reloading_identity_files_presents_new_client_certificate() {
         &paths.client_cert,
         &paths.client_key,
     );
-    let address = fixture.control_address();
 
-    let _first = connect_client(&address, &session, ManagedSessionRole::Client).await;
+    let mut handle = spawn_client_session(fixture.control_address(), session).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_applied(&mut handle.event_rx),
+    )
+    .await
+    .expect("first snapshot should apply before identity reload");
+
     let first_fingerprint = {
         let fingerprints = fixture.metrics.peer_cert_fingerprints.lock().unwrap();
         fingerprints[0].clone()
     };
-    drop(_first);
 
     fs::write(&paths.client_cert, &client_b_cert_pem).unwrap();
     fs::write(&paths.client_key, &client_b_key_pem).unwrap();
 
-    let _second = connect_client(&address, &session, ManagedSessionRole::Client).await;
+    // Force reconnect so the next handshake reloads identity paths from disk.
+    tokio::time::pause();
+    tokio::time::advance(MANAGED_SESSION_SILENCE_TIMEOUT + Duration::from_secs(1)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_reconnecting(&mut handle.event_rx),
+    )
+    .await
+    .expect("silence should force reconnect after identity rewrite");
+    tokio::time::resume();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture.metrics.tls_accepts.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("identity reload requires a second TLS handshake");
+
     {
         let fingerprints = fixture.metrics.peer_cert_fingerprints.lock().unwrap();
-        assert_eq!(fingerprints.len(), 2);
+        assert!(fingerprints.len() >= 2);
         assert_ne!(fingerprints[0], fingerprints[1]);
         assert_eq!(fingerprints[0], first_fingerprint);
         let expected_b = cert_fingerprint(
@@ -886,5 +996,6 @@ async fn reloading_identity_files_presents_new_client_certificate() {
         assert_eq!(fingerprints[1], expected_b);
     }
 
+    handle.stop().await;
     fixture.shutdown().await;
 }

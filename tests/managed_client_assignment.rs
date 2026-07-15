@@ -26,14 +26,13 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     AddressController, AddressWorkerControl, AssignmentConvergence, CLIENT_CERT_FILENAME,
-    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, CONTROL_ALPN_H2, ClientConfig, ClientIdentity,
+    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientConfig, ClientIdentity,
     ClientInstancePrep, ClientTlsMode, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
     LogLevel, MaintenanceIntent, ManagedSession, ManagedSessionEvent, ManagedSessionRole,
     OrderlyShutdown, PreparedClient, PublicHostname, QUIC_CLOSE_FLUSH_DURATION, Server,
     ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
     ServerTunnelConfig, ServiceConfig, SessionMaterial, ShutdownMode,
-    client_identity_from_certificate_der, events_path,
-    make_server_quic_config_with_client_admission, state_path,
+    client_identity_from_certificate_der, make_server_quic_config_with_client_admission,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -50,7 +49,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-use common::{ControlMtlsMaterial, generate_control_mtls_material, write_control_ca_and_certs};
+use common::{
+    CLIENT_EVENTS_PATH, CLIENT_STATE_PATH, CONTROL_ALPN_H2, ControlMtlsMaterial,
+    generate_control_mtls_material, write_control_ca_and_certs,
+};
 
 const APP_HOSTNAME: &str = "app.example.test";
 
@@ -1065,7 +1067,7 @@ async fn handle_request(
     snapshots: Arc<AsyncMutex<mpsc::UnboundedReceiver<String>>>,
 ) -> Result<Response<HttpBoxBody<Bytes, Infallible>>, hyper::Error> {
     let path = request.uri().path().to_owned();
-    if path == events_path(ManagedSessionRole::Client) {
+    if path == CLIENT_EVENTS_PATH {
         // Poll the shared snapshot channel without holding the mutex across
         // awaits so a replaced Control connection can receive later snapshots.
         let body = HttpBoxBody::new(StreamBody::new(SnapshotFeedStream { snapshots }));
@@ -1075,7 +1077,7 @@ async fn handle_request(
             .body(body)
             .unwrap());
     }
-    if path == state_path(ManagedSessionRole::Client) {
+    if path == CLIENT_STATE_PATH {
         let body = request.collect().await?.to_bytes();
         let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         metrics.state_bodies.lock().unwrap().push(value);

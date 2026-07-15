@@ -21,9 +21,9 @@ use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
-    ApplyError, CONTROL_ALPN_H2, ClientManagedInput, ControlAddress, ControlClientIdentityMaterial,
-    ControlTrust, DeferredClientAdapter, ManagedSession, ManagedSessionEvent, ManagedSessionLimits,
-    ManagedSessionRole, RoleAdapter, SessionMaterial, events_path, state_path,
+    ApplyError, ClientManagedInput, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
+    ManagedSession, ManagedSessionEvent, ManagedSessionLimits, ManagedSessionRole, RoleAdapter,
+    SessionMaterial, parse_client_input,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -37,7 +37,11 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
-use common::{ControlMtlsMaterial, generate_control_mtls_material, write_control_ca_and_certs};
+use common::{
+    AcceptingClientAdapter, CLIENT_EVENTS_PATH, CLIENT_STATE_PATH, CONTROL_ALPN_H2,
+    ControlMtlsMaterial, SERVER_EVENTS_PATH, SERVER_STATE_PATH, generate_control_mtls_material,
+    write_control_ca_and_certs,
+};
 
 #[derive(Clone, Debug)]
 enum StateBehavior {
@@ -259,9 +263,7 @@ async fn handle_request(
         .unwrap()
         .push(format!("{method} {path}"));
 
-    if path == events_path(ManagedSessionRole::Client)
-        || path == events_path(ManagedSessionRole::Server)
-    {
+    if path == CLIENT_EVENTS_PATH || path == SERVER_EVENTS_PATH {
         metrics.begin_stream();
         let metrics_drop = metrics.clone();
         let body = boxed_stream(SnapshotFeedStream {
@@ -276,9 +278,7 @@ async fn handle_request(
             .unwrap());
     }
 
-    if path == state_path(ManagedSessionRole::Client)
-        || path == state_path(ManagedSessionRole::Server)
-    {
+    if path == CLIENT_STATE_PATH || path == SERVER_STATE_PATH {
         metrics.begin_stream();
         let body = request.collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
@@ -415,7 +415,7 @@ impl RoleAdapter for RecordingAdapter {
         input: Value,
         limits: &runewarp::ManagedSessionLimits,
     ) -> Result<Self::Input, runewarp::InputError> {
-        DeferredClientAdapter::parse_input(input, limits)
+        parse_client_input(input, limits)
     }
 
     async fn apply(&mut self, input: Self::Input) -> Result<(), ApplyError> {
@@ -458,7 +458,7 @@ impl RoleAdapter for GatedAdapter {
         input: Value,
         limits: &runewarp::ManagedSessionLimits,
     ) -> Result<Self::Input, runewarp::InputError> {
-        DeferredClientAdapter::parse_input(input, limits)
+        parse_client_input(input, limits)
     }
 
     async fn apply(&mut self, input: Self::Input) -> Result<(), ApplyError> {
@@ -543,12 +543,12 @@ async fn apply_acknowledges_revision_on_same_connection_with_exact_payload() {
         assert!(
             paths
                 .iter()
-                .any(|path| path == &format!("GET {}", events_path(ManagedSessionRole::Client)))
+                .any(|path| path == &format!("GET {CLIENT_EVENTS_PATH}"))
         );
         assert!(
             paths
                 .iter()
-                .any(|path| path == &format!("PUT {}", state_path(ManagedSessionRole::Client)))
+                .any(|path| path == &format!("PUT {CLIENT_STATE_PATH}"))
         );
         assert_eq!(fixture.metrics.tls_accepts.load(Ordering::SeqCst), 1);
         assert!(
@@ -583,7 +583,7 @@ async fn applied_revision_is_not_repeated_without_another_snapshot() {
         session_material,
     )
     .unwrap();
-    let mut adapter = DeferredClientAdapter;
+    let mut adapter = AcceptingClientAdapter;
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let metrics = fixture.metrics.clone();
     let runner = tokio::spawn(async move {
@@ -638,7 +638,7 @@ async fn state_acknowledgment_failure_reconnects_and_reacks_equal_snapshot() {
         session_material,
     )
     .unwrap();
-    let mut adapter = DeferredClientAdapter;
+    let mut adapter = AcceptingClientAdapter;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let metrics = fixture.metrics.clone();
@@ -727,7 +727,7 @@ async fn state_acknowledgment_timeout_reconnects_session() {
         session_material,
     )
     .unwrap();
-    let mut adapter = DeferredClientAdapter;
+    let mut adapter = AcceptingClientAdapter;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let runner = tokio::spawn(async move {
@@ -1254,9 +1254,7 @@ async fn state_acknowledgments_begin_only_after_first_successful_apply() {
         loop {
             let opened = {
                 let paths = fixture.metrics.request_paths.lock().unwrap();
-                paths
-                    .iter()
-                    .any(|path| path.contains(events_path(ManagedSessionRole::Client)))
+                paths.iter().any(|path| path.contains(CLIENT_EVENTS_PATH))
             };
             if opened {
                 break;
@@ -1328,7 +1326,7 @@ async fn body_bearing_204_reconnects_session() {
         session_material,
     )
     .unwrap();
-    let mut adapter = DeferredClientAdapter;
+    let mut adapter = AcceptingClientAdapter;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let runner = tokio::spawn(async move {
@@ -1400,7 +1398,7 @@ async fn stalled_report_does_not_block_later_snapshot_apply() {
         session_material,
     )
     .unwrap();
-    let mut adapter = DeferredClientAdapter;
+    let mut adapter = AcceptingClientAdapter;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let runner = tokio::spawn(async move {
@@ -1490,7 +1488,7 @@ async fn cardinality_limit_violation_replaces_session() {
         limits,
     )
     .unwrap();
-    let mut adapter = DeferredClientAdapter;
+    let mut adapter = AcceptingClientAdapter;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let runner = tokio::spawn(async move {
@@ -1552,7 +1550,7 @@ async fn reporting_coalesces_to_latest_pending_revision() {
         session_material,
     )
     .unwrap();
-    let mut adapter = DeferredClientAdapter;
+    let mut adapter = AcceptingClientAdapter;
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let runner = tokio::spawn(async move {
@@ -1646,6 +1644,151 @@ async fn reporting_coalesces_to_latest_pending_revision() {
     })
     .await
     .expect("reports must coalesce to rev-1 then latest pending rev-3 (skipping rev-2)");
+
+    let _ = stop_tx.send(());
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn fragmented_sse_line_limit_replaces_session() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    // Empty initial feed; fragments are pushed after the session is running.
+    let fixture = ControlFixture::start(&material, Vec::new()).await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let limits = ManagedSessionLimits {
+        max_sse_line_bytes: 8,
+        ..ManagedSessionLimits::default()
+    };
+    let mut session = ManagedSession::with_limits(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+        limits,
+    )
+    .unwrap();
+    let mut adapter = AcceptingClientAdapter;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+
+    // Wait until the SSE downlink is open, then feed an oversize line across
+    // multiple HTTP body frames so the session enforces the limit incrementally.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture.metrics.concurrent_streams.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("SSE downlink should open");
+
+    fixture.push_snapshot("aaaa".to_owned());
+    fixture.push_snapshot("bbbb".to_owned());
+    fixture.push_snapshot("c".to_owned());
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Reconnecting { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("fragmented oversize SSE line must replace the Managed session");
+
+    assert!(
+        fixture.metrics.state_bodies.lock().unwrap().is_empty(),
+        "limit violations must not be acknowledged"
+    );
+
+    let _ = stop_tx.send(());
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn snapshot_byte_limit_replaces_session() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let oversized = format!(
+        "event: snapshot\ndata: {{\"revision\":\"rev-big\",\"input\":{{\"server_addresses\":[{}]}}}}\n\n",
+        "\"host.example.test\"".repeat(20)
+    );
+    let fixture = ControlFixture::start(&material, vec![oversized]).await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let limits = ManagedSessionLimits {
+        max_snapshot_bytes: 64,
+        max_sse_event_data_bytes: 1024,
+        ..ManagedSessionLimits::default()
+    };
+    let mut session = ManagedSession::with_limits(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+        limits,
+    )
+    .unwrap();
+    let mut adapter = AcceptingClientAdapter;
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                event_rx.recv().await,
+                Some(ManagedSessionEvent::Reconnecting { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("snapshot byte limit violation must replace the Managed session");
+
+    assert!(
+        fixture.metrics.state_bodies.lock().unwrap().is_empty(),
+        "oversized snapshot must not be acknowledged"
+    );
 
     let _ = stop_tx.send(());
     let _ = runner.await;

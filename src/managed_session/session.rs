@@ -16,7 +16,7 @@ use super::reconcile::{AppliedRevision, QueuedSnapshot, SnapshotQueue};
 use super::role::ManagedSessionRole;
 use super::snapshot::{SnapshotEnvelope, SnapshotError, parse_snapshot_event};
 use super::sse::{SseParseError, SseParseItem, SseParser};
-use super::timing::{FIRST_SNAPSHOT_DEADLINE, SessionClock, SessionDeadlines, SystemSessionClock};
+use super::timing::{FIRST_SNAPSHOT_DEADLINE, SessionDeadlines};
 use super::tls::{ControlTlsMaterialError, SessionMaterial, load_control_tls_material};
 use crate::ControlAddress;
 use crate::reconnect_policy::ReconnectPolicy;
@@ -42,7 +42,7 @@ pub enum ManagedSessionEvent {
 }
 
 #[derive(Debug)]
-pub enum ManagedSessionError {
+pub(crate) enum ManagedSessionError {
     TlsMaterial(ControlTlsMaterialError),
     Connection(ConnectionError),
     Sse(SseParseError),
@@ -93,17 +93,16 @@ impl std::error::Error for ManagedSessionError {
 }
 
 /// Role-neutral Managed-session engine.
-pub struct ManagedSession<C = SystemSessionClock> {
+pub struct ManagedSession {
     address: ControlAddress,
     role: ManagedSessionRole,
     material: SessionMaterial,
     limits: ManagedSessionLimits,
-    clock: C,
     reconnect: ReconnectPolicy<StdRng>,
     applied: AppliedRevision,
 }
 
-impl ManagedSession<SystemSessionClock> {
+impl ManagedSession {
     pub fn new(
         address: ControlAddress,
         role: ManagedSessionRole,
@@ -118,33 +117,6 @@ impl ManagedSession<SystemSessionClock> {
         material: SessionMaterial,
         limits: ManagedSessionLimits,
     ) -> Result<Self, ControlTlsMaterialError> {
-        Self::with_clock_and_limits(address, role, material, SystemSessionClock, limits)
-    }
-}
-
-impl<C: SessionClock> ManagedSession<C> {
-    pub fn with_clock(
-        address: ControlAddress,
-        role: ManagedSessionRole,
-        material: SessionMaterial,
-        clock: C,
-    ) -> Result<Self, ControlTlsMaterialError> {
-        Self::with_clock_and_limits(
-            address,
-            role,
-            material,
-            clock,
-            ManagedSessionLimits::default(),
-        )
-    }
-
-    pub fn with_clock_and_limits(
-        address: ControlAddress,
-        role: ManagedSessionRole,
-        material: SessionMaterial,
-        clock: C,
-        limits: ManagedSessionLimits,
-    ) -> Result<Self, ControlTlsMaterialError> {
         // Initial local material is a startup invariant. Later connection
         // attempts reload the same paths so post-start replacement failures
         // remain recoverable through the reconnect loop.
@@ -154,7 +126,6 @@ impl<C: SessionClock> ManagedSession<C> {
             role,
             material,
             limits,
-            clock,
             reconnect: ReconnectPolicy::new(),
             applied: AppliedRevision::new(),
         })
@@ -234,7 +205,7 @@ impl<C: SessionClock> ManagedSession<C> {
         let mut loop_state = ConnectionLoop::<A::Input> {
             connection,
             parser: SseParser::new(self.limits),
-            deadlines: SessionDeadlines::new(self.clock.now()),
+            deadlines: SessionDeadlines::new(Instant::now()),
             received_valid_snapshot: false,
             queue: SnapshotQueue::new(),
             report: ReportState::default(),
@@ -271,7 +242,7 @@ impl<C: SessionClock> ManagedSession<C> {
                 return Ok(pending);
             }
 
-            let wait = next_wait(&loop_state.deadlines, self.clock.now());
+            let wait = next_wait(&loop_state.deadlines, Instant::now());
             if let Some(report) = loop_state.report.in_flight.as_mut() {
                 tokio::select! {
                     chunk = loop_state.connection.next_chunk() => {
@@ -322,7 +293,7 @@ impl<C: SessionClock> ManagedSession<C> {
 
         let apply_result = loop {
             self.drive_report(loop_state)?;
-            let wait = next_wait(&loop_state.deadlines, self.clock.now());
+            let wait = next_wait(&loop_state.deadlines, Instant::now());
             if let Some(report) = loop_state.report.in_flight.as_mut() {
                 tokio::select! {
                     result = &mut apply => break result,
@@ -392,7 +363,7 @@ impl<C: SessionClock> ManagedSession<C> {
             return Ok(());
         }
 
-        let now = self.clock.now();
+        let now = Instant::now();
         loop_state.deadlines.note_bytes(now);
 
         let items = loop_state.parser.push(&bytes).map_err(|error| {
@@ -489,7 +460,7 @@ impl<C: SessionClock> ManagedSession<C> {
         &self,
         loop_state: &mut ConnectionLoop<I>,
     ) -> Result<(), ManagedSessionError> {
-        let now = self.clock.now();
+        let now = Instant::now();
         if loop_state.deadlines.expired(now) {
             if !loop_state.received_valid_snapshot
                 && now >= loop_state.deadlines.first_snapshot_deadline

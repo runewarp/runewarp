@@ -13,6 +13,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures_util::FutureExt;
 use futures_util::stream::Stream;
 use http::header::CONTENT_TYPE;
 use http::{Request, Response, StatusCode};
@@ -24,9 +25,8 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    AddressController, AddressWorkerControl, AssignmentConvergence, AssignmentConvergenceTracker,
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, CONTROL_ALPN_H2,
-    ClientAssignmentAdapter, ClientAssignmentApply, ClientConfig, ClientIdentity,
+    AddressController, AddressWorkerControl, AssignmentConvergence, CLIENT_CERT_FILENAME,
+    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, CONTROL_ALPN_H2, ClientConfig, ClientIdentity,
     ClientInstancePrep, ClientTlsMode, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
     LogLevel, MaintenanceIntent, ManagedSession, ManagedSessionEvent, ManagedSessionRole,
     OrderlyShutdown, PreparedClient, PublicHostname, QUIC_CLOSE_FLUSH_DURATION, Server,
@@ -168,9 +168,8 @@ struct ManagedClientHarness {
     event_rx: mpsc::UnboundedReceiver<ManagedSessionEvent>,
     stop_tx: Option<oneshot::Sender<()>>,
     runtime_task: JoinHandle<Result<(), String>>,
-    worker_count: Arc<Mutex<usize>>,
+    controller_view: runewarp::AddressControllerView,
     dial_attempts: Arc<AtomicUsize>,
-    convergence: AssignmentConvergenceTracker,
 }
 
 impl ManagedClientHarness {
@@ -225,16 +224,14 @@ impl ManagedClientHarness {
             }),
         };
         let settings = Arc::new(settings);
-        let worker_count = Arc::new(Mutex::new(0usize));
         let dial_attempts = Arc::new(AtomicUsize::new(0));
-        let convergence = AssignmentConvergenceTracker::new();
-
-        let mut controller = AddressController::new();
-        controller.disable_client_ready_log();
-        let (apply_tx, mut apply_rx) = mpsc::unbounded_channel::<ClientAssignmentApply>();
-        let mut adapter = ClientAssignmentAdapter::new(apply_tx);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
+
+        let instance = ClientInstancePrep::prepare(settings.as_ref())
+            .await
+            .expect("client instance should prepare");
+        instance.start_acme_once();
 
         let session_material = SessionMaterial {
             control_hostname: "localhost".to_owned(),
@@ -248,15 +245,34 @@ impl ManagedClientHarness {
         )
         .unwrap();
 
-        let worker_count_task = Arc::clone(&worker_count);
-        let dial_attempts_task = Arc::clone(&dial_attempts);
-        let convergence_task = convergence.clone();
+        let factory: runewarp::AddressWorkerFactory = {
+            let settings = Arc::clone(&settings);
+            let instance = Arc::clone(&instance);
+            let dial_attempts = Arc::clone(&dial_attempts);
+            Arc::new(move |server_address, control| {
+                let settings = Arc::clone(&settings);
+                let instance = Arc::clone(&instance);
+                let dial_attempts = Arc::clone(&dial_attempts);
+                async move {
+                    run_test_address_worker(
+                        settings,
+                        instance,
+                        server_address,
+                        localhost(0),
+                        control,
+                        dial_attempts,
+                    )
+                    .await
+                }
+                .boxed()
+            })
+        };
+
+        let (mut controller, mut adapter) = AddressController::for_managed(factory);
+        let controller_view = controller.view();
+        let shutdown = controller.shutdown_handle();
+
         let runtime_task = tokio::spawn(async move {
-            let instance = match ClientInstancePrep::prepare(settings.as_ref()).await {
-                Ok(instance) => instance,
-                Err(error) => return Err(error.to_string()),
-            };
-            instance.start_acme_once();
             let session_runtime = session.run(
                 &mut adapter,
                 move |event| {
@@ -270,64 +286,16 @@ impl ManagedClientHarness {
                 },
             );
             tokio::pin!(session_runtime);
-            let shutdown = controller.shutdown_handle();
-            loop {
-                let drive_workers = controller.has_inflight_workers();
-                *worker_count_task.lock().unwrap() = controller.worker_count();
-                tokio::select! {
-                    biased;
-                    apply = apply_rx.recv() => {
-                        let Some(ClientAssignmentApply { addresses, done }) = apply else {
-                            break;
-                        };
-                        let _ = convergence_task.set_assigned(&addresses);
-                        controller.replace_intent(&addresses, {
-                            let settings = Arc::clone(&settings);
-                            let instance = Arc::clone(&instance);
-                            let convergence = convergence_task.clone();
-                            let dial_attempts = Arc::clone(&dial_attempts_task);
-                            move |server_address, control| {
-                                let settings = Arc::clone(&settings);
-                                let instance = Arc::clone(&instance);
-                                let convergence = Some(convergence.clone());
-                                let dial_attempts = Arc::clone(&dial_attempts);
-                                async move {
-                                    run_test_address_worker(
-                                        settings,
-                                        instance,
-                                        server_address,
-                                        localhost(0),
-                                        control,
-                                        convergence,
-                                        dial_attempts,
-                                    )
-                                    .await
-                                }
-                            }
-                        });
-                        let _ = done.send(Ok(()));
-                    }
-                    completion = controller.next_completion(), if drive_workers => {
-                        match completion {
-                            Some(Ok(_)) => {}
-                            Some(Err((_address, error))) => {
-                                shutdown.request();
-                                instance.stop_acme().await;
-                                return Err(error);
-                            }
-                            None => {}
-                        }
-                    }
-                    () = &mut session_runtime => {
-                        shutdown.request();
-                        controller.run_until_idle().await?;
-                        instance.stop_acme().await;
-                        return Ok(());
-                    }
+            let runtime = controller.run();
+            tokio::pin!(runtime);
+
+            let result = tokio::select! {
+                result = &mut runtime => result,
+                _session_done = &mut session_runtime => {
+                    shutdown.request();
+                    runtime.await
                 }
-            }
-            shutdown.request();
-            let result = controller.run_until_idle().await;
+            };
             instance.stop_acme().await;
             result
         });
@@ -344,9 +312,8 @@ impl ManagedClientHarness {
             event_rx,
             stop_tx: Some(stop_tx),
             runtime_task,
-            worker_count,
+            controller_view,
             dial_attempts,
-            convergence,
         }
     }
 
@@ -397,7 +364,7 @@ impl ManagedClientHarness {
     }
 
     fn worker_count(&self) -> usize {
-        *self.worker_count.lock().unwrap()
+        self.controller_view.worker_count()
     }
 
     fn dial_attempts(&self) -> usize {
@@ -405,7 +372,7 @@ impl ManagedClientHarness {
     }
 
     fn convergence(&self) -> AssignmentConvergence {
-        self.convergence.current()
+        self.controller_view.assignment_convergence()
     }
 
     async fn shutdown(mut self) {
@@ -696,10 +663,9 @@ async fn managed_client_fatal_worker_exits_the_runtime() {
     )
     .unwrap();
 
-    let mut controller = AddressController::new();
-    controller.disable_client_ready_log();
-    let (apply_tx, mut apply_rx) = mpsc::unbounded_channel::<ClientAssignmentApply>();
-    let mut adapter = ClientAssignmentAdapter::new(apply_tx);
+    let factory: runewarp::AddressWorkerFactory =
+        Arc::new(|_address, _control| async { Err("worker exploded".to_owned()) }.boxed());
+    let (mut controller, mut adapter) = AddressController::for_managed(factory);
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let (_stop_tx, stop_rx) = oneshot::channel::<()>();
     let mut session = ManagedSession::new(
@@ -713,53 +679,23 @@ async fn managed_client_fatal_worker_exits_the_runtime() {
     )
     .unwrap();
 
-    let runtime_task = tokio::spawn(async move {
-        let session_runtime = session.run(
-            &mut adapter,
-            move |event| {
-                let event_tx = event_tx.clone();
-                async move {
-                    let _ = event_tx.send(event);
-                }
-            },
-            async {
-                let _ = stop_rx.await;
-            },
-        );
-        tokio::pin!(session_runtime);
-        let shutdown = controller.shutdown_handle();
-        loop {
-            let drive_workers = controller.has_inflight_workers();
-            tokio::select! {
-                biased;
-                apply = apply_rx.recv() => {
-                    let Some(ClientAssignmentApply { addresses, done }) = apply else {
-                        break;
-                    };
-                    controller.replace_intent(&addresses, |_address, _control| async {
-                        Err("worker exploded".to_owned())
-                    });
-                    let _ = done.send(Ok(()));
-                }
-                completion = controller.next_completion(), if drive_workers => {
-                    match completion {
-                        Some(Ok(_)) => {}
-                        Some(Err((_address, error))) => {
-                            shutdown.request();
-                            return Err(error);
-                        }
-                        None => {}
+    let shutdown = controller.shutdown_handle();
+    let controller_task = tokio::spawn(async move { controller.run().await });
+    let session_task = tokio::spawn(async move {
+        session
+            .run(
+                &mut adapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
                     }
-                }
-                () = &mut session_runtime => {
-                    shutdown.request();
-                    controller.run_until_idle().await?;
-                    return Ok(());
-                }
-            }
-        }
-        shutdown.request();
-        controller.run_until_idle().await
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await
     });
 
     control.push_snapshot(snapshot_sse(
@@ -767,11 +703,13 @@ async fn managed_client_fatal_worker_exits_the_runtime() {
         &json!({ "server_addresses": ["localhost:9"] }).to_string(),
     ));
     wait_for_applied(&mut event_rx, "rev-fatal").await;
-    let result = timeout(Duration::from_secs(5), runtime_task)
+    let result = timeout(Duration::from_secs(5), controller_task)
         .await
         .expect("fatal worker should end the runtime")
         .expect("runtime join");
     assert_eq!(result, Err("worker exploded".to_owned()));
+    shutdown.request();
+    let _ = timeout(Duration::from_secs(2), session_task).await;
     control.shutdown().await;
 }
 
@@ -794,7 +732,6 @@ async fn run_test_address_worker(
     server_address: ServerAddress,
     local_bind_addr: SocketAddr,
     control: AddressWorkerControl,
-    convergence: Option<AssignmentConvergenceTracker>,
     dial_attempts: Arc<AtomicUsize>,
 ) -> Result<(), String> {
     let mut maintenance = control.subscribe_maintenance();
@@ -876,9 +813,7 @@ async fn run_test_address_worker(
             }
         };
 
-        if let Some(tracker) = convergence.as_ref() {
-            let _ = tracker.mark_connected(&server_address);
-        }
+        control.observe_connected(&server_address);
 
         // Retire must not locally close: only process shutdown ends the tunnel run.
         let _run_result = client
@@ -909,9 +844,7 @@ async fn run_test_address_worker(
             })
             .await;
 
-        if let Some(tracker) = convergence.as_ref() {
-            let _ = tracker.mark_disconnected(&server_address);
-        }
+        control.observe_disconnected(&server_address);
 
         if control.shutdown_requested() || control.maintenance_intent() == MaintenanceIntent::Retire
         {

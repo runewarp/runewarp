@@ -6,12 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use runewarp::{
-    AddressController, AddressWorkerControl, AssignmentConvergenceTracker, ClientAssignmentAdapter,
-    ClientAssignmentApply, ClientInstancePrep, MaintenanceIntent, PreparedClient, ServerAddress,
-    ShutdownMode,
+    AddressController, AddressWorkerControl, AddressWorkerFactory, ClientInstancePrep,
+    MaintenanceIntent, PreparedClient, ServerAddress, ShutdownMode,
 };
 use tokio::net::lookup_host;
-use tokio::sync::mpsc;
 
 use runewarp::reconnect_policy::ReconnectPolicy;
 
@@ -35,20 +33,16 @@ pub(crate) async fn run_until_orderly_shutdown<F>(
 where
     F: Future<Output = io::Result<ShutdownMode>>,
 {
-    let mut controller = AddressController::new();
     let settings = Arc::new(settings.clone());
     let instance = ClientInstancePrep::prepare(settings.as_ref()).await?;
     instance.start_acme_once();
-    let shutdown = controller.shutdown_handle();
 
     if let Some(control) = settings.control.as_ref() {
         let result = run_managed_client(
             Arc::clone(&settings),
             Arc::clone(&instance),
             control,
-            controller,
             local_bind_addr,
-            shutdown,
             shutdown_signal,
         )
         .await;
@@ -56,27 +50,16 @@ where
         return result;
     }
 
-    controller.seed_static(settings.server_addresses.clone(), {
-        let settings = Arc::clone(&settings);
-        let instance = Arc::clone(&instance);
-        move |server_address, control| {
-            let settings = Arc::clone(&settings);
-            let instance = Arc::clone(&instance);
-            async move {
-                run_server_address_worker(
-                    settings,
-                    instance,
-                    server_address,
-                    local_bind_addr,
-                    control,
-                    None,
-                )
-                .await
-            }
-        }
-    });
+    let factory = static_address_worker_factory(
+        Arc::clone(&settings),
+        Arc::clone(&instance),
+        local_bind_addr,
+    );
+    let mut controller = AddressController::for_static(factory);
+    controller.seed_configured(settings.server_addresses.clone());
+    let shutdown = controller.shutdown_handle();
 
-    let runtime = controller.run_until_idle();
+    let runtime = controller.run();
     tokio::pin!(runtime);
     tokio::pin!(shutdown_signal);
     let client_result = tokio::select! {
@@ -92,24 +75,41 @@ where
     client_result.map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
 }
 
+fn static_address_worker_factory(
+    settings: Arc<runewarp::ClientConfig>,
+    instance: Arc<ClientInstancePrep>,
+    local_bind_addr: SocketAddr,
+) -> AddressWorkerFactory {
+    Arc::new(move |server_address, control| {
+        let settings = Arc::clone(&settings);
+        let instance = Arc::clone(&instance);
+        Box::pin(run_server_address_worker(
+            settings,
+            instance,
+            server_address,
+            local_bind_addr,
+            control,
+        ))
+    })
+}
+
 async fn run_managed_client<F>(
     settings: Arc<runewarp::ClientConfig>,
     instance: Arc<ClientInstancePrep>,
     control: &runewarp::ControlConfig,
-    mut controller: AddressController,
     local_bind_addr: SocketAddr,
-    shutdown: runewarp::AddressControllerShutdown,
     shutdown_signal: F,
 ) -> Result<(), Box<dyn Error>>
 where
     F: Future<Output = io::Result<ShutdownMode>>,
 {
-    // Managed mode starts with no Server connections until the first valid
-    // assignment apply. Static one-shot Client-ready is replaced by convergence.
-    controller.disable_client_ready_log();
-    let convergence = AssignmentConvergenceTracker::new();
-    let (apply_tx, mut apply_rx) = mpsc::unbounded_channel::<ClientAssignmentApply>();
-    let mut adapter = ClientAssignmentAdapter::new(apply_tx);
+    let factory = static_address_worker_factory(
+        Arc::clone(&settings),
+        Arc::clone(&instance),
+        local_bind_addr,
+    );
+    let (mut controller, mut adapter) = AddressController::for_managed(factory);
+    let shutdown = controller.shutdown_handle();
 
     let material = runewarp::SessionMaterial {
         control_hostname: control.address.hostname().as_str().to_owned(),
@@ -135,75 +135,23 @@ where
         shutdown_signal,
     );
     tokio::pin!(session_runtime);
+    let runtime = controller.run();
+    tokio::pin!(runtime);
 
-    loop {
-        let drive_workers = controller.has_inflight_workers();
-        tokio::select! {
-            biased;
-            apply = apply_rx.recv() => {
-                let Some(ClientAssignmentApply { addresses, done }) = apply else {
-                    break;
-                };
-                // Emit the post-apply aggregate even when status is unchanged so
-                // operators see assignment transitions independently of workers.
-                let status = convergence
-                    .set_assigned(&addresses)
-                    .unwrap_or_else(|| convergence.current());
-                runewarp::runtime_log::client_assignment_convergence(status);
-                // Dispatch maintenance intent without awaiting network convergence.
-                controller.replace_intent(&addresses, {
-                    let settings = Arc::clone(&settings);
-                    let instance = Arc::clone(&instance);
-                    let convergence = convergence.clone();
-                    move |server_address, control| {
-                        let settings = Arc::clone(&settings);
-                        let instance = Arc::clone(&instance);
-                        let convergence = Some(convergence.clone());
-                        async move {
-                            run_server_address_worker(
-                                settings,
-                                instance,
-                                server_address,
-                                local_bind_addr,
-                                control,
-                                convergence,
-                            )
-                            .await
-                        }
-                    }
-                });
-                let _ = done.send(Ok(()));
-            }
-            completion = controller.next_completion(), if drive_workers => {
-                match completion {
-                    Some(Ok(_)) => {}
-                    Some(Err((_address, error))) => {
-                        // Internal fatal failure: stop address workers and exit
-                        // nonzero without waiting for an external shutdown signal.
-                        shutdown.request();
-                        return Err(Box::new(io::Error::other(error)) as Box<dyn Error>);
-                    }
-                    None => {}
-                }
-            }
-            session_result = &mut session_runtime => {
-                let _mode = session_result?;
-                runewarp::runtime_log::client_graceful_shutdown_started();
-                shutdown.request();
-                controller.run_until_idle().await.map_err(|error| {
-                    Box::new(io::Error::other(error)) as Box<dyn Error>
-                })?;
-                return Ok(());
-            }
+    tokio::select! {
+        result = &mut runtime => {
+            result.map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
+        }
+        session_result = &mut session_runtime => {
+            let _mode = session_result?;
+            runewarp::runtime_log::client_graceful_shutdown_started();
+            shutdown.request();
+            runtime.await.map_err(|error| {
+                Box::new(io::Error::other(error)) as Box<dyn Error>
+            })?;
+            Ok(())
         }
     }
-
-    runewarp::runtime_log::client_graceful_shutdown_started();
-    shutdown.request();
-    controller
-        .run_until_idle()
-        .await
-        .map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
 }
 
 async fn run_server_address_worker(
@@ -212,7 +160,6 @@ async fn run_server_address_worker(
     server_address: ServerAddress,
     local_bind_addr: SocketAddr,
     control: AddressWorkerControl,
-    convergence: Option<AssignmentConvergenceTracker>,
 ) -> Result<(), String> {
     let mut connected_once = false;
     let mut reconnect_policy = ReconnectPolicy::new();
@@ -344,9 +291,7 @@ async fn run_server_address_worker(
         if first_connection && control.claim_client_ready_log() {
             runewarp::runtime_log::client_ready(&dial_target.configured_server_addr);
         }
-        if let Some(tracker) = convergence.as_ref()
-            && let Some(status) = tracker.mark_connected(&server_address)
-        {
+        if let Some(status) = control.observe_connected(&server_address) {
             runewarp::runtime_log::client_assignment_convergence(status);
         }
 
@@ -362,9 +307,7 @@ async fn run_server_address_worker(
             })
             .await;
 
-        if let Some(tracker) = convergence.as_ref()
-            && let Some(status) = tracker.mark_disconnected(&server_address)
-        {
+        if let Some(status) = control.observe_disconnected(&server_address) {
             runewarp::runtime_log::client_assignment_convergence(status);
         }
 

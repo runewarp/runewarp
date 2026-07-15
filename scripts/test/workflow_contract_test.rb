@@ -38,10 +38,10 @@ class WorkflowContractTest < Minitest::Test
   def test_ci_requires_dependency_advisory_scan_in_rust_contract
     assert_includes(ci_workflow, "- name: Audit Rust dependencies")
     assert_includes(ci_workflow, "run: ./scripts/audit-dependencies")
-    assert_includes(ci_workflow, "uses: cargo-bins/cargo-binstall@ead08b90bd7b2e6d81963fb9cf0b7239f66d5db4 # v1.21.0")
-    assert_includes(ci_workflow, "version: \"1.21.0\"")
+    assert_includes(ci_workflow, "cargo-binstall-x86_64-unknown-linux-musl.tgz")
+    assert_includes(ci_workflow, "sha256sum --check")
     assert_match(
-      /rust-contract:[\s\S]*Install cargo-binstall[\s\S]*Audit Rust dependencies[\s\S]*Run Rust tests/,
+      /rust-contract:[\s\S]*CARGO_BINSTALL_VERSION: 1\.21\.0[\s\S]*CARGO_BINSTALL_SHA256: b1880b3631d1ff0fd1f286a0d20f82f373355651f9fbd7f4d0d7fbfe218bf562[\s\S]*Install cargo-binstall[\s\S]*Audit Rust dependencies[\s\S]*Run Rust tests/,
       ci_workflow
     )
     assert_includes(ci_workflow, "RUST_CONTRACT_RESULT: ${{ needs.rust-contract.result }}")

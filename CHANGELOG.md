@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Changed
 
-- Contracted redundant `config::client` / `config::server` config aliases to role-qualified entry points and exposed preparation-owned material outcomes (`resolve_server_cert_material_dir`, `resolve_server_cert_hostname`, `resolve_client_identity_material_dir`, `resolve_client_public_cert_material_dir`) for public Rust consumers. (#195)
+- Contracted redundant `config::client` / `config::server` config aliases to role-qualified entry points and exposed preparation-owned material outcomes (`resolve_server_cert_material_dir`, `resolve_server_cert_hostname`, `resolve_client_identity_material_dir`, `resolve_client_public_cert_material_dir`) for public Rust consumers. (#210)
 
 ### Security
 

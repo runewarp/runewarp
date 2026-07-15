@@ -38,8 +38,10 @@ class WorkflowContractTest < Minitest::Test
   def test_ci_requires_dependency_advisory_scan_in_rust_contract
     assert_includes(ci_workflow, "- name: Audit Rust dependencies")
     assert_includes(ci_workflow, "run: ./scripts/audit-dependencies")
+    assert_includes(ci_workflow, "uses: cargo-bins/cargo-binstall@ead08b90bd7b2e6d81963fb9cf0b7239f66d5db4 # v1.21.0")
+    assert_includes(ci_workflow, "version: \"1.21.0\"")
     assert_match(
-      /rust-contract:[\s\S]*Audit Rust dependencies[\s\S]*Run Rust tests/,
+      /rust-contract:[\s\S]*Install cargo-binstall[\s\S]*Audit Rust dependencies[\s\S]*Run Rust tests/,
       ci_workflow
     )
     assert_includes(ci_workflow, "RUST_CONTRACT_RESULT: ${{ needs.rust-contract.result }}")

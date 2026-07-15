@@ -3,13 +3,21 @@
 
 require_relative "lib/runewarp"
 
+CARGO_AUDIT_VERSION = "0.22.2"
+
 Runewarp::Core.run_cli do
   repo_root = File.expand_path("..", __dir__)
   Dir.chdir(repo_root) do
     Runewarp::Core.section("Auditing Rust dependencies")
-    unless Runewarp::Shell.successful?("cargo", "audit", "--version")
-      Runewarp::Core.note("Installing cargo-audit")
-      Runewarp::Shell.run!("cargo", "install", "cargo-audit", "--locked")
+    installed_version = Runewarp::Shell.capture!("cargo", "audit", "--version", allow_failure: true).strip
+    unless installed_version.split.last == CARGO_AUDIT_VERSION
+      if Runewarp::Shell.successful?("cargo", "binstall", "--version")
+        Runewarp::Core.note("Installing cargo-audit #{CARGO_AUDIT_VERSION} with cargo-binstall")
+        Runewarp::Shell.run!("cargo", "binstall", "cargo-audit@#{CARGO_AUDIT_VERSION}", "--no-confirm", "--locked", "--force", "--disable-telemetry", "--only-signed")
+      else
+        Runewarp::Core.note("Installing cargo-audit #{CARGO_AUDIT_VERSION} from source")
+        Runewarp::Shell.run!("cargo", "install", "cargo-audit", "--version", CARGO_AUDIT_VERSION, "--locked", "--force")
+      end
     end
     # Policy (deny informational findings; narrow ignores) lives in `.cargo/audit.toml`.
     Runewarp::Shell.run!("cargo", "audit")

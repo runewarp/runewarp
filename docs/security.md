@@ -173,11 +173,11 @@ The **Client instance** owns one live ACME manager per terminating **Public host
 
 ## Dependency advisory scanning
 
-Core keeps a repository-owned RustSec gate at `./scripts/audit-dependencies`. That command installs `cargo-audit` when needed, then scans the resolved `Cargo.lock` graph. Vulnerabilities always fail. Informational findings (unmaintained, unsound, and yanked crates) also fail through `.cargo/audit.toml` (`output.deny = ["warnings"]`).
+Core keeps a repository-owned RustSec gate at `./scripts/audit-dependencies`. That command requires the repository-pinned `cargo-audit` version, installs it through `cargo-binstall` when available, and falls back to a locked source install before scanning the resolved `Cargo.lock` graph. Vulnerabilities always fail. Informational findings (unmaintained, unsound, and yanked crates) also fail through `.cargo/audit.toml` (`output.deny = ["warnings"]`).
 
 Checked-in exceptions belong only under `[advisories].ignore` in `.cargo/audit.toml`, each with the advisory id plus a comment that records why the finding is not exploitable or cannot yet be removed, an owner, and a removal condition. Do not blanket-ignore advisory classes.
 
-CI runs the same command as a required Rust-contract step. Certificate and private-key PEM parsing uses maintained `rustls-pki-types` APIs rather than unmaintained `rustls-pemfile`.
+CI bootstraps a pinned `cargo-binstall` release and runs the same command as a required Rust-contract step, avoiding a source build of the audit tool on fresh runners. Certificate and private-key PEM parsing uses maintained `rustls-pki-types` APIs rather than unmaintained `rustls-pemfile`.
 
 ## Operational limits and trade-offs
 

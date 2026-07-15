@@ -2,6 +2,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional};
@@ -9,8 +10,8 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
 use crate::acme::ACME_TLS_ALPN;
-use crate::client::{ServiceSelector, TerminationTlsConfigs};
-use crate::client_hello::{ParsedClientHello, read_client_hello};
+use crate::client::{ClientStreamLimits, ServiceSelector, TerminationTlsConfigs};
+use crate::client_hello::{ParsedClientHello, read_client_hello_with_timeout};
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
 use crate::{
@@ -21,21 +22,29 @@ use crate::{
 pub(crate) struct TunnelConnectionStreamHandler {
     service_selector: ServiceSelector,
     termination_tls_configs: TerminationTlsConfigs,
+    stream_limits: ClientStreamLimits,
 }
 
 impl TunnelConnectionStreamHandler {
     pub(crate) fn new(
         services: Vec<ServiceConfig>,
         termination_tls_configs: TerminationTlsConfigs,
+        stream_limits: ClientStreamLimits,
     ) -> Self {
         Self {
             service_selector: ServiceSelector::new(services),
             termination_tls_configs,
+            stream_limits,
         }
     }
 
     pub(crate) async fn handle(&self, send: SendStream, mut recv: RecvStream) -> io::Result<()> {
-        let parsed_client_hello = match read_client_hello(&mut recv).await {
+        let parsed_client_hello = match read_client_hello_with_timeout(
+            &mut recv,
+            self.stream_limits.client_hello_timeout,
+        )
+        .await
+        {
             Ok(parsed_client_hello) => parsed_client_hello,
             Err(error) => {
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
@@ -61,7 +70,12 @@ impl TunnelConnectionStreamHandler {
 
         let (_, buffered_bytes) = parsed_client_hello.into_parts();
 
-        let mut backend_stream = match TcpStream::connect(service.backend_address.as_str()).await {
+        let mut backend_stream = match connect_backend(
+            service.backend_address.as_str(),
+            self.stream_limits.backend_connect_timeout,
+        )
+        .await
+        {
             Ok(stream) => stream,
             Err(error) => {
                 runtime_log::client_route(
@@ -74,7 +88,13 @@ impl TunnelConnectionStreamHandler {
                 return Err(error);
             }
         };
-        if let Err(error) = backend_stream.write_all(&buffered_bytes).await {
+        if let Err(error) = write_backend_with_timeout(
+            &mut backend_stream,
+            &buffered_bytes,
+            self.stream_limits.initial_backend_write_timeout,
+        )
+        .await
+        {
             runtime_log::client_route(
                 public_hostname.as_str(),
                 ClientRouteOutcome::BackendWriteFailed {
@@ -140,16 +160,35 @@ impl TunnelConnectionStreamHandler {
         // complete the handshake from the beginning of the TLS record stream.
         let quic_stream =
             ReplayedQuicBiStream::new(send, recv, parsed_client_hello.into_buffered_bytes());
-        let mut tls_stream = match acceptor.accept(quic_stream).await {
-            Ok(stream) => stream,
-            Err(error) => {
+        let mut tls_stream = match tokio::time::timeout(
+            self.stream_limits.terminate_handshake_timeout,
+            acceptor.accept(quic_stream),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
                 return Err(io::Error::other(format!(
                     "TLS termination handshake failed for {public_hostname}: {error}"
                 )));
             }
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "TLS termination handshake timed out for {public_hostname} after {:?}",
+                        self.stream_limits.terminate_handshake_timeout
+                    ),
+                ));
+            }
         };
 
-        let mut backend_stream = match TcpStream::connect(service.backend_address.as_str()).await {
+        let mut backend_stream = match connect_backend(
+            service.backend_address.as_str(),
+            self.stream_limits.backend_connect_timeout,
+        )
+        .await
+        {
             Ok(stream) => stream,
             Err(error) => {
                 runtime_log::client_route(
@@ -184,15 +223,20 @@ impl TunnelConnectionStreamHandler {
     ) -> io::Result<()> {
         let acceptor = TlsAcceptor::from(challenge_tls_config.clone());
         let quic_stream = ReplayedQuicBiStream::new(send, recv, buffered_bytes);
-        match acceptor.accept(quic_stream).await {
-            Ok(_) => {
+        match tokio::time::timeout(
+            self.stream_limits.acme_challenge_handshake_timeout,
+            acceptor.accept(quic_stream),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
                 runtime_log::acme(
                     AcmeRole::Client { public_hostname },
                     AcmeEvent::ChallengeHandled,
                 );
                 Ok(())
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 let error = error.to_string();
                 runtime_log::acme(
                     AcmeRole::Client { public_hostname },
@@ -204,8 +248,53 @@ impl TunnelConnectionStreamHandler {
                     "ACME TLS-ALPN-01 handshake failed for {public_hostname}: {error}"
                 )))
             }
+            Err(_) => {
+                runtime_log::acme(
+                    AcmeRole::Client { public_hostname },
+                    AcmeEvent::ChallengeFailed {
+                        error: "handshake timed out",
+                    },
+                );
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "ACME TLS-ALPN-01 handshake timed out for {public_hostname} after {:?}",
+                        self.stream_limits.acme_challenge_handshake_timeout
+                    ),
+                ))
+            }
         }
     }
+}
+
+async fn connect_backend(backend_address: &str, timeout: Duration) -> io::Result<TcpStream> {
+    match tokio::time::timeout(timeout, TcpStream::connect(backend_address)).await {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("backend connect timed out for {backend_address} after {timeout:?}"),
+        )),
+    }
+}
+
+async fn write_backend_with_timeout(
+    backend_stream: &mut TcpStream,
+    buffered_bytes: &[u8],
+    timeout: Duration,
+) -> io::Result<()> {
+    match tokio::time::timeout(timeout, backend_stream.write_all(buffered_bytes)).await {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("initial backend write timed out after {timeout:?}"),
+        )),
+    }
+}
+
+/// Reset an accepted Tunnel stream that the Client cannot service (e.g. handler saturation).
+pub(crate) fn reject_stream(mut send: SendStream, mut recv: RecvStream) {
+    let _ = send.reset(proxy_stream_error_code());
+    let _ = recv.stop(proxy_stream_error_code());
 }
 
 /// A bidirectional QUIC stream that replays `buffered_bytes` before reading from `recv`.
@@ -269,11 +358,6 @@ impl AsyncWrite for ReplayedQuicBiStream {
     }
 }
 
-fn reject_stream(mut send: SendStream, mut recv: RecvStream) {
-    let _ = send.reset(proxy_stream_error_code());
-    let _ = recv.stop(proxy_stream_error_code());
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -299,6 +383,7 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     use super::{ACME_TLS_ALPN, TunnelConnectionStreamHandler};
+    use crate::client::ClientStreamLimits;
     use crate::{
         ClientTlsMode, LogLevel, PublicHostname, ServiceConfig, client::TerminationTlsConfigs,
         make_client_quic_config, make_server_quic_config,
@@ -328,6 +413,72 @@ mod tests {
             "api.example.test",
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn rejects_stream_when_backend_connect_times_out() -> io::Result<()> {
+        // TEST-NET-1 is non-routable; connect remains pending until the deadline.
+        let services = vec![ServiceConfig {
+            public_hostnames: None,
+            backend_address: "192.0.2.1:9".to_owned(),
+            tls_mode: ClientTlsMode::Passthrough,
+        }];
+        let stream_handler = TunnelConnectionStreamHandler::new(
+            services,
+            TerminationTlsConfigs::empty(),
+            ClientStreamLimits {
+                backend_connect_timeout: Duration::from_millis(20),
+                ..ClientStreamLimits::for_test()
+            },
+        );
+        let fixture = TunnelConnectionFixture::connect().await?;
+        let (mut send, recv) = timeout(Duration::from_secs(1), fixture.server_connection.open_bi())
+            .await
+            .map_err(|_| timeout_error("server should open a stream"))?
+            .map_err(io::Error::other)?;
+        let client_hello = build_client_hello("app.example.test")?;
+        send.write_all(&client_hello)
+            .await
+            .map_err(io::Error::other)?;
+        send.finish().map_err(io::Error::other)?;
+
+        let handle = tokio::spawn(async move { stream_handler.handle(send, recv).await });
+        let result = timeout(Duration::from_secs(1), handle)
+            .await
+            .map_err(|_| timeout_error("handler should finish after backend connect timeout"))?
+            .map_err(io::Error::other)?;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_stream_when_tunneled_client_hello_times_out() -> io::Result<()> {
+        let services = vec![ServiceConfig {
+            public_hostnames: None,
+            backend_address: "127.0.0.1:9".to_owned(),
+            tls_mode: ClientTlsMode::Passthrough,
+        }];
+        let stream_handler = TunnelConnectionStreamHandler::new(
+            services,
+            TerminationTlsConfigs::empty(),
+            ClientStreamLimits {
+                client_hello_timeout: Duration::from_millis(20),
+                ..ClientStreamLimits::for_test()
+            },
+        );
+        let fixture = TunnelConnectionFixture::connect().await?;
+        let (send, recv) = timeout(Duration::from_secs(1), fixture.server_connection.open_bi())
+            .await
+            .map_err(|_| timeout_error("server should open a stream"))?
+            .map_err(io::Error::other)?;
+
+        let handle = tokio::spawn(async move { stream_handler.handle(send, recv).await });
+        let result = timeout(Duration::from_secs(1), handle)
+            .await
+            .map_err(|_| timeout_error("handler should finish after ClientHello timeout"))?
+            .map_err(io::Error::other)?;
+        assert!(result.is_err());
+        Ok(())
     }
 
     #[tokio::test]
@@ -514,8 +665,11 @@ mod tests {
             }
         }
 
-        let stream_handler =
-            TunnelConnectionStreamHandler::new(services, TerminationTlsConfigs::empty());
+        let stream_handler = TunnelConnectionStreamHandler::new(
+            services,
+            TerminationTlsConfigs::empty(),
+            ClientStreamLimits::default(),
+        );
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -543,8 +697,11 @@ mod tests {
         requested_hostname: &str,
         assert_handler_result: impl FnOnce(io::Result<()>),
     ) -> io::Result<()> {
-        let stream_handler =
-            TunnelConnectionStreamHandler::new(services, TerminationTlsConfigs::empty());
+        let stream_handler = TunnelConnectionStreamHandler::new(
+            services,
+            TerminationTlsConfigs::empty(),
+            ClientStreamLimits::default(),
+        );
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -597,8 +754,11 @@ mod tests {
             }
         }
 
-        let stream_handler =
-            TunnelConnectionStreamHandler::new(services, TerminationTlsConfigs::empty());
+        let stream_handler = TunnelConnectionStreamHandler::new(
+            services,
+            TerminationTlsConfigs::empty(),
+            ClientStreamLimits::default(),
+        );
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -630,8 +790,11 @@ mod tests {
         requested_hostname: &str,
         assert_handler_result: impl FnOnce(io::Result<()>) + Send + 'static,
     ) -> io::Result<()> {
-        let stream_handler =
-            TunnelConnectionStreamHandler::new(services, TerminationTlsConfigs::empty());
+        let stream_handler = TunnelConnectionStreamHandler::new(
+            services,
+            TerminationTlsConfigs::empty(),
+            ClientStreamLimits::default(),
+        );
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -1039,6 +1202,7 @@ mod tests {
         let stream_handler = TunnelConnectionStreamHandler::new(
             services,
             TerminationTlsConfigs::new(tls_configs, HashMap::new()),
+            ClientStreamLimits::default(),
         );
 
         let fixture = TunnelConnectionFixture::connect().await?;
@@ -1126,6 +1290,7 @@ mod tests {
         let stream_handler = TunnelConnectionStreamHandler::new(
             services,
             TerminationTlsConfigs::new(tls_configs, challenge_tls_configs),
+            ClientStreamLimits::default(),
         );
 
         let output = capture_logs_with_wait(
@@ -1310,6 +1475,7 @@ mod tests {
         let stream_handler = TunnelConnectionStreamHandler::new(
             services,
             TerminationTlsConfigs::new(tls_configs, HashMap::new()),
+            ClientStreamLimits::default(),
         );
 
         let fixture = TunnelConnectionFixture::connect().await?;

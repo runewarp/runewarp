@@ -61,12 +61,14 @@ Runtime diagnostics follow the same boundary.
 
 ## Admission and overload protection
 
-The Server applies one fixed admission policy across its distinct public and authenticated trust boundaries:
+The Server and Client apply fixed admission and setup-deadline policies across their distinct public and authenticated trust boundaries:
 
 - Visitor pre-routing capacity is acquired before spawning a handler and released immediately after ClientHello completion, rejection, error, timeout, cancellation, or shutdown. Existing routed Visitor streams do not retain this capacity.
 - The public limits are 4,096 concurrent pre-routing Visitors globally and 256 per accepted peer IP. A normal load balancer may collapse many Visitors into one source bucket; Core deliberately accepts that conservative behavior rather than trusting an unverified forwarded header.
 - QUIC handshake capacity is acquired before spawning handshake work and is limited to 256 concurrent handshakes.
+- After routing, pending `open_bi()` opens are limited to 1,024 with a 5-second deadline, and active routed Visitor streams are limited to 4,096. Active streams are tracked in a keyed map so selective Authorization revocation can target Public hostname, Tunnel connection, or Client identity without linear identity-by-identity accumulation for ordinary cleanup.
 - Authenticated active Tunnel connections are limited to 4,096 globally, 256 per Tunnel, and 64 per Client identity.
+- Each Client instance enforces one aggregate stream-handler budget of 1,024 across all live Tunnel connections. Per-connection QUIC bidirectional stream credit is capped at that same 1,024 so one connection cannot advertise more than the instance can service; when multiple connections share the budget, the Client-instance semaphore remains authoritative and excess accepted streams are reset without spawning handlers. Tunneled ClientHello completion, backend connect, initial backend write, Terminate-mode handshake, and ACME challenge handshake each have a 5-second setup deadline. Successfully established proxies remain long-lived; this policy does not add a proxy lifetime or idle timeout.
 - Saturation always rejects the newest work. It never evicts an existing healthy Tunnel connection or consumes capacity reserved by already-admitted Visitor traffic.
 - Authorization replacement, Tunnel-pool realignment, selective revocation, readiness, and orderly shutdown retain their existing behavior. Connections keep their active-admission accounting while moving between pools. Existing healthy connections are grandfathered if realignment combines pools above the per-Tunnel admission limit; new connections remain rejected until churn restores capacity.
 - Transient public accept failures retry with exponential backoff from 10 ms to a 1-second cap. Other accept errors drop readiness and remain fatal.

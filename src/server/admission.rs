@@ -15,9 +15,12 @@ const SATURATION_LOG_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ServerAdmissionLimits {
     pub(crate) client_hello_timeout: Duration,
+    pub(crate) open_bi_timeout: Duration,
     pub(crate) max_pending_visitors: usize,
     pub(crate) max_pending_visitors_per_source: usize,
     pub(crate) max_pending_handshakes: usize,
+    pub(crate) max_pending_stream_opens: usize,
+    pub(crate) max_active_routed_streams: usize,
     pub(crate) max_tunnel_connections: usize,
     pub(crate) max_tunnel_connections_per_tunnel: usize,
     pub(crate) max_tunnel_connections_per_identity: usize,
@@ -27,9 +30,12 @@ impl Default for ServerAdmissionLimits {
     fn default() -> Self {
         Self {
             client_hello_timeout: Duration::from_secs(5),
+            open_bi_timeout: Duration::from_secs(5),
             max_pending_visitors: 4_096,
             max_pending_visitors_per_source: 256,
             max_pending_handshakes: 256,
+            max_pending_stream_opens: 1_024,
+            max_active_routed_streams: 4_096,
             max_tunnel_connections: 4_096,
             max_tunnel_connections_per_tunnel: 256,
             max_tunnel_connections_per_identity: 64,
@@ -42,6 +48,7 @@ impl ServerAdmissionLimits {
     pub(crate) fn for_test() -> Self {
         Self {
             client_hello_timeout: Duration::from_millis(50),
+            open_bi_timeout: Duration::from_millis(50),
             ..Self::default()
         }
     }
@@ -52,6 +59,8 @@ pub(crate) enum AdmissionLimit {
     VisitorsGlobal,
     VisitorSource,
     Handshakes,
+    PendingStreamOpens,
+    ActiveRoutedStreams,
     TunnelConnectionsGlobal,
     TunnelConnectionsPerTunnel,
     TunnelConnectionsPerIdentity,
@@ -76,6 +85,8 @@ pub(crate) struct ServerAdmissionPolicy {
     pending_visitors: Arc<Semaphore>,
     pending_visitors_by_source: Arc<Mutex<HashMap<IpAddr, usize>>>,
     pending_handshakes: Arc<Semaphore>,
+    pending_stream_opens: Arc<Semaphore>,
+    active_routed_streams: Arc<Semaphore>,
     tunnel_connections: TunnelConnectionAdmission,
     log_gate: AdmissionLogGate,
 }
@@ -86,6 +97,8 @@ impl ServerAdmissionPolicy {
             pending_visitors: Arc::new(Semaphore::new(limits.max_pending_visitors)),
             pending_visitors_by_source: Arc::new(Mutex::new(HashMap::new())),
             pending_handshakes: Arc::new(Semaphore::new(limits.max_pending_handshakes)),
+            pending_stream_opens: Arc::new(Semaphore::new(limits.max_pending_stream_opens)),
+            active_routed_streams: Arc::new(Semaphore::new(limits.max_active_routed_streams)),
             tunnel_connections: TunnelConnectionAdmission::new(limits),
             log_gate: AdmissionLogGate::default(),
             limits,
@@ -141,6 +154,32 @@ impl ServerAdmissionPolicy {
             })
     }
 
+    pub(crate) fn try_admit_pending_stream_open(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, AdmissionRejection> {
+        self.pending_stream_opens
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AdmissionRejection {
+                limit: AdmissionLimit::PendingStreamOpens,
+                active_work: self.limits.max_pending_stream_opens
+                    - self.pending_stream_opens.available_permits(),
+            })
+    }
+
+    pub(crate) fn try_admit_active_routed_stream(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, AdmissionRejection> {
+        self.active_routed_streams
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AdmissionRejection {
+                limit: AdmissionLimit::ActiveRoutedStreams,
+                active_work: self.limits.max_active_routed_streams
+                    - self.active_routed_streams.available_permits(),
+            })
+    }
+
     pub(crate) fn tunnel_connections(&self) -> TunnelConnectionAdmission {
         self.tunnel_connections.clone()
     }
@@ -175,6 +214,8 @@ impl ServerAdmissionPolicy {
             AdmissionLimit::VisitorsGlobal => Some(self.limits.max_pending_visitors),
             AdmissionLimit::VisitorSource => Some(self.limits.max_pending_visitors_per_source),
             AdmissionLimit::Handshakes => Some(self.limits.max_pending_handshakes),
+            AdmissionLimit::PendingStreamOpens => Some(self.limits.max_pending_stream_opens),
+            AdmissionLimit::ActiveRoutedStreams => Some(self.limits.max_active_routed_streams),
             AdmissionLimit::TunnelConnectionsGlobal => Some(self.limits.max_tunnel_connections),
             AdmissionLimit::TunnelConnectionsPerTunnel => {
                 Some(self.limits.max_tunnel_connections_per_tunnel)
@@ -390,12 +431,51 @@ mod tests {
         let limits = ServerAdmissionLimits::default();
 
         assert_eq!(limits.client_hello_timeout, Duration::from_secs(5));
+        assert_eq!(limits.open_bi_timeout, Duration::from_secs(5));
         assert_eq!(limits.max_pending_visitors, 4_096);
         assert_eq!(limits.max_pending_visitors_per_source, 256);
         assert_eq!(limits.max_pending_handshakes, 256);
+        assert_eq!(limits.max_pending_stream_opens, 1_024);
+        assert_eq!(limits.max_active_routed_streams, 4_096);
         assert_eq!(limits.max_tunnel_connections, 4_096);
         assert_eq!(limits.max_tunnel_connections_per_tunnel, 256);
         assert_eq!(limits.max_tunnel_connections_per_identity, 64);
+    }
+
+    #[test]
+    fn pending_stream_open_admission_releases_capacity_after_completion() {
+        let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
+            max_pending_stream_opens: 1,
+            ..ServerAdmissionLimits::for_test()
+        });
+
+        let permit = policy
+            .try_admit_pending_stream_open()
+            .expect("first pending open should fit");
+        assert_eq!(
+            policy.try_admit_pending_stream_open().unwrap_err().limit,
+            AdmissionLimit::PendingStreamOpens
+        );
+        drop(permit);
+        assert!(policy.try_admit_pending_stream_open().is_ok());
+    }
+
+    #[test]
+    fn active_routed_stream_admission_releases_capacity_after_completion() {
+        let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
+            max_active_routed_streams: 1,
+            ..ServerAdmissionLimits::for_test()
+        });
+
+        let permit = policy
+            .try_admit_active_routed_stream()
+            .expect("first active stream should fit");
+        assert_eq!(
+            policy.try_admit_active_routed_stream().unwrap_err().limit,
+            AdmissionLimit::ActiveRoutedStreams
+        );
+        drop(permit);
+        assert!(policy.try_admit_active_routed_stream().is_ok());
     }
 
     #[test]

@@ -25,7 +25,7 @@ For each inbound TCP connection on the configured `server.public-bind-address`:
 9. Otherwise, select a **Tunnel** by exact normalized **Public hostname** from `server.tunnels[].public-hostnames`.
 10. If no Tunnel owns that hostname, drop the connection.
 11. If the selected Tunnel has no active **Tunnel connection**, drop the connection.
-12. Open a bidirectional stream on the selected Tunnel connection, forward the buffered ClientHello bytes, then continue streaming in both directions.
+12. Acquire one pending stream-open slot, then open a bidirectional stream on the selected Tunnel connection with a **5-second** deadline. On success, acquire one active routed-stream slot, release the pending slot, forward the buffered ClientHello bytes, and continue streaming in both directions. Successfully established proxies have no additional lifetime or idle deadline.
 
 The buffered ClientHello must never be logged or echoed back in diagnostics. With top-level `log-level = "debug"`, stderr diagnostics may log the normalized **Public hostname** using stable event plus key=value fields such as `public-hostname`, `backend-address`, and `reason`. `acme-tls/1` traffic for the **Server hostname** is logged as `server acme challenge handled` with `server-hostname=...`, while Client-side `acme-tls/1` traffic for terminating **Public hostnames** is logged as distinct ACME challenge handling rather than ordinary terminate routing. Runtime tunnel failure causes keep separate full-detail lines whose operator-facing `warn` lines are shortened.
 The buffered ClientHello must never be logged or echoed back in diagnostics.
@@ -60,11 +60,15 @@ Server admission uses fixed production limits; these are runtime safety policy, 
 | Visitor pre-routing work | **4,096** globally | Close the newest accepted socket before spawning its handler |
 | Visitor pre-routing work from one accepted peer IP | **256** | Close the newest socket from that source before spawning its handler |
 | Concurrent Server-side QUIC handshakes | **256** | Refuse the newest QUIC `Incoming` before spawning handshake work |
+| Pending Server `open_bi()` opens | **1,024** | Drop the newest Visitor before waiting on stream open |
+| Active routed Visitor streams | **4,096** | Reset/stop the newest opened QUIC stream before proxying |
 | Active Tunnel connections | **4,096** globally | Complete authentication, then close the newest connection |
 | Active Tunnel connections in one Tunnel pool | **256** | Close the newest connection; keep existing pool members |
 | Active Tunnel connections for one Client identity | **64** globally | Close the newest connection; keep existing connections for that identity |
 
 The per-source Visitor limit uses only the peer IP returned by the accepted TCP socket. Behind a load balancer, many Visitors may therefore share one source bucket. Core does not trust `Forwarded`, `X-Forwarded-For`, PROXY protocol, or any other application-supplied source identity. Completed ClientHellos release both Visitor admission slots before Tunnel selection and proxying, so saturation does not consume capacity from already-routed Visitor traffic.
+
+Pending stream-open capacity is acquired immediately before `open_bi()` and released on open success, open failure, the **5-second** open deadline, active-stream rejection, cancellation, and shutdown. Active routed-stream capacity is acquired after a successful open and retained for the proxy lifetime, including selective Authorization revocation; it is released when the proxy task exits. Established proxies have no additional lifetime or idle deadline in this policy.
 
 Tunnel handshake slots are released on every handshake success, rejection, timeout, cancellation, and listener shutdown path. Active Tunnel slots are retained for the connection lifetime, including Authorization pool realignment, and released after connection termination. If realignment combines previously admitted pools above the per-Tunnel limit, those existing healthy connections remain grandfathered; new connections are rejected until churn returns the pool below its limit. Reaching any active-connection limit during admission rejects the newest connection without evicting a healthy pool member.
 
@@ -94,18 +98,21 @@ Rules:
 
 When the Client receives a new QUIC stream:
 
-1. Buffer the forwarded ClientHello and parse it using the same **16 KB** cap.
-2. Extract and normalize the SNI hostname.
-3. If there is exactly one configured **Service** and it omits `public-hostnames`, select that **Catch-all Service**.
-4. Otherwise, match the hostname to `client.services[*].public-hostnames`.
-5. If no Service matches, reject the stream immediately.
-6. If the matched Service has `tls-mode = "passthrough"` (default):
-   a. Open a TCP connection to the selected `backend-address`.
-   b. Forward the buffered ClientHello bytes, then continue streaming in both directions.
-7. If the matched Service has `tls-mode = "terminate"`:
-   a. Complete the TLS handshake with the Visitor using the per-hostname certificate — from `client.public-cert-dir` (manual path) or from `[client.acme]` (ACME path). If `[client.acme]` is in use and the certificate for that hostname is not yet ready, the TLS handshake fails immediately (fail closed); there is no fallback to passthrough.
-   b. Open a TCP connection to the selected `backend-address`.
+1. Acquire one Client-instance stream-handler slot shared across every live Tunnel connection for that process. Saturation resets/stops the newest accepted stream without spawning handler work.
+2. Buffer the forwarded ClientHello and parse it using the same **16 KB** cap and a **5-second** completion deadline.
+3. Extract and normalize the SNI hostname.
+4. If there is exactly one configured **Service** and it omits `public-hostnames`, select that **Catch-all Service**.
+5. Otherwise, match the hostname to `client.services[*].public-hostnames`.
+6. If no Service matches, reject the stream immediately.
+7. If the matched Service has `tls-mode = "passthrough"` (default):
+   a. Open a TCP connection to the selected `backend-address` with a **5-second** connect deadline.
+   b. Forward the buffered ClientHello bytes with a **5-second** initial-write deadline, then continue streaming in both directions.
+8. If the matched Service has `tls-mode = "terminate"`:
+   a. Complete the TLS handshake with the Visitor within **5 seconds** using the per-hostname certificate — from `client.public-cert-dir` (manual path) or from `[client.acme]` (ACME path). If `[client.acme]` is in use and the certificate for that hostname is not yet ready, the TLS handshake fails immediately (fail closed); there is no fallback to passthrough. ACME `acme-tls/1` challenge handshakes use the same **5-second** bound.
+   b. Open a TCP connection to the selected `backend-address` with a **5-second** connect deadline.
    c. Proxy decrypted data between the TLS stream and the plaintext backend connection.
+
+Per-connection QUIC bidirectional stream credit advertised by the Client is capped at **1,024**, the same fixed Client-instance handler budget, so one Tunnel connection cannot advertise more streams than the instance can service in aggregate. When multiple Tunnel connections share that budget, the Client-instance semaphore remains the authoritative bound: excess accepted streams are reset/stopped without spawning handler work. Successfully established proxies have no additional lifetime or idle deadline.
 
 Notes:
 

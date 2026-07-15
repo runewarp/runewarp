@@ -132,7 +132,10 @@ The client validates the server certificate either through system trust or throu
 - public pre-routing work is bounded to 4,096 concurrent ClientHellos globally and 256 per accepted peer IP, with a 5-second ClientHello completion deadline in addition to the 16 KB byte limit
 - the accepted socket peer IP is the only per-source admission identity; deployments behind a load balancer share that load balancer IP's bucket, and Core does not infer source identity from forwarded headers
 - concurrent Server-side QUIC handshakes are bounded to 256 before per-handshake work is spawned
+- pending Server `open_bi()` opens are bounded to 1,024 with a 5-second open deadline; active routed Visitor streams are bounded to 4,096 and tracked in a keyed map for selective Authorization revocation
 - active **Tunnel connections** are bounded to 4,096 globally, 256 per **Tunnel pool**, and 64 per authenticated **Client identity**; saturation rejects the newest connection without replacing healthy members
+- each **Client instance** enforces one aggregate stream-handler budget of 1,024 across all live **Tunnel connections**, and advertises at most 1,024 Server-opened bidirectional QUIC streams per connection so one connection cannot request more than the instance budget; the shared semaphore remains authoritative when multiple connections compete
+- Client routed-stream setup uses 5-second deadlines for tunneled ClientHello completion, backend connect, initial backend write, Terminate-mode TLS handshake, and ACME challenge TLS handshake; successfully established proxies remain long-lived without a new idle or lifetime deadline
 - transient public-listener accept errors retry with backoff from 10 ms to 1 s; unrecoverable listener failures remain fatal and drop readiness
 - each **Client instance** establishes one or more **Tunnel connections**
 - static Client startup seeds one **Address controller** from the configured **Server addresses**, retaining one independent worker per normalized address and allowing maintenance intent to be replaced (add / remove / re-adopt) without process restart

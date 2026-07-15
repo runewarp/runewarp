@@ -247,6 +247,26 @@ pub fn server_admission_recovered(scope: &str) {
     );
 }
 
+pub fn client_stream_handler_saturated(active_work: usize, limit: usize) {
+    emit(
+        EventLevel::Warn,
+        &event_line(
+            "client stream handlers saturated",
+            [
+                ("active-work", Cow::Owned(active_work.to_string())),
+                ("limit", Cow::Owned(limit.to_string())),
+            ],
+        ),
+    );
+}
+
+pub fn client_stream_handler_recovered() {
+    emit(
+        EventLevel::Info,
+        &event_line("client stream handlers recovered", []),
+    );
+}
+
 pub fn server_public_listener_accept_retry(error: &io::Error, delay: Duration) {
     emit(
         EventLevel::Warn,

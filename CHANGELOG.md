@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Security
 
+- Bounded the complete routed-stream setup lifecycle: distinct Server pending-`open_bi` and active routed-stream budgets, a 5-second `open_bi` deadline, keyed active Visitor-stream tracking, a Client-instance aggregate stream-handler limit aligned with QUIC bidi credit, and 5-second Client setup deadlines for tunneled ClientHello, backend connect/write, Terminate handshake, and ACME challenge handshake, while leaving established proxies long-lived. (#208)
 - Bounded Managed-session SSE framing, snapshot size, decoded allocation, and role-input cardinalities; moved applied-state reporting off the reconciliation critical path with coalesced latest-revision acknowledgments, bodyless-204 enforcement, and 5-second request/response deadlines. (#207)
 - Bounded Server admission before Visitor and QUIC-handshake task creation, added a 5-second ClientHello deadline, capped active Tunnel connections globally/per-Tunnel/per-Client-identity, and made transient public-listener accept failures recover with bounded backoff. (#206)
 - Upgraded the Rust dependency baseline past RUSTSEC-2026-0185 (`quinn-proto`) and RUSTSEC-2026-0190 (`anyhow`), replaced unmaintained `rustls-pemfile` PEM parsing with maintained `rustls-pki-types` APIs (RUSTSEC-2025-0134), and added a required `./scripts/audit-dependencies` CI gate. (#204)

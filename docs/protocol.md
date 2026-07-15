@@ -78,7 +78,7 @@ Admission saturation warnings include the active-work count and limit and are li
 
 ## Tunnel connection handshake
 
-Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. Effective **Server addresses** come from either `client.server-address`, `client.server-addresses`, or repeated runtime `--server-address` flags. An **Address controller** owns one worker per normalized address so static fanout and Managed-session assignment changes cannot start duplicate dial loops for the same target:
+Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. Effective **Server addresses** come from either `client.server-address`, `client.server-addresses`, or repeated runtime `--server-address` flags. An **Address controller** owns the complete assigned Server-address lifecycle (one worker per normalized address, maintenance intent, Retiring, Assignment convergence, apply acknowledgment, and shutdown) so static fanout and Managed-session assignment changes cannot start duplicate dial loops for the same target:
 
 1. Resolve the hostname portion of one effective **Server address**.
 2. Dial the UDP port from that **Server address**, defaulting to `443` when the port is omitted.

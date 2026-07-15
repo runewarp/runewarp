@@ -7,10 +7,11 @@ mod termination_tls;
 mod tunnel_stream;
 
 pub use address_controller::{
-    AddressController, AddressControllerShutdown, AddressWorkerControl, MaintenanceIntent,
+    AddressController, AddressControllerShutdown, AddressControllerView, AddressWorkerControl,
+    AddressWorkerFactory, MaintenanceIntent,
 };
-pub use assignment_convergence::{AssignmentConvergence, AssignmentConvergenceTracker};
-pub use managed_adapter::{ClientAssignmentAdapter, ClientAssignmentApply};
+pub use assignment_convergence::AssignmentConvergence;
+pub use managed_adapter::ClientAssignmentAdapter;
 
 use std::fmt;
 use std::future::Future;

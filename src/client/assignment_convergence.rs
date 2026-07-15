@@ -63,7 +63,7 @@ impl ConvergenceState {
 /// Shared tracker updated when assignment intent changes or address workers
 /// gain/lose Connected status.
 #[derive(Clone, Debug, Default)]
-pub struct AssignmentConvergenceTracker {
+pub(crate) struct AssignmentConvergenceTracker {
     inner: Arc<Mutex<ConvergenceState>>,
 }
 

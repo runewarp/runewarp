@@ -1,8 +1,10 @@
 //! Client role adapter for Managed-session Server-address assignment applies.
 //!
-//! Atomically replaces Address-controller maintenance intent through a command
+//! Atomically replaces **Address controller** maintenance intent through a command
 //! channel so the session can acknowledge a revision without waiting for
-//! network convergence. The runtime loop owns the controller and applies each
+//! network convergence. Production obtains this adapter only from
+//! [`crate::AddressController::for_managed`]; the apply channel is owned by the
+//! controller's [`crate::AddressController::run`] loop, which dispatches each
 //! command before answering the oneshot.
 
 use serde_json::Value;
@@ -16,9 +18,9 @@ use crate::managed_session::{
 
 /// One assignment apply dispatched to the Address-controller owner.
 #[derive(Debug)]
-pub struct ClientAssignmentApply {
-    pub addresses: Vec<ServerAddress>,
-    pub done: oneshot::Sender<Result<(), ApplyError>>,
+pub(crate) struct ClientAssignmentApply {
+    pub(crate) addresses: Vec<ServerAddress>,
+    pub(crate) done: oneshot::Sender<Result<(), ApplyError>>,
 }
 
 /// Applies validated Client Managed-session input onto Address-controller intent.
@@ -28,7 +30,7 @@ pub struct ClientAssignmentAdapter {
 }
 
 impl ClientAssignmentAdapter {
-    pub fn new(apply_tx: mpsc::UnboundedSender<ClientAssignmentApply>) -> Self {
+    pub(crate) fn new(apply_tx: mpsc::UnboundedSender<ClientAssignmentApply>) -> Self {
         Self { apply_tx }
     }
 }

@@ -6,6 +6,39 @@ Use it when you operate managed Server or Client runtimes, or when you implement
 
 This document describes what Core implements today. Product policy (lifecycle labels, persistence, certificate issuance, identity cardinality) is out of scope and called out explicitly.
 
+## Contract at a glance
+
+- **Audience:** Control implementers and Core runtime integrators
+- **Session:** one mutually authenticated HTTP/2 connection per Server or Client runtime
+- **Downlink:** one role-specific SSE stream carrying versioned full snapshots
+- **Acknowledgment:** revision-only state writes after successfully handled snapshots; no periodic state heartbeat
+- **Role inputs:** Server authorization and Client Server-address assignment use separate schemas
+- **Failure model:** protocol or reporting failure replaces the session; reconnect retains last-applied in-memory state after the first successful apply
+
+## Navigate this contract
+
+- [Domain boundary](#domain-boundary)
+- [Mode selection and trust](#mode-selection-and-configuration)
+- [Transport and endpoints](#transport-contract)
+- [Schemas and reconciliation](#sse-framing)
+- [Limits and timing](#input-and-reporting-limits)
+- [Server and Client behavior](#managed-server-behavior)
+- [Failure taxonomy](#failure-taxonomy)
+- [Wire examples](#wire-examples)
+- [Control interoperability checklist](#interoperability-checklist-for-control)
+
+## Related documentation
+
+| Document | What it owns |
+| --- | --- |
+| [`architecture.md`](architecture.md) | System shape, data paths, and trust model |
+| [`protocol.md`](protocol.md) | Tunnel/QUIC wire behavior and stream lifecycle |
+| [`security.md`](security.md) | Authentication and revocation boundaries |
+| [`configuration.md`](configuration.md) | `[control]`, identity directories, and validation |
+| [`usage.md`](usage.md) | Operator workflows and static-first setup |
+| [`CONTEXT.md`](../CONTEXT.md) | Canonical domain vocabulary |
+| [`roadmap.md`](roadmap.md) | Forward-looking work outside this implemented contract |
+
 ## Domain boundary
 
 | Term | Role in managed mode |
@@ -368,15 +401,3 @@ The following remain outside this contract and must not be assumed from Core:
 - v1 patch events, capability negotiation, HTTP/3 Control, and browser EventSource compatibility
 
 Infrastructure drain uses Core's existing graceful process shutdown path. Managed input adds no drain field, SSE event, or state-acknowledgment field.
-
-## Related documentation
-
-| Document | What it covers relative to managed mode |
-| --- | --- |
-| [`architecture.md`](architecture.md) | System shape, trust model, and managed runtime limits |
-| [`protocol.md`](protocol.md) | Tunnel/QUIC wire behavior; summary pointer to this contract |
-| [`security.md`](security.md) | Control authentication and managed revocation boundaries |
-| [`configuration.md`](configuration.md) | `[control]`, identity dirs, validation, and examples |
-| [`usage.md`](usage.md) | Operator workflow; static path remains the default get-started |
-| [`CONTEXT.md`](../CONTEXT.md) | Canonical domain language |
-| [`roadmap.md`](roadmap.md) | Forward-looking managed-service ideas beyond this Core contract |

@@ -6,8 +6,8 @@ Use this guide to install Runewarp, prepare trust material, start the runtime, a
 
 | Path | Best for | Next step |
 | --- | --- | --- |
-| CLI | Running Runewarp directly on your own hosts or service manager | Follow [Operate the CLI](#operate-the-cli) |
 | Docker example | Proving the shipped topology end to end before adapting it | Follow [Evaluate with the Docker example](#evaluate-with-the-docker-example) |
+| Recommended static deployment | Public Server ACME plus TLS passthrough to a TLS backend | Follow [Operate a static deployment](#operate-a-static-deployment) |
 | Managed mode | Server or Client driven by a Control endpoint instead of static Tunnel / Server-address config | Configure `[control]` per [`configuration.md`](configuration.md) and follow [`managed.md`](managed.md) |
 
 ## Before you start
@@ -31,7 +31,9 @@ cd runewarp
 
 Use [`examples/docker/README.md`](../examples/docker/README.md) for the full walkthrough and reset flow.
 
-## Operate the CLI
+## Operate a static deployment
+
+The recommended production starting point uses ACME for the public Server certificate and TLS passthrough to a TLS-terminating Local backend. This keeps application TLS keys and plaintext off the public Server. The manual Server CA and Client-side Terminate-mode alternatives are documented at the relevant steps below.
 
 ### 1. Install Runewarp
 
@@ -49,7 +51,7 @@ runewarp client --help
 
 ### 2. Choose the Server certificate path
 
-Choose one Server certificate path:
+Use Server ACME when the Server hostname is publicly routable. Choose the manual/private-CA path for private deployments or operator-managed trust.
 
 | Path | When to use it | What to do |
 | --- | --- | --- |
@@ -152,6 +154,8 @@ server-trust = "ca-file"
 ```
 
 For exact-match client routing, multiple services or tunnels, terminate-mode config, defaults, and full key definitions, use [`docs/configuration.md`](configuration.md).
+
+For a managed runtime, keep Services and TLS mode local, omit static Server addresses or Tunnel authorization as described in [`configuration.md`](configuration.md), and implement the Control contract in [`managed.md`](managed.md).
 
 ### 6. Prepare DNS and deployment
 

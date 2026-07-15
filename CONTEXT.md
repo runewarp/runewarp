@@ -113,8 +113,8 @@ Configuration and runtime shape where an effective Control address is present. M
 _Avoid_: static mode, self-hosted baseline
 
 **Server identity**:
-The pinned public-key identity the Server presents to Control, distinct from the **Server certificate** used on the tunnel endpoint.
-_Avoid_: Server certificate, Client identity
+The durable pinned public-key identity a **Server** presents to **Control**, distinct from the **Server certificate** used on the Tunnel endpoint. A **Server identity certificate** attests this identity; certificate renewal and process restart preserve it, while key rotation changes it.
+_Avoid_: Server certificate, Server hostname, serial number
 
 **Public hostname certificate**:
 The certificate presented to a **Visitor** for a **Public hostname** when a **Service** is in **Terminate mode**.
@@ -147,10 +147,6 @@ _Avoid_: Service, tunnel
 **Client identity**:
 The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime, issuer, or certificate purpose metadata; newly generated self-signed Client identity certificates use Ed25519 with explicit client-authentication purpose, while existing algorithm profiles remain valid when their SPKI fingerprint is authorized. Certificate renewal or attestation with the same key preserves the identity; explicit key rotation changes it. One **Tunnel** may authorize one or more **Client identities**.
 _Avoid_: Certificate, serial number
-
-**Server identity**:
-The stable trust identity used by one or more **Servers**, defined by its pinned public key rather than a certificate lifetime or issuer. Certificate renewal and process restarts preserve it; key rotation changes it.
-_Avoid_: Server certificate, Server hostname, serial number
 
 **Server identity certificate**:
 The certificate a **Server** presents to authenticate its **Server identity** to a managed control plane. It attests the identity without defining it, so renewal with the same key preserves the **Server identity**.
@@ -191,26 +187,6 @@ _Avoid_: Default service, wildcard service
 **Hostname mirroring**:
 The operator practice of repeating **Public hostnames** in Server **Tunnels** and Client **Services** when both sides use explicit hostname matching, so both sides can route the same traffic without extra protocol metadata even when their grouping differs.
 _Avoid_: Duplicate hostname config, registration
-
-**Config preparation**:
-The internal module that selects the active config input, applies CLI/XDG/hardcoded defaults, resolves config-relative paths, projects command-specific validated partial outcomes (material directories, hostnames, managed detection), and emits prepared **Server** or **Client** config before validation and startup side effects.
-_Avoid_: Settings loader, validation pass, startup defaults
-
-**Release-prep PR**:
-The maintainer change that prepares one stable release by updating versioned release metadata on `main` before the real release tag is cut.
-_Avoid_: Release branch, release commit
-
-**Release rehearsal**:
-The non-publishing release validation run that exercises the release gates for one candidate stable version already reachable from `main`.
-_Avoid_: Real release, preview publish
-
-**Release tag**:
-The SSH-signed stable `vX.Y.Z` tag that triggers real public publication for one release.
-_Avoid_: Commit, branch tag
-
-**Release environment**:
-The GitHub environment that scopes release-only secrets to the privileged publication jobs.
-_Avoid_: CI environment, deploy target
 
 ## Relationships
 
@@ -257,10 +233,6 @@ _Avoid_: CI environment, deploy target
 - A **Tunnel** owns one or more explicit **Public hostnames**
 - A **Catch-all Service** is valid only when there is exactly one configured **Service**
 - **Hostname mirroring** repeats one set of **Public hostnames** across **Tunnels** and **Services**, but the grouping does not have to line up one-to-one
-- A **Release-prep PR** prepares exactly one candidate stable release
-- A **Release rehearsal** validates exactly one candidate **Release tag** without publishing public artifacts
-- A **Release tag** publishes exactly one stable release from a green commit already on `main`
-- A **Release environment** scopes secrets for real publication jobs only
 
 ## Example dialogue
 
@@ -333,12 +305,6 @@ _Avoid_: CI environment, deploy target
 > **Dev:** "If the **Server** puts `app.example.com` and `api.example.com` in one **Tunnel**, but the **Client** splits them across two **Services**, is that still **Hostname mirroring**?"
 > **Domain expert:** "Yes. **Hostname mirroring** repeats the hostname set across both sides; the grouping into **Tunnels** and **Services** can differ."
 >
-> **Dev:** "What actually starts a public release?"
-> **Domain expert:** "A signed **Release tag** on a green `main` commit. A **Release rehearsal** checks the same gates without publishing."
->
-> **Dev:** "Where do I make the version and changelog changes first?"
-> **Domain expert:** "In the **Release-prep PR**. The tag comes later, after that candidate commit is on `main` and green."
-
 ## Flagged ambiguities
 
 - "tunnel" was used to mean both a configured routing entry and a live QUIC session — resolved: **Tunnel** is the configured unit; **Tunnel connection** is the live session.
@@ -366,4 +332,3 @@ _Avoid_: CI environment, deploy target
 - "Hostname mirroring" could sound like it covered every valid routing topology — resolved: **Hostname mirroring** means both-sides explicit hostname matching; a **Catch-all Service** on the Client is described directly rather than named as a separate topology.
 - "Hostname mirroring" could sound like Tunnel and Service groups had to line up exactly — resolved: the mirrored unit is the explicit hostname set, not a one-to-one grouping.
 - "duplicate hostname config" sounded accidental — resolved: **Hostname mirroring** is the deliberate routing pattern.
-- "release" could blur rehearsal with real publication — resolved: **Release rehearsal** is the non-publishing gate run, while a **Release tag** starts the real published release.

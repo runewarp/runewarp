@@ -2,6 +2,15 @@
 
 In the default passthrough mode, Runewarp does not terminate customer TLS on the public server. The server sees only the metadata it needs to authorize hostnames and forward traffic. When a service opts into terminate mode, the client terminates TLS and the local backend receives plaintext.
 
+## Secure deployment checklist
+
+- choose system trust or an exclusive CA bundle deliberately for every Server and Control connection
+- protect Client and Server identity keys, private CA keys, and explicit ACME state directories
+- expose only the intended public TCP, Tunnel UDP, readiness, and Control listeners
+- account for the Server's visibility into SNI, Visitor source addresses, timing, and byte counts
+- probe `server.readiness-bind-address` rather than public TLS when readiness is configured
+- use `tls-mode = "terminate"` only when Client-side TLS termination and plaintext delivery to the Local backend are intended
+
 ## What the Server can and cannot see
 
 | Visible to the Server | Not visible to the Server |
@@ -174,11 +183,7 @@ The **Client instance** owns one live ACME manager per terminating **Public host
 
 ## Dependency advisory scanning
 
-Core keeps a repository-owned RustSec gate at `./scripts/audit-dependencies`. That command requires the repository-pinned `cargo-audit` version, installs it through `cargo-binstall` when available, and falls back to a locked source install before scanning the resolved `Cargo.lock` graph. Vulnerabilities always fail. Informational findings (unmaintained, unsound, and yanked crates) also fail through `.cargo/audit.toml` (`output.deny = ["warnings"]`).
-
-Checked-in exceptions belong only under `[advisories].ignore` in `.cargo/audit.toml`, each with the advisory id plus a comment that records why the finding is not exploitable or cannot yet be removed, an owner, and a removal condition. Do not blanket-ignore advisory classes.
-
-CI bootstraps a pinned `cargo-binstall` release and runs the same command as a required Rust-contract step, avoiding a source build of the audit tool on fresh runners. Certificate and private-key PEM parsing uses maintained `rustls-pki-types` APIs rather than unmaintained `rustls-pemfile`.
+Core's CI scans the resolved dependency graph for RustSec vulnerabilities and informational advisories. Contributor commands and exception policy belong in [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 ## Operational limits and trade-offs
 

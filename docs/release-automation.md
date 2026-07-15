@@ -1,6 +1,6 @@
 # Release automation
 
-This document describes the repository automation for release preparation and publication. It covers the CI checks behind the supported distribution paths and the release workflow for signed tags, rehearsals, and real publication. For the maintainer procedure and recovery steps, see [`release-guide.md`](release-guide.md).
+This is the canonical automation contract for CI, publication gates, trust and cache boundaries, secrets, and artifact lineage. For human release actions and recovery decisions, use [`release-guide.md`](release-guide.md); this document does not repeat that runbook.
 
 ## CI coverage
 

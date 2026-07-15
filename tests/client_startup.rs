@@ -33,7 +33,7 @@ async fn prepared_client_connects_from_validated_settings() {
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
-    let authorization = ServerAuthorization::from_tunnels(
+    let authorization = ServerAuthorization::from_static_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
             id: None,
@@ -113,7 +113,7 @@ async fn prepared_client_uses_the_configured_server_address_port() {
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
-    let authorization = ServerAuthorization::from_tunnels(
+    let authorization = ServerAuthorization::from_static_tunnels(
         &server_hostname("localhost"),
         &[ServerTunnelConfig {
             id: None,
@@ -207,7 +207,7 @@ async fn prepared_client_rejects_settings_without_services() {
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
-    let authorization = ServerAuthorization::from_tunnels(
+    let authorization = ServerAuthorization::from_static_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
             id: None,
@@ -470,7 +470,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
-    let authorization = ServerAuthorization::from_tunnels(
+    let authorization = ServerAuthorization::from_static_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
             id: None,
@@ -585,7 +585,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
-    let authorization = ServerAuthorization::from_tunnels(
+    let authorization = ServerAuthorization::from_static_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
             id: None,
@@ -690,7 +690,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
-    let authorization = ServerAuthorization::from_tunnels(
+    let authorization = ServerAuthorization::from_static_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
             id: None,
@@ -794,7 +794,7 @@ async fn shared_client_instance_prep_survives_reconnect_style_redials() {
     let server_cert = CertificateDer::from(certified_server.cert);
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
-    let authorization = ServerAuthorization::from_tunnels(
+    let authorization = ServerAuthorization::from_static_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
             id: None,
@@ -926,7 +926,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
     let server_key = certified_server.signing_key.serialize_der();
     let client_identity = generate_client_identity().unwrap();
 
-    let authorization = ServerAuthorization::from_tunnels(
+    let authorization = ServerAuthorization::from_static_tunnels(
         &server_hostname("tunnel.example.test"),
         &[ServerTunnelConfig {
             id: None,

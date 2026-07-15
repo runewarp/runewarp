@@ -81,6 +81,10 @@ pub struct ServerConfig {
     pub tunnels: Vec<ServerTunnelConfig>,
     pub control: Option<ControlConfig>,
     pub identity: Option<ServerIdentityConfig>,
+    /// Prepared once during config validation from Control address presence.
+    /// Startup and Authorization construction consume this instead of
+    /// re-deriving Managed vs static from `control`.
+    pub admission: crate::ServerAdmission,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -558,6 +562,11 @@ fn validate_prepared_server_config(
     };
 
     if messages.is_empty() {
+        let admission = if managed {
+            crate::ServerAdmission::Managed
+        } else {
+            crate::ServerAdmission::Static
+        };
         Ok(ServerConfig {
             hostname: hostname.expect("validated server.hostname"),
             log_level,
@@ -571,6 +580,7 @@ fn validate_prepared_server_config(
             tunnels: validated_tunnels,
             control,
             identity,
+            admission,
         })
     } else {
         Err(ConfigFileError::Validation {

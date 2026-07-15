@@ -16,6 +16,7 @@ pub mod reconnect_policy;
 pub mod runtime_log;
 mod server;
 mod server_address;
+mod server_admission;
 mod server_cert;
 mod server_identity;
 mod shutdown;
@@ -85,10 +86,11 @@ pub use quic::{
     make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
 };
 pub use server::{
-    AuthorizationSnapshot, QUIC_CLOSE_FLUSH_DURATION, Server, ServerAdmission, ServerAuthorization,
+    AuthorizationSnapshot, QUIC_CLOSE_FLUSH_DURATION, Server, ServerAuthorization,
     ServerAuthorizationAdapter, ServerBindConfig,
 };
 pub use server_address::{ServerAddress, ServerAddressError};
+pub use server_admission::ServerAdmission;
 pub use server_cert::{
     SERVER_CA_FILENAME, initialize_manual_server_certificate, inspect_manual_server_certificate,
     renew_manual_server_certificate, rotate_manual_server_certificate_authority,

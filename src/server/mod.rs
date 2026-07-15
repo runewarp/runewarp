@@ -8,6 +8,7 @@ mod visitor_stream;
 
 pub use self::authorization::{AuthorizationSnapshot, ServerAuthorization};
 pub use self::managed_adapter::ServerAuthorizationAdapter;
+pub use crate::server_admission::ServerAdmission;
 
 use std::future::Future;
 use std::io;
@@ -66,17 +67,6 @@ impl FatalSignal {
             notified.await;
         }
     }
-}
-
-/// How the Server admits authorization and readiness at bind time.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ServerAdmission {
-    /// Static mode: requires at least one Tunnel and gains readiness immediately.
-    #[default]
-    Static,
-    /// Managed mode: empty authorization is allowed; readiness stays deferred
-    /// until the first successful Managed-session apply.
-    Managed,
 }
 
 pub struct ServerBindConfig {

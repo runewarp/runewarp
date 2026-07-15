@@ -320,7 +320,7 @@ impl ManagedClientHarness {
     }
 
     async fn spawn_server_node(&self) -> QuicServerNode {
-        let authorization = ServerAuthorization::from_tunnels(
+        let authorization = ServerAuthorization::from_static_tunnels(
             &ServerHostname::try_from("localhost").unwrap(),
             &[ServerTunnelConfig {
                 id: None,

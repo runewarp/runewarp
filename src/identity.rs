@@ -4,7 +4,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use rcgen::{CertificateParams, KeyPair, PublicKeyData};
+use rcgen::{
+    CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose, PKCS_ED25519,
+    PublicKeyData,
+};
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use sha2::{Digest, Sha256};
@@ -116,7 +119,7 @@ impl fmt::Display for ParseClientIdentityCertificateError {
 impl std::error::Error for ParseClientIdentityCertificateError {}
 
 pub fn generate_client_identity() -> Result<GeneratedClientIdentity, rcgen::Error> {
-    let signing_key = KeyPair::generate()?;
+    let signing_key = KeyPair::generate_for(&PKCS_ED25519)?;
     let certificate_pem = issue_client_certificate(&signing_key, OffsetDateTime::now_utc())?;
     let client_identity =
         ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
@@ -238,6 +241,12 @@ fn issue_client_certificate(
     let mut certificate_params = CertificateParams::new(vec!["runewarp-client".to_owned()])?;
     certificate_params.not_before = not_before;
     certificate_params.not_after = not_before + Duration::days(CLIENT_CERT_LIFETIME_DAYS as i64);
+    certificate_params
+        .key_usages
+        .push(KeyUsagePurpose::DigitalSignature);
+    certificate_params
+        .extended_key_usages
+        .push(ExtendedKeyUsagePurpose::ClientAuth);
     let certificate = certificate_params.self_signed(signing_key)?;
     Ok(certificate.pem())
 }

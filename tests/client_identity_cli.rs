@@ -2,13 +2,16 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
-use runewarp::client_identity_from_certificate_der;
+use rcgen::{KeyPair, PublicKeyData};
+use runewarp::{ClientIdentity, client_identity_from_certificate_der};
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use tempfile::tempdir;
 use time::OffsetDateTime;
 
 mod common;
+
+use common::assert_generated_client_identity_certificate_profile;
 
 #[test]
 fn client_identity_init_writes_identity_artifacts_to_the_requested_directory() {
@@ -272,15 +275,22 @@ fn client_identity_init_matches_the_generated_certificate_subject_public_key_inf
         .success();
 
     let certificate_pem = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
+    let private_key_pem =
+        fs::read_to_string(tempdir.path().join("client-identity/client.key")).unwrap();
     let certificate =
         CertificateDer::from_pem_slice(&certificate_pem).expect("generated certificate");
     let stored_identity =
         fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
+    let signing_key = KeyPair::from_pem(&private_key_pem).expect("generated private key");
 
     let derived_identity = client_identity_from_certificate_der(certificate.as_ref())
         .expect("derive client identity from certificate");
+    let key_identity =
+        ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
 
     assert_eq!(stored_identity.trim(), derived_identity.to_string());
+    assert_eq!(stored_identity.trim(), key_identity.to_string());
+    assert_generated_client_identity_certificate_profile(certificate.as_ref());
 }
 
 #[test]
@@ -366,6 +376,7 @@ fn client_identity_rotate_replaces_the_key_and_client_identity() {
             .to_string(),
         rotated_identity.trim(),
     );
+    assert_generated_client_identity_certificate_profile(rotated_certificate_der.as_ref());
     assert!(stdout.contains(&format!(
         "Client identity rotated: {}",
         rotated_identity.trim()

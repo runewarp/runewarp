@@ -141,7 +141,7 @@ The operator-run local endpoint that a **Client** connects to after it selects a
 _Avoid_: Service, tunnel
 
 **Client identity**:
-The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime or issuer; self-signed Client identity certificates are operationally non-expiring key carriers, and certificate renewal or attestation with the same key preserves it, while explicit key rotation changes the identity. One **Tunnel** may authorize one or more **Client identities**.
+The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime, issuer, or certificate purpose metadata; newly generated self-signed Client identity certificates use Ed25519 with explicit client-authentication purpose, while existing algorithm profiles remain valid when their SPKI fingerprint is authorized. Certificate renewal or attestation with the same key preserves the identity; explicit key rotation changes it. One **Tunnel** may authorize one or more **Client identities**.
 _Avoid_: Certificate, serial number
 
 **Server identity**:

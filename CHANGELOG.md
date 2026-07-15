@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Changed
 
+- Newly initialized and rotated Client identities use Ed25519 self-signed certificates with `digitalSignature` and `clientAuth`, while pin-only Tunnel authentication continues to accept existing ECDSA P-256 material and certificates without extended key usage. (#214)
 - Deepened Managed session so production runtimes and integration tests share one domain seam (`ManagedSession` + `RoleAdapter` + session material/limits); transport, SSE framing, snapshot parsing, reporting, and TLS-load helpers are no longer crate-root exports. (#196)
 - Contracted redundant `config::client` / `config::server` config aliases to role-qualified entry points and exposed preparation-owned material outcomes (`resolve_server_cert_material_dir`, `resolve_server_cert_hostname`, `resolve_client_identity_material_dir`, `resolve_client_public_cert_material_dir`) for public Rust consumers. (#210)
 

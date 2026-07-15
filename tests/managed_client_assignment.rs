@@ -25,14 +25,14 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    AddressController, AddressWorkerControl, AssignmentConvergence, CLIENT_CERT_FILENAME,
+    AddressController, AddressWorkerDial, AssignmentConvergence, CLIENT_CERT_FILENAME,
     CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientConfig, ClientIdentity,
     ClientInstancePrep, ClientTlsMode, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
-    LogLevel, MaintenanceIntent, ManagedSession, ManagedSessionEvent, ManagedSessionRole,
+    EstablishOutcome, LogLevel, ManagedSession, ManagedSessionEvent, ManagedSessionRole,
     OrderlyShutdown, PreparedClient, PublicHostname, QUIC_CLOSE_FLUSH_DURATION, Server,
     ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
-    ServerTunnelConfig, ServiceConfig, SessionMaterial, ShutdownMode,
-    client_identity_from_certificate_der, make_server_quic_config_with_client_admission,
+    ServerTunnelConfig, ServiceConfig, SessionMaterial, client_identity_from_certificate_der,
+    make_server_quic_config_with_client_admission,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -224,6 +224,7 @@ impl ManagedClientHarness {
                 address: ControlAddress::parse(&format!("localhost:{}", control.port)).unwrap(),
                 trust: ControlTrust::CaFile(control_paths.ca_cert.clone()),
             }),
+            admission: runewarp::ClientAdmission::Managed,
         };
         let settings = Arc::new(settings);
         let dial_attempts = Arc::new(AtomicUsize::new(0));
@@ -251,22 +252,24 @@ impl ManagedClientHarness {
             let settings = Arc::clone(&settings);
             let instance = Arc::clone(&instance);
             let dial_attempts = Arc::clone(&dial_attempts);
+            let dial = Arc::new(IntegrationAddressDial {
+                settings,
+                instance,
+                local_bind_addr: localhost(0),
+                dial_attempts,
+            });
             Arc::new(move |server_address, control| {
-                let settings = Arc::clone(&settings);
-                let instance = Arc::clone(&instance);
-                let dial_attempts = Arc::clone(&dial_attempts);
-                async move {
-                    run_test_address_worker(
-                        settings,
-                        instance,
+                let dial = Arc::clone(&dial);
+                Box::pin(async move {
+                    runewarp::run_address_worker(
                         server_address,
-                        localhost(0),
                         control,
-                        dial_attempts,
+                        dial,
+                        Arc::new(runewarp::SilentAddressWorkerHooks),
+                        runewarp::FixedBackoff(Duration::from_millis(20)),
                     )
                     .await
-                }
-                .boxed()
+                })
             })
         };
 
@@ -728,158 +731,74 @@ async fn wait_for_reconnecting(events: &mut mpsc::UnboundedReceiver<ManagedSessi
     .expect("timed out waiting for managed session reconnect");
 }
 
-async fn run_test_address_worker(
+struct IntegrationAddressDial {
     settings: Arc<ClientConfig>,
     instance: Arc<ClientInstancePrep>,
-    server_address: ServerAddress,
     local_bind_addr: SocketAddr,
-    control: AddressWorkerControl,
     dial_attempts: Arc<AtomicUsize>,
-) -> Result<(), String> {
-    let mut maintenance = control.subscribe_maintenance();
-    loop {
-        if control.shutdown_requested() {
-            return Ok(());
-        }
-        // Establishing / reconnecting work stops on Retire. Connected retirement is
-        // handled inside the tunnel run below and must not locally close the connection.
-        if control.maintenance_intent() == MaintenanceIntent::Retire {
-            return Ok(());
-        }
+}
 
-        let resolved = match tokio::select! {
-            _ = wait_for_shutdown(&control) => return Ok(()),
-            changed = maintenance.changed() => {
-                if changed.is_err()
-                    || control.maintenance_intent() == MaintenanceIntent::Retire
-                {
-                    return Ok(());
+impl AddressWorkerDial for IntegrationAddressDial {
+    fn establish(
+        &self,
+        address: ServerAddress,
+    ) -> futures_util::future::BoxFuture<'static, EstablishOutcome> {
+        let settings = Arc::clone(&self.settings);
+        let instance = Arc::clone(&self.instance);
+        let local_bind_addr = self.local_bind_addr;
+        let dial_attempts = Arc::clone(&self.dial_attempts);
+        Box::pin(async move {
+            let resolved = match lookup_host((address.hostname().as_str(), address.port())).await {
+                Ok(addrs) => {
+                    let resolved: Vec<_> = addrs.collect();
+                    // Prefer IPv4 so Linux CI (where localhost often resolves
+                    // ::1 first) still reaches Servers bound to 127.0.0.1.
+                    resolved
+                        .iter()
+                        .copied()
+                        .find(SocketAddr::is_ipv4)
+                        .or_else(|| resolved.first().copied())
                 }
-                continue;
-            }
-            result = lookup_host((server_address.hostname().as_str(), server_address.port())) => {
-                match result {
-                    Ok(addrs) => {
-                        let resolved: Vec<_> = addrs.collect();
-                        // Prefer IPv4 so Linux CI (where localhost often resolves
-                        // ::1 first) still reaches Servers bound to 127.0.0.1.
-                        resolved
-                            .iter()
-                            .copied()
-                            .find(SocketAddr::is_ipv4)
-                            .or_else(|| resolved.first().copied())
-                            .ok_or_else(|| "no resolved address".to_owned())
-                    }
-                    Err(error) => Err(error.to_string()),
-                }
-            }
-        } {
-            Ok(addr) => addr,
-            Err(_) => {
-                if !wait_for_retry_delay(Duration::from_millis(20), &control).await {
-                    return Ok(());
-                }
-                continue;
-            }
-        };
+                Err(_) => None,
+            };
+            let Some(resolved) = resolved else {
+                return EstablishOutcome::Retryable {
+                    message: "resolution failed".to_owned(),
+                    log_with_delay: None,
+                };
+            };
 
-        if control.maintenance_intent() == MaintenanceIntent::Retire {
-            return Ok(());
-        }
-
-        dial_attempts.fetch_add(1, Ordering::SeqCst);
-        let client = match tokio::select! {
-            _ = wait_for_shutdown(&control) => return Ok(()),
-            changed = maintenance.changed() => {
-                if changed.is_err()
-                    || control.maintenance_intent() == MaintenanceIntent::Retire
-                {
-                    return Ok(());
-                }
-                continue;
-            }
-            result = PreparedClient::connect_to_server_address(
+            dial_attempts.fetch_add(1, Ordering::SeqCst);
+            match PreparedClient::connect_to_server_address(
                 &settings,
                 &instance,
                 local_bind_addr,
-                &server_address,
+                &address,
                 resolved,
-            ) => result,
-        } {
-            Ok(client) => client,
-            Err(_) => {
-                if !wait_for_retry_delay(Duration::from_millis(20), &control).await {
-                    return Ok(());
-                }
-                continue;
+            )
+            .await
+            {
+                Ok(client) => EstablishOutcome::Connected {
+                    configured_server_addr: format!(
+                        "{}:{}",
+                        address.hostname().as_str(),
+                        address.port()
+                    ),
+                    run: Box::new(move |process_shutdown| {
+                        Box::pin(async move {
+                            client
+                                .run_until_shutdown(process_shutdown)
+                                .await
+                                .map_err(|error| error.to_string())
+                        })
+                    }),
+                },
+                Err(error) => EstablishOutcome::Retryable {
+                    message: error.to_string(),
+                    log_with_delay: None,
+                },
             }
-        };
-
-        control.observe_connected(&server_address);
-
-        // Retire must not locally close: only process shutdown ends the tunnel run.
-        let _run_result = client
-            .run_until_shutdown({
-                let control = control.clone();
-                async move {
-                    let mut maintenance = control.subscribe_maintenance();
-                    let mut shutdown = control.subscribe_shutdown();
-                    if control.shutdown_requested() {
-                        return ShutdownMode::Graceful;
-                    }
-                    loop {
-                        tokio::select! {
-                            changed = shutdown.changed() => {
-                                if changed.is_err() || control.shutdown_requested() {
-                                    return ShutdownMode::Graceful;
-                                }
-                            }
-                            changed = maintenance.changed() => {
-                                // Observe Retire without closing; re-adopt restores Maintain.
-                                if changed.is_err() {
-                                    return ShutdownMode::Graceful;
-                                }
-                            }
-                        }
-                    }
-                }
-            })
-            .await;
-
-        control.observe_disconnected(&server_address);
-
-        if control.shutdown_requested() || control.maintenance_intent() == MaintenanceIntent::Retire
-        {
-            return Ok(());
-        }
-
-        if !wait_for_retry_delay(Duration::from_millis(20), &control).await {
-            return Ok(());
-        }
-    }
-}
-
-async fn wait_for_shutdown(control: &AddressWorkerControl) {
-    let mut shutdown = control.subscribe_shutdown();
-    loop {
-        if control.shutdown_requested() {
-            return;
-        }
-        if shutdown.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
-async fn wait_for_retry_delay(delay: Duration, control: &AddressWorkerControl) -> bool {
-    let mut maintenance = control.subscribe_maintenance();
-    let mut shutdown = control.subscribe_shutdown();
-    tokio::select! {
-        _ = sleep(delay) => true,
-        _ = shutdown.changed() => false,
-        changed = maintenance.changed() => {
-            changed.is_ok() && control.maintenance_intent() != MaintenanceIntent::Retire
-        }
+        })
     }
 }
 

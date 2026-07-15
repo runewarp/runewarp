@@ -118,6 +118,8 @@ pub struct ClientConfig {
     pub services: Vec<ServiceConfig>,
     pub public_cert_config: Option<ClientPublicCertConfig>,
     pub control: Option<ControlConfig>,
+    /// Prepared static-vs-managed outcome for Address-controller wiring.
+    pub admission: crate::ClientAdmission,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -861,6 +863,11 @@ pub(crate) fn validate_prepared_client_config(
             services,
             public_cert_config,
             control: control_config,
+            admission: if managed {
+                crate::ClientAdmission::Managed
+            } else {
+                crate::ClientAdmission::Static
+            },
         })
     } else {
         Err(ConfigFileError::Validation {

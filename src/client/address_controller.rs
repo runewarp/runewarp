@@ -98,18 +98,35 @@ struct WorkerSlot {
 
 type RunningWorker = BoxFuture<'static, (ServerAddress, u64, Result<(), String>)>;
 
+/// How the controller was constructed and which subsystems are active.
+enum ControllerMode {
+    /// Lightweight intent/slot tests via [`AddressController::new`] + [`AddressController::add`]
+    /// / [`AddressController::seed_static`].
+    Manual {
+        client_ready_enabled: bool,
+        convergence: Option<AssignmentConvergenceTracker>,
+    },
+    /// Static Client startup via [`AddressController::for_static`]: factory-driven seeding,
+    /// **Client-ready** enabled, no managed apply loop.
+    Static { factory: AddressWorkerFactory },
+    /// Managed-session reconciliation via [`AddressController::for_managed`]: factory,
+    /// apply channel, and **Assignment convergence**; **Client-ready** disabled.
+    Managed {
+        factory: AddressWorkerFactory,
+        apply_rx: Option<mpsc::UnboundedReceiver<ClientAssignmentApply>>,
+        convergence: AssignmentConvergenceTracker,
+    },
+}
+
 /// Owns address-worker lifecycle keyed by normalized **Server address**.
 pub struct AddressController {
     workers: HashMap<ServerAddress, WorkerSlot>,
     running: FuturesUnordered<RunningWorker>,
     ready_logged: Arc<AtomicBool>,
-    client_ready_enabled: bool,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     next_generation: u64,
-    factory: Option<AddressWorkerFactory>,
-    apply_rx: Option<mpsc::UnboundedReceiver<ClientAssignmentApply>>,
-    convergence: Option<AssignmentConvergenceTracker>,
+    mode: ControllerMode,
     shared_worker_count: Arc<AtomicUsize>,
 }
 
@@ -155,28 +172,30 @@ impl Default for AddressController {
 }
 
 impl AddressController {
-    pub fn new() -> Self {
+    fn new_with_mode(mode: ControllerMode) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             workers: HashMap::new(),
             running: FuturesUnordered::new(),
             ready_logged: Arc::new(AtomicBool::new(false)),
-            client_ready_enabled: true,
             shutdown_tx,
             shutdown_rx,
             next_generation: 1,
-            factory: None,
-            apply_rx: None,
-            convergence: None,
+            mode,
             shared_worker_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
+    pub fn new() -> Self {
+        Self::new_with_mode(ControllerMode::Manual {
+            client_ready_enabled: true,
+            convergence: None,
+        })
+    }
+
     /// Static Client controller with **Client-ready** enabled and no managed apply loop.
     pub fn for_static(factory: AddressWorkerFactory) -> Self {
-        let mut controller = Self::new();
-        controller.factory = Some(factory);
-        controller
+        Self::new_with_mode(ControllerMode::Static { factory })
     }
 
     /// Managed Client controller with **Assignment convergence** tracking and an apply
@@ -186,24 +205,47 @@ impl AddressController {
     pub fn for_managed(factory: AddressWorkerFactory) -> (Self, crate::ClientAssignmentAdapter) {
         let (apply_tx, apply_rx) = mpsc::unbounded_channel();
         let adapter = crate::ClientAssignmentAdapter::new(apply_tx);
-        let mut controller = Self::new();
-        controller.disable_client_ready_log();
-        controller.factory = Some(factory);
-        controller.apply_rx = Some(apply_rx);
-        controller.convergence = Some(AssignmentConvergenceTracker::new());
+        let controller = Self::new_with_mode(ControllerMode::Managed {
+            factory,
+            apply_rx: Some(apply_rx),
+            convergence: AssignmentConvergenceTracker::new(),
+        });
         (controller, adapter)
     }
 
-    /// Disable the static one-shot Client-ready log for managed assignment mode.
-    pub fn disable_client_ready_log(&mut self) {
-        self.client_ready_enabled = false;
+    fn factory(&self) -> Option<&AddressWorkerFactory> {
+        match &self.mode {
+            ControllerMode::Manual { .. } => None,
+            ControllerMode::Static { factory } | ControllerMode::Managed { factory, .. } => {
+                Some(factory)
+            }
+        }
+    }
+
+    fn convergence_tracker(&self) -> Option<&AssignmentConvergenceTracker> {
+        match &self.mode {
+            ControllerMode::Manual { convergence, .. } => convergence.as_ref(),
+            ControllerMode::Static { .. } => None,
+            ControllerMode::Managed { convergence, .. } => Some(convergence),
+        }
+    }
+
+    fn client_ready_enabled(&self) -> bool {
+        match &self.mode {
+            ControllerMode::Manual {
+                client_ready_enabled,
+                ..
+            } => *client_ready_enabled,
+            ControllerMode::Static { .. } => true,
+            ControllerMode::Managed { .. } => false,
+        }
     }
 
     /// Clone a read-only view for observing worker count and **Assignment convergence**
     /// from another task (for example integration-test harnesses).
     pub fn view(&self) -> AddressControllerView {
         AddressControllerView {
-            convergence: self.convergence.clone(),
+            convergence: self.convergence_tracker().cloned(),
             worker_count: Arc::clone(&self.shared_worker_count),
         }
     }
@@ -215,8 +257,7 @@ impl AddressController {
     /// Current **Assignment convergence**. Static mode without a tracker is always
     /// [`AssignmentConvergence::Converged`].
     pub fn assignment_convergence(&self) -> AssignmentConvergence {
-        self.convergence
-            .as_ref()
+        self.convergence_tracker()
             .map(AssignmentConvergenceTracker::current)
             .unwrap_or(AssignmentConvergence::Converged)
     }
@@ -240,9 +281,10 @@ impl AddressController {
     ///
     /// No-op when no factory was configured (for example outside [`Self::for_static`]).
     pub fn seed_configured(&mut self, addresses: impl IntoIterator<Item = ServerAddress>) {
-        let Some(factory) = self.factory.clone() else {
+        let Some(factory) = self.factory() else {
             return;
         };
+        let factory = factory.clone();
         for address in addresses {
             let _ = self.add_with_factory(address, &factory);
         }
@@ -380,49 +422,55 @@ impl AddressController {
     /// Static mode (no apply channel) is equivalent to [`Self::run_until_idle`]. Managed
     /// mode selects on assignment applies, worker completions, and shutdown.
     pub async fn run(&mut self) -> Result<(), String> {
-        let Some(mut apply_rx) = self.apply_rx.take() else {
-            return self.run_until_idle().await;
-        };
+        match &mut self.mode {
+            ControllerMode::Managed {
+                factory,
+                apply_rx,
+                convergence,
+            } => {
+                let Some(mut apply_rx) = apply_rx.take() else {
+                    return self.run_until_idle().await;
+                };
+                let factory = factory.clone();
+                let convergence = convergence.clone();
+                let mut shutdown_rx = self.shutdown_rx.clone();
 
-        let Some(factory) = self.factory.clone() else {
-            return Err("factory required for managed run".to_owned());
-        };
-        let Some(convergence) = self.convergence.clone() else {
-            return Err("convergence tracker required for managed run".to_owned());
-        };
-        let mut shutdown_rx = self.shutdown_rx.clone();
-
-        loop {
-            let drive_workers = self.has_inflight_workers();
-            tokio::select! {
-                biased;
-                apply = apply_rx.recv() => {
-                    let Some(ClientAssignmentApply { addresses, done }) = apply else {
-                        self.request_shutdown();
-                        return self.run_until_idle().await;
-                    };
-                    let status = convergence
-                        .set_assigned(&addresses)
-                        .unwrap_or_else(|| convergence.current());
-                    crate::runtime_log::client_assignment_convergence(status);
-                    self.replace_intent_with_factory(&addresses, &factory);
-                    let _ = done.send(Ok(()));
-                }
-                completion = self.next_completion(), if drive_workers => {
-                    match completion {
-                        Some(Ok(_)) => {}
-                        Some(Err((_address, error))) => {
-                            self.request_shutdown();
-                            return Err(error);
+                loop {
+                    let drive_workers = self.has_inflight_workers();
+                    tokio::select! {
+                        biased;
+                        apply = apply_rx.recv() => {
+                            let Some(ClientAssignmentApply { addresses, done }) = apply else {
+                                self.request_shutdown();
+                                return self.run_until_idle().await;
+                            };
+                            let status = convergence
+                                .set_assigned(&addresses)
+                                .unwrap_or_else(|| convergence.current());
+                            crate::runtime_log::client_assignment_convergence(status);
+                            self.replace_intent_with_factory(&addresses, &factory);
+                            let _ = done.send(Ok(()));
                         }
-                        None => {}
+                        completion = self.next_completion(), if drive_workers => {
+                            match completion {
+                                Some(Ok(_)) => {}
+                                Some(Err((_address, error))) => {
+                                    self.request_shutdown();
+                                    return Err(error);
+                                }
+                                None => {}
+                            }
+                        }
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                return self.run_until_idle().await;
+                            }
+                        }
                     }
                 }
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        return self.run_until_idle().await;
-                    }
-                }
+            }
+            ControllerMode::Manual { .. } | ControllerMode::Static { .. } => {
+                self.run_until_idle().await
             }
         }
     }
@@ -490,8 +538,8 @@ impl AddressController {
             maintenance: maintenance_rx,
             shutdown: self.shutdown_rx.clone(),
             ready_logged: Arc::clone(&self.ready_logged),
-            client_ready_enabled: self.client_ready_enabled,
-            convergence: self.convergence.clone(),
+            client_ready_enabled: self.client_ready_enabled(),
+            convergence: self.convergence_tracker().cloned(),
         };
         let worker_address = address.clone();
         let future = spawn(address.clone(), control);
@@ -1515,15 +1563,7 @@ mod tests {
     }
 
     async fn wait_for_shutdown(control: &AddressWorkerControl) {
-        let mut shutdown = control.subscribe_shutdown();
-        if control.shutdown_requested() {
-            return;
-        }
-        while shutdown.changed().await.is_ok() {
-            if *shutdown.borrow() {
-                return;
-            }
-        }
+        crate::wait_for_shutdown(control).await;
     }
 
     async fn wait_until_retired_or_shutdown(control: &AddressWorkerControl) {

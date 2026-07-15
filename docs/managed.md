@@ -51,7 +51,8 @@ This document describes what Core implements today. Product policy (lifecycle la
 | **Tunnel connection** | QUIC data-path session between Client and Server; separate from the Managed session |
 | **Authorization snapshot** | Server-side Public-hostname routing plus trusted Client identities applied from Control; managed tunnels are keyed by **Tunnel ID** |
 | **Tunnel ID** | Control-owned opaque identifier for one managed Server **Tunnel**; continuity key for live pools; absent in static mode |
-| **Address controller** | Client-owned complete assigned Server-address lifecycle (intent, workers, Retiring, Assignment convergence, apply ack, fatal completion, static Client-ready, shutdown) |
+| **Address controller** | Client-owned complete assigned Server-address lifecycle (intent, workers, production Retiring policy, Assignment convergence, apply ack, fatal completion, static Client-ready, shutdown) |
+| **Client admission** | Prepared Client static-vs-managed outcome set once during Config validation; startup wires the Address controller from it |
 | **Assignment convergence** | Client aggregate of whether assigned Server addresses are Connected (separate from revision acknowledgment) |
 | **Retiring** | Connected address removed from assignment intent: reconnect stops; live Tunnel connection stays until remote Server closure |
 | **Server readiness** | Ingress-admission signal; gated on first successful Server input apply in managed mode |

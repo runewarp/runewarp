@@ -84,8 +84,12 @@ _Avoid_: Tunnel registry, handshake config, routing table
 The prepared Server static-vs-managed outcome decided once during Config validation from Control address presence. Startup binds Authorization construction and readiness policy from that outcome instead of re-checking Control at every layer.
 _Avoid_: RuntimeMode, global mode flag
 
+**Client admission**:
+The prepared Client static-vs-managed outcome decided once during Config validation from Control address presence. Client startup wires the **Address controller** from that outcome (`for_static` + seeded addresses vs `for_managed` + empty start with convergence and apply) instead of re-checking Control at every layer.
+_Avoid_: RuntimeMode, global mode flag
+
 **Address controller**:
-The Client-owned runtime that owns the complete assigned **Server address** lifecycle: maintenance intent, address workers, **Retiring**, **Assignment convergence**, managed apply acknowledgment, fatal worker completion, static **Client-ready** policy, and shutdown draining. It maintains at most one address worker per normalized **Server address**. Static Client startup seeds it from the configured address set; Managed-session Client reconciliation drives the same seam through complete Server-address snapshots.
+The Client-owned runtime that owns the complete assigned **Server address** lifecycle: maintenance intent, address workers, **Retiring**, **Assignment convergence**, managed apply acknowledgment, fatal worker completion, static **Client-ready** policy, and shutdown draining. Production Retiring / reconnect-vs-exit / re-adopt-without-duplicate-dial policy lives with the controller seam (library address-worker lifecycle); factories supply dial/connect adapters only. It maintains at most one address worker per normalized **Server address**. Static Client startup seeds it from the configured address set; Managed-session Client reconciliation drives the same seam through complete Server-address snapshots.
 _Avoid_: fanout loop, connection pool, dial manager
 
 **Assignment convergence**:

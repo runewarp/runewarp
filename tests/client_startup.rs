@@ -263,6 +263,7 @@ async fn prepared_client_rejects_settings_without_services() {
         services: Vec::new(),
         public_cert_config: None,
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
 
     let join = tokio::spawn(async move {
@@ -334,6 +335,7 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
         ],
         public_cert_config: None,
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
 
     let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
@@ -395,6 +397,7 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
         ],
         public_cert_config: None,
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
 
     let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
@@ -448,6 +451,7 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
             directory: public_cert_dir,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
 
     let error = match PreparedClient::connect_to(&settings, localhost(0), localhost(0)).await {
@@ -535,6 +539,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
             directory: public_cert_dir,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
 
     // We use a fake server_ca_file path; the connect will succeed despite the missing ca file
@@ -661,6 +666,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
             directory: public_cert_dir,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
 
     // Startup must succeed — mixed services are valid
@@ -764,6 +770,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
             state_directory_was_defaulted: false,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
 
     // Startup must succeed without blocking — the ACME resolver starts with no cert loaded,
@@ -862,6 +869,7 @@ async fn shared_client_instance_prep_survives_reconnect_style_redials() {
             directory: public_cert_dir,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
 
     let instance = ClientInstancePrep::prepare(&settings).await.unwrap();
@@ -1010,6 +1018,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
             state_directory_was_defaulted: false,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
 
     // Startup must succeed: the passthrough service does not require ACME management.

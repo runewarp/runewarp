@@ -3,11 +3,13 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use futures_util::future::BoxFuture;
 use runewarp::{
-    AddressController, AddressWorkerControl, AddressWorkerFactory, ClientInstancePrep,
-    MaintenanceIntent, PreparedClient, ServerAddress, ShutdownMode,
+    AddressController, AddressWorkerDial, AddressWorkerFactory, AddressWorkerHooks,
+    ClientAdmission, ClientInstancePrep, EstablishOutcome, PreparedClient, ServerAddress,
+    ShutdownMode,
 };
 use tokio::net::lookup_host;
 
@@ -37,60 +39,245 @@ where
     let instance = ClientInstancePrep::prepare(settings.as_ref()).await?;
     instance.start_acme_once();
 
-    if let Some(control) = settings.control.as_ref() {
-        let result = run_managed_client(
-            Arc::clone(&settings),
-            Arc::clone(&instance),
-            control,
-            local_bind_addr,
-            shutdown_signal,
-        )
-        .await;
-        instance.stop_acme().await;
-        return result;
-    }
+    let result = match settings.admission {
+        ClientAdmission::Managed => {
+            let control = settings.control.as_ref().ok_or_else(|| {
+                io::Error::other("managed Client admission requires Control config")
+            })?;
+            run_managed_client(
+                Arc::clone(&settings),
+                Arc::clone(&instance),
+                control,
+                local_bind_addr,
+                shutdown_signal,
+            )
+            .await
+        }
+        ClientAdmission::Static => {
+            let factory = production_client_address_worker_factory(
+                Arc::clone(&settings),
+                Arc::clone(&instance),
+                local_bind_addr,
+            );
+            let mut controller = AddressController::for_static(factory);
+            controller.seed_configured(settings.server_addresses.clone());
+            let shutdown = controller.shutdown_handle();
 
-    let factory = static_address_worker_factory(
-        Arc::clone(&settings),
-        Arc::clone(&instance),
-        local_bind_addr,
-    );
-    let mut controller = AddressController::for_static(factory);
-    controller.seed_configured(settings.server_addresses.clone());
-    let shutdown = controller.shutdown_handle();
-
-    let runtime = controller.run();
-    tokio::pin!(runtime);
-    tokio::pin!(shutdown_signal);
-    let client_result = tokio::select! {
-        result = &mut runtime => result,
-        signal_result = &mut shutdown_signal => {
-            let _mode = signal_result?;
-            runewarp::runtime_log::client_graceful_shutdown_started();
-            shutdown.request();
-            runtime.await
+            let runtime = controller.run();
+            tokio::pin!(runtime);
+            tokio::pin!(shutdown_signal);
+            let client_result = tokio::select! {
+                result = &mut runtime => result,
+                signal_result = &mut shutdown_signal => {
+                    let _mode = signal_result?;
+                    runewarp::runtime_log::client_graceful_shutdown_started();
+                    shutdown.request();
+                    runtime.await
+                }
+            };
+            client_result.map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
         }
     };
     instance.stop_acme().await;
-    client_result.map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
+    result
 }
 
-fn static_address_worker_factory(
+fn production_client_address_worker_factory(
     settings: Arc<runewarp::ClientConfig>,
     instance: Arc<ClientInstancePrep>,
     local_bind_addr: SocketAddr,
 ) -> AddressWorkerFactory {
     Arc::new(move |server_address, control| {
-        let settings = Arc::clone(&settings);
-        let instance = Arc::clone(&instance);
-        Box::pin(run_server_address_worker(
-            settings,
-            instance,
-            server_address,
+        let dial = Arc::new(ProductionAddressDial {
+            settings: Arc::clone(&settings),
+            instance: Arc::clone(&instance),
             local_bind_addr,
-            control,
-        ))
+            connected_once: Arc::new(AtomicBool::new(false)),
+            establish_attempts: Arc::new(AtomicUsize::new(0)),
+        });
+        Box::pin(async move {
+            runewarp::run_address_worker_with_reconnect_policy(
+                server_address,
+                control,
+                dial,
+                Arc::new(RuntimeClientReadyHooks),
+            )
+            .await
+        })
     })
+}
+
+struct RuntimeClientReadyHooks;
+
+impl AddressWorkerHooks for RuntimeClientReadyHooks {
+    fn on_client_ready(&self, configured_server_addr: &str) {
+        runewarp::runtime_log::client_ready(configured_server_addr);
+    }
+}
+
+struct ProductionAddressDial {
+    settings: Arc<runewarp::ClientConfig>,
+    instance: Arc<ClientInstancePrep>,
+    local_bind_addr: SocketAddr,
+    connected_once: Arc<AtomicBool>,
+    establish_attempts: Arc<AtomicUsize>,
+}
+
+impl AddressWorkerDial for ProductionAddressDial {
+    fn establish(&self, address: ServerAddress) -> BoxFuture<'static, EstablishOutcome> {
+        let settings = Arc::clone(&self.settings);
+        let instance = Arc::clone(&self.instance);
+        let local_bind_addr = self.local_bind_addr;
+        let connected_once = Arc::clone(&self.connected_once);
+        let establish_attempts = Arc::clone(&self.establish_attempts);
+        Box::pin(async move {
+            let phase = client_tunnel_phase(connected_once.load(Ordering::SeqCst));
+            let attempt_number = establish_attempts.fetch_add(1, Ordering::SeqCst);
+            let attempt_kind = client_tunnel_attempt_kind(attempt_number == 0);
+            let configured_server_addr =
+                configured_server_addr(address.hostname().as_str(), address.port());
+
+            let dial_target = match resolve_client_tunnel_dial_target(&address).await {
+                Ok(dial_target) => dial_target,
+                Err(error) => {
+                    return if matches!(
+                        retry_disposition_for_client_connect_error(&error),
+                        RetryDisposition::Retry
+                    ) {
+                        let message = error.to_string();
+                        EstablishOutcome::Retryable {
+                            message: message.clone(),
+                            log_with_delay: Some(Box::new(move |delay_secs| {
+                                runewarp::runtime_log::client_tunnel_resolution_failed(
+                                    phase,
+                                    attempt_kind,
+                                    &configured_server_addr,
+                                    delay_secs,
+                                    &message,
+                                );
+                            })),
+                        }
+                    } else {
+                        EstablishOutcome::Fatal {
+                            message: error.to_string(),
+                        }
+                    };
+                }
+            };
+
+            runewarp::runtime_log::client_tunnel_connecting(
+                phase,
+                attempt_kind,
+                &dial_target.configured_server_addr,
+                dial_target.resolved_server_addr,
+            );
+
+            let client = match PreparedClient::connect_to_server_address(
+                &settings,
+                &instance,
+                local_bind_addr,
+                &address,
+                dial_target.resolved_server_addr,
+            )
+            .await
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    return if matches!(
+                        retry_disposition_for_client_connect_error(&error),
+                        RetryDisposition::Retry
+                    ) {
+                        let unauthorized = error
+                            .source()
+                            .and_then(|source| {
+                                source.downcast_ref::<runewarp::ClientConnectError>()
+                            })
+                            .is_some_and(
+                                runewarp::ClientConnectError::is_unauthorized_client_identity,
+                            );
+                        let configured = dial_target.configured_server_addr.clone();
+                        let resolved = dial_target.resolved_server_addr;
+                        let message = error.to_string();
+                        EstablishOutcome::Retryable {
+                            message: message.clone(),
+                            log_with_delay: Some(Box::new(move |delay_secs| {
+                                if unauthorized {
+                                    runewarp::runtime_log::client_tunnel_unauthorized(
+                                        attempt_kind,
+                                        &configured,
+                                        delay_secs,
+                                        &message,
+                                    );
+                                } else {
+                                    runewarp::runtime_log::client_tunnel_connect_failed(
+                                        phase,
+                                        attempt_kind,
+                                        &configured,
+                                        resolved,
+                                        delay_secs,
+                                        &message,
+                                    );
+                                }
+                            })),
+                        }
+                    } else {
+                        EstablishOutcome::Fatal {
+                            message: error.to_string(),
+                        }
+                    };
+                }
+            };
+
+            connected_once.store(true, Ordering::SeqCst);
+            establish_attempts.store(0, Ordering::SeqCst);
+            runewarp::runtime_log::client_tunnel_connected(
+                phase,
+                &dial_target.configured_server_addr,
+                dial_target.resolved_server_addr,
+            );
+
+            let configured = dial_target.configured_server_addr.clone();
+            let resolved = dial_target.resolved_server_addr;
+            EstablishOutcome::Connected {
+                configured_server_addr: dial_target.configured_server_addr,
+                run: Box::new(move |process_shutdown| {
+                    Box::pin(async move {
+                        match client.run_until_shutdown(process_shutdown).await {
+                            Ok(()) => Ok(()),
+                            Err(error) => {
+                                let mut reconnect_policy = ReconnectPolicy::new();
+                                let next_attempt_kind =
+                                    client_tunnel_attempt_kind(reconnect_policy.is_fresh());
+                                let retry = reconnect_policy.next_retry();
+                                if is_unauthorized_client_connection_error(&error) {
+                                    runewarp::runtime_log::client_tunnel_unauthorized(
+                                        next_attempt_kind,
+                                        &configured,
+                                        retry.display_delay_secs,
+                                        &error.to_string(),
+                                    );
+                                } else if is_clean_client_tunnel_close(&error) {
+                                    runewarp::runtime_log::client_tunnel_closed(
+                                        &configured,
+                                        resolved,
+                                        retry.display_delay_secs,
+                                    );
+                                } else {
+                                    runewarp::runtime_log::client_tunnel_disconnected(
+                                        &configured,
+                                        resolved,
+                                        retry.display_delay_secs,
+                                        &error.to_string(),
+                                    );
+                                }
+                                Err(error.to_string())
+                            }
+                        }
+                    })
+                }),
+            }
+        })
+    }
 }
 
 async fn run_managed_client<F>(
@@ -103,7 +290,7 @@ async fn run_managed_client<F>(
 where
     F: Future<Output = io::Result<ShutdownMode>>,
 {
-    let factory = static_address_worker_factory(
+    let factory = production_client_address_worker_factory(
         Arc::clone(&settings),
         Arc::clone(&instance),
         local_bind_addr,
@@ -151,204 +338,6 @@ where
             })?;
             Ok(())
         }
-    }
-}
-
-async fn run_server_address_worker(
-    settings: Arc<runewarp::ClientConfig>,
-    instance: Arc<ClientInstancePrep>,
-    server_address: ServerAddress,
-    local_bind_addr: SocketAddr,
-    control: AddressWorkerControl,
-) -> Result<(), String> {
-    let mut connected_once = false;
-    let mut reconnect_policy = ReconnectPolicy::new();
-    let configured_server_addr =
-        configured_server_addr(server_address.hostname().as_str(), server_address.port());
-    let mut maintenance = control.subscribe_maintenance();
-    loop {
-        if control.shutdown_requested() || control.maintenance_intent() == MaintenanceIntent::Retire
-        {
-            // Establishing / reconnecting work stops on remove. Connected workers reach
-            // this check only after their tunnel run ends (Retire does not locally close).
-            return Ok(());
-        }
-
-        let phase = client_tunnel_phase(connected_once);
-        let attempt_kind = client_tunnel_attempt_kind(reconnect_policy.is_fresh());
-        let dial_target = match tokio::select! {
-            _ = wait_for_shutdown(&control) => return Ok(()),
-            changed = maintenance.changed() => {
-                if changed.is_err()
-                    || control.maintenance_intent() == MaintenanceIntent::Retire
-                {
-                    return Ok(());
-                }
-                continue;
-            }
-            result = resolve_client_tunnel_dial_target(&server_address) => result,
-        } {
-            Ok(dial_target) => dial_target,
-            Err(error) => {
-                if matches!(
-                    retry_disposition_for_client_connect_error(&error),
-                    RetryDisposition::Retry
-                ) {
-                    let retry = reconnect_policy.next_retry();
-                    runewarp::runtime_log::client_tunnel_resolution_failed(
-                        phase,
-                        attempt_kind,
-                        &configured_server_addr,
-                        retry.display_delay_secs,
-                        &error.to_string(),
-                    );
-                    if wait_for_retry_delay(retry.delay, &control).await {
-                        continue;
-                    }
-                    return Ok(());
-                }
-                return Err(error.to_string());
-            }
-        };
-
-        if control.maintenance_intent() == MaintenanceIntent::Retire {
-            return Ok(());
-        }
-
-        runewarp::runtime_log::client_tunnel_connecting(
-            phase,
-            attempt_kind,
-            &dial_target.configured_server_addr,
-            dial_target.resolved_server_addr,
-        );
-
-        let client = match tokio::select! {
-            _ = wait_for_shutdown(&control) => return Ok(()),
-            changed = maintenance.changed() => {
-                if changed.is_err()
-                    || control.maintenance_intent() == MaintenanceIntent::Retire
-                {
-                    return Ok(());
-                }
-                continue;
-            }
-            result = PreparedClient::connect_to_server_address(
-                &settings,
-                &instance,
-                local_bind_addr,
-                &server_address,
-                dial_target.resolved_server_addr,
-            ) => result,
-        } {
-            Ok(client) => client,
-            Err(error) => {
-                if matches!(
-                    retry_disposition_for_client_connect_error(&error),
-                    RetryDisposition::Retry
-                ) {
-                    let retry = reconnect_policy.next_retry();
-                    if error
-                        .source()
-                        .and_then(|source| source.downcast_ref::<runewarp::ClientConnectError>())
-                        .is_some_and(runewarp::ClientConnectError::is_unauthorized_client_identity)
-                    {
-                        runewarp::runtime_log::client_tunnel_unauthorized(
-                            attempt_kind,
-                            &dial_target.configured_server_addr,
-                            retry.display_delay_secs,
-                            &error.to_string(),
-                        );
-                    } else {
-                        runewarp::runtime_log::client_tunnel_connect_failed(
-                            phase,
-                            attempt_kind,
-                            &dial_target.configured_server_addr,
-                            dial_target.resolved_server_addr,
-                            retry.display_delay_secs,
-                            &error.to_string(),
-                        );
-                    }
-                    if wait_for_retry_delay(retry.delay, &control).await {
-                        continue;
-                    }
-                    return Ok(());
-                }
-                return Err(error.to_string());
-            }
-        };
-
-        let first_connection = !connected_once;
-        let retiring = control.maintenance_intent() == MaintenanceIntent::Retire;
-        if !retiring {
-            reconnect_policy.reset();
-        }
-        connected_once = true;
-        runewarp::runtime_log::client_tunnel_connected(
-            phase,
-            &dial_target.configured_server_addr,
-            dial_target.resolved_server_addr,
-        );
-        if first_connection && control.claim_client_ready_log() {
-            runewarp::runtime_log::client_ready(&dial_target.configured_server_addr);
-        }
-        if let Some(status) = control.observe_connected(&server_address) {
-            runewarp::runtime_log::client_assignment_convergence(status);
-        }
-
-        let run_result = client
-            .run_until_shutdown({
-                let control = control.clone();
-                let configured_server_addr = dial_target.configured_server_addr.clone();
-                async move {
-                    wait_for_process_shutdown_observing_retire(&control, &configured_server_addr)
-                        .await;
-                    ShutdownMode::Graceful
-                }
-            })
-            .await;
-
-        if let Some(status) = control.observe_disconnected(&server_address) {
-            runewarp::runtime_log::client_assignment_convergence(status);
-        }
-
-        // Retiring connections stay live until remote close or process shutdown, then exit
-        // without reconnecting. Maintained connections reconnect after unexpected closes.
-        if control.shutdown_requested() || control.maintenance_intent() == MaintenanceIntent::Retire
-        {
-            return Ok(());
-        }
-
-        if let Err(error) = run_result {
-            let next_attempt_kind = client_tunnel_attempt_kind(reconnect_policy.is_fresh());
-            let retry = reconnect_policy.next_retry();
-            if is_unauthorized_client_connection_error(&error) {
-                runewarp::runtime_log::client_tunnel_unauthorized(
-                    next_attempt_kind,
-                    &dial_target.configured_server_addr,
-                    retry.display_delay_secs,
-                    &error.to_string(),
-                );
-            } else if is_clean_client_tunnel_close(&error) {
-                runewarp::runtime_log::client_tunnel_closed(
-                    &dial_target.configured_server_addr,
-                    dial_target.resolved_server_addr,
-                    retry.display_delay_secs,
-                );
-            } else {
-                runewarp::runtime_log::client_tunnel_disconnected(
-                    &dial_target.configured_server_addr,
-                    dial_target.resolved_server_addr,
-                    retry.display_delay_secs,
-                    &error.to_string(),
-                );
-            }
-            if wait_for_retry_delay(retry.delay, &control).await {
-                continue;
-            }
-            return Ok(());
-        }
-
-        return Ok(());
     }
 }
 
@@ -420,74 +409,6 @@ fn is_clean_client_tunnel_close(error: &quinn::ConnectionError) -> bool {
     )
 }
 
-async fn wait_for_shutdown(control: &AddressWorkerControl) {
-    let mut shutdown = control.subscribe_shutdown();
-    if control.shutdown_requested() {
-        return;
-    }
-    while shutdown.changed().await.is_ok() {
-        if *shutdown.borrow() {
-            return;
-        }
-    }
-}
-
-/// Wait for process shutdown while observing Retire without closing the live tunnel.
-async fn wait_for_process_shutdown_observing_retire(
-    control: &AddressWorkerControl,
-    configured_server_addr: &str,
-) {
-    let mut maintenance = control.subscribe_maintenance();
-    let mut shutdown = control.subscribe_shutdown();
-    let mut logged_retiring = false;
-    if control.maintenance_intent() == MaintenanceIntent::Retire {
-        runewarp::runtime_log::client_tunnel_retiring(configured_server_addr);
-        logged_retiring = true;
-    }
-    if control.shutdown_requested() {
-        return;
-    }
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || control.shutdown_requested() {
-                    return;
-                }
-            }
-            changed = maintenance.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-                if !logged_retiring
-                    && control.maintenance_intent() == MaintenanceIntent::Retire
-                {
-                    runewarp::runtime_log::client_tunnel_retiring(configured_server_addr);
-                    logged_retiring = true;
-                }
-            }
-        }
-    }
-}
-
-/// Returns true when the worker should continue retrying after the delay.
-async fn wait_for_retry_delay(delay: Duration, control: &AddressWorkerControl) -> bool {
-    let mut maintenance = control.subscribe_maintenance();
-    tokio::select! {
-        _ = wait_for_shutdown(control) => false,
-        changed = maintenance.changed() => {
-            if changed.is_err() {
-                return false;
-            }
-            !control.shutdown_requested()
-                && control.maintenance_intent() != MaintenanceIntent::Retire
-        }
-        _ = tokio::time::sleep(delay) => {
-            !control.shutdown_requested()
-                && control.maintenance_intent() != MaintenanceIntent::Retire
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -508,16 +429,14 @@ mod tests {
 
     use runewarp::{
         AddressController, AddressWorkerControl, CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME,
-        CLIENT_KEY_FILENAME, ClientConfig, ClientTlsMode, LogLevel, PublicHostname, Server,
-        ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
-        ServerTunnelConfig, ServiceConfig, ShutdownMode, generate_client_identity,
-        make_server_quic_config_with_client_admission,
-    };
-
-    use super::{
-        RetryDisposition, client_tunnel_attempt_kind, run_until_orderly_shutdown,
+        CLIENT_KEY_FILENAME, ClientAdmission, ClientConfig, ClientTlsMode, LogLevel,
+        PublicHostname, Server, ServerAddress, ServerAdmission, ServerAuthorization,
+        ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, ShutdownMode,
+        generate_client_identity, make_server_quic_config_with_client_admission,
         wait_for_retry_delay, wait_for_shutdown,
     };
+
+    use super::{RetryDisposition, client_tunnel_attempt_kind, run_until_orderly_shutdown};
 
     #[test]
     fn retry_attempt_kind_matches_fresh_policy_state() {
@@ -714,6 +633,7 @@ mod tests {
             }],
             public_cert_config: None,
             control: None,
+            admission: ClientAdmission::Static,
         };
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();

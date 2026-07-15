@@ -1858,6 +1858,7 @@ client-identity = "{}"
             state_directory_was_defaulted: false,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
@@ -2024,6 +2025,7 @@ client-identity = "{}"
             state_directory_was_defaulted: false,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
@@ -2178,6 +2180,7 @@ client-identity = "{}"
             state_directory_was_defaulted: false,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
 
     let instance = ClientInstancePrep::prepare(&client_settings).await.unwrap();
@@ -2367,6 +2370,7 @@ client-identity = "{}"
             state_directory_was_defaulted: false,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await
@@ -2505,6 +2509,7 @@ client-identity = "{}"
             state_directory_was_defaulted: false,
         }),
         control: None,
+        admission: runewarp::ClientAdmission::Static,
     };
     let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
         .await

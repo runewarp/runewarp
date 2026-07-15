@@ -1,4 +1,5 @@
 mod address_controller;
+mod address_worker;
 mod assignment_convergence;
 mod managed_adapter;
 mod service;
@@ -9,6 +10,12 @@ mod tunnel_stream;
 pub use address_controller::{
     AddressController, AddressControllerShutdown, AddressControllerView, AddressWorkerControl,
     AddressWorkerFactory, MaintenanceIntent,
+};
+pub use address_worker::{
+    AddressWorkerBackoff, AddressWorkerDial, AddressWorkerHooks, ConnectedTunnelRun,
+    EstablishOutcome, FixedBackoff, SilentAddressWorkerHooks, connected_session_until,
+    production_address_worker_factory, run_address_worker,
+    run_address_worker_with_reconnect_policy, wait_for_retry_delay, wait_for_shutdown,
 };
 pub use assignment_convergence::AssignmentConvergence;
 pub use managed_adapter::ClientAssignmentAdapter;

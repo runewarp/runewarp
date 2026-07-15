@@ -1,11 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use runewarp::{
-    SERVER_CA_FILENAME, ServerHostname, default_server_cert_material_dir,
-    initialize_manual_server_certificate, inspect_manual_server_certificate,
-    renew_manual_server_certificate, resolve_server_cert_material_dir_from_config,
-    resolve_server_hostname_from_config, resolve_server_hostname_runtime_override,
-    rotate_manual_server_certificate_authority,
+    SERVER_CA_FILENAME, initialize_manual_server_certificate, inspect_manual_server_certificate,
+    renew_manual_server_certificate, resolve_server_cert_hostname,
+    resolve_server_cert_material_dir, rotate_manual_server_certificate_authority,
 };
 
 use crate::cli;
@@ -15,7 +13,7 @@ pub(crate) fn run(config: Option<PathBuf>, command: cli::ServerCertArgs) -> Comm
     match command.command {
         cli::ServerCertSubcommand::Init(args) => {
             let hostname = resolve_server_cert_hostname(config.clone(), args.hostname)?;
-            let directory = resolve_server_cert_dir(config, args.dir)?;
+            let directory = resolve_server_cert_material_dir(config, args.dir)?;
             if let Ok(existing_state) = inspect_manual_server_certificate(&directory) {
                 if existing_state.hostname == hostname {
                     print_server_certificate_summary(
@@ -58,7 +56,7 @@ pub(crate) fn run(config: Option<PathBuf>, command: cli::ServerCertArgs) -> Comm
             Ok(())
         }
         cli::ServerCertSubcommand::Renew(args) => {
-            let directory = resolve_server_cert_dir(config, args.dir)?;
+            let directory = resolve_server_cert_material_dir(config, args.dir)?;
             renew_manual_server_certificate(&directory)?;
             let hostname = inspect_manual_server_certificate(&directory)?.hostname;
             print_server_certificate_summary("Server certificate renewed", &directory, &hostname)?;
@@ -66,7 +64,7 @@ pub(crate) fn run(config: Option<PathBuf>, command: cli::ServerCertArgs) -> Comm
         }
         cli::ServerCertSubcommand::RotateCa(args) => {
             let hostname = resolve_server_cert_hostname(config.clone(), args.hostname)?;
-            let directory = resolve_server_cert_dir(config, args.dir)?;
+            let directory = resolve_server_cert_material_dir(config, args.dir)?;
             rotate_manual_server_certificate_authority(&directory, &hostname)?;
             print_server_certificate_summary(
                 "Server certificate authority rotated",
@@ -76,67 +74,6 @@ pub(crate) fn run(config: Option<PathBuf>, command: cli::ServerCertArgs) -> Comm
             Ok(())
         }
     }
-}
-
-fn resolve_server_cert_dir(
-    config: Option<PathBuf>,
-    directory: Option<PathBuf>,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    certs::resolve_material_dir(
-        config,
-        directory,
-        resolve_server_cert_material_dir_from_config,
-        default_server_cert_material_dir,
-    )
-}
-
-fn resolve_server_cert_hostname(
-    config: Option<PathBuf>,
-    hostname: Option<String>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let cli_hostname = hostname;
-    let runtime_hostname = resolve_server_hostname_runtime_override(cli_hostname.clone());
-    let configured_hostname =
-        if let Some(config_path) = certs::candidate_config_path(config.clone()) {
-            resolve_server_hostname_from_config(&config_path)
-                .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?
-        } else {
-            None
-        };
-
-    let hostname = match (cli_hostname, runtime_hostname, configured_hostname) {
-        (Some(hostname), _, Some(configured_hostname)) => {
-            if normalized_hostname_for_match(&hostname)
-                != normalized_hostname_for_match(configured_hostname.as_str())
-            {
-                return Err(format!(
-                    "--hostname `{hostname}` does not match configured server.hostname `{configured_hostname}`"
-                )
-                .into());
-            }
-            hostname
-        }
-        (Some(hostname), _, None) => hostname,
-        (None, Some(hostname), _) => hostname,
-        (None, None, Some(configured_hostname)) => configured_hostname.to_string(),
-        (None, None, None) => {
-            return Err(
-                "server hostname is required via --hostname, RUNEWARP_SERVER_HOSTNAME, or server.hostname in config"
-                    .into(),
-            )
-        }
-    };
-
-    ServerHostname::try_from(hostname.as_str())
-        .map_err(|error| format!("server.hostname is invalid: {error}"))?;
-    Ok(hostname)
-}
-
-fn normalized_hostname_for_match(hostname: &str) -> String {
-    hostname
-        .strip_suffix('.')
-        .unwrap_or(hostname)
-        .to_ascii_lowercase()
 }
 
 fn print_server_certificate_summary(

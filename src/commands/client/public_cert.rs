@@ -2,10 +2,9 @@ use std::path::{Path, PathBuf};
 
 use runewarp::{
     CLIENT_PUBLIC_CA_FILENAME, CLIENT_PUBLIC_CERT_FILENAME, CLIENT_PUBLIC_CERT_LIFETIME_DAYS,
-    CLIENT_PUBLIC_KEY_FILENAME, default_client_public_cert_material_dir, default_config_path,
-    initialize_manual_client_public_cert, renew_manual_client_public_cert,
-    resolve_client_public_cert_material_dir_from_config, resolve_terminating_hostnames_from_config,
-    rotate_manual_client_public_cert_authority, select_client_config,
+    CLIENT_PUBLIC_KEY_FILENAME, default_config_path, initialize_manual_client_public_cert,
+    renew_manual_client_public_cert, resolve_client_public_cert_material_dir,
+    resolve_selected_terminating_hostnames, rotate_manual_client_public_cert_authority,
 };
 
 use crate::cli;
@@ -16,7 +15,7 @@ pub(crate) fn run(config: Option<PathBuf>, command: cli::ClientPublicCertArgs) -
         cli::ClientPublicCertSubcommand::Init(args) => {
             let directory_config = config.clone();
             let hostnames = resolve_client_public_cert_hostnames(config, args.hostname)?;
-            let directory = resolve_client_public_cert_dir(directory_config, args.dir)?;
+            let directory = resolve_client_public_cert_material_dir(directory_config, args.dir)?;
             let mut initialized_hostnames = Vec::new();
             let mut existing_hostnames = Vec::new();
             for hostname in &hostnames {
@@ -69,7 +68,7 @@ pub(crate) fn run(config: Option<PathBuf>, command: cli::ClientPublicCertArgs) -
         cli::ClientPublicCertSubcommand::Renew(args) => {
             let directory_config = config.clone();
             let hostnames = resolve_client_public_cert_hostnames(config, args.hostname)?;
-            let directory = resolve_client_public_cert_dir(directory_config, args.dir)?;
+            let directory = resolve_client_public_cert_material_dir(directory_config, args.dir)?;
             for hostname in &hostnames {
                 renew_manual_client_public_cert(&directory, hostname)?;
             }
@@ -80,7 +79,7 @@ pub(crate) fn run(config: Option<PathBuf>, command: cli::ClientPublicCertArgs) -
         cli::ClientPublicCertSubcommand::RotateCa(args) => {
             let directory_config = config.clone();
             let hostnames = resolve_client_public_cert_hostnames_from_config_required(config)?;
-            let directory = resolve_client_public_cert_dir(directory_config, args.dir)?;
+            let directory = resolve_client_public_cert_material_dir(directory_config, args.dir)?;
             rotate_manual_client_public_cert_authority(&directory, &hostnames)?;
             println!(
                 "Public hostname CA rotated: {}",
@@ -100,17 +99,17 @@ fn resolve_client_public_cert_hostnames(
     if let Some(hostname) = hostname {
         return Ok(vec![hostname]);
     }
-    let Some(config_path) = resolve_selected_client_config_path(config)? else {
+    let Some(selected) = resolve_selected_terminating_hostnames(config)? else {
         return Err(
             "--hostname is required, or supply --config or a default client config to derive \
              targets from client.services[].public-hostnames (tls-mode = \"terminate\")"
                 .into(),
         );
     };
-    let Some(hostnames) = resolve_terminating_hostnames_from_config(&config_path)? else {
+    let Some(hostnames) = selected.hostnames else {
         return Err(format!(
             "config file {} has no [client] section; cannot derive terminating hostnames",
-            config_path.display()
+            selected.path.display()
         )
         .into());
     };
@@ -118,7 +117,7 @@ fn resolve_client_public_cert_hostnames(
         return Err(format!(
             "config file {} has no tls-mode = \"terminate\" services with explicit \
              public-hostnames; use --hostname to specify the target explicitly",
-            config_path.display()
+            selected.path.display()
         )
         .into());
     }
@@ -128,22 +127,19 @@ fn resolve_client_public_cert_hostnames(
 fn resolve_client_public_cert_hostnames_from_config_required(
     config: Option<PathBuf>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let config_path = match resolve_selected_client_config_path(config.clone())? {
-        Some(config_path) => config_path,
-        None => {
-            let default_path = default_config_path()?;
-            return Err(format!(
-                "no selected config file for `client public-cert rotate-ca`; use -c, --config \
-                 or create the default config at {}",
-                default_path.display()
-            )
-            .into());
-        }
+    let Some(selected) = resolve_selected_terminating_hostnames(config)? else {
+        let default_path = default_config_path()?;
+        return Err(format!(
+            "no selected config file for `client public-cert rotate-ca`; use -c, --config \
+             or create the default config at {}",
+            default_path.display()
+        )
+        .into());
     };
-    let Some(hostnames) = resolve_terminating_hostnames_from_config(&config_path)? else {
+    let Some(hostnames) = selected.hostnames else {
         return Err(format!(
             "config file {} has no [client] section; cannot derive terminating hostnames",
-            config_path.display()
+            selected.path.display()
         )
         .into());
     };
@@ -151,33 +147,11 @@ fn resolve_client_public_cert_hostnames_from_config_required(
         return Err(format!(
             "config file {} has no tls-mode = \"terminate\" services with explicit \
              public-hostnames",
-            config_path.display()
+            selected.path.display()
         )
         .into());
     }
     Ok(hostnames.into_iter().map(String::from).collect())
-}
-
-fn resolve_selected_client_config_path(
-    config: Option<PathBuf>,
-) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
-    match select_client_config(config)? {
-        runewarp::SelectedClientConfig::Explicit(path)
-        | runewarp::SelectedClientConfig::Discovered(path) => Ok(Some(path)),
-        runewarp::SelectedClientConfig::None => Ok(None),
-    }
-}
-
-fn resolve_client_public_cert_dir(
-    config: Option<PathBuf>,
-    directory: Option<PathBuf>,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    certs::resolve_material_dir(
-        config,
-        directory,
-        resolve_client_public_cert_material_dir_from_config,
-        default_client_public_cert_material_dir,
-    )
 }
 
 fn print_public_cert_timestamps(

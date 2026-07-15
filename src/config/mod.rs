@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::env;
 use std::fmt;
 use std::fs;
 use std::net::SocketAddr;
@@ -12,6 +11,7 @@ pub mod client;
 mod preparation;
 pub mod server;
 
+use self::preparation::PreparedDirectory;
 use self::preparation::client::{
     PreparedClientAcmeConfig, PreparedClientConfig, PreparedClientServiceConfig,
     PreparedClientTlsMode, PreparedClientTrust,
@@ -20,7 +20,6 @@ use self::preparation::control::PreparedControlTrust;
 use self::preparation::server::{
     PreparedServerAcmeConfig, PreparedServerConfig, PreparedServerTunnelConfig,
 };
-use self::preparation::{PreparedDirectory, resolve_default_path};
 use crate::control_address::ControlAddress;
 use crate::server_address::ServerAddress;
 use crate::server_identity::{ServerIdentity, read_server_identity};
@@ -31,10 +30,10 @@ use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
     PublicHostname, SERVER_CA_FILENAME, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_FILENAME,
     SERVER_IDENTITY_KEY_FILENAME, ServerHostname, XdgPathError,
-    default_server_identity_material_dir,
 };
 
-pub use self::preparation::server::ServerRuntimeArgs;
+pub use self::preparation::material::MaterialDirectoryError;
+pub use self::preparation::server::{ServerCertHostnameError, ServerRuntimeArgs};
 
 pub const SERVER_HOSTNAME_ENV_VAR: &str = "RUNEWARP_SERVER_HOSTNAME";
 
@@ -292,73 +291,37 @@ pub fn load_client_config(path: &Path) -> Result<ClientConfig, ConfigFileError> 
 pub fn resolve_server_cert_material_dir_from_config(
     path: &Path,
 ) -> Result<Option<PathBuf>, ConfigFileError> {
-    let base_dir = config_dir(path);
-    let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
-        return Ok(None);
-    };
-    let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
-    if !unknown_field_messages.is_empty() {
-        return Err(ConfigFileError::Validation {
-            path: path.to_path_buf(),
-            section: "server",
-            messages: unknown_field_messages,
-        });
-    }
-    let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
-    Ok(raw.cert_dir.map(|path| resolve_path(base_dir, &path)))
+    preparation::server::project_server_cert_material_dir(path)
 }
 
 pub fn resolve_server_hostname_from_config(
     path: &Path,
 ) -> Result<Option<ServerHostname>, ConfigFileError> {
-    let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
-        return Ok(None);
-    };
-    let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
-    if !unknown_field_messages.is_empty() {
-        return Err(ConfigFileError::Validation {
-            path: path.to_path_buf(),
-            section: "server",
-            messages: unknown_field_messages,
-        });
-    }
-    let raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
-    let mut messages = Vec::new();
-    let hostname = raw.hostname.and_then(|hostname| {
-        validate_server_hostname_field("server.hostname", hostname, &mut messages)
-    });
-    if messages.is_empty() {
-        Ok(hostname)
-    } else {
-        Err(ConfigFileError::Validation {
-            path: path.to_path_buf(),
-            section: "server",
-            messages,
-        })
-    }
+    preparation::server::project_server_hostname(path)
 }
 
 pub fn resolve_server_hostname_runtime_override(hostname: Option<String>) -> Option<String> {
-    hostname.or_else(|| env::var(SERVER_HOSTNAME_ENV_VAR).ok())
+    preparation::server::resolve_server_hostname_runtime_override(hostname)
+}
+
+pub fn resolve_server_cert_material_dir(
+    config: Option<PathBuf>,
+    directory: Option<PathBuf>,
+) -> Result<PathBuf, MaterialDirectoryError> {
+    preparation::server::resolve_server_cert_material_dir(config, directory)
+}
+
+pub fn resolve_server_cert_hostname(
+    config: Option<PathBuf>,
+    hostname: Option<String>,
+) -> Result<String, ServerCertHostnameError> {
+    preparation::server::resolve_server_cert_hostname(config, hostname)
 }
 
 pub fn resolve_client_public_cert_material_dir_from_config(
     path: &Path,
 ) -> Result<Option<PathBuf>, ConfigFileError> {
-    let base_dir = config_dir(path);
-    let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
-        return Ok(None);
-    };
-    let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
-    if !unknown_field_messages.is_empty() {
-        return Err(ConfigFileError::Validation {
-            path: path.to_path_buf(),
-            section: "client",
-            messages: unknown_field_messages,
-        });
-    }
-    let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
-    Ok(raw.public_cert_dir.map(|p| resolve_path(base_dir, &p)))
+    preparation::client::project_client_public_cert_material_dir(path)
 }
 
 /// Returns the deduplicated, normalized list of `public-hostnames` from every
@@ -367,63 +330,27 @@ pub fn resolve_client_public_cert_material_dir_from_config(
 pub fn resolve_terminating_hostnames_from_config(
     path: &Path,
 ) -> Result<Option<Vec<PublicHostname>>, ConfigFileError> {
-    let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
-        return Ok(None);
-    };
-    let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
-    if !unknown_field_messages.is_empty() {
-        return Err(ConfigFileError::Validation {
-            path: path.to_path_buf(),
-            section: "client",
-            messages: unknown_field_messages,
-        });
-    }
-    let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
-    let mut messages = Vec::new();
-    let mut hostnames = Vec::new();
-    for hostname in raw
-        .services
-        .into_iter()
-        .filter(|service| service.tls_mode.as_deref() == Some("terminate"))
-        .flat_map(|service| service.public_hostnames.unwrap_or_default())
-    {
-        match PublicHostname::try_from(hostname.as_str()) {
-            Ok(hostname) => hostnames.push(hostname),
-            Err(error) => messages.push(format!(
-                "client.services[].public-hostnames contains invalid hostname `{hostname}`: {error}"
-            )),
-        }
-    }
-    hostnames.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-    hostnames.dedup();
-    if messages.is_empty() {
-        Ok(Some(hostnames))
-    } else {
-        Err(ConfigFileError::Validation {
-            path: path.to_path_buf(),
-            section: "client",
-            messages,
-        })
-    }
+    preparation::client::project_terminating_hostnames(path)
 }
 
 pub fn resolve_client_identity_material_dir_from_config(
     path: &Path,
 ) -> Result<Option<PathBuf>, ConfigFileError> {
-    let base_dir = config_dir(path);
-    let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
-        return Ok(None);
-    };
-    let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
-    if !unknown_field_messages.is_empty() {
-        return Err(ConfigFileError::Validation {
-            path: path.to_path_buf(),
-            section: "client",
-            messages: unknown_field_messages,
-        });
-    }
-    let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
-    Ok(raw.identity_dir.map(|path| resolve_path(base_dir, &path)))
+    preparation::client::project_client_identity_material_dir(path)
+}
+
+pub fn resolve_client_identity_material_dir(
+    config: Option<PathBuf>,
+    directory: Option<PathBuf>,
+) -> Result<PathBuf, MaterialDirectoryError> {
+    preparation::client::resolve_client_identity_material_dir(config, directory)
+}
+
+pub fn resolve_client_public_cert_material_dir(
+    config: Option<PathBuf>,
+    directory: Option<PathBuf>,
+) -> Result<PathBuf, MaterialDirectoryError> {
+    preparation::client::resolve_client_public_cert_material_dir(config, directory)
 }
 
 pub(crate) fn load_optional_selected_section_value(
@@ -461,10 +388,6 @@ fn load_config_document(
             source: Box::new(source),
         })?;
     Ok(document)
-}
-
-fn config_dir(path: &Path) -> &Path {
-    path.parent().unwrap_or_else(|| Path::new("."))
 }
 
 pub(crate) fn deserialize_selected_section<T>(
@@ -596,14 +519,11 @@ fn validate_prepared_server_config(
     };
 
     let identity = if managed {
-        let identity_directory = match identity_directory {
-            Some(directory) => directory.into_option(&mut messages),
-            None => resolve_default_path(default_server_identity_material_dir)
-                .into_option(&mut messages),
-        }
-        .and_then(|directory| {
-            validate_existing_directory_path("server.identity-dir", directory, &mut messages)
-        });
+        let identity_directory = identity_directory
+            .and_then(|directory| directory.into_option(&mut messages))
+            .and_then(|directory| {
+                validate_existing_directory_path("server.identity-dir", directory, &mut messages)
+            });
         if let (Some(identity_directory), Some(cert_directory)) = (
             identity_directory.as_ref(),
             certificate_directory(&certificate),
@@ -1588,14 +1508,6 @@ fn parse_duration(value: &str) -> Result<std::time::Duration, String> {
     }
 }
 
-fn resolve_path(config_dir: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        config_dir.join(path)
-    }
-}
-
 pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value) -> Vec<String> {
     let mut messages = Vec::new();
     let Some(server) = section_value.as_table() else {
@@ -1649,8 +1561,22 @@ pub(crate) fn collect_control_unknown_field_messages(section_value: &toml::Value
 }
 
 pub fn is_managed_client_config(path: &Path) -> Result<bool, ConfigFileError> {
-    let control = preparation::control::prepare_control_section(path, None)?;
-    Ok(control.address.is_some())
+    preparation::client::is_managed_client_config(path)
+}
+
+pub fn is_managed_selected_client_config(
+    config: Option<PathBuf>,
+) -> Result<bool, crate::config::client::ClientConfigResolutionError> {
+    preparation::client::is_managed_selected_client_config(config)
+}
+
+pub use preparation::client::SelectedTerminatingHostnames;
+
+pub fn resolve_selected_terminating_hostnames(
+    config: Option<PathBuf>,
+) -> Result<Option<SelectedTerminatingHostnames>, crate::config::client::ClientConfigResolutionError>
+{
+    preparation::client::resolve_selected_terminating_hostnames(config)
 }
 
 pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value) -> Vec<String> {
@@ -1784,18 +1710,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use super::{ConfigFileError, is_valid_backend_address, parse_duration, resolve_path};
-
-    #[test]
-    fn resolves_relative_paths_against_the_config_directory() {
-        assert_eq!(
-            resolve_path(
-                PathBuf::from("/tmp/runewarp").as_path(),
-                PathBuf::from("server.crt").as_path()
-            ),
-            PathBuf::from("/tmp/runewarp/server.crt")
-        );
-    }
+    use super::{ConfigFileError, is_valid_backend_address, parse_duration};
 
     #[test]
     fn parses_human_duration_strings() {

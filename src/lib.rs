@@ -42,11 +42,14 @@ pub use client_public_cert::{
 };
 pub use config::{
     ClientConfig, ClientPublicCertConfig, ClientTlsMode, ConfigFileError, ControlConfig,
-    ControlTrust, LogLevel, ServerCertificateConfig, ServerConfig, ServerConfigResolutionError,
+    ControlTrust, LogLevel, MaterialDirectoryError, SelectedTerminatingHostnames,
+    ServerCertHostnameError, ServerCertificateConfig, ServerConfig, ServerConfigResolutionError,
     ServerIdentityConfig, ServerRuntimeArgs, ServerTunnelConfig, ServiceConfig,
-    is_managed_client_config, load_client_config, load_server_config,
-    resolve_client_identity_material_dir_from_config,
-    resolve_client_public_cert_material_dir_from_config,
+    is_managed_client_config, is_managed_selected_client_config, load_client_config,
+    load_server_config, resolve_client_identity_material_dir,
+    resolve_client_identity_material_dir_from_config, resolve_client_public_cert_material_dir,
+    resolve_client_public_cert_material_dir_from_config, resolve_selected_terminating_hostnames,
+    resolve_server_cert_hostname, resolve_server_cert_material_dir,
     resolve_server_cert_material_dir_from_config, resolve_server_config_from_cli,
     resolve_server_hostname_from_config, resolve_server_hostname_runtime_override,
     resolve_terminating_hostnames_from_config,

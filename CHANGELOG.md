@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+
+- Contracted redundant `config::client` / `config::server` config aliases to role-qualified entry points and exposed preparation-owned material outcomes (`resolve_server_cert_material_dir`, `resolve_server_cert_hostname`, `resolve_client_identity_material_dir`, `resolve_client_public_cert_material_dir`) for public Rust consumers. (#195)
+
 ### Security
 
 - Bounded the complete routed-stream setup lifecycle: distinct Server pending-`open_bi` and active routed-stream budgets, a 5-second `open_bi` deadline, keyed active Visitor-stream tracking, a Client-instance aggregate stream-handler limit aligned with QUIC bidi credit, and 5-second Client setup deadlines for tunneled ClientHello, backend connect/write, Terminate handshake, and ACME challenge handshake, while leaving established proxies long-lived. (#208)

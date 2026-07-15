@@ -1,18 +1,22 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::config::preparation::control::prepare_control_section;
+use crate::config::preparation::material::{candidate_config_path, resolve_material_directory};
 use crate::config::preparation::{
-    PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
+    MaterialDirectoryError, PreparedDirectory, PreparedValue, resolve_default_path, resolve_path,
+    resolve_path_with_default,
 };
 use crate::config::{
     ConfigFileError, LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig,
-    collect_server_unknown_field_messages, deserialize_selected_section, load_log_level_from_path,
-    load_optional_selected_section_value, resolve_server_hostname_runtime_override,
+    SERVER_HOSTNAME_ENV_VAR, collect_server_unknown_field_messages, deserialize_selected_section,
+    load_log_level_from_path, load_optional_selected_section_value,
 };
 use crate::{
-    XdgPathError, default_config_path, default_server_acme_state_dir,
-    default_server_cert_material_dir,
+    ServerHostname, XdgPathError, default_config_path, default_server_acme_state_dir,
+    default_server_cert_material_dir, default_server_identity_material_dir,
 };
+use std::env;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServerRuntimeArgs {
@@ -88,6 +92,12 @@ pub(crate) fn prepare_server_config_from_cli(
     ))
 }
 
+struct ServerPreparationDefaults<'a> {
+    default_server_cert_directory: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_server_acme_state_dir: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_server_identity_directory: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
+}
+
 fn prepare_raw_server_config(
     path: &Path,
     log_level: LogLevel,
@@ -101,8 +111,11 @@ fn prepare_raw_server_config(
         raw,
         unknown_field_messages,
         control,
-        &default_server_cert_material_dir,
-        &default_server_acme_state_dir,
+        &ServerPreparationDefaults {
+            default_server_cert_directory: &default_server_cert_material_dir,
+            default_server_acme_state_dir: &default_server_acme_state_dir,
+            default_server_identity_directory: &default_server_identity_material_dir,
+        },
     )
 }
 
@@ -112,12 +125,12 @@ fn prepare_raw_server_config_with_defaults(
     raw: RawServerConfig,
     unknown_field_messages: Vec<String>,
     control: crate::config::preparation::control::PreparedControlSection,
-    default_server_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
-    default_server_acme_state_dir: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+    defaults: &ServerPreparationDefaults<'_>,
 ) -> PreparedServerConfig {
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let manual_cert_present = raw.cert_dir.is_some();
     let acme_present = raw.acme.is_some();
+    let managed = control.address.is_some();
 
     PreparedServerConfig {
         hostname: raw.hostname,
@@ -138,14 +151,14 @@ fn prepare_raw_server_config_with_defaults(
             Some(resolve_path_with_default(
                 raw.cert_dir,
                 config_dir,
-                default_server_cert_directory,
+                defaults.default_server_cert_directory,
             ))
         } else {
             None
         },
         acme: if acme_present && !manual_cert_present {
             raw.acme.map(|acme| {
-                prepare_server_acme_config(acme, config_dir, default_server_acme_state_dir)
+                prepare_server_acme_config(acme, config_dir, defaults.default_server_acme_state_dir)
             })
         } else {
             None
@@ -153,9 +166,25 @@ fn prepare_raw_server_config_with_defaults(
         tunnels: raw.tunnels.into_iter().map(prepare_server_tunnel).collect(),
         unknown_field_messages,
         control,
-        identity_directory: raw
-            .identity_dir
-            .map(|directory| PreparedValue::Ready(resolve_path(config_dir, &directory))),
+        identity_directory: prepare_server_identity_directory(
+            raw.identity_dir,
+            config_dir,
+            managed,
+            defaults.default_server_identity_directory,
+        ),
+    }
+}
+
+fn prepare_server_identity_directory(
+    identity_dir: Option<PathBuf>,
+    config_dir: &Path,
+    managed: bool,
+    default_server_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+) -> Option<PreparedValue<PathBuf>> {
+    match identity_dir {
+        Some(directory) => Some(PreparedValue::Ready(resolve_path(config_dir, &directory))),
+        None if managed => Some(resolve_default_path(default_server_identity_directory)),
+        None => None,
     }
 }
 
@@ -192,6 +221,167 @@ fn select_server_config_path_with_default(
     match config {
         Some(path) => Ok(path),
         None => default_config_path(),
+    }
+}
+
+pub(crate) fn resolve_server_hostname_runtime_override(hostname: Option<String>) -> Option<String> {
+    hostname.or_else(|| env::var(SERVER_HOSTNAME_ENV_VAR).ok())
+}
+
+/// Projects an explicit `server.cert-dir` from config without applying XDG defaults.
+pub(crate) fn project_server_cert_material_dir(
+    path: &Path,
+) -> Result<Option<PathBuf>, ConfigFileError> {
+    let Some(raw) = load_optional_raw_server_section(path)? else {
+        return Ok(None);
+    };
+    let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(raw.cert_dir.map(|path| resolve_path(config_dir, &path)))
+}
+
+/// Projects and validates an explicit `server.hostname` from config.
+pub(crate) fn project_server_hostname(
+    path: &Path,
+) -> Result<Option<ServerHostname>, ConfigFileError> {
+    let Some(raw) = load_optional_raw_server_section(path)? else {
+        return Ok(None);
+    };
+    let mut messages = Vec::new();
+    let hostname =
+        raw.hostname.and_then(
+            |hostname| match ServerHostname::try_from(hostname.as_str()) {
+                Ok(hostname) => Some(hostname),
+                Err(error) => {
+                    messages.push(format!("server.hostname is invalid: {error}"));
+                    None
+                }
+            },
+        );
+    if messages.is_empty() {
+        Ok(hostname)
+    } else {
+        Err(ConfigFileError::Validation {
+            path: path.to_path_buf(),
+            section: "server",
+            messages,
+        })
+    }
+}
+
+/// Resolves the Server certificate material directory for material-management commands.
+pub(crate) fn resolve_server_cert_material_dir(
+    config: Option<PathBuf>,
+    directory: Option<PathBuf>,
+) -> Result<PathBuf, MaterialDirectoryError> {
+    resolve_material_directory(
+        config,
+        directory,
+        project_server_cert_material_dir,
+        default_server_cert_material_dir,
+    )
+}
+
+/// Resolves the Server hostname for certificate material commands.
+pub(crate) fn resolve_server_cert_hostname(
+    config: Option<PathBuf>,
+    hostname: Option<String>,
+) -> Result<String, ServerCertHostnameError> {
+    let cli_hostname = hostname;
+    let runtime_hostname = resolve_server_hostname_runtime_override(cli_hostname.clone());
+    let configured_hostname = if let Some(config_path) = candidate_config_path(config) {
+        project_server_hostname(&config_path).map_err(ServerCertHostnameError::ConfigFile)?
+    } else {
+        None
+    };
+
+    let hostname = match (cli_hostname, runtime_hostname, configured_hostname) {
+        (Some(hostname), _, Some(configured_hostname)) => {
+            let parsed = ServerHostname::try_from(hostname.as_str()).map_err(|error| {
+                ServerCertHostnameError::Invalid {
+                    message: format!("server.hostname is invalid: {error}"),
+                }
+            })?;
+            if parsed != configured_hostname {
+                return Err(ServerCertHostnameError::Mismatch {
+                    cli_hostname: hostname,
+                    configured_hostname: configured_hostname.to_string(),
+                });
+            }
+            hostname
+        }
+        (Some(hostname), _, None) => hostname,
+        (None, Some(hostname), _) => hostname,
+        (None, None, Some(configured_hostname)) => configured_hostname.to_string(),
+        (None, None, None) => return Err(ServerCertHostnameError::Missing),
+    };
+
+    ServerHostname::try_from(hostname.as_str()).map_err(|error| {
+        ServerCertHostnameError::Invalid {
+            message: format!("server.hostname is invalid: {error}"),
+        }
+    })?;
+    Ok(hostname)
+}
+
+fn load_optional_raw_server_section(
+    path: &Path,
+) -> Result<Option<RawServerConfig>, ConfigFileError> {
+    let Some(section_value) = load_optional_selected_section_value(path, "server")? else {
+        return Ok(None);
+    };
+    let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
+    if !unknown_field_messages.is_empty() {
+        return Err(ConfigFileError::Validation {
+            path: path.to_path_buf(),
+            section: "server",
+            messages: unknown_field_messages,
+        });
+    }
+    Ok(Some(deserialize_selected_section::<RawServerConfig>(
+        path,
+        "server",
+        &section_value,
+    )?))
+}
+
+#[derive(Debug)]
+pub enum ServerCertHostnameError {
+    ConfigFile(ConfigFileError),
+    Missing,
+    Mismatch {
+        cli_hostname: String,
+        configured_hostname: String,
+    },
+    Invalid {
+        message: String,
+    },
+}
+
+impl fmt::Display for ServerCertHostnameError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConfigFile(error) => write!(formatter, "{error}"),
+            Self::Missing => formatter.write_str(
+                "server hostname is required via --hostname, RUNEWARP_SERVER_HOSTNAME, or server.hostname in config",
+            ),
+            Self::Mismatch {
+                cli_hostname,
+                configured_hostname,
+            } => write!(
+                formatter,
+                "--hostname `{cli_hostname}` does not match configured server.hostname `{configured_hostname}`"
+            ),
+            Self::Invalid { message } => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ServerCertHostnameError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ConfigFile(error) => Some(error),
+            Self::Missing | Self::Mismatch { .. } | Self::Invalid { .. } => None,
+        }
     }
 }
 
@@ -336,8 +526,13 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             },
             Vec::new(),
             control.clone(),
-            &|| Ok(default_cert_dir.clone()),
-            &|| Ok(default_acme_state_dir.clone()),
+            &super::ServerPreparationDefaults {
+                default_server_cert_directory: &|| Ok(default_cert_dir.clone()),
+                default_server_acme_state_dir: &|| Ok(default_acme_state_dir.clone()),
+                default_server_identity_directory: &|| {
+                    Ok(tempdir.path().join("unused-identity-dir"))
+                },
+            },
         );
 
         assert_eq!(
@@ -375,8 +570,13 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             },
             Vec::new(),
             control,
-            &|| Ok(tempdir.path().join("unused-cert-dir")),
-            &|| Ok(default_acme_state_dir.clone()),
+            &super::ServerPreparationDefaults {
+                default_server_cert_directory: &|| Ok(tempdir.path().join("unused-cert-dir")),
+                default_server_acme_state_dir: &|| Ok(default_acme_state_dir.clone()),
+                default_server_identity_directory: &|| {
+                    Ok(tempdir.path().join("unused-identity-dir"))
+                },
+            },
         );
 
         assert_eq!(acme.log_level, LogLevel::Off);
@@ -423,8 +623,13 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             },
             Vec::new(),
             prepare_control_section_without_config(None),
-            &|| Ok(tempdir.path().join("unused-cert-dir")),
-            &|| Ok(tempdir.path().join("unused-acme-state")),
+            &super::ServerPreparationDefaults {
+                default_server_cert_directory: &|| Ok(tempdir.path().join("unused-cert-dir")),
+                default_server_acme_state_dir: &|| Ok(tempdir.path().join("unused-acme-state")),
+                default_server_identity_directory: &|| {
+                    Ok(tempdir.path().join("unused-identity-dir"))
+                },
+            },
         );
 
         assert_eq!(prepared.log_level, LogLevel::Off);
@@ -443,6 +648,85 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             prepared_acme.state_directory,
             PreparedDirectory::Explicit(tempdir.path().join("nested/acme-state"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn server_preparation_defaults_managed_identity_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let config_path = tempdir.path().join("config.toml");
+        let default_identity_dir = tempdir.path().join("xdg-data/server/identity");
+
+        let prepared = super::prepare_raw_server_config_with_defaults(
+            &config_path,
+            LogLevel::Info,
+            RawServerConfig {
+                hostname: Some("tunnel.example.test".to_owned()),
+                cert_dir: Some(PathBuf::from("server-cert")),
+                identity_dir: None,
+                acme: None,
+                public_bind_address: None,
+                tunnel_bind_address: None,
+                readiness_bind_address: None,
+                graceful_shutdown_duration: None,
+                tunnels: Vec::new(),
+            },
+            Vec::new(),
+            prepare_control_section_without_config(Some("https://control.example.test".to_owned())),
+            &super::ServerPreparationDefaults {
+                default_server_cert_directory: &|| Ok(tempdir.path().join("unused-cert-dir")),
+                default_server_acme_state_dir: &|| Ok(tempdir.path().join("unused-acme-state")),
+                default_server_identity_directory: &|| Ok(default_identity_dir.clone()),
+            },
+        );
+
+        assert_eq!(
+            prepared.identity_directory,
+            Some(PreparedValue::Ready(default_identity_dir))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_preparation_leaves_static_identity_directory_unset_when_omitted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let config_path = tempdir.path().join("config.toml");
+
+        let prepared = super::prepare_raw_server_config_with_defaults(
+            &config_path,
+            LogLevel::Info,
+            RawServerConfig {
+                hostname: Some("tunnel.example.test".to_owned()),
+                cert_dir: Some(PathBuf::from("server-cert")),
+                identity_dir: None,
+                acme: None,
+                public_bind_address: None,
+                tunnel_bind_address: None,
+                readiness_bind_address: None,
+                graceful_shutdown_duration: None,
+                tunnels: vec![RawServerTunnelConfig {
+                    public_hostnames: Some(vec!["app.example.test".to_owned()]),
+                    client_identity: Some(
+                        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                            .to_owned(),
+                    ),
+                    client_identities: None,
+                }],
+            },
+            Vec::new(),
+            prepare_control_section_without_config(None),
+            &super::ServerPreparationDefaults {
+                default_server_cert_directory: &|| Ok(tempdir.path().join("unused-cert-dir")),
+                default_server_acme_state_dir: &|| Ok(tempdir.path().join("unused-acme-state")),
+                default_server_identity_directory: &|| {
+                    panic!("static mode should not consult identity defaults")
+                },
+            },
+        );
+
+        assert_eq!(prepared.identity_directory, None);
         Ok(())
     }
 }

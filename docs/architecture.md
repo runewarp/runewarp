@@ -29,6 +29,8 @@ Runewarp prepares config in three steps:
 2. Validate routing, trust, and mutual-exclusion rules against the prepared config.
 3. Perform startup side effects only after validation succeeds.
 
+Runtime commands request a full prepared-and-validated **Server** or **Client** config from Config preparation. Material-management commands request command-specific outcomes from the same seam (material directories, Server hostname, terminating Public hostnames, managed-mode detection) without reopening raw config sections or coordinating parsing helpers themselves.
+
 This keeps config discovery and defaulting predictable without mixing them into startup side effects.
 
 ## Hostname domain values

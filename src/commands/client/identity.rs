@@ -3,46 +3,34 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use runewarp::{
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
-    default_client_identity_material_dir, generate_client_identity, is_managed_client_config,
-    read_client_identity, resolve_client_identity_material_dir_from_config, rotate_client_identity,
+    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, generate_client_identity,
+    is_managed_selected_client_config, read_client_identity, resolve_client_identity_material_dir,
+    rotate_client_identity,
 };
 
 use crate::cli;
-use crate::commands::{CommandResult, certs};
+use crate::commands::CommandResult;
 
 pub(crate) fn run(config: Option<PathBuf>, command: cli::ClientIdentityArgs) -> CommandResult {
     match command.command {
         cli::ClientIdentitySubcommand::Init(args) => {
             reject_managed_config_derived_identity_command(config.clone(), args.dir.is_some())?;
-            let directory = resolve_client_identity_dir(config, args.dir)?;
+            let directory = resolve_client_identity_material_dir(config, args.dir)?;
             write_client_identity_artifacts(&directory)
         }
         cli::ClientIdentitySubcommand::Rotate(args) => {
             reject_managed_config_derived_identity_command(config.clone(), args.dir.is_some())?;
-            let directory = resolve_client_identity_dir(config, args.dir)?;
+            let directory = resolve_client_identity_material_dir(config, args.dir)?;
             let rotated = rotate_client_identity(&directory)?;
             print_client_identity_summary("Client identity rotated", &directory, rotated);
             Ok(())
         }
         cli::ClientIdentitySubcommand::Show(args) => {
-            let directory = resolve_client_identity_dir(config, args.dir)?;
+            let directory = resolve_client_identity_material_dir(config, args.dir)?;
             println!("{}", read_client_identity(&directory)?);
             Ok(())
         }
     }
-}
-
-fn resolve_client_identity_dir(
-    config: Option<PathBuf>,
-    directory: Option<PathBuf>,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    certs::resolve_material_dir(
-        config,
-        directory,
-        resolve_client_identity_material_dir_from_config,
-        default_client_identity_material_dir,
-    )
 }
 
 fn reject_managed_config_derived_identity_command(
@@ -52,10 +40,7 @@ fn reject_managed_config_derived_identity_command(
     if explicit_dir {
         return Ok(());
     }
-    let Some(config_path) = certs::candidate_config_path(config) else {
-        return Ok(());
-    };
-    if is_managed_client_config(&config_path)? {
+    if is_managed_selected_client_config(config)? {
         return Err(
             "client identity init and rotate are not supported for managed-mode configs without --dir"
                 .into(),

@@ -4,9 +4,9 @@ use std::fs;
 use runewarp::config::LogLevel;
 use runewarp::config::client::{
     ClientConfigResolutionDefaults, ClientRuntimeArgs, SelectedClientConfig,
-    resolve_selected_config,
+    resolve_selected_client_config,
 };
-use runewarp::config::server::{load_config as load_server_config, resolve_hostname_from_config};
+use runewarp::config::server::{load_server_config, resolve_server_hostname_from_config};
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
     initialize_manual_server_certificate,
@@ -19,7 +19,7 @@ fn client_config_can_be_resolved_through_the_deep_config_module() -> Result<(), 
     let identity_directory = tempdir.path().join("client-identity");
     write_identity_material(&identity_directory)?;
 
-    let settings = resolve_selected_config(
+    let settings = resolve_selected_client_config(
         SelectedClientConfig::None,
         &ClientRuntimeArgs {
             server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
@@ -59,8 +59,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 "#,
     )?;
 
-    let hostname =
-        resolve_hostname_from_config(&tempdir.path().join("config.toml"))?.expect("hostname");
+    let hostname = resolve_server_hostname_from_config(&tempdir.path().join("config.toml"))?
+        .expect("hostname");
     assert_eq!(hostname.as_str(), "tunnel.example.test");
 
     let settings = load_server_config(&tempdir.path().join("config.toml"))?;

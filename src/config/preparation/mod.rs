@@ -4,7 +4,10 @@ use crate::XdgPathError;
 
 pub(crate) mod client;
 pub(crate) mod control;
+pub(crate) mod material;
 pub(crate) mod server;
+
+pub(crate) use material::{MaterialDirectoryError, resolve_material_directory};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PreparedValue<T> {
@@ -55,5 +58,33 @@ pub(crate) fn resolve_path_with_default(
     match raw_path {
         Some(path) => PreparedValue::Ready(resolve_path(config_dir, &path)),
         None => resolve_default_path(default_path),
+    }
+}
+
+#[cfg(test)]
+mod resolve_path_tests {
+    use super::resolve_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolves_relative_paths_against_the_config_directory() {
+        assert_eq!(
+            resolve_path(
+                PathBuf::from("/tmp/runewarp").as_path(),
+                PathBuf::from("server.crt").as_path()
+            ),
+            PathBuf::from("/tmp/runewarp/server.crt")
+        );
+    }
+
+    #[test]
+    fn preserves_absolute_paths() {
+        assert_eq!(
+            resolve_path(
+                PathBuf::from("/tmp/runewarp").as_path(),
+                PathBuf::from("/abs/server.crt").as_path()
+            ),
+            PathBuf::from("/abs/server.crt")
+        );
     }
 }

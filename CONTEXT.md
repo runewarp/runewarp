@@ -189,7 +189,7 @@ The operator practice of repeating **Public hostnames** in Server **Tunnels** an
 _Avoid_: Duplicate hostname config, registration
 
 **Config preparation**:
-The internal module that selects the active config input, applies CLI/XDG/hardcoded defaults, resolves config-relative paths, and emits prepared **Server** or **Client** config before validation and startup side effects.
+The internal module that selects the active config input, applies CLI/XDG/hardcoded defaults, resolves config-relative paths, projects command-specific validated partial outcomes (material directories, hostnames, managed detection), and emits prepared **Server** or **Client** config before validation and startup side effects.
 _Avoid_: Settings loader, validation pass, startup defaults
 
 **Release-prep PR**:

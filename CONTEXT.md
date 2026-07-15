@@ -77,7 +77,7 @@ The Server-owned rule that allows a **Tunnel** to admit traffic only for its exp
 _Avoid_: Client registration, wildcard routing
 
 **Authorization snapshot**:
-The immutable Server-owned Public-hostname routing and trusted Client-identity set that Public-hostname routing and QUIC Client-identity handshake admission consult together. Static configuration loads one snapshot at startup; a prepared replacement can be validated independently and committed atomically.
+The immutable Server-owned Public-hostname routing and trusted Client-identity set that Public-hostname routing and QUIC Client-identity handshake admission consult together. Static configuration loads one snapshot at startup. Live replacement is one Server operation that validates a candidate beside the live snapshot, commits routing and admission together, realigns Tunnel pools, dispatches selective live-work revocation, and opens first-success Server readiness.
 _Avoid_: Tunnel registry, handshake config, routing table
 
 **Address controller**:

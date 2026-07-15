@@ -219,7 +219,7 @@ Any downlink or state-acknowledgment failure closes the whole connection. Reconn
 ## Managed Server behavior
 
 1. Startup validates local credentials and binds listeners, but **Server readiness** stays unavailable and no Tunnel or Visitor work is admitted until the first successful Server input apply.
-2. Candidates are prepared beside the live **Authorization snapshot** and committed atomically across Public-hostname routing and Client-identity handshake admission.
+2. Authorization replacement is one Server operation: a candidate is validated beside the live **Authorization snapshot**, then committed atomically across Public-hostname routing and Client-identity handshake admission, Tunnel-pool realignment, selective live-work revocation, and first-success **Server readiness**. The Managed Server role adapter supplies validated input and observes success or failure; it does not coordinate those phases.
 3. A valid empty `tunnels` collection may keep **Server readiness** available while authorizing no work.
 4. Live continuity uses **Tunnel ID** for pool identity, plus Client identity and Public hostname facts for admission and revocation:
    - surviving Tunnel pools are rematched by Tunnel ID when Control reorders tunnels

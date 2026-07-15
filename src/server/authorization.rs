@@ -46,18 +46,6 @@ impl ServerAuthorization {
             .cloned()
             .collect()
     }
-
-    pub fn prepare(
-        &self,
-        server_hostname: &ServerHostname,
-        tunnels: &[ServerTunnelConfig],
-    ) -> io::Result<PreparedAuthorization> {
-        self.state.prepare(server_hostname, tunnels)
-    }
-
-    pub fn commit(&self, prepared: PreparedAuthorization) -> Arc<AuthorizationSnapshot> {
-        self.state.commit(prepared)
-    }
 }
 
 impl ClientIdentityAdmission for ServerAuthorization {
@@ -211,14 +199,8 @@ impl AuthorizationSnapshot {
 
 /// Validated candidate ready to replace the live authorization snapshot.
 #[derive(Clone, Debug)]
-pub struct PreparedAuthorization {
+pub(crate) struct PreparedAuthorization {
     snapshot: Arc<AuthorizationSnapshot>,
-}
-
-impl PreparedAuthorization {
-    pub fn snapshot(&self) -> &AuthorizationSnapshot {
-        &self.snapshot
-    }
 }
 
 /// Live authorization state that readers observe as one coherent snapshot.
@@ -551,7 +533,7 @@ mod tests {
         assert!(admission.authorizes_client_identity(&first_identity));
         assert!(!admission.authorizes_client_identity(&second_identity));
 
-        let prepared = authorization.prepare(
+        let prepared = authorization.state().prepare(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: None,
@@ -559,7 +541,7 @@ mod tests {
                 authorized_client_identities: vec![second_identity.clone()],
             }],
         )?;
-        authorization.commit(prepared);
+        authorization.state().commit(prepared);
 
         assert!(!admission.authorizes_client_identity(&first_identity));
         assert!(admission.authorizes_client_identity(&second_identity));

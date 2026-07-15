@@ -2,6 +2,7 @@ mod address_controller;
 mod assignment_convergence;
 mod managed_adapter;
 mod service;
+mod stream_limits;
 mod termination_tls;
 mod tunnel_stream;
 
@@ -15,9 +16,11 @@ use std::fmt;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use quinn::{Connection, Endpoint};
 
+pub(crate) use self::stream_limits::{ClientStreamBudget, ClientStreamLimits};
 pub(crate) use self::termination_tls::TerminationTlsConfigs;
 use self::tunnel_stream::TunnelConnectionStreamHandler;
 use crate::{
@@ -25,8 +28,6 @@ use crate::{
     quic::with_handshake_timeout,
     shutdown::{OrderlyShutdown, ShutdownMode},
 };
-
-type RouteModeServicesAndConfigs = (Vec<ServiceConfig>, TerminationTlsConfigs);
 
 pub use crate::config::client::{
     ClientConfigResolutionDefaults, ClientConfigResolutionError, ClientRuntimeArgs,
@@ -52,6 +53,7 @@ pub(crate) struct RoutedClientConnectConfig {
     pub(crate) services: Vec<ServiceConfig>,
     pub(crate) quic_client_config: quinn::ClientConfig,
     pub(crate) termination_tls_configs: TerminationTlsConfigs,
+    pub(crate) stream_budget: Arc<ClientStreamBudget>,
 }
 
 enum ClientRouteMode {
@@ -61,6 +63,7 @@ enum ClientRouteMode {
     Routed {
         services: Vec<ServiceConfig>,
         termination_tls_configs: TerminationTlsConfigs,
+        stream_budget: Arc<ClientStreamBudget>,
     },
 }
 
@@ -68,6 +71,7 @@ pub struct Client {
     endpoint: Endpoint,
     connection: Connection,
     tunnel_stream_handler: TunnelConnectionStreamHandler,
+    stream_budget: Arc<ClientStreamBudget>,
 }
 
 #[derive(Debug)]
@@ -128,6 +132,7 @@ impl Client {
             ClientRouteMode::Routed {
                 services: config.services,
                 termination_tls_configs: config.termination_tls_configs,
+                stream_budget: config.stream_budget,
             },
         )
         .await
@@ -152,14 +157,19 @@ impl Client {
         )
         .await
         .map_err(ClientConnectError::Handshake)?;
-        let (services, termination_tls_configs) = services_and_configs_for_route_mode(route_mode);
-        let tunnel_stream_handler =
-            TunnelConnectionStreamHandler::new(services, termination_tls_configs);
+        let (services, termination_tls_configs, stream_budget) =
+            services_and_configs_for_route_mode(route_mode);
+        let tunnel_stream_handler = TunnelConnectionStreamHandler::new(
+            services,
+            termination_tls_configs,
+            stream_budget.limits(),
+        );
 
         Ok(Self {
             endpoint,
             connection,
             tunnel_stream_handler,
+            stream_budget,
         })
     }
 
@@ -171,10 +181,7 @@ impl Client {
         loop {
             match self.connection.accept_bi().await {
                 Ok((send, recv)) => {
-                    let tunnel_stream_handler = self.tunnel_stream_handler.clone();
-                    tokio::spawn(async move {
-                        let _ = tunnel_stream_handler.handle(send, recv).await;
-                    });
+                    self.spawn_stream_handler(send, recv);
                 }
                 Err(quinn::ConnectionError::LocallyClosed) => return Ok(()),
                 Err(error) => return Err(error),
@@ -221,10 +228,7 @@ impl Client {
                 }
                 accept_result = self.connection.accept_bi() => match accept_result {
                     Ok((send, recv)) => {
-                        let tunnel_stream_handler = self.tunnel_stream_handler.clone();
-                        tokio::spawn(async move {
-                            let _ = tunnel_stream_handler.handle(send, recv).await;
-                        });
+                        self.spawn_stream_handler(send, recv);
                     }
                     Err(quinn::ConnectionError::LocallyClosed) => return Ok(()),
                     Err(error) => return Err(error),
@@ -232,9 +236,27 @@ impl Client {
             }
         }
     }
+
+    fn spawn_stream_handler(&self, send: quinn::SendStream, recv: quinn::RecvStream) {
+        let Ok(permit) = self.stream_budget.try_admit_handler() else {
+            crate::client::tunnel_stream::reject_stream(send, recv);
+            return;
+        };
+        let tunnel_stream_handler = self.tunnel_stream_handler.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let _ = tunnel_stream_handler.handle(send, recv).await;
+        });
+    }
 }
 
-fn services_and_configs_for_route_mode(route_mode: ClientRouteMode) -> RouteModeServicesAndConfigs {
+fn services_and_configs_for_route_mode(
+    route_mode: ClientRouteMode,
+) -> (
+    Vec<ServiceConfig>,
+    TerminationTlsConfigs,
+    Arc<ClientStreamBudget>,
+) {
     match route_mode {
         ClientRouteMode::CatchAll { backend_address } => (
             vec![ServiceConfig {
@@ -243,11 +265,13 @@ fn services_and_configs_for_route_mode(route_mode: ClientRouteMode) -> RouteMode
                 tls_mode: ClientTlsMode::Passthrough,
             }],
             TerminationTlsConfigs::empty(),
+            Arc::new(ClientStreamBudget::new(ClientStreamLimits::default())),
         ),
         ClientRouteMode::Routed {
             services,
             termination_tls_configs,
-        } => (services, termination_tls_configs),
+            stream_budget,
+        } => (services, termination_tls_configs, stream_budget),
     }
 }
 

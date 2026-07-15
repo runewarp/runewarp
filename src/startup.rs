@@ -222,6 +222,7 @@ impl PreparedServer {
 pub struct ClientInstancePrep {
     services: Vec<ServiceConfig>,
     termination_tls_configs: TerminationTlsConfigs,
+    stream_budget: Arc<crate::client::ClientStreamBudget>,
     acme_manager_count: usize,
     acme: Mutex<ClientAcmeDrive>,
 }
@@ -235,6 +236,13 @@ enum ClientAcmeDrive {
 impl ClientInstancePrep {
     /// Validates Services and builds Terminate-mode TLS / Client ACME state once.
     pub async fn prepare(config: &ClientConfig) -> Result<Arc<Self>, ClientStartupError> {
+        Self::prepare_with_stream_limits(config, crate::client::ClientStreamLimits::default()).await
+    }
+
+    pub(crate) async fn prepare_with_stream_limits(
+        config: &ClientConfig,
+        stream_limits: crate::client::ClientStreamLimits,
+    ) -> Result<Arc<Self>, ClientStartupError> {
         if config.services.is_empty() {
             return Err(ClientStartupError::InvalidSettings(
                 "client config must include at least one Service".to_owned(),
@@ -253,6 +261,7 @@ impl ClientInstancePrep {
         Ok(Arc::new(Self {
             services,
             termination_tls_configs,
+            stream_budget: Arc::new(crate::client::ClientStreamBudget::new(stream_limits)),
             acme_manager_count,
             acme: Mutex::new(ClientAcmeDrive::Idle(acme_runtimes)),
         }))
@@ -268,6 +277,10 @@ impl ClientInstancePrep {
 
     pub(crate) fn termination_tls_configs(&self) -> TerminationTlsConfigs {
         self.termination_tls_configs.clone()
+    }
+
+    pub(crate) fn stream_budget(&self) -> Arc<crate::client::ClientStreamBudget> {
+        self.stream_budget.clone()
     }
 
     /// Starts Client ACME tasks at most once for this Client instance.
@@ -409,6 +422,7 @@ impl PreparedClient {
             services: instance.services().to_vec(),
             quic_client_config,
             termination_tls_configs: instance.termination_tls_configs(),
+            stream_budget: instance.stream_budget(),
         })
         .await
         .map_err(ClientStartupError::Connect)?;

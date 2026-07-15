@@ -256,6 +256,7 @@ impl Server {
             config.server_hostname.clone(),
             tunnel_registry.clone(),
             config.public_tls_config.clone(),
+            admission_policy.clone(),
         )?;
         let public_listener =
             TcpListener::bind(config.public_bind_addr)
@@ -669,6 +670,8 @@ fn admission_limit_name(limit: AdmissionLimit) -> &'static str {
         AdmissionLimit::VisitorsGlobal => "visitor-global",
         AdmissionLimit::VisitorSource => "visitor-source",
         AdmissionLimit::Handshakes => "quic-handshake-global",
+        AdmissionLimit::PendingStreamOpens => "pending-stream-open",
+        AdmissionLimit::ActiveRoutedStreams => "active-routed-stream",
         AdmissionLimit::TunnelConnectionsGlobal => "tunnel-connection-global",
         AdmissionLimit::TunnelConnectionsPerTunnel => "tunnel-connection-per-tunnel",
         AdmissionLimit::TunnelConnectionsPerIdentity => "tunnel-connection-per-client-identity",

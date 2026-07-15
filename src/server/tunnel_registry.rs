@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
@@ -40,7 +40,6 @@ pub(crate) struct LiveWorkDispatch {
 }
 
 struct ActiveVisitorStream {
-    stream_id: u64,
     public_hostname: PublicHostname,
     member_id: u64,
     client_identity: ClientIdentity,
@@ -52,7 +51,7 @@ pub(crate) struct TunnelRegistry {
     authorization: Arc<AuthorizationState>,
     tunnel_pools: Arc<RwLock<Vec<ActiveClientPool>>>,
     // std lock so track/reset stay synchronous (no await gap after stream admission).
-    visitor_streams: Arc<StdRwLock<Vec<ActiveVisitorStream>>>,
+    visitor_streams: Arc<StdRwLock<HashMap<u64, ActiveVisitorStream>>>,
     next_stream_id: Arc<AtomicU64>,
     accepting_tunnel_connections: Arc<AtomicBool>,
     admitting_streams: Arc<AtomicBool>,
@@ -92,7 +91,7 @@ impl TunnelRegistry {
             tunnel_pools: Arc::new(RwLock::new(vec![ActiveClientPool::with_admission(
                 tunnel_connection_admission.clone(),
             )])),
-            visitor_streams: Arc::new(StdRwLock::new(Vec::new())),
+            visitor_streams: Arc::new(StdRwLock::new(HashMap::new())),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
             admitting_streams: Arc::new(AtomicBool::new(true)),
@@ -130,7 +129,7 @@ impl TunnelRegistry {
         Ok(Self {
             authorization: authorization.state().clone(),
             tunnel_pools: Arc::new(RwLock::new(tunnel_pools)),
-            visitor_streams: Arc::new(StdRwLock::new(Vec::new())),
+            visitor_streams: Arc::new(StdRwLock::new(HashMap::new())),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
             admitting_streams: Arc::new(AtomicBool::new(true)),
@@ -305,13 +304,15 @@ impl TunnelRegistry {
         self.visitor_streams
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(ActiveVisitorStream {
+            .insert(
                 stream_id,
-                public_hostname,
-                member_id,
-                client_identity,
-                abort_handle,
-            });
+                ActiveVisitorStream {
+                    public_hostname,
+                    member_id,
+                    client_identity,
+                    abort_handle,
+                },
+            );
         stream_id
     }
 
@@ -319,7 +320,7 @@ impl TunnelRegistry {
         self.visitor_streams
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .retain(|stream| stream.stream_id != stream_id);
+            .remove(&stream_id);
     }
 
     #[allow(dead_code)] // selective hostname revocation; also used by tests
@@ -348,7 +349,7 @@ impl TunnelRegistry {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut reset = 0;
-        streams.retain(|stream| {
+        streams.retain(|_, stream| {
             if should_reset(stream) {
                 stream.abort_handle.abort();
                 reset += 1;
@@ -373,7 +374,7 @@ impl TunnelRegistry {
         self.visitor_streams
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
+            .values()
             .map(|stream| stream.public_hostname.clone())
             .collect()
     }

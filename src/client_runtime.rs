@@ -637,7 +637,7 @@ mod tests {
         let server_cert = CertificateDer::from(certified_server.cert);
         let server_key = certified_server.signing_key.serialize_der();
         let client_identity = generate_client_identity().map_err(io::Error::other)?;
-        let authorization = ServerAuthorization::from_tunnels(
+        let authorization = ServerAuthorization::from_static_tunnels(
             &server_hostname("localhost"),
             &[ServerTunnelConfig {
                 id: None,

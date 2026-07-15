@@ -77,8 +77,12 @@ The Server-owned rule that allows a **Tunnel** to admit traffic only for its exp
 _Avoid_: Client registration, wildcard routing
 
 **Authorization snapshot**:
-The immutable Server-owned Public-hostname routing and trusted Client-identity set that Public-hostname routing and QUIC Client-identity handshake admission consult together. Static configuration loads one snapshot at startup. Live replacement is one Server operation that validates a candidate beside the live snapshot, commits routing and admission together, realigns Tunnel pools, dispatches selective live-work revocation, and opens first-success Server readiness.
+The immutable Server-owned Public-hostname routing and trusted Client-identity set that Public-hostname routing and QUIC Client-identity handshake admission consult together. Continuity is first-class: static snapshots have no **Tunnel ID** (startup-only, ordinal pools); managed snapshots carry Tunnel IDs (live replacement, ID-keyed pools), including an empty managed snapshot before the first Control apply. Static configuration loads one static snapshot at startup. Live replacement is one Server operation that validates a managed candidate beside the live snapshot, commits routing and admission together, realigns Tunnel pools, dispatches selective live-work revocation, and opens first-success Server readiness.
 _Avoid_: Tunnel registry, handshake config, routing table
+
+**Server admission**:
+The prepared Server static-vs-managed outcome decided once during Config validation from Control address presence. Startup binds Authorization construction and readiness policy from that outcome instead of re-checking Control at every layer.
+_Avoid_: RuntimeMode, global mode flag
 
 **Address controller**:
 The Client-owned runtime that owns the complete assigned **Server address** lifecycle: maintenance intent, address workers, **Retiring**, **Assignment convergence**, managed apply acknowledgment, fatal worker completion, static **Client-ready** policy, and shutdown draining. It maintains at most one address worker per normalized **Server address**. Static Client startup seeds it from the configured address set; Managed-session Client reconciliation drives the same seam through complete Server-address snapshots.

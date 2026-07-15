@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use runewarp::{
-    ControlTrust, LogLevel, ServerCertificateConfig, ServerConfigResolutionError,
+    ControlTrust, LogLevel, ServerAdmission, ServerCertificateConfig, ServerConfigResolutionError,
     ServerRuntimeArgs, initialize_manual_server_certificate, load_server_config,
     resolve_server_config_from_cli,
 };
@@ -42,6 +42,7 @@ identity-dir = "server-identity"
     let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.log_level, LogLevel::Info);
+    assert_eq!(settings.admission, ServerAdmission::Managed);
     assert!(settings.tunnels.is_empty());
     let control = settings.control.expect("managed server control config");
     assert_eq!(control.address.to_string(), "control.example.test");

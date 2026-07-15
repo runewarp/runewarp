@@ -36,6 +36,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
     assert_eq!(settings.hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.log_level, LogLevel::Info);
+    assert_eq!(settings.admission, runewarp::ServerAdmission::Static);
     assert_eq!(
         hostname_strings(&settings.tunnels[0].public_hostnames),
         vec!["app.example.test", "api.example.test"]

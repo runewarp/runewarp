@@ -51,9 +51,14 @@ impl PreparedServer {
         tunnel_connection_bind_addr: SocketAddr,
     ) -> Result<Self, ServerStartupError> {
         prepare_default_server_acme_state_dir(config)?;
-        let authorization = ServerAuthorization::from_tunnels(&config.hostname, &config.tunnels)
-            .map_err(ServerStartupError::Bind)?;
-        let admission: Arc<dyn ClientIdentityAdmission> = Arc::new(authorization.clone());
+        let authorization = match config.admission {
+            crate::ServerAdmission::Static => {
+                ServerAuthorization::from_static_tunnels(&config.hostname, &config.tunnels)
+                    .map_err(ServerStartupError::Bind)?
+            }
+            crate::ServerAdmission::Managed => ServerAuthorization::empty_managed(),
+        };
+        let client_admission: Arc<dyn ClientIdentityAdmission> = Arc::new(authorization.clone());
         let trusted_client_identities = authorization.trusted_client_identities();
         let (quic_server_config, acme_runtime) = match &config.certificate {
             ServerCertificateConfig::Manual { directory } => {
@@ -62,7 +67,7 @@ impl PreparedServer {
                 let quic_server_config = make_server_quic_config_with_client_admission(
                     cert_chain,
                     private_key,
-                    admission,
+                    client_admission,
                 )
                 .map_err(ServerStartupError::QuicConfig)?;
                 (quic_server_config, None)
@@ -87,7 +92,7 @@ impl PreparedServer {
                     AcmeLifecycle::server(config.hostname.as_str(), state_directory).await;
                 let quic_server_config = make_server_quic_config_with_client_admission_resolver(
                     acme_state.resolver(),
-                    admission,
+                    client_admission,
                 )
                 .map_err(ServerStartupError::QuicConfig)?;
                 (
@@ -99,12 +104,6 @@ impl PreparedServer {
                 )
             }
         };
-        let managed = config.control.is_some();
-        let admission = if managed {
-            crate::ServerAdmission::Managed
-        } else {
-            crate::ServerAdmission::Static
-        };
         let server = Server::bind(ServerBindConfig {
             public_bind_addr,
             tunnel_connection_bind_addr,
@@ -115,7 +114,7 @@ impl PreparedServer {
                 .as_ref()
                 .map(|acme| acme.state.challenge_rustls_config()),
             quic_server_config,
-            admission,
+            admission: config.admission,
         })
         .await
         .map_err(ServerStartupError::Bind)?;
@@ -125,7 +124,7 @@ impl PreparedServer {
             graceful_shutdown_duration: config.graceful_shutdown_duration,
             trusted_client_identities,
             acme_runtime,
-            managed,
+            managed: config.admission == crate::ServerAdmission::Managed,
         })
     }
 
@@ -940,7 +939,7 @@ mod tests {
     use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
     use crate::{
         ClientConfig, ClientIdentity, ClientPublicCertConfig, ClientTlsMode, ControlAddress,
-        ControlConfig, ControlTrust, LogLevel, PublicHostname, ServerAddress,
+        ControlConfig, ControlTrust, LogLevel, PublicHostname, ServerAddress, ServerAdmission,
         ServerCertificateConfig, ServerConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
     };
 
@@ -1157,6 +1156,7 @@ mod tests {
             tunnels: Vec::new(),
             control: None,
             identity: None,
+            admission: ServerAdmission::Static,
         };
 
         super::prepare_default_server_acme_state_dir(&settings)?;
@@ -1182,6 +1182,7 @@ mod tests {
             tunnels: Vec::new(),
             control: None,
             identity: None,
+            admission: ServerAdmission::Static,
         };
         let manual_settings = ServerConfig {
             certificate: ServerCertificateConfig::Manual {
@@ -1398,6 +1399,7 @@ mod tests {
             tunnels: Vec::new(),
             control: None,
             identity: None,
+            admission: ServerAdmission::Static,
         };
 
         let error = match super::prepare_default_server_acme_state_dir(&settings) {
@@ -1615,6 +1617,7 @@ mod tests {
             }],
             control: None,
             identity: None,
+            admission: ServerAdmission::Static,
         }
     }
 

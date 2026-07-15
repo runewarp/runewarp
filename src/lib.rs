@@ -85,8 +85,8 @@ pub use quic::{
     make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
 };
 pub use server::{
-    AuthorizationSnapshot, PreparedAuthorization, QUIC_CLOSE_FLUSH_DURATION, Server,
-    ServerAdmission, ServerAuthorization, ServerAuthorizationAdapter, ServerBindConfig,
+    AuthorizationSnapshot, QUIC_CLOSE_FLUSH_DURATION, Server, ServerAdmission, ServerAuthorization,
+    ServerAuthorizationAdapter, ServerBindConfig,
 };
 pub use server_address::{ServerAddress, ServerAddressError};
 pub use server_cert::{

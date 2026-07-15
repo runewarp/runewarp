@@ -2,10 +2,11 @@ mod active_client;
 mod admission;
 mod authorization;
 mod managed_adapter;
+mod readiness;
 mod tunnel_registry;
 mod visitor_stream;
 
-pub use self::authorization::{AuthorizationSnapshot, PreparedAuthorization, ServerAuthorization};
+pub use self::authorization::{AuthorizationSnapshot, ServerAuthorization};
 pub use self::managed_adapter::ServerAuthorizationAdapter;
 
 use std::future::Future;
@@ -29,7 +30,7 @@ use crate::{
 use self::admission::{
     AcceptBackoff, AdmissionLimit, AdmissionRejection, ServerAdmissionLimits, ServerAdmissionPolicy,
 };
-use self::managed_adapter::ReadinessGate;
+use self::readiness::ReadinessGate;
 use self::tunnel_registry::{TunnelRegistrationOutcome, TunnelRegistry};
 use self::visitor_stream::VisitorStreamHandler;
 
@@ -298,11 +299,11 @@ impl Server {
             }
         }
         let readiness_gate = readiness_probe.as_ref().map(ReadinessProbe::gate);
-        let authorization_adapter = ServerAuthorizationAdapter::new(
-            config.server_hostname,
-            tunnel_registry.clone(),
-            readiness_gate,
-        );
+        if let Some(gate) = readiness_gate {
+            tunnel_registry.set_readiness(gate);
+        }
+        let authorization_adapter =
+            ServerAuthorizationAdapter::new(config.server_hostname, tunnel_registry.clone());
 
         Ok(Self {
             public_listener,

@@ -3,15 +3,16 @@ use std::path::{Path, PathBuf};
 
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, PublicKeyData,
+    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PublicKeyData,
 };
 use runewarp::{
-    ClientIdentity, ClientManagedInput, ManagedSessionLimits, RoleAdapter,
-    SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_FILENAME, SERVER_IDENTITY_KEY_FILENAME,
-    ServerIdentity, ServerManagedInput,
+    CLIENT_CERT_LIFETIME_DAYS, ClientIdentity, ClientManagedInput, GeneratedClientIdentity,
+    ManagedSessionLimits, RoleAdapter, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_FILENAME,
+    SERVER_IDENTITY_KEY_FILENAME, ServerIdentity, ServerManagedInput,
 };
 use serde_json::Value;
 use time::{Duration, OffsetDateTime};
+use x509_parser::oid_registry::OID_SIG_ED25519;
 
 /// Wire-contract ALPN for Control fixtures (HTTP/2 only).
 #[allow(dead_code)]
@@ -217,13 +218,58 @@ fn control_client_leaf_params(common_name: &str, not_before: OffsetDateTime) -> 
     params
 }
 
+/// Asserts the certificate profile used for newly generated Client identities.
+///
+/// Covers Ed25519, self-signed subject/issuer, digitalSignature, clientAuth, and the 100-year
+/// validity window. Callers that also need key/fingerprint agreement assert that separately.
+#[allow(dead_code)]
+pub fn assert_generated_client_identity_certificate_profile(certificate_der: &[u8]) {
+    let (_, parsed) = x509_parser::parse_x509_certificate(certificate_der)
+        .expect("parse generated Client identity certificate");
+
+    assert_eq!(
+        parsed.signature_algorithm.algorithm, OID_SIG_ED25519,
+        "generated Client identity certificates must be Ed25519"
+    );
+    assert_eq!(
+        parsed.tbs_certificate.subject_pki.algorithm.algorithm, OID_SIG_ED25519,
+        "generated Client identity public keys must be Ed25519"
+    );
+    assert_eq!(
+        parsed.tbs_certificate.subject, parsed.tbs_certificate.issuer,
+        "generated Client identity certificates must remain self-signed"
+    );
+
+    let key_usage = parsed
+        .key_usage()
+        .expect("parse key usage")
+        .expect("generated Client identity certificates declare key usage");
+    assert!(
+        key_usage.value.digital_signature(),
+        "generated Client identity certificates declare digitalSignature"
+    );
+
+    let extended_key_usage = parsed
+        .extended_key_usage()
+        .expect("parse extended key usage")
+        .expect("generated Client identity certificates declare extended key usage");
+    assert!(
+        extended_key_usage.value.client_auth,
+        "generated Client identity certificates declare clientAuth"
+    );
+
+    let lifetime =
+        parsed.validity().not_after.to_datetime() - parsed.validity().not_before.to_datetime();
+    assert_eq!(lifetime.whole_days(), CLIENT_CERT_LIFETIME_DAYS as i64);
+}
+
 /// Builds a deliberately expired self-signed Client identity certificate for the same key.
 ///
 /// Validity is backdated so `not_after` is already in the past. Callers that claim to exercise
 /// expired material should assert that before relying on the fixture.
 #[allow(dead_code)]
 pub fn expired_client_identity_material() -> (ClientIdentity, String, String) {
-    let signing_key = KeyPair::generate().unwrap();
+    let signing_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
     let not_before = OffsetDateTime::now_utc() - Duration::days(120);
     let mut certificate_params =
         CertificateParams::new(vec!["runewarp-client".to_owned()]).unwrap();
@@ -238,6 +284,29 @@ pub fn expired_client_identity_material() -> (ClientIdentity, String, String) {
         certificate.pem(),
         signing_key.serialize_pem(),
     )
+}
+
+/// Builds a legacy ECDSA P-256 self-signed Client identity certificate without key usage or EKU.
+///
+/// This locks pin-only Tunnel authentication: purpose metadata is emitted for new identities but
+/// is not required for exact-SPKI authorization of existing material.
+#[allow(dead_code)]
+pub fn legacy_p256_client_identity_without_eku() -> GeneratedClientIdentity {
+    let signing_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let not_before = OffsetDateTime::now_utc() - Duration::minutes(1);
+    let mut certificate_params =
+        CertificateParams::new(vec!["runewarp-client".to_owned()]).unwrap();
+    certificate_params.not_before = not_before;
+    certificate_params.not_after = not_before + Duration::days(CLIENT_CERT_LIFETIME_DAYS as i64);
+    let certificate = certificate_params.self_signed(&signing_key).unwrap();
+    let client_identity =
+        ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
+
+    GeneratedClientIdentity {
+        private_key_pem: signing_key.serialize_pem(),
+        certificate_pem: certificate.pem(),
+        client_identity,
+    }
 }
 
 /// Write freshly generated Server identity material for tests.

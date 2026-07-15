@@ -111,8 +111,9 @@ Identity and trust material are loaded when establishing each new Managed-sessio
 
 Self-hosted Client identity certificates are operationally non-expiring key carriers:
 
-- newly initialized and rotated certificates use a **100-year** validity window
-- the Server authorizes the pinned Client identity from the subject public key and does not validate certificate issuer, chain, SAN, validity window, or revocation state
+- newly initialized and rotated certificates use an **Ed25519** key, a **100-year** validity window, `digitalSignature` key usage, and `clientAuth` extended key usage
+- the Server authorizes the pinned Client identity from the subject public key and does not validate certificate issuer, chain, SAN, validity window, revocation state, key usage, or extended key usage
+- existing ECDSA P-256 identities and certificates without extended key usage remain accepted when their SPKI fingerprint is authorized; Core does not rewrite them
 - existing shorter-lived certificates remain accepted after their encoded expiry; Core does not rewrite them
 - there is no automatic or manual self-signed Client identity certificate renewal
 

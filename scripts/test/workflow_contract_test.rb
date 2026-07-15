@@ -40,6 +40,7 @@ class WorkflowContractTest < Minitest::Test
     assert_includes(ci_workflow, "run: ./scripts/audit-dependencies")
     assert_includes(ci_workflow, "cargo-binstall-x86_64-unknown-linux-musl.tgz")
     assert_includes(ci_workflow, "sha256sum --check")
+    assert_includes(ci_workflow, '"$HOME/.cargo/bin" >> "$GITHUB_PATH"')
     assert_match(
       /rust-contract:[\s\S]*CARGO_BINSTALL_VERSION: 1\.21\.0[\s\S]*CARGO_BINSTALL_SHA256: b1880b3631d1ff0fd1f286a0d20f82f373355651f9fbd7f4d0d7fbfe218bf562[\s\S]*Install cargo-binstall[\s\S]*Audit Rust dependencies[\s\S]*Run Rust tests/,
       ci_workflow

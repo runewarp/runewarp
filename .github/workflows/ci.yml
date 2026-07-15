@@ -190,6 +190,7 @@ jobs:
             --output "$archive"
           printf '%s  %s\n' "$CARGO_BINSTALL_SHA256" "$archive" | sha256sum --check
           tar --extract --gzip --file "$archive" --directory "$HOME/.cargo/bin" cargo-binstall
+          printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Audit Rust dependencies
         run: ./scripts/audit-dependencies

@@ -479,6 +479,154 @@ fn default_public_cert_dir() -> Result<PathBuf, XdgPathError> {
     crate::default_client_public_cert_material_dir()
 }
 
+fn load_optional_raw_client_section(
+    path: &Path,
+) -> Result<Option<RawClientConfig>, ConfigFileError> {
+    let Some(section_value) = load_optional_selected_section_value(path, "client")? else {
+        return Ok(None);
+    };
+    let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
+    if !unknown_field_messages.is_empty() {
+        return Err(ConfigFileError::Validation {
+            path: path.to_path_buf(),
+            section: "client",
+            messages: unknown_field_messages,
+        });
+    }
+    Ok(Some(deserialize_selected_section::<RawClientConfig>(
+        path,
+        "client",
+        &section_value,
+    )?))
+}
+
+fn project_optional_client_path(
+    path: &Path,
+    select: impl FnOnce(&RawClientConfig) -> Option<PathBuf>,
+) -> Result<Option<PathBuf>, ConfigFileError> {
+    let Some(raw) = load_optional_raw_client_section(path)? else {
+        return Ok(None);
+    };
+    let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(select(&raw).map(|path| resolve_path(config_dir, &path)))
+}
+
+/// Projects an explicit `client.identity-dir` without applying XDG defaults.
+pub(crate) fn project_client_identity_material_dir(
+    path: &Path,
+) -> Result<Option<PathBuf>, ConfigFileError> {
+    project_optional_client_path(path, |raw| raw.identity_dir.clone())
+}
+
+/// Projects an explicit `client.public-cert-dir` without applying XDG defaults.
+pub(crate) fn project_client_public_cert_material_dir(
+    path: &Path,
+) -> Result<Option<PathBuf>, ConfigFileError> {
+    project_optional_client_path(path, |raw| raw.public_cert_dir.clone())
+}
+
+/// Returns the deduplicated, normalized list of `public-hostnames` from every
+/// `[[client.services]]` entry whose `tls-mode` is `"terminate"`. Returns
+/// `None` when no `[client]` section exists in the config file.
+pub(crate) fn project_terminating_hostnames(
+    path: &Path,
+) -> Result<Option<Vec<crate::PublicHostname>>, ConfigFileError> {
+    let Some(raw) = load_optional_raw_client_section(path)? else {
+        return Ok(None);
+    };
+    let mut messages = Vec::new();
+    let mut hostnames = Vec::new();
+    for hostname in raw
+        .services
+        .into_iter()
+        .filter(|service| service.tls_mode.as_deref() == Some("terminate"))
+        .flat_map(|service| service.public_hostnames.unwrap_or_default())
+    {
+        match crate::PublicHostname::try_from(hostname.as_str()) {
+            Ok(hostname) => hostnames.push(hostname),
+            Err(error) => messages.push(format!(
+                "client.services[].public-hostnames contains invalid hostname `{hostname}`: {error}"
+            )),
+        }
+    }
+    hostnames.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    hostnames.dedup();
+    if messages.is_empty() {
+        Ok(Some(hostnames))
+    } else {
+        Err(ConfigFileError::Validation {
+            path: path.to_path_buf(),
+            section: "client",
+            messages,
+        })
+    }
+}
+
+pub(crate) fn resolve_client_identity_material_dir(
+    config: Option<PathBuf>,
+    directory: Option<PathBuf>,
+) -> Result<PathBuf, crate::config::preparation::MaterialDirectoryError> {
+    crate::config::preparation::resolve_material_directory(
+        config,
+        directory,
+        project_client_identity_material_dir,
+        default_identity_material_dir,
+    )
+}
+
+pub(crate) fn resolve_client_public_cert_material_dir(
+    config: Option<PathBuf>,
+    directory: Option<PathBuf>,
+) -> Result<PathBuf, crate::config::preparation::MaterialDirectoryError> {
+    crate::config::preparation::resolve_material_directory(
+        config,
+        directory,
+        project_client_public_cert_material_dir,
+        default_public_cert_dir,
+    )
+}
+
+pub(crate) fn is_managed_client_config(path: &Path) -> Result<bool, ConfigFileError> {
+    let control = prepare_control_section(path, None)?;
+    Ok(control.address.is_some())
+}
+
+/// Selected-config outcome for terminating Public hostname projection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedTerminatingHostnames {
+    pub path: PathBuf,
+    /// `None` when the selected file has no `[client]` section.
+    pub hostnames: Option<Vec<crate::PublicHostname>>,
+}
+
+/// Returns whether a selected material config is managed. Missing selection is not managed.
+pub(crate) fn is_managed_selected_client_config(
+    config: Option<PathBuf>,
+) -> Result<bool, ClientConfigResolutionError> {
+    match select_client_config(config).map_err(ClientConfigResolutionError::XdgPath)? {
+        SelectedClientConfig::Explicit(path) | SelectedClientConfig::Discovered(path) => {
+            is_managed_client_config(&path).map_err(ClientConfigResolutionError::ConfigFile)
+        }
+        SelectedClientConfig::None => Ok(false),
+    }
+}
+
+/// Selects client config and projects terminating Public hostnames.
+///
+/// Returns `Ok(None)` when no config is selected.
+pub(crate) fn resolve_selected_terminating_hostnames(
+    config: Option<PathBuf>,
+) -> Result<Option<SelectedTerminatingHostnames>, ClientConfigResolutionError> {
+    let selected = select_client_config(config).map_err(ClientConfigResolutionError::XdgPath)?;
+    let path = match selected {
+        SelectedClientConfig::Explicit(path) | SelectedClientConfig::Discovered(path) => path,
+        SelectedClientConfig::None => return Ok(None),
+    };
+    let hostnames =
+        project_terminating_hostnames(&path).map_err(ClientConfigResolutionError::ConfigFile)?;
+    Ok(Some(SelectedTerminatingHostnames { path, hostnames }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

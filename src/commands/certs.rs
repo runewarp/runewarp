@@ -1,44 +1,14 @@
 use std::error::Error;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use runewarp::{ConfigFileError, XdgPathError, default_config_path};
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::{Error as PemError, PemObject};
 use time::OffsetDateTime;
 use x509_parser::parse_x509_certificate;
 
 pub(super) const MANUAL_CERT_RENEW_AFTER_DAYS: i64 = 60;
-
-pub(super) fn resolve_material_dir(
-    config: Option<PathBuf>,
-    directory: Option<PathBuf>,
-    configured_dir: impl Fn(&Path) -> Result<Option<PathBuf>, ConfigFileError>,
-    default_dir: impl Fn() -> Result<PathBuf, XdgPathError>,
-) -> Result<PathBuf, Box<dyn Error>> {
-    if let Some(directory) = directory {
-        return Ok(directory);
-    }
-
-    if let Some(config_path) = candidate_config_path(config)
-        && let Some(configured_dir) =
-            configured_dir(&config_path).map_err(|error| -> Box<dyn Error> { Box::new(error) })?
-    {
-        return Ok(configured_dir);
-    }
-
-    default_dir().map_err(|error| -> Box<dyn Error> { Box::new(error) })
-}
-
-pub(super) fn candidate_config_path(config: Option<PathBuf>) -> Option<PathBuf> {
-    match config {
-        Some(config) => Some(config),
-        None => default_config_path()
-            .ok()
-            .filter(|default_config_path| default_config_path.is_file()),
-    }
-}
 
 pub(super) struct CertificateWindow {
     pub(super) issued_at: OffsetDateTime,

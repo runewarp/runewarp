@@ -1229,6 +1229,7 @@ mod tests {
                 state_directory_was_defaulted: false,
             }),
             control: None,
+            admission: crate::ClientAdmission::Static,
         };
 
         let (configs, acme_runtimes) = super::load_termination_tls_configs(&settings)
@@ -1272,6 +1273,7 @@ mod tests {
                 state_directory_was_defaulted: false,
             }),
             control: None,
+            admission: crate::ClientAdmission::Static,
         }
     }
 
@@ -1369,6 +1371,7 @@ mod tests {
                 state_directory_was_defaulted: true,
             }),
             control: None,
+            admission: crate::ClientAdmission::Static,
         };
 
         super::prepare_default_client_acme_state_dir(&settings)?;
@@ -1443,6 +1446,7 @@ mod tests {
                 state_directory_was_defaulted: true,
             }),
             control: None,
+            admission: crate::ClientAdmission::Static,
         };
 
         let error = match super::prepare_default_client_acme_state_dir(&settings) {
@@ -1562,6 +1566,7 @@ mod tests {
                 address: ControlAddress::parse("control.example.test").unwrap(),
                 trust: ControlTrust::System,
             }),
+            admission: crate::ClientAdmission::Managed,
         };
 
         let connect_error =

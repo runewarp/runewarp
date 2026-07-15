@@ -1,6 +1,7 @@
 mod acme;
 mod cert_file_ops;
 mod client;
+mod client_admission;
 mod client_hello;
 mod client_public_cert;
 pub mod config;
@@ -26,12 +27,17 @@ mod trust;
 mod tunnel_id;
 
 pub use client::{
-    AddressController, AddressControllerShutdown, AddressControllerView, AddressWorkerControl,
-    AddressWorkerFactory, AssignmentConvergence, Client, ClientAssignmentAdapter,
-    ClientConfigResolutionDefaults, ClientConfigResolutionError, ClientConnectConfig,
-    ClientConnectError, ClientRuntimeArgs, MaintenanceIntent, SelectedClientConfig,
-    resolve_client_config_from_cli, resolve_selected_client_config, select_client_config,
+    AddressController, AddressControllerShutdown, AddressControllerView, AddressWorkerBackoff,
+    AddressWorkerControl, AddressWorkerDial, AddressWorkerFactory, AddressWorkerHooks,
+    AssignmentConvergence, Client, ClientAssignmentAdapter, ClientConfigResolutionDefaults,
+    ClientConfigResolutionError, ClientConnectConfig, ClientConnectError, ClientRuntimeArgs,
+    ConnectedTunnelRun, EstablishOutcome, FixedBackoff, MaintenanceIntent, SelectedClientConfig,
+    SilentAddressWorkerHooks, connected_session_until, production_address_worker_factory,
+    resolve_client_config_from_cli, resolve_selected_client_config, run_address_worker,
+    run_address_worker_with_reconnect_policy, select_client_config, wait_for_retry_delay,
+    wait_for_shutdown,
 };
+pub use client_admission::ClientAdmission;
 pub use client_hello::{
     CLIENT_HELLO_BUFFER_LIMIT, ClientHelloError, ParsedClientHello, read_client_hello,
 };

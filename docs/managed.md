@@ -77,7 +77,7 @@ Core does not follow redirects, honor `Retry-After`, or attach session IDs / run
 | Server | `PUT` | `/v1/server/state` | `204` with empty body | `Content-Type: application/json`; body `{"revision":"..."}` only |
 | Client | `PUT` | `/v1/client/state` | same | same |
 
-SSE status `204`, redirects, other non-success statuses, missing `Content-Type`, and wrong media types all fail the session and trigger reconnect. A state write that is not exact `204` with an empty body also fails the session and triggers reconnect.
+SSE status `204`, redirects, other non-success statuses, missing `Content-Type`, and wrong media types all fail the session and trigger reconnect. A state write that is not exact `204` with an already-ended empty body also fails the session and triggers reconnect.
 
 ## SSE framing
 
@@ -88,7 +88,8 @@ Core uses standard SSE framing, not the browser EventSource connection lifecycle
 - lines starting with `:` are comment keepalives (byte activity only; no event)
 - `id`, `retry`, and unknown fields are ignored
 - empty dispatched events (no type and empty data) are skipped
-- invalid UTF-8, malformed framing, missing required snapshot fields, empty revision, invalid JSON, and unknown event types fail the session
+- invalid UTF-8, malformed framing, missing required snapshot fields, empty revision, invalid JSON, unknown event types, and input/size limit violations fail the session
+- unfinished line, event-type, and accumulated event-data sizes are enforced incrementally across fragmented HTTP/2 chunks (see [Input and reporting limits](#input-and-reporting-limits))
 
 Every v1 data event must be `event: snapshot`. The first data event on every connection must be a snapshot. V1 never emits patches; patch delivery requires a future protocol version.
 
@@ -125,6 +126,7 @@ Rules (as implemented):
 - each entry requires non-empty `id`, plural `public_hostnames`, and `client_identities` (no singular aliases)
 - `id` is a **Tunnel ID**: non-empty opaque string, at most 128 Unicode scalars, no ASCII whitespace or control characters; unique across the whole set
 - normalized Public hostnames and Client identities must be unique across the whole set
+- cardinality is bounded (see [Input and reporting limits](#input-and-reporting-limits)): at most 4,096 tunnels, 4,096 Public hostnames total / 256 per Tunnel, and 4,096 Client identities total / 64 per Tunnel
 - unknown per-tunnel JSON fields are ignored
 
 ### Client `input`
@@ -140,6 +142,7 @@ Rules (as implemented):
 - `server_addresses` is required and may be `[]`
 - each entry is a DNS hostname with optional port (default `443`); IP literals and URL schemes are rejected
 - addresses must be unique after normalization
+- at most 256 Server addresses (see [Input and reporting limits](#input-and-reporting-limits))
 
 ## Revision and reconciliation
 
@@ -173,11 +176,32 @@ A Server revision is acknowledged only after the atomic authorization swap and d
 For each valid snapshot that names a successfully applied revision:
 
 1. Apply a new revision, or skip apply when the revision already matches the process's applied revision.
-2. Send one `PUT .../state` with body `{"revision":"<applied>"}`.
-3. Treat exact `204` with an empty body as acknowledgment success.
-4. On any state-write failure, replace the whole Managed session. The new connection's required first snapshot is applied or recognized as equal, then acknowledged again.
+2. Schedule one `PUT .../state` with body `{"revision":"<applied>"}` off the downlink reconciliation critical path.
+3. Maintain at most one in-flight state request and one coalesced latest pending revision; newer successful applies replace older pending reports.
+4. Treat exact `204` with an already-ended empty body as acknowledgment success. Non-204 and body-bearing responses are rejected without collecting an unbounded body.
+5. On any state-write failure or deadline miss, replace the whole Managed session while retaining the latest successfully applied revision in memory for re-acknowledgment after reconnect.
 
-Rejected and superseded revisions are never acknowledged. Acknowledgments never include desired revision, **Server readiness**, **Assignment convergence**, rejection reasons, or richer role state. Core sends no periodic state heartbeat; Control health and staleness classification remain outside this protocol.
+Rejected and superseded revisions are never acknowledged. Acknowledgments never include desired revision, **Server readiness**, **Assignment convergence**, rejection reasons, or richer role state. Core sends no periodic state heartbeat; Control health and staleness classification remain outside this protocol. SSE reads, snapshot application, silence/first-snapshot timers, and Authorization revocations stay responsive while a state report is slow or failed.
+
+## Input and reporting limits
+
+Core enforces fixed production limits (injectable smaller values in tests only; no operator configuration or wire negotiation):
+
+| Limit | Production default |
+| --- | --- |
+| Unfinished SSE line | **4 KiB** |
+| SSE event type | **64 B** |
+| Accumulated SSE event data / complete snapshot | **1 MiB** |
+| Cumulative decoded allocation | **2 MiB** |
+| Revision / Tunnel ID | **128** Unicode scalars |
+| Tunnels | **4,096** |
+| Public hostnames (total / per Tunnel) | **4,096 / 256** |
+| Client identities (total / per Tunnel) | **4,096 / 64** |
+| Server addresses | **256** |
+| State request deadline (through response headers) | **5 s** |
+| State response deadline (ended body) | **5 s** |
+
+Limit violations fail the entire Managed session and reconnect; Core never partially applies an oversized snapshot. Rejection logs include only bounded metadata (limit name and counts), never full snapshots or attacker-sized payloads.
 
 ## Timing and reconnect
 
@@ -185,7 +209,8 @@ Rejected and superseded revisions are never acknowledged. Acknowledgments never 
 | --- | --- | --- |
 | First-snapshot deadline | **60 s** from connection start | Bounds dial + TLS + SSE open + first valid snapshot; keepalive comments do not extend it |
 | Silence timeout | **60 s** without any SSE bytes | Reset by any SSE bytes, including `:` comments |
-| State acknowledgment deadline | **60 s** | A stalled `PUT .../state` fails and replaces the whole Managed session |
+| State request deadline | **5 s** | Bounds `PUT .../state` through response headers |
+| State response deadline | **5 s** | Bounds classifying an already-ended bodyless `204` |
 | Control keepalive cadence | Less than **60 s** between SSE bytes | `:` comments keep quiet sessions active; **20 s** is recommended, not required |
 | Reconnect backoff | `1, 2, 3, 5, 8, 12, 18, 27, 41, 60` s | Full jitter over `0..window`; same policy as Tunnel reconnect |
 
@@ -309,7 +334,8 @@ Label each requirement as **Control must** (wire contract Control implements) or
 - [ ] Allow empty overall `tunnels` / `server_addresses` collections
 - [ ] Emit SSE comment keepalives often enough that silence stays under 60 s (20 s cadence recommended)
 - [ ] Accept state `PUT` only after the matching downlink is active on that connection
-- [ ] Respond to successful state writes with exact `204` and an empty body
+- [ ] Respond to successful state writes with exact `204` and an already-ended empty body
+- [ ] Keep snapshots within Core's documented size and cardinality limits (4 KiB SSE line, 64 B event type, 1 MiB snapshot / event data, 2 MiB decoded allocation, 4,096 tunnels, 4,096/256 Public hostnames, 4,096/64 Client identities, 256 Server addresses)
 - [ ] Treat state body as revision-only; ignore unknown future keys defensively if you add none today
 - [ ] Do not rely on Core following redirects or honoring `Retry-After`
 - [ ] Do not rely on SSE `id` / `retry` / Last-Event-ID replay
@@ -317,11 +343,12 @@ Label each requirement as **Control must** (wire contract Control implements) or
 ### Core does
 
 - [ ] Open one Managed session per runtime with one SSE downlink and snapshot-triggered state writes
-- [ ] Fail the session on malformed/unknown SSE events and reconnect with the shared backoff policy
+- [ ] Fail the session on malformed/unknown SSE events, size/cardinality limit violations, and reconnect with the shared backoff policy
 - [ ] Ignore unknown JSON fields in known v1 snapshots
 - [ ] Skip apply on equal already-applied revisions and acknowledge the snapshot again
 - [ ] Collapse mid-apply snapshots to the newest candidate
 - [ ] Acknowledge only successfully applied revisions
+- [ ] Keep at most one in-flight state report and one coalesced latest pending revision off the reconciliation critical path
 - [ ] Send no periodic state heartbeat
 - [ ] Gate managed Server readiness on the first successful apply; retain authorization through later Control loss
 - [ ] Keep **Server readiness** available for a valid empty Tunnel collection while authorizing no work

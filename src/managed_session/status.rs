@@ -16,7 +16,7 @@ pub enum SseResponseClass {
 /// Outcome of classifying a state-acknowledgment response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StateResponseClass {
-    /// Exact status 204 with an empty body.
+    /// Exact status 204 with an already-ended empty body.
     Success,
     /// Any other outcome: leave SSE undisturbed and retry later.
     Failure,
@@ -59,20 +59,30 @@ pub fn classify_state_response(status: StatusCode, body: &[u8]) -> StateResponse
     }
 }
 
-/// Collect a state-response body and classify it. Used by connection writes.
+/// Classify a state-response body without collecting an unbounded payload.
 ///
-/// Non-204 responses fail immediately without reading the body, so a large or
-/// slow error body cannot stall or inflate memory on the shared connection.
+/// Non-204 responses fail immediately without reading the body. Success requires
+/// exact status 204 with an already-ended body (no data frames). A body-bearing
+/// or still-open 204 is rejected after observing the first frame, without
+/// draining remaining bytes.
 pub async fn classify_state_incoming(
     status: StatusCode,
-    body: Incoming,
+    mut body: Incoming,
 ) -> Result<StateResponseClass, hyper::Error> {
     if classify_state_status(status) != StateResponseClass::Success {
         drop(body);
         return Ok(StateResponseClass::Failure);
     }
-    let collected = body.collect().await?;
-    Ok(classify_state_response(status, &collected.to_bytes()))
+
+    match body.frame().await {
+        None => Ok(StateResponseClass::Success),
+        Some(Ok(_)) => {
+            // Any data or trailer frame means the body was not already ended empty.
+            drop(body);
+            Ok(StateResponseClass::Failure)
+        }
+        Some(Err(error)) => Err(error),
+    }
 }
 
 fn content_type_is_event_stream(headers: &HeaderMap) -> bool {

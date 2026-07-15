@@ -136,7 +136,8 @@ The client validates the server certificate either through system trust or throu
 - transient public-listener accept errors retry with backoff from 10 ms to 1 s; unrecoverable listener failures remain fatal and drop readiness
 - each **Client instance** establishes one or more **Tunnel connections**
 - static Client startup seeds one **Address controller** from the configured **Server addresses**, retaining one independent worker per normalized address and allowing maintenance intent to be replaced (add / remove / re-adopt) without process restart
-- managed Server and Client runtimes maintain one **Managed session** to Control; the wire contract, schemas, readiness/Retiring/convergence rules, and failure taxonomy are in [`managed.md`](managed.md)
+- managed Server and Client runtimes maintain one **Managed session** to Control; the wire contract, schemas, readiness/Retiring/convergence rules, input/reporting limits, and failure taxonomy are in [`managed.md`](managed.md)
+- Managed-session SSE lines, event types, event data, snapshot bytes, decoded allocation, Tunnel/Public-hostname/Client-identity/Server-address cardinalities, and applied-state request/response deadlines are fixed production limits documented in [`managed.md`](managed.md); oversized input fails the session without partial apply
 - static and managed modes are mutually exclusive at startup: static-to-managed and managed-to-static changes require configuration replacement plus process restart, with no overlapping sources or in-process mode switch
 - in static Client mode, Client-ready means at least one configured **Server address** is connected; managed Client mode reports **Assignment convergence** instead and does not emit the static one-shot Client-ready event
 - failure of one configured **Server address** does not tear down healthy **Tunnel connections** to other configured **Server addresses**

@@ -10,7 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::ServerAddress;
 use crate::managed_session::{
-    ApplyError, ClientManagedInput, InputError, RoleAdapter, parse_client_input,
+    ApplyError, ClientManagedInput, InputError, ManagedSessionLimits, RoleAdapter,
+    parse_client_input,
 };
 
 /// One assignment apply dispatched to the Address-controller owner.
@@ -35,8 +36,8 @@ impl ClientAssignmentAdapter {
 impl RoleAdapter for ClientAssignmentAdapter {
     type Input = ClientManagedInput;
 
-    fn parse_input(input: &Value) -> Result<Self::Input, InputError> {
-        parse_client_input(input)
+    fn parse_input(input: Value, limits: &ManagedSessionLimits) -> Result<Self::Input, InputError> {
+        parse_client_input(input, limits)
     }
 
     async fn apply(&mut self, input: Self::Input) -> Result<(), ApplyError> {
@@ -62,7 +63,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::{ClientAssignmentAdapter, ClientAssignmentApply};
-    use crate::managed_session::{ApplyError, RoleAdapter};
+    use crate::managed_session::{ApplyError, ManagedSessionLimits, RoleAdapter};
 
     #[tokio::test]
     async fn apply_dispatches_addresses_and_awaits_acknowledgment() {
@@ -71,9 +72,12 @@ mod tests {
         let apply = tokio::spawn(async move {
             adapter
                 .apply(
-                    ClientAssignmentAdapter::parse_input(&json!({
-                        "server_addresses": ["a.example.test:443", "b.example.test"]
-                    }))
+                    ClientAssignmentAdapter::parse_input(
+                        json!({
+                            "server_addresses": ["a.example.test:443", "b.example.test"]
+                        }),
+                        &ManagedSessionLimits::default(),
+                    )
                     .expect("input should parse"),
                 )
                 .await
@@ -95,9 +99,12 @@ mod tests {
         let apply = tokio::spawn(async move {
             adapter
                 .apply(
-                    ClientAssignmentAdapter::parse_input(&json!({
-                        "server_addresses": []
-                    }))
+                    ClientAssignmentAdapter::parse_input(
+                        json!({
+                            "server_addresses": []
+                        }),
+                        &ManagedSessionLimits::default(),
+                    )
                     .expect("empty input should parse"),
                 )
                 .await
@@ -118,9 +125,12 @@ mod tests {
         let mut adapter = ClientAssignmentAdapter::new(tx);
         let error = adapter
             .apply(
-                ClientAssignmentAdapter::parse_input(&json!({
-                    "server_addresses": ["a.example.test"]
-                }))
+                ClientAssignmentAdapter::parse_input(
+                    json!({
+                        "server_addresses": ["a.example.test"]
+                    }),
+                    &ManagedSessionLimits::default(),
+                )
                 .expect("input should parse"),
             )
             .await

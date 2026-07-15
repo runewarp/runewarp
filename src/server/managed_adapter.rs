@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::Value;
 use tokio::sync::Notify;
 
-use crate::managed_session::{ApplyError, RoleAdapter, ServerManagedInput, parse_server_input};
+use crate::managed_session::{
+    ApplyError, ManagedSessionLimits, RoleAdapter, ServerManagedInput, parse_server_input,
+};
 use crate::{ServerHostname, ServerTunnelConfig};
 
 use super::tunnel_registry::TunnelRegistry;
@@ -107,8 +109,11 @@ impl ServerAuthorizationAdapter {
 impl RoleAdapter for ServerAuthorizationAdapter {
     type Input = ServerManagedInput;
 
-    fn parse_input(input: &Value) -> Result<Self::Input, crate::managed_session::InputError> {
-        parse_server_input(input)
+    fn parse_input(
+        input: Value,
+        limits: &ManagedSessionLimits,
+    ) -> Result<Self::Input, crate::managed_session::InputError> {
+        parse_server_input(input, limits)
     }
 
     async fn apply(&mut self, input: Self::Input) -> Result<(), ApplyError> {

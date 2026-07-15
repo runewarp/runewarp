@@ -10,6 +10,8 @@ use std::fmt;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::limits::{ManagedSessionLimitKind, ManagedSessionLimits};
+
 use crate::config::ServerTunnelConfig;
 use crate::{ClientIdentity, PublicHostname, ServerAddress, TunnelId};
 
@@ -30,6 +32,11 @@ pub enum InputError {
     MissingTunnels,
     MissingServerAddresses,
     InvalidShape(String),
+    LimitExceeded {
+        limit: ManagedSessionLimitKind,
+        value: usize,
+        max: usize,
+    },
 }
 
 impl fmt::Display for InputError {
@@ -40,6 +47,11 @@ impl fmt::Display for InputError {
                 formatter.write_str("client input omitted server_addresses")
             }
             Self::InvalidShape(message) => formatter.write_str(message),
+            Self::LimitExceeded { limit, value, max } => write!(
+                formatter,
+                "input {} limit exceeded: value={value} max={max}",
+                limit.as_str()
+            ),
         }
     }
 }
@@ -63,9 +75,33 @@ struct RawClientInput {
     server_addresses: Option<Vec<String>>,
 }
 
+fn limit_exceeded(limit: ManagedSessionLimitKind, value: usize, max: usize) -> InputError {
+    InputError::LimitExceeded { limit, value, max }
+}
+
 /// Parse and validate Server snapshot `input`.
-pub fn parse_server_input(input: &Value) -> Result<ServerManagedInput, InputError> {
-    let raw: RawServerInput = serde_json::from_value(input.clone()).map_err(|_| {
+pub fn parse_server_input(
+    input: Value,
+    limits: &ManagedSessionLimits,
+) -> Result<ServerManagedInput, InputError> {
+    match input.get("tunnels") {
+        None => return Err(InputError::MissingTunnels),
+        Some(Value::Array(tunnels)) if tunnels.len() > limits.max_tunnels => {
+            return Err(limit_exceeded(
+                ManagedSessionLimitKind::Tunnels,
+                tunnels.len(),
+                limits.max_tunnels,
+            ));
+        }
+        Some(Value::Array(_)) => {}
+        Some(_) => {
+            return Err(InputError::InvalidShape(
+                "server input was not a JSON object with tunnel entries".into(),
+            ));
+        }
+    }
+
+    let raw: RawServerInput = serde_json::from_value(input).map_err(|_| {
         InputError::InvalidShape("server input was not a JSON object with tunnel entries".into())
     })?;
     let Some(raw_tunnels) = raw.tunnels else {
@@ -73,8 +109,16 @@ pub fn parse_server_input(input: &Value) -> Result<ServerManagedInput, InputErro
     };
 
     let mut tunnels = Vec::with_capacity(raw_tunnels.len());
+    let mut total_public_hostnames = 0usize;
+    let mut total_client_identities = 0usize;
     for (index, tunnel) in raw_tunnels.into_iter().enumerate() {
-        tunnels.push(parse_server_tunnel(index, tunnel)?);
+        tunnels.push(parse_server_tunnel(
+            index,
+            tunnel,
+            limits,
+            &mut total_public_hostnames,
+            &mut total_client_identities,
+        )?);
     }
 
     validate_unique_tunnel_ids(&tunnels)?;
@@ -85,8 +129,28 @@ pub fn parse_server_input(input: &Value) -> Result<ServerManagedInput, InputErro
 }
 
 /// Parse and validate Client snapshot `input`.
-pub fn parse_client_input(input: &Value) -> Result<ClientManagedInput, InputError> {
-    let raw: RawClientInput = serde_json::from_value(input.clone()).map_err(|_| {
+pub fn parse_client_input(
+    input: Value,
+    limits: &ManagedSessionLimits,
+) -> Result<ClientManagedInput, InputError> {
+    match input.get("server_addresses") {
+        None => return Err(InputError::MissingServerAddresses),
+        Some(Value::Array(addresses)) if addresses.len() > limits.max_server_addresses => {
+            return Err(limit_exceeded(
+                ManagedSessionLimitKind::ServerAddresses,
+                addresses.len(),
+                limits.max_server_addresses,
+            ));
+        }
+        Some(Value::Array(_)) => {}
+        Some(_) => {
+            return Err(InputError::InvalidShape(
+                "client input was not a JSON object with server_addresses".into(),
+            ));
+        }
+    }
+
+    let raw: RawClientInput = serde_json::from_value(input).map_err(|_| {
         InputError::InvalidShape("client input was not a JSON object with server_addresses".into())
     })?;
     let Some(raw_addresses) = raw.server_addresses else {
@@ -110,6 +174,9 @@ pub fn parse_client_input(input: &Value) -> Result<ClientManagedInput, InputErro
 fn parse_server_tunnel(
     index: usize,
     tunnel: RawServerTunnel,
+    limits: &ManagedSessionLimits,
+    total_public_hostnames: &mut usize,
+    total_client_identities: &mut usize,
 ) -> Result<ServerTunnelConfig, InputError> {
     let Some(raw_id) = tunnel.id else {
         return Err(InputError::InvalidShape(format!(
@@ -144,6 +211,38 @@ fn parse_server_tunnel(
         )));
     }
 
+    if raw_hostnames.len() > limits.max_public_hostnames_per_tunnel {
+        return Err(limit_exceeded(
+            ManagedSessionLimitKind::PublicHostnamesPerTunnel,
+            raw_hostnames.len(),
+            limits.max_public_hostnames_per_tunnel,
+        ));
+    }
+    if raw_identities.len() > limits.max_client_identities_per_tunnel {
+        return Err(limit_exceeded(
+            ManagedSessionLimitKind::ClientIdentitiesPerTunnel,
+            raw_identities.len(),
+            limits.max_client_identities_per_tunnel,
+        ));
+    }
+
+    let new_public_hostnames_total = total_public_hostnames.saturating_add(raw_hostnames.len());
+    if new_public_hostnames_total > limits.max_public_hostnames_total {
+        return Err(limit_exceeded(
+            ManagedSessionLimitKind::PublicHostnamesTotal,
+            new_public_hostnames_total,
+            limits.max_public_hostnames_total,
+        ));
+    }
+    let new_client_identities_total = total_client_identities.saturating_add(raw_identities.len());
+    if new_client_identities_total > limits.max_client_identities_total {
+        return Err(limit_exceeded(
+            ManagedSessionLimitKind::ClientIdentitiesTotal,
+            new_client_identities_total,
+            limits.max_client_identities_total,
+        ));
+    }
+
     let mut public_hostnames = Vec::with_capacity(raw_hostnames.len());
     for hostname in raw_hostnames {
         let parsed = PublicHostname::try_from(hostname.as_str()).map_err(|error| {
@@ -163,6 +262,9 @@ fn parse_server_tunnel(
         })?;
         authorized_client_identities.push(parsed);
     }
+
+    *total_public_hostnames = new_public_hostnames_total;
+    *total_client_identities = new_client_identities_total;
 
     Ok(ServerTunnelConfig {
         id: Some(id),
@@ -237,27 +339,52 @@ mod tests {
     use super::{
         ClientManagedInput, InputError, ServerManagedInput, parse_client_input, parse_server_input,
     };
+    use crate::managed_session::limits::{ManagedSessionLimitKind, ManagedSessionLimits};
     use crate::{ClientIdentity, PublicHostname, ServerAddress, ServerTunnelConfig, TunnelId};
 
     const IDENTITY_A: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     const IDENTITY_B: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    fn default_limits() -> ManagedSessionLimits {
+        ManagedSessionLimits::default()
+    }
+
+    fn two_tunnel_json() -> serde_json::Value {
+        json!({
+            "tunnels": [
+                {
+                    "id": "t1",
+                    "public_hostnames": ["app.example.test"],
+                    "client_identities": [IDENTITY_A],
+                },
+                {
+                    "id": "t2",
+                    "public_hostnames": ["api.example.test"],
+                    "client_identities": [IDENTITY_B],
+                },
+            ]
+        })
+    }
+
     #[test]
     fn server_input_accepts_empty_tunnels() {
-        let input = parse_server_input(&json!({"tunnels": []})).unwrap();
+        let input = parse_server_input(json!({"tunnels": []}), &default_limits()).unwrap();
         assert_eq!(input, ServerManagedInput { tunnels: vec![] });
     }
 
     #[test]
     fn server_input_accepts_plural_fields_and_normalizes_hostnames() {
-        let input = parse_server_input(&json!({
-            "tunnels": [{
-                "id": "tunnel-a",
-                "public_hostnames": ["App.Example.Test."],
-                "client_identities": [IDENTITY_A],
-                "ignored": true
-            }]
-        }))
+        let input = parse_server_input(
+            json!({
+                "tunnels": [{
+                    "id": "tunnel-a",
+                    "public_hostnames": ["App.Example.Test."],
+                    "client_identities": [IDENTITY_A],
+                    "ignored": true
+                }]
+            }),
+            &default_limits(),
+        )
         .unwrap();
         assert_eq!(
             input,
@@ -276,41 +403,56 @@ mod tests {
     #[test]
     fn server_input_rejects_missing_or_empty_entry_collections() {
         assert_eq!(
-            parse_server_input(&json!({})).unwrap_err(),
+            parse_server_input(json!({}), &default_limits()).unwrap_err(),
             InputError::MissingTunnels
         );
         assert!(matches!(
-            parse_server_input(&json!({
-                "tunnels": [{"public_hostnames": ["app.example.test"], "client_identities": [IDENTITY_A]}]
-            }))
+            parse_server_input(
+                json!({
+                    "tunnels": [{"public_hostnames": ["app.example.test"], "client_identities": [IDENTITY_A]}]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("omitted id")
         ));
         assert!(matches!(
-            parse_server_input(&json!({
-                "tunnels": [{"id": "t1", "client_identities": [IDENTITY_A]}]
-            }))
+            parse_server_input(
+                json!({
+                    "tunnels": [{"id": "t1", "client_identities": [IDENTITY_A]}]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("public_hostnames")
         ));
         assert!(matches!(
-            parse_server_input(&json!({
-                "tunnels": [{"id": "t1", "public_hostnames": ["app.example.test"]}]
-            }))
+            parse_server_input(
+                json!({
+                    "tunnels": [{"id": "t1", "public_hostnames": ["app.example.test"]}]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("client_identities")
         ));
         assert!(matches!(
-            parse_server_input(&json!({
-                "tunnels": [{"id": "t1", "public_hostnames": [], "client_identities": [IDENTITY_A]}]
-            }))
+            parse_server_input(
+                json!({
+                    "tunnels": [{"id": "t1", "public_hostnames": [], "client_identities": [IDENTITY_A]}]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("public_hostnames must not be empty")
         ));
         assert!(matches!(
-            parse_server_input(&json!({
-                "tunnels": [{"id": "t1", "public_hostnames": ["app.example.test"], "client_identities": []}]
-            }))
+            parse_server_input(
+                json!({
+                    "tunnels": [{"id": "t1", "public_hostnames": ["app.example.test"], "client_identities": []}]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("client_identities must not be empty")
         ));
@@ -319,31 +461,37 @@ mod tests {
     #[test]
     fn server_input_rejects_invalid_and_duplicate_tunnel_ids() {
         assert!(matches!(
-            parse_server_input(&json!({
-                "tunnels": [{
-                    "id": "bad id",
-                    "public_hostnames": ["app.example.test"],
-                    "client_identities": [IDENTITY_A]
-                }]
-            }))
+            parse_server_input(
+                json!({
+                    "tunnels": [{
+                        "id": "bad id",
+                        "public_hostnames": ["app.example.test"],
+                        "client_identities": [IDENTITY_A]
+                    }]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("id is invalid")
         ));
         assert!(matches!(
-            parse_server_input(&json!({
-                "tunnels": [
-                    {
-                        "id": "same",
-                        "public_hostnames": ["app.example.test"],
-                        "client_identities": [IDENTITY_A]
-                    },
-                    {
-                        "id": "same",
-                        "public_hostnames": ["api.example.test"],
-                        "client_identities": [IDENTITY_B]
-                    }
-                ]
-            }))
+            parse_server_input(
+                json!({
+                    "tunnels": [
+                        {
+                            "id": "same",
+                            "public_hostnames": ["app.example.test"],
+                            "client_identities": [IDENTITY_A]
+                        },
+                        {
+                            "id": "same",
+                            "public_hostnames": ["api.example.test"],
+                            "client_identities": [IDENTITY_B]
+                        }
+                    ]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("tunnel ids must be unique")
         ));
@@ -352,38 +500,44 @@ mod tests {
     #[test]
     fn server_input_rejects_duplicate_hostnames_and_identities() {
         assert!(matches!(
-            parse_server_input(&json!({
-                "tunnels": [
-                    {
-                        "id": "t1",
-                        "public_hostnames": ["app.example.test"],
-                        "client_identities": [IDENTITY_A]
-                    },
-                    {
-                        "id": "t2",
-                        "public_hostnames": ["App.Example.Test."],
-                        "client_identities": [IDENTITY_B]
-                    }
-                ]
-            }))
+            parse_server_input(
+                json!({
+                    "tunnels": [
+                        {
+                            "id": "t1",
+                            "public_hostnames": ["app.example.test"],
+                            "client_identities": [IDENTITY_A]
+                        },
+                        {
+                            "id": "t2",
+                            "public_hostnames": ["App.Example.Test."],
+                            "client_identities": [IDENTITY_B]
+                        }
+                    ]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("public_hostnames must be unique")
         ));
         assert!(matches!(
-            parse_server_input(&json!({
-                "tunnels": [
-                    {
-                        "id": "t1",
-                        "public_hostnames": ["app.example.test"],
-                        "client_identities": [IDENTITY_A]
-                    },
-                    {
-                        "id": "t2",
-                        "public_hostnames": ["api.example.test"],
-                        "client_identities": [IDENTITY_A]
-                    }
-                ]
-            }))
+            parse_server_input(
+                json!({
+                    "tunnels": [
+                        {
+                            "id": "t1",
+                            "public_hostnames": ["app.example.test"],
+                            "client_identities": [IDENTITY_A]
+                        },
+                        {
+                            "id": "t2",
+                            "public_hostnames": ["api.example.test"],
+                            "client_identities": [IDENTITY_A]
+                        }
+                    ]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("client_identities must be unique")
         ));
@@ -393,21 +547,124 @@ mod tests {
     fn server_input_does_not_accept_singular_aliases_as_required_fields() {
         // Singular aliases are not protocol fields; omitting plurals fails closed.
         assert!(matches!(
-            parse_server_input(&json!({
-                "tunnels": [{
-                    "id": "t1",
-                    "public_hostname": "app.example.test",
-                    "client_identity": IDENTITY_A
-                }]
-            }))
+            parse_server_input(
+                json!({
+                    "tunnels": [{
+                        "id": "t1",
+                        "public_hostname": "app.example.test",
+                        "client_identity": IDENTITY_A
+                    }]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("public_hostnames")
         ));
     }
 
     #[test]
+    fn server_input_rejects_tunnel_count_over_limit() {
+        let limits = ManagedSessionLimits {
+            max_tunnels: 1,
+            ..default_limits()
+        };
+        assert_eq!(
+            parse_server_input(two_tunnel_json(), &limits).unwrap_err(),
+            InputError::LimitExceeded {
+                limit: ManagedSessionLimitKind::Tunnels,
+                value: 2,
+                max: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn server_input_rejects_public_hostnames_per_tunnel_over_limit() {
+        let limits = ManagedSessionLimits {
+            max_public_hostnames_per_tunnel: 1,
+            ..default_limits()
+        };
+        assert_eq!(
+            parse_server_input(
+                json!({
+                    "tunnels": [{
+                        "id": "t1",
+                        "public_hostnames": ["app.example.test", "api.example.test"],
+                        "client_identities": [IDENTITY_A],
+                    }]
+                }),
+                &limits,
+            )
+            .unwrap_err(),
+            InputError::LimitExceeded {
+                limit: ManagedSessionLimitKind::PublicHostnamesPerTunnel,
+                value: 2,
+                max: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn server_input_rejects_client_identities_per_tunnel_over_limit() {
+        let limits = ManagedSessionLimits {
+            max_client_identities_per_tunnel: 1,
+            ..default_limits()
+        };
+        assert_eq!(
+            parse_server_input(
+                json!({
+                    "tunnels": [{
+                        "id": "t1",
+                        "public_hostnames": ["app.example.test"],
+                        "client_identities": [IDENTITY_A, IDENTITY_B],
+                    }]
+                }),
+                &limits,
+            )
+            .unwrap_err(),
+            InputError::LimitExceeded {
+                limit: ManagedSessionLimitKind::ClientIdentitiesPerTunnel,
+                value: 2,
+                max: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn server_input_rejects_public_hostnames_total_over_limit() {
+        let limits = ManagedSessionLimits {
+            max_public_hostnames_total: 1,
+            ..default_limits()
+        };
+        assert_eq!(
+            parse_server_input(two_tunnel_json(), &limits).unwrap_err(),
+            InputError::LimitExceeded {
+                limit: ManagedSessionLimitKind::PublicHostnamesTotal,
+                value: 2,
+                max: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn server_input_rejects_client_identities_total_over_limit() {
+        let limits = ManagedSessionLimits {
+            max_client_identities_total: 1,
+            ..default_limits()
+        };
+        assert_eq!(
+            parse_server_input(two_tunnel_json(), &limits).unwrap_err(),
+            InputError::LimitExceeded {
+                limit: ManagedSessionLimitKind::ClientIdentitiesTotal,
+                value: 2,
+                max: 1,
+            }
+        );
+    }
+
+    #[test]
     fn client_input_accepts_empty_server_addresses() {
-        let input = parse_client_input(&json!({"server_addresses": []})).unwrap();
+        let input = parse_client_input(json!({"server_addresses": []}), &default_limits()).unwrap();
         assert_eq!(
             input,
             ClientManagedInput {
@@ -418,10 +675,13 @@ mod tests {
 
     #[test]
     fn client_input_parses_dns_optional_port_and_defaults_to_443() {
-        let input = parse_client_input(&json!({
-            "server_addresses": ["Tunnel.Example.Test.", "other.example.test:8443"],
-            "ignored": 1
-        }))
+        let input = parse_client_input(
+            json!({
+                "server_addresses": ["Tunnel.Example.Test.", "other.example.test:8443"],
+                "ignored": 1
+            }),
+            &default_limits(),
+        )
         .unwrap();
         assert_eq!(
             input.server_addresses,
@@ -436,23 +696,33 @@ mod tests {
     #[test]
     fn client_input_rejects_missing_duplicates_and_invalid_values() {
         assert_eq!(
-            parse_client_input(&json!({})).unwrap_err(),
+            parse_client_input(json!({}), &default_limits()).unwrap_err(),
             InputError::MissingServerAddresses
         );
         assert!(matches!(
-            parse_client_input(&json!({
-                "server_addresses": ["tunnel.example.test", "Tunnel.Example.Test."]
-            }))
+            parse_client_input(
+                json!({
+                    "server_addresses": ["tunnel.example.test", "Tunnel.Example.Test."]
+                }),
+                &default_limits(),
+            )
             .unwrap_err(),
             InputError::InvalidShape(message) if message.contains("duplicate")
         ));
         assert!(matches!(
-            parse_client_input(&json!({"server_addresses": ["127.0.0.1"]})).unwrap_err(),
+            parse_client_input(
+                json!({"server_addresses": ["127.0.0.1"]}),
+                &default_limits()
+            )
+            .unwrap_err(),
             InputError::InvalidShape(_)
         ));
         assert!(matches!(
-            parse_client_input(&json!({"server_addresses": ["https://tunnel.example.test"]}))
-                .unwrap_err(),
+            parse_client_input(
+                json!({"server_addresses": ["https://tunnel.example.test"]}),
+                &default_limits(),
+            )
+            .unwrap_err(),
             InputError::InvalidShape(_)
         ));
     }
@@ -460,8 +730,47 @@ mod tests {
     #[test]
     fn client_input_does_not_accept_singular_alias_as_required_field() {
         assert_eq!(
-            parse_client_input(&json!({"server_address": "tunnel.example.test"})).unwrap_err(),
+            parse_client_input(
+                json!({"server_address": "tunnel.example.test"}),
+                &default_limits(),
+            )
+            .unwrap_err(),
             InputError::MissingServerAddresses
+        );
+    }
+
+    #[test]
+    fn client_input_rejects_server_address_count_over_limit() {
+        let limits = ManagedSessionLimits {
+            max_server_addresses: 1,
+            ..default_limits()
+        };
+        assert_eq!(
+            parse_client_input(
+                json!({
+                    "server_addresses": ["a.example.test", "b.example.test"]
+                }),
+                &limits,
+            )
+            .unwrap_err(),
+            InputError::LimitExceeded {
+                limit: ManagedSessionLimitKind::ServerAddresses,
+                value: 2,
+                max: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn limit_exceeded_display_includes_kind_and_counts() {
+        let error = InputError::LimitExceeded {
+            limit: ManagedSessionLimitKind::Tunnels,
+            value: 3,
+            max: 1,
+        };
+        assert_eq!(
+            error.to_string(),
+            "input tunnels limit exceeded: value=3 max=1"
         );
     }
 }

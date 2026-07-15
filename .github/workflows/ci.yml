@@ -154,6 +154,8 @@ jobs:
     env:
       RUNEWARP_BUILD_COMMIT: ${{ github.sha }}
       RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'trusted-main' }}
+      CARGO_BINSTALL_VERSION: 1.21.0
+      CARGO_BINSTALL_SHA256: b1880b3631d1ff0fd1f286a0d20f82f373355651f9fbd7f4d0d7fbfe218bf562
     steps:
       - name: Check out the repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -179,6 +181,16 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Install cargo-binstall
+        run: |
+          archive="$RUNNER_TEMP/cargo-binstall.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "https://github.com/cargo-bins/cargo-binstall/releases/download/v${CARGO_BINSTALL_VERSION}/cargo-binstall-x86_64-unknown-linux-musl.tgz" \
+            --output "$archive"
+          printf '%s  %s\n' "$CARGO_BINSTALL_SHA256" "$archive" | sha256sum --check
+          tar --extract --gzip --file "$archive" --directory "$HOME/.cargo/bin" cargo-binstall
+          printf '%s\n' "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Audit Rust dependencies
         run: ./scripts/audit-dependencies

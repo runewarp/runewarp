@@ -24,6 +24,8 @@ The `CI` workflow is the required aggregate check for normal changes. It current
 
 These checks run on both pull requests and `main` pushes and roll up into one required `CI` status.
 
+The Rust-contract job bootstraps a pinned `cargo-binstall` release so `./scripts/audit-dependencies` can install the repository-pinned `cargo-audit` binary without compiling the audit tool on each fresh runner. The script retains a locked source-install fallback for local environments without `cargo-binstall`.
+
 Local workflow edits can run `./scripts/lint-workflows` directly, and `./scripts/test-automation` exercises the repository-owned Ruby workflow helpers against the same public entry points used by CI.
 
 CI cache scope stays intentionally split by trust level:

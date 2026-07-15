@@ -15,13 +15,13 @@ use super::limits::{ManagedSessionLimitKind, ManagedSessionLimits};
 
 /// Validated v1 snapshot envelope from an SSE `snapshot` event.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SnapshotEnvelope {
+pub(crate) struct SnapshotEnvelope {
     pub revision: String,
     pub input: Value,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SnapshotError {
+pub(crate) enum SnapshotError {
     InvalidJson,
     MissingRevision,
     EmptyRevision,
@@ -70,7 +70,7 @@ struct RawSnapshot {
 }
 
 /// Interpret a completed SSE event as a v1 snapshot envelope.
-pub fn parse_snapshot_event(
+pub(crate) fn parse_snapshot_event(
     event_type: Option<&str>,
     data: &str,
     limits: &ManagedSessionLimits,

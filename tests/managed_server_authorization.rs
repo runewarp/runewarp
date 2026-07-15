@@ -25,13 +25,12 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, CONTROL_ALPN_H2,
-    ControlAddress, ControlClientIdentityMaterial, ControlTrust, GeneratedClientIdentity,
-    ManagedSession, ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PreparedClient,
-    PreparedServer, QUIC_CLOSE_FLUSH_DURATION, SERVER_IDENTITY_CERT_FILENAME,
-    SERVER_IDENTITY_KEY_FILENAME, SessionMaterial, ShutdownMode, events_path,
-    generate_client_identity, initialize_manual_server_certificate, load_client_config,
-    load_server_config, state_path,
+    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ControlAddress,
+    ControlClientIdentityMaterial, ControlTrust, GeneratedClientIdentity, ManagedSession,
+    ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PreparedClient, PreparedServer,
+    QUIC_CLOSE_FLUSH_DURATION, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_KEY_FILENAME,
+    SessionMaterial, ShutdownMode, generate_client_identity, initialize_manual_server_certificate,
+    load_client_config, load_server_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -49,7 +48,8 @@ use tokio::time::{sleep, timeout};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use common::{
-    ControlMtlsMaterial, generate_control_mtls_material, write_control_ca_and_certs,
+    CONTROL_ALPN_H2, ControlMtlsMaterial, SERVER_EVENTS_PATH, SERVER_STATE_PATH,
+    generate_control_mtls_material, write_control_ca_and_certs,
     write_control_client_as_server_identity,
 };
 
@@ -1280,7 +1280,7 @@ async fn handle_request(
     snapshots: Arc<AsyncMutex<mpsc::UnboundedReceiver<String>>>,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let path = request.uri().path().to_owned();
-    if path == events_path(ManagedSessionRole::Server) {
+    if path == SERVER_EVENTS_PATH {
         metrics.begin_stream();
         let metrics_drop = metrics.clone();
         let body = boxed_stream(SnapshotFeedStream {
@@ -1295,7 +1295,7 @@ async fn handle_request(
             .unwrap());
     }
 
-    if path == state_path(ManagedSessionRole::Server) {
+    if path == SERVER_STATE_PATH {
         metrics.begin_stream();
         let body = request.collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);

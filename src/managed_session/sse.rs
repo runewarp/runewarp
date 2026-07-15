@@ -12,14 +12,14 @@ use super::limits::{ManagedSessionLimitKind, ManagedSessionLimits};
 
 /// One complete SSE event after a blank-line dispatch boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SseEvent {
+pub(crate) struct SseEvent {
     pub event_type: Option<String>,
     pub data: String,
 }
 
 /// Incremental SSE framing parser.
 #[derive(Debug)]
-pub struct SseParser {
+pub(crate) struct SseParser {
     limits: ManagedSessionLimits,
     pending: Vec<u8>,
     event_type: Option<String>,
@@ -36,7 +36,7 @@ impl Default for SseParser {
 
 /// Outcome of feeding bytes into [`SseParser`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SseParseItem {
+pub(crate) enum SseParseItem {
     /// Colon-prefixed comment line (keepalive or other).
     Comment,
     /// Complete event dispatched by a blank line.
@@ -44,7 +44,7 @@ pub enum SseParseItem {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SseParseError {
+pub(crate) enum SseParseError {
     InvalidUtf8,
     LimitExceeded {
         limit: ManagedSessionLimitKind,

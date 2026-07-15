@@ -13,7 +13,7 @@ This document describes what Core implements today. Product policy (lifecycle la
 | **Control** | HTTPS endpoint that publishes desired inputs and observes applied revisions |
 | **Control address** | DNS hostname with optional port; HTTPS is mandatory and inferred |
 | **Managed mode** | Startup-selected shape when an effective Control address is present |
-| **Managed session** | Authenticated live relationship between one Server or Client instance and Control for versioned snapshots and revision acknowledgments; Core implements it as one mutually authenticated HTTP/2 connection |
+| **Managed session** | Authenticated live relationship between one Server or Client instance and Control for versioned snapshots and revision acknowledgments; Core implements it as one mutually authenticated HTTP/2 connection behind the `ManagedSession` domain seam |
 | **Server** / **Client instance** | Runtimes that open a Managed session; they still own the data-path listeners and Tunnel connections |
 | **Tunnel connection** | QUIC data-path session between Client and Server; separate from the Managed session |
 | **Authorization snapshot** | Server-side Public-hostname routing plus trusted Client identities applied from Control; managed tunnels are keyed by **Tunnel ID** |

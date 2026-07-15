@@ -12,7 +12,7 @@ use crate::tls_material::{load_certificate_chain, load_private_key};
 use crate::{CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, ControlTrust};
 
 /// ALPN token for mandatory HTTP/2. HTTP/1.1 is never offered.
-pub const CONTROL_ALPN_H2: &[u8] = b"h2";
+pub(crate) const CONTROL_ALPN_H2: &[u8] = b"h2";
 
 /// Role identity presented to Control over mTLS.
 #[derive(Clone, Debug)]
@@ -30,7 +30,7 @@ pub struct SessionMaterial {
 }
 
 /// Loaded rustls client config for one Control connection attempt.
-pub struct ControlTlsMaterial {
+pub(crate) struct ControlTlsMaterial {
     pub client_config: Arc<ClientConfig>,
     pub server_name: String,
 }
@@ -96,7 +96,7 @@ impl std::error::Error for TrustLoadError {
 /// Material is read from disk on every call so post-start replacements are
 /// picked up on reconnect. Failures are returned to the caller for in-process
 /// retry rather than process exit.
-pub fn load_control_tls_material(
+pub(crate) fn load_control_tls_material(
     material: &SessionMaterial,
 ) -> Result<ControlTlsMaterial, ControlTlsMaterialError> {
     let roots = load_control_root_store(&material.trust).map_err(ControlTlsMaterialError::Trust)?;

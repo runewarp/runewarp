@@ -9,9 +9,7 @@ use std::future::Future;
 
 use serde_json::Value;
 
-use super::input::{
-    ClientManagedInput, InputError, ServerManagedInput, parse_client_input, parse_server_input,
-};
+use super::input::InputError;
 use super::limits::ManagedSessionLimits;
 
 /// Failure applying a validated role input. The session keeps the prior
@@ -47,38 +45,4 @@ pub trait RoleAdapter: Send {
     /// Atomically apply a validated input. Returning `Err` rejects the
     /// candidate without acknowledging its revision.
     fn apply(&mut self, input: Self::Input) -> impl Future<Output = Result<(), ApplyError>> + Send;
-}
-
-/// Temporary Server adapter that accepts validated inputs without wiring live
-/// authorization. Production managed Servers use [`crate::ServerAuthorizationAdapter`].
-#[derive(Clone, Debug, Default)]
-pub struct DeferredServerAdapter;
-
-impl RoleAdapter for DeferredServerAdapter {
-    type Input = ServerManagedInput;
-
-    fn parse_input(input: Value, limits: &ManagedSessionLimits) -> Result<Self::Input, InputError> {
-        parse_server_input(input, limits)
-    }
-
-    async fn apply(&mut self, _input: Self::Input) -> Result<(), ApplyError> {
-        Ok(())
-    }
-}
-
-/// Temporary Client adapter that accepts validated inputs without wiring the
-/// address controller. Production managed Clients use [`crate::ClientAssignmentAdapter`].
-#[derive(Clone, Debug, Default)]
-pub struct DeferredClientAdapter;
-
-impl RoleAdapter for DeferredClientAdapter {
-    type Input = ClientManagedInput;
-
-    fn parse_input(input: Value, limits: &ManagedSessionLimits) -> Result<Self::Input, InputError> {
-        parse_client_input(input, limits)
-    }
-
-    async fn apply(&mut self, _input: Self::Input) -> Result<(), ApplyError> {
-        Ok(())
-    }
 }

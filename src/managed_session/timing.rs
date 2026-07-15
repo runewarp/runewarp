@@ -6,25 +6,10 @@ use tokio::time::Instant;
 
 /// Deadline for the first valid snapshot on a new connection. Keepalive
 /// comments do not extend this window.
-pub const FIRST_SNAPSHOT_DEADLINE: Duration = Duration::from_secs(60);
+pub(crate) const FIRST_SNAPSHOT_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Maximum silence between any SSE bytes before the session is replaced.
-pub const SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Clock used by the Managed-session loop so tests can pause Tokio time.
-pub trait SessionClock {
-    fn now(&self) -> Instant;
-}
-
-/// Tokio-time [`SessionClock`] backed by [`Instant::now`].
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemSessionClock;
-
-impl SessionClock for SystemSessionClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-}
+pub(crate) const SILENCE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionDeadlines {

@@ -32,7 +32,6 @@ Choose the path that matches what you want to do:
 
 - **Evaluate locally:** follow the tested [Docker example](examples/docker/README.md)
 - **Operate a self-hosted deployment:** use the [operator guide](docs/usage.md), then the [configuration reference](docs/configuration.md)
-- **Managed protocol/specification:** use the normative [Managed-session protocol](docs/managed.md)
 - **Understand the design:** start with [architecture](docs/architecture.md) and [security](docs/security.md)
 
 ## Goals
@@ -123,7 +122,7 @@ A simple, open-source client/server tunneling tool whose config model and simple
 - [Architecture](docs/architecture.md) — system structure, data paths, and current limits
 - [Security](docs/security.md) — trust boundaries, visibility, certificates, and deployment trade-offs
 
-### Protocol and Control implementers
+### Protocol specifications
 
 - [Tunnel protocol](docs/protocol.md) — Tunnel wire behavior and runtime invariants
 - [Managed-session protocol](docs/managed.md) — normative Control contract and interoperability checklist

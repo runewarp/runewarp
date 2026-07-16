@@ -31,7 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Added strict trusted PROXY protocol v2 Visitor ingress, canonical Visitor TCP address transport on every Tunnel stream, and independent per-Service PROXY v2 emission for passthrough and Terminate-mode Local backends. (#227)
+- Added strict trusted PROXY protocol v2 Visitor ingress, canonical Visitor TCP address transport on every Tunnel stream, and independent per-Service PROXY v2 emission for passthrough and Terminate-mode Local backends. (#228)
 
 - Added required managed Server **Tunnel ID** (`tunnels[].id`): opaque Control-owned continuity keys (shared validation with revision), ID-keyed live pool rematch on apply, and static mode remains ID-less. (#192)
 - Added the Managed-session protocol and Control interoperability guide in `docs/managed.md`, with cross-links from architecture, protocol, security, configuration, usage, and the README documentation index. (#190)

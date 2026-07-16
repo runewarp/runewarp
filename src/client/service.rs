@@ -93,6 +93,7 @@ pub(crate) fn validate_services(
             public_hostnames,
             backend_address: service.backend_address.clone(),
             tls_mode: service.tls_mode.clone(),
+            proxy_protocol: None,
         });
     }
 
@@ -116,11 +117,13 @@ mod tests {
                 public_hostnames: None,
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
         ];
 
@@ -137,11 +140,13 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname("App.Example.Test.")]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
         ];
 
@@ -159,6 +164,7 @@ mod tests {
             public_hostnames: None,
             backend_address: "127.0.0.1:443".to_owned(),
             tls_mode: ClientTlsMode::Passthrough,
+            proxy_protocol: None,
         }]);
 
         let selected = selector.select(&public_hostname("app.example.test"));
@@ -176,11 +182,13 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("api.example.test")]),
                 backend_address: "127.0.0.1:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
         ]);
 
@@ -198,6 +206,7 @@ mod tests {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "127.0.0.1:443".to_owned(),
             tls_mode: ClientTlsMode::Passthrough,
+            proxy_protocol: None,
         }]);
 
         let selected = selector.select(&public_hostname("api.example.test"));

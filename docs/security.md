@@ -187,6 +187,8 @@ Core's CI scans the resolved dependency graph for RustSec vulnerabilities and in
 
 ## Operational limits and trade-offs
 
+Visitor address trust is explicit. Direct ingress uses accepted socket addresses. PROXY v2 ingress first verifies the socket peer against configured CIDRs, then requires a PROXY-command TCP/IPv4 or TCP/IPv6 header. Missing, malformed, `LOCAL`, non-TCP, mismatched-family, and oversized headers fail closed. TLVs are consumed but never retained, logged, or propagated. Global admission covers header parsing; per-source admission uses the canonical source. Internal and optional backend headers are regenerated from typed addresses.
+
 | Concern | Behavior |
 | --- | --- |
 | Cross-side hostname drift | The runtime does not validate cross-side hostname coverage under **Hostname mirroring** |

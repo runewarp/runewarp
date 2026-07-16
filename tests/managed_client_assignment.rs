@@ -218,6 +218,7 @@ impl ManagedClientHarness {
                 public_hostnames: None,
                 backend_address: backend_addr.to_string(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             }],
             public_cert_config: None,
             control: Some(runewarp::ControlConfig {

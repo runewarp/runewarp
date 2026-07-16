@@ -1851,6 +1851,7 @@ client-identity = "{}"
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:80".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }],
         public_cert_config: Some(ClientPublicCertConfig::Acme {
             email: "test@example.test".to_owned(),
@@ -2018,6 +2019,7 @@ client-identity = "{}"
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: backend_address.to_string(),
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }],
         public_cert_config: Some(ClientPublicCertConfig::Acme {
             email: "test@example.test".to_owned(),
@@ -2173,6 +2175,7 @@ client-identity = "{}"
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: backend_address.to_string(),
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }],
         public_cert_config: Some(ClientPublicCertConfig::Acme {
             email: "test@example.test".to_owned(),
@@ -2363,6 +2366,7 @@ client-identity = "{}"
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:80".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }],
         public_cert_config: Some(ClientPublicCertConfig::Acme {
             email: "test@example.test".to_owned(),
@@ -2502,6 +2506,7 @@ client-identity = "{}"
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: backend_address.to_string(),
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }],
         public_cert_config: Some(ClientPublicCertConfig::Acme {
             email: "test@example.test".to_owned(),

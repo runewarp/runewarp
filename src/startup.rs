@@ -104,18 +104,22 @@ impl PreparedServer {
                 )
             }
         };
-        let server = Server::bind(ServerBindConfig {
-            public_bind_addr,
-            tunnel_connection_bind_addr,
-            readiness_bind_addr: config.readiness_bind_address,
-            server_hostname: config.hostname.clone(),
-            authorization,
-            public_tls_config: acme_runtime
-                .as_ref()
-                .map(|acme| acme.state.challenge_rustls_config()),
-            quic_server_config,
-            admission: config.admission,
-        })
+        let server = Server::bind_with_proxy(
+            ServerBindConfig {
+                public_bind_addr,
+                tunnel_connection_bind_addr,
+                readiness_bind_addr: config.readiness_bind_address,
+                server_hostname: config.hostname.clone(),
+                authorization,
+                public_tls_config: acme_runtime
+                    .as_ref()
+                    .map(|acme| acme.state.challenge_rustls_config()),
+                quic_server_config,
+                admission: config.admission,
+            },
+            config.visitor_proxy_protocol,
+            config.visitor_proxy_trusted_networks.clone(),
+        )
         .await
         .map_err(ServerStartupError::Bind)?;
 
@@ -1061,11 +1065,13 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "localhost:80".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("api.example.test")]),
                 backend_address: "localhost:8080".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
         ];
 
@@ -1080,6 +1086,7 @@ mod tests {
             public_hostnames: None, // catch-all has no explicit hostnames
             backend_address: "localhost:80".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }];
 
         let hostnames = acme_terminating_hostnames(&services);
@@ -1100,11 +1107,13 @@ mod tests {
                 ]),
                 backend_address: "localhost:80".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "localhost:8080".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
             },
         ];
 
@@ -1123,11 +1132,13 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "localhost:80".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("api.example.test")]),
                 backend_address: "localhost:8080".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
         ];
 
@@ -1153,6 +1164,8 @@ mod tests {
             tunnel_connection_bind_address: "127.0.0.1:443".parse()?,
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            visitor_proxy_protocol: None,
+            visitor_proxy_trusted_networks: Vec::new(),
             tunnels: Vec::new(),
             control: None,
             identity: None,
@@ -1179,6 +1192,8 @@ mod tests {
             tunnel_connection_bind_address: "127.0.0.1:443".parse().unwrap(),
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            visitor_proxy_protocol: None,
+            visitor_proxy_trusted_networks: Vec::new(),
             tunnels: Vec::new(),
             control: None,
             identity: None,
@@ -1222,6 +1237,7 @@ mod tests {
                 ]),
                 backend_address: "127.0.0.1:8080".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
             }],
             public_cert_config: Some(ClientPublicCertConfig::Acme {
                 email: "admin@example.test".to_owned(),
@@ -1266,6 +1282,7 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname(hostname)]),
                 backend_address: "127.0.0.1:8080".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
             }],
             public_cert_config: Some(ClientPublicCertConfig::Acme {
                 email: "admin@example.test".to_owned(),
@@ -1364,6 +1381,7 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
             }],
             public_cert_config: Some(ClientPublicCertConfig::Acme {
                 email: "admin@example.test".to_owned(),
@@ -1399,6 +1417,8 @@ mod tests {
             tunnel_connection_bind_address: "127.0.0.1:443".parse()?,
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            visitor_proxy_protocol: None,
+            visitor_proxy_trusted_networks: Vec::new(),
             tunnels: Vec::new(),
             control: None,
             identity: None,
@@ -1439,6 +1459,7 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
             }],
             public_cert_config: Some(ClientPublicCertConfig::Acme {
                 email: "admin@example.test".to_owned(),
@@ -1560,6 +1581,7 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:8080".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             }],
             public_cert_config: None,
             control: Some(ControlConfig {
@@ -1610,6 +1632,8 @@ mod tests {
             tunnel_connection_bind_address: "127.0.0.1:0".parse().unwrap(),
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            visitor_proxy_protocol: None,
+            visitor_proxy_trusted_networks: Vec::new(),
             tunnels: vec![ServerTunnelConfig {
                 id: None,
                 public_hostnames: vec![public_hostname("app.example.test")],

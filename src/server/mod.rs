@@ -223,12 +223,28 @@ async fn accept_readiness_connections(listener: TcpListener) {
 
 impl Server {
     pub async fn bind(config: ServerBindConfig) -> io::Result<Self> {
-        Self::bind_with_admission_limits(config, ServerAdmissionLimits::default()).await
+        Self::bind_with_proxy(config, None, Vec::new()).await
     }
 
-    pub(crate) async fn bind_with_admission_limits(
+    pub async fn bind_with_proxy(
+        config: ServerBindConfig,
+        visitor_proxy_protocol: Option<crate::ProxyProtocolVersion>,
+        visitor_proxy_trusted_networks: Vec<crate::TrustedNetwork>,
+    ) -> io::Result<Self> {
+        Self::bind_with_admission_limits_and_proxy(
+            config,
+            ServerAdmissionLimits::default(),
+            visitor_proxy_protocol,
+            visitor_proxy_trusted_networks,
+        )
+        .await
+    }
+
+    async fn bind_with_admission_limits_and_proxy(
         config: ServerBindConfig,
         admission_limits: ServerAdmissionLimits,
+        visitor_proxy_protocol: Option<crate::ProxyProtocolVersion>,
+        visitor_proxy_trusted_networks: Vec<crate::TrustedNetwork>,
     ) -> io::Result<Self> {
         if config.admission == ServerAdmission::Static
             && config.authorization.current_tunnel_count() == 0
@@ -243,11 +259,13 @@ impl Server {
             config.authorization,
             admission_policy.tunnel_connections(),
         )?;
-        let visitor_stream_handler = VisitorStreamHandler::new(
+        let visitor_stream_handler = VisitorStreamHandler::new_with_proxy(
             config.server_hostname.clone(),
             tunnel_registry.clone(),
             config.public_tls_config.clone(),
             admission_policy.clone(),
+            visitor_proxy_protocol,
+            visitor_proxy_trusted_networks,
         )?;
         let public_listener =
             TcpListener::bind(config.public_bind_addr)
@@ -562,10 +580,10 @@ fn admit_visitor_connection(
     admission_policy: &ServerAdmissionPolicy,
     visitor_stream_handler: &VisitorStreamHandler,
     visitor_stream: tokio::net::TcpStream,
-    peer_address: SocketAddr,
+    _peer_address: SocketAddr,
     shutdown: Option<OrderlyShutdown>,
 ) {
-    let permit = match admission_policy.try_admit_visitor(peer_address.ip()) {
+    let permit = match admission_policy.try_admit_visitor_global() {
         Ok(permit) => permit,
         Err(rejection) => {
             drop(visitor_stream);

@@ -28,8 +28,9 @@ use crate::tls_material::{
 };
 use crate::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
-    PublicHostname, SERVER_CA_FILENAME, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_FILENAME,
-    SERVER_IDENTITY_KEY_FILENAME, ServerHostname, XdgPathError,
+    ProxyProtocolVersion, PublicHostname, SERVER_CA_FILENAME, SERVER_IDENTITY_CERT_FILENAME,
+    SERVER_IDENTITY_FILENAME, SERVER_IDENTITY_KEY_FILENAME, ServerHostname, TrustedNetwork,
+    XdgPathError,
 };
 
 pub use self::preparation::material::MaterialDirectoryError;
@@ -78,6 +79,8 @@ pub struct ServerConfig {
     pub tunnel_connection_bind_address: SocketAddr,
     pub readiness_bind_address: Option<SocketAddr>,
     pub graceful_shutdown_duration: std::time::Duration,
+    pub visitor_proxy_protocol: Option<ProxyProtocolVersion>,
+    pub visitor_proxy_trusted_networks: Vec<TrustedNetwork>,
     pub tunnels: Vec<ServerTunnelConfig>,
     pub control: Option<ControlConfig>,
     pub identity: Option<ServerIdentityConfig>,
@@ -139,6 +142,7 @@ pub struct ServiceConfig {
     pub public_hostnames: Option<Vec<PublicHostname>>,
     pub backend_address: String,
     pub tls_mode: ClientTlsMode,
+    pub proxy_protocol: Option<ProxyProtocolVersion>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -425,6 +429,8 @@ fn validate_prepared_server_config(
         tunnel_bind_address,
         readiness_bind_address,
         graceful_shutdown_duration,
+        visitor_proxy_protocol,
+        visitor_proxy_trusted_networks,
         manual_cert_present,
         acme_present,
         manual_certificate_directory,
@@ -500,6 +506,35 @@ fn validate_prepared_server_config(
         graceful_shutdown_duration.as_str(),
         &mut messages,
     );
+    let visitor_proxy_protocol = match visitor_proxy_protocol.as_deref() {
+        None => None,
+        Some("v2") => Some(ProxyProtocolVersion::V2),
+        Some(_) => {
+            messages.push("server.visitor-proxy-protocol must be \"v2\"".to_owned());
+            None
+        }
+    };
+    let trusted_networks_were_configured = visitor_proxy_trusted_networks.is_some();
+    let visitor_proxy_trusted_networks = visitor_proxy_trusted_networks
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|network| match network.parse::<TrustedNetwork>() {
+            Ok(network) => Some(network),
+            Err(error) => {
+                messages.push(format!("server.visitor-proxy-trusted-networks contains invalid CIDR `{network}`: {error}"));
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if visitor_proxy_protocol.is_some() && visitor_proxy_trusted_networks.is_empty() {
+        messages.push("server.visitor-proxy-trusted-networks must be non-empty when visitor-proxy-protocol = \"v2\"".to_owned());
+    }
+    if visitor_proxy_protocol.is_none() && trusted_networks_were_configured {
+        messages.push(
+            "server.visitor-proxy-trusted-networks requires visitor-proxy-protocol = \"v2\""
+                .to_owned(),
+        );
+    }
 
     let validated_tunnels = if managed {
         if !tunnels.is_empty() {
@@ -579,6 +614,8 @@ fn validate_prepared_server_config(
             readiness_bind_address,
             graceful_shutdown_duration: graceful_shutdown_duration
                 .expect("validated server.graceful-shutdown-duration"),
+            visitor_proxy_protocol,
+            visitor_proxy_trusted_networks,
             tunnels: validated_tunnels,
             control,
             identity,
@@ -1159,6 +1196,14 @@ fn validate_prepared_client_service(
             None
         }
     };
+    let proxy_protocol = match raw.proxy_protocol.as_deref() {
+        None => Some(None),
+        Some("v2") => Some(Some(ProxyProtocolVersion::V2)),
+        Some(_) => {
+            messages.push("client.services[].proxy-protocol must be \"v2\"".to_owned());
+            None
+        }
+    };
 
     if parsed_tls_mode == Some(ClientTlsMode::Terminate) && public_hostnames.values.is_none() {
         messages.push(
@@ -1167,15 +1212,17 @@ fn validate_prepared_client_service(
         );
     }
 
-    let settings = if public_hostnames.is_valid && parsed_tls_mode.is_some() {
-        backend_address.map(|backend_address| ServiceConfig {
-            public_hostnames: public_hostnames.values.clone(),
-            backend_address,
-            tls_mode: parsed_tls_mode.clone().expect("validated tls mode"),
-        })
-    } else {
-        None
-    };
+    let settings =
+        if public_hostnames.is_valid && parsed_tls_mode.is_some() && proxy_protocol.is_some() {
+            backend_address.map(|backend_address| ServiceConfig {
+                public_hostnames: public_hostnames.values.clone(),
+                backend_address,
+                tls_mode: parsed_tls_mode.clone().expect("validated tls mode"),
+                proxy_protocol: proxy_protocol.expect("validated proxy protocol"),
+            })
+        } else {
+            None
+        };
 
     ValidatedClientService {
         settings,
@@ -1541,6 +1588,8 @@ pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value)
             "tunnel-bind-address",
             "readiness-bind-address",
             "graceful-shutdown-duration",
+            "visitor-proxy-protocol",
+            "visitor-proxy-trusted-networks",
             "identity-dir",
             "tunnels",
         ],
@@ -1626,7 +1675,12 @@ pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value)
             if let Some(service) = service.as_table() {
                 push_unknown_table_fields(
                     service,
-                    &["public-hostnames", "backend-address", "tls-mode"],
+                    &[
+                        "public-hostnames",
+                        "backend-address",
+                        "tls-mode",
+                        "proxy-protocol",
+                    ],
                     &mut messages,
                 );
             }
@@ -1667,6 +1721,8 @@ pub(crate) struct RawServerConfig {
     pub(crate) tunnel_bind_address: Option<String>,
     pub(crate) readiness_bind_address: Option<String>,
     pub(crate) graceful_shutdown_duration: Option<String>,
+    pub(crate) visitor_proxy_protocol: Option<String>,
+    pub(crate) visitor_proxy_trusted_networks: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) tunnels: Vec<RawServerTunnelConfig>,
 }
@@ -1713,6 +1769,7 @@ pub(crate) struct RawClientServiceConfig {
     pub(crate) public_hostnames: Option<Vec<String>>,
     pub(crate) backend_address: Option<String>,
     pub(crate) tls_mode: Option<String>,
+    pub(crate) proxy_protocol: Option<String>,
 }
 
 #[derive(Deserialize)]

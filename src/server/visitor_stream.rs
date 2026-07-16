@@ -17,9 +17,12 @@ use crate::acme::ACME_TLS_ALPN;
 use crate::client_hello::read_client_hello;
 use crate::client_hello::{ParsedClientHello, read_client_hello_with_timeout};
 use crate::proxy::{proxy_stream_error_code, proxy_tcp_over_quic};
+use crate::proxy_protocol::read_proxy_v2;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ServerRouteOutcome};
-use crate::{PublicHostname, ServerHostname};
+use crate::{
+    ProxyProtocolVersion, PublicHostname, ServerHostname, TrustedNetwork, VisitorTcpAddresses,
+};
 
 #[derive(Clone)]
 pub(crate) struct VisitorStreamHandler {
@@ -27,25 +30,49 @@ pub(crate) struct VisitorStreamHandler {
     tunnel_registry: TunnelRegistry,
     public_tls_config: Option<Arc<rustls::ServerConfig>>,
     admission_policy: ServerAdmissionPolicy,
+    visitor_proxy_protocol: Option<ProxyProtocolVersion>,
+    visitor_proxy_trusted_networks: Vec<TrustedNetwork>,
 }
 
 impl VisitorStreamHandler {
+    #[cfg(test)]
     pub(crate) fn new(
         server_hostname: ServerHostname,
         tunnel_registry: TunnelRegistry,
         public_tls_config: Option<Arc<rustls::ServerConfig>>,
         admission_policy: ServerAdmissionPolicy,
     ) -> io::Result<Self> {
+        Self::new_with_proxy(
+            server_hostname,
+            tunnel_registry,
+            public_tls_config,
+            admission_policy,
+            None,
+            Vec::new(),
+        )
+    }
+
+    pub(crate) fn new_with_proxy(
+        server_hostname: ServerHostname,
+        tunnel_registry: TunnelRegistry,
+        public_tls_config: Option<Arc<rustls::ServerConfig>>,
+        admission_policy: ServerAdmissionPolicy,
+        visitor_proxy_protocol: Option<ProxyProtocolVersion>,
+        visitor_proxy_trusted_networks: Vec<TrustedNetwork>,
+    ) -> io::Result<Self> {
         Ok(Self {
             server_hostname,
             tunnel_registry,
             public_tls_config,
             admission_policy,
+            visitor_proxy_protocol,
+            visitor_proxy_trusted_networks,
         })
     }
 
     #[cfg(test)]
     pub(crate) async fn handle(&self, mut visitor_stream: TcpStream) -> io::Result<()> {
+        let addresses = VisitorTcpAddresses::from_socket(&visitor_stream)?;
         let parsed_client_hello = match read_client_hello(&mut visitor_stream).await {
             Ok(parsed_client_hello) => parsed_client_hello,
             Err(error) => {
@@ -53,7 +80,7 @@ impl VisitorStreamHandler {
                 return Ok(());
             }
         };
-        self.handle_parsed(visitor_stream, parsed_client_hello)
+        self.handle_parsed(visitor_stream, parsed_client_hello, addresses)
             .await
     }
 
@@ -76,27 +103,55 @@ impl VisitorStreamHandler {
         &self,
         mut visitor_stream: TcpStream,
         timeout: std::time::Duration,
-        admission_permit: VisitorAdmissionPermit,
+        mut admission_permit: VisitorAdmissionPermit,
         shutdown: Shutdown,
     ) -> io::Result<()>
     where
         Shutdown: std::future::Future<Output = ()>,
     {
+        let direct_addresses = VisitorTcpAddresses::from_socket(&visitor_stream)?;
+        let peer_ip = direct_addresses.source.ip();
         let parsed_client_hello = tokio::select! {
-            parsed = read_client_hello_with_timeout(&mut visitor_stream, timeout) => parsed,
+            parsed = tokio::time::timeout(timeout, async {
+                let addresses = if self.visitor_proxy_protocol.is_some() {
+                    if !self.visitor_proxy_trusted_networks.iter().any(|network| network.contains(peer_ip)) {
+                        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "visitor PROXY protocol peer is not trusted"));
+                    }
+                    read_proxy_v2(&mut visitor_stream).await.map_err(io::Error::other)?
+                } else {
+                    direct_addresses
+                };
+                let hello = read_client_hello_with_timeout(&mut visitor_stream, timeout)
+                    .await.map_err(io::Error::other)?;
+                Ok::<_, io::Error>((hello, addresses))
+            }) => match parsed {
+                Ok(result) => result,
+                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "Visitor pre-routing intake timed out")),
+            },
             _ = shutdown => return Ok(()),
         };
+        if let Ok((_, addresses)) = &parsed_client_hello
+            && let Err(rejection) = admission_permit.use_canonical_source(
+                addresses.source.ip(),
+                self.admission_policy
+                    .limits()
+                    .max_pending_visitors_per_source,
+            )
+        {
+            report_stream_admission_saturation(&self.admission_policy, rejection);
+            return Ok(());
+        }
         // Pre-routing capacity protects ClientHello completion only. Existing routed
         // Visitor traffic must remain independent from admission saturation.
         drop(admission_permit);
-        let parsed_client_hello = match parsed_client_hello {
-            Ok(parsed_client_hello) => parsed_client_hello,
+        let (parsed_client_hello, addresses) = match parsed_client_hello {
+            Ok(parsed) => parsed,
             Err(error) => {
-                runtime_log::server_route_rejected_client_hello(&error);
+                runtime_log::warning("server", &format!("rejected Visitor stream: {error}"));
                 return Ok(());
             }
         };
-        self.handle_parsed(visitor_stream, parsed_client_hello)
+        self.handle_parsed(visitor_stream, parsed_client_hello, addresses)
             .await
     }
 
@@ -104,6 +159,7 @@ impl VisitorStreamHandler {
         &self,
         visitor_stream: TcpStream,
         parsed_client_hello: ParsedClientHello,
+        addresses: VisitorTcpAddresses,
     ) -> io::Result<()> {
         let serves_acme_tls_alpn_01 = parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN);
         let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
@@ -148,6 +204,7 @@ impl VisitorStreamHandler {
             public_hostname,
             buffered_bytes,
             selected_tunnel_connection,
+            addresses,
         )
         .await
     }
@@ -187,6 +244,7 @@ impl VisitorStreamHandler {
         public_hostname: PublicHostname,
         buffered_bytes: Vec<u8>,
         tunnel_connection: super::active_client::SelectedTunnelConnection,
+        addresses: VisitorTcpAddresses,
     ) -> io::Result<()> {
         let pending_open_permit = match self.admission_policy.try_admit_pending_stream_open() {
             Ok(permit) => permit,
@@ -241,7 +299,9 @@ impl VisitorStreamHandler {
         let proxy_task = tokio::spawn(async move {
             let _active_stream_guard = active_stream_guard;
             let _active_stream_permit = active_stream_permit;
-            proxy_tcp_over_quic(visitor_stream, buffered_bytes, send, recv).await
+            let mut initial_bytes = addresses.encode_proxy_v2();
+            initial_bytes.extend_from_slice(&buffered_bytes);
+            proxy_tcp_over_quic(visitor_stream, initial_bytes, send, recv).await
         });
         // Track synchronously before the next await so commit-time revocation cannot miss
         // a stream that has already been admitted.
@@ -529,6 +589,9 @@ mod tests {
         .await
         .map_err(|_| timeout_error("router should open a tunnel stream"))?
         .map_err(io::Error::other)?;
+        crate::proxy_protocol::read_proxy_v2(&mut tunnel_recv)
+            .await
+            .map_err(io::Error::other)?;
         tunnel_send.finish().map_err(io::Error::other)?;
         let forwarded = timeout(
             Duration::from_secs(1),
@@ -626,6 +689,9 @@ mod tests {
         .await
         .map_err(|_| timeout_error("established visitor should open a tunnel stream"))?
         .map_err(io::Error::other)?;
+        crate::proxy_protocol::read_proxy_v2(&mut tunnel_recv)
+            .await
+            .map_err(io::Error::other)?;
         let mut forwarded = vec![0_u8; client_hello.len()];
         timeout(
             Duration::from_secs(1),
@@ -673,6 +739,9 @@ mod tests {
         .await
         .map_err(|_| timeout_error("recovery visitor should open a tunnel stream"))?
         .map_err(io::Error::other)?;
+        crate::proxy_protocol::read_proxy_v2(&mut recv)
+            .await
+            .map_err(io::Error::other)?;
         let recovered_bytes = timeout(
             Duration::from_secs(1),
             recv.read_to_end(client_hello.len() + 1),

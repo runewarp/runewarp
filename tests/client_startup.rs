@@ -326,11 +326,13 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
                 public_hostnames: None,
                 backend_address: "localhost:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "localhost:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
         ],
         public_cert_config: None,
@@ -388,11 +390,13 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
                 public_hostnames: Some(vec![public_hostname("App.Example.Test.")]),
                 backend_address: "localhost:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "localhost:8443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
         ],
         public_cert_config: None,
@@ -446,6 +450,7 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:443".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }],
         public_cert_config: Some(ClientPublicCertConfig::Manual {
             directory: public_cert_dir,
@@ -534,6 +539,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:443".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }],
         public_cert_config: Some(ClientPublicCertConfig::Manual {
             directory: public_cert_dir,
@@ -655,11 +661,13 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "localhost:8080".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("api.example.test")]),
                 backend_address: "localhost:9443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
         ],
         public_cert_config: Some(ClientPublicCertConfig::Manual {
@@ -763,6 +771,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:80".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }],
         public_cert_config: Some(ClientPublicCertConfig::Acme {
             email: "test@example.test".to_owned(),
@@ -864,6 +873,7 @@ async fn shared_client_instance_prep_survives_reconnect_style_redials() {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:443".to_owned(),
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }],
         public_cert_config: Some(ClientPublicCertConfig::Manual {
             directory: public_cert_dir,
@@ -1005,11 +1015,13 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "localhost:80".to_owned(),
                 tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("api.example.test")]),
                 backend_address: "localhost:8080".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
         ],
         public_cert_config: Some(ClientPublicCertConfig::Acme {

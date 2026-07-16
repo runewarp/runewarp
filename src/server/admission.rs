@@ -109,9 +109,18 @@ impl ServerAdmissionPolicy {
         self.limits
     }
 
+    #[cfg(test)]
     pub(crate) fn try_admit_visitor(
         &self,
         source: IpAddr,
+    ) -> Result<VisitorAdmissionPermit, AdmissionRejection> {
+        let mut permit = self.try_admit_visitor_global()?;
+        permit.use_canonical_source(source, self.limits.max_pending_visitors_per_source)?;
+        Ok(permit)
+    }
+
+    pub(crate) fn try_admit_visitor_global(
+        &self,
     ) -> Result<VisitorAdmissionPermit, AdmissionRejection> {
         let global_permit = self
             .pending_visitors
@@ -122,23 +131,9 @@ impl ServerAdmissionPolicy {
                 active_work: self.limits.max_pending_visitors
                     - self.pending_visitors.available_permits(),
             })?;
-        let mut sources = self
-            .pending_visitors_by_source
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let active = sources.entry(source).or_default();
-        if *active >= self.limits.max_pending_visitors_per_source {
-            return Err(AdmissionRejection {
-                limit: AdmissionLimit::VisitorSource,
-                active_work: *active,
-            });
-        }
-        *active += 1;
-        drop(sources);
-
         Ok(VisitorAdmissionPermit {
             _global_permit: global_permit,
-            source,
+            source: None,
             pending_visitors_by_source: self.pending_visitors_by_source.clone(),
         })
     }
@@ -230,8 +225,42 @@ impl ServerAdmissionPolicy {
 #[derive(Debug)]
 pub(crate) struct VisitorAdmissionPermit {
     _global_permit: OwnedSemaphorePermit,
-    source: IpAddr,
+    source: Option<IpAddr>,
     pending_visitors_by_source: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl VisitorAdmissionPermit {
+    pub(crate) fn use_canonical_source(
+        &mut self,
+        source: IpAddr,
+        maximum: usize,
+    ) -> Result<(), AdmissionRejection> {
+        if Some(source) == self.source {
+            return Ok(());
+        }
+        let mut sources = self
+            .pending_visitors_by_source
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let active = sources.get(&source).copied().unwrap_or_default();
+        if active >= maximum {
+            return Err(AdmissionRejection {
+                limit: AdmissionLimit::VisitorSource,
+                active_work: active,
+            });
+        }
+        if let Some(previous_source) = self.source
+            && let Some(previous) = sources.get_mut(&previous_source)
+        {
+            *previous -= 1;
+            if *previous == 0 {
+                sources.remove(&previous_source);
+            }
+        }
+        *sources.entry(source).or_default() += 1;
+        self.source = Some(source);
+        Ok(())
+    }
 }
 
 impl Drop for VisitorAdmissionPermit {
@@ -240,12 +269,15 @@ impl Drop for VisitorAdmissionPermit {
             .pending_visitors_by_source
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(active) = sources.get_mut(&self.source) else {
+        let Some(source) = self.source else {
+            return;
+        };
+        let Some(active) = sources.get_mut(&source) else {
             return;
         };
         *active -= 1;
         if *active == 0 {
-            sources.remove(&self.source);
+            sources.remove(&source);
         }
     }
 }

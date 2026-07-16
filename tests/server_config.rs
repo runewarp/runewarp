@@ -6,6 +6,37 @@ use runewarp::{
 };
 use tempfile::tempdir;
 
+#[test]
+fn server_config_accepts_proxy_v2_with_cidr_trust() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    let path = tempdir.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+visitor-proxy-protocol = "v2"
+visitor-proxy-trusted-networks = ["10.0.0.0/8", "2001:db8::/32"]
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+    let settings = load_server_config(&path).unwrap();
+    assert_eq!(
+        settings.visitor_proxy_protocol,
+        Some(runewarp::ProxyProtocolVersion::V2)
+    );
+    assert!(settings.visitor_proxy_trusted_networks[0].contains("10.1.2.3".parse().unwrap()));
+}
+
 fn hostname_strings(hostnames: &[runewarp::PublicHostname]) -> Vec<&str> {
     hostnames.iter().map(|hostname| hostname.as_str()).collect()
 }

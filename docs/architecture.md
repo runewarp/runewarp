@@ -7,6 +7,7 @@ Runewarp keeps public ingress simple: the server routes encrypted traffic to a c
 | Concern | Runewarp design |
 | --- | --- |
 | Public traffic | TLS passthrough by default; the public edge does not terminate customer TLS |
+| Visitor addresses | Direct sockets or trusted PROXY v2 ingress become one canonical TCP tuple carried on every Tunnel stream |
 | Routing authority | The **Server** selects the **Tunnel** from explicit Server-configured **Public hostnames** |
 | **Client instance behavior** | The **Client instance** selects a **Service** locally and either forwards TLS bytes to a TLS-terminating **Local backend** (**TLS passthrough**) or terminates TLS itself before proxying plaintext to the **Local backend** (**Terminate mode**) |
 | Tunnel transport | One long-lived QUIC/TLS **Tunnel connection** per **Client instance** |
@@ -20,6 +21,8 @@ Runewarp keeps public ingress simple: the server routes encrypted traffic to a c
 | **Server** | Accepts Visitor traffic, extracts SNI, selects a **Tunnel**, and forwards the original encrypted stream |
 | **Client instance** | Maintains one or more **Tunnel connections**, selects a **Service**, and forwards traffic to a **Local backend** |
 | **Local backend** | Terminates TLS under **TLS passthrough** or receives plaintext in **Terminate mode** and serves the operator application |
+
+Server ingress and backend emission are independent. An opted-in Service receives a regenerated PROXY v2 header before TLS bytes in passthrough mode or before plaintext in Terminate mode. Other Services receive no header.
 
 ## Config handling
 

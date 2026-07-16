@@ -12,6 +12,7 @@ pub mod managed_session;
 mod opaque_control_token;
 mod paths;
 mod proxy;
+mod proxy_protocol;
 mod quic;
 pub mod reconnect_policy;
 pub mod runtime_log;
@@ -83,6 +84,7 @@ pub use paths::{
     default_control_ca_path, default_server_acme_state_dir, default_server_cert_material_dir,
     default_server_identity_material_dir,
 };
+pub use proxy_protocol::{ProxyProtocolVersion, TrustedNetwork, VisitorTcpAddresses};
 pub use quic::{
     ClientIdentityAdmission, HANDSHAKE_TIMEOUT, IDLE_TIMEOUT, KEEPALIVE_INTERVAL,
     MAX_SERVER_OPENED_BIDI_STREAMS, QuicConfigError, RUNEWARP_ALPN, make_client_quic_config,

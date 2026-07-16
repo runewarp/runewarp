@@ -213,6 +213,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn rejects_local_udp_and_oversized_headers() {
+        let addresses = VisitorTcpAddresses {
+            source: "192.0.2.1:1234".parse().unwrap(),
+            destination: "198.51.100.2:443".parse().unwrap(),
+        };
+
+        let mut local = addresses.encode_proxy_v2();
+        local[12] = 0x20;
+        assert!(read_proxy_v2(&mut local.as_slice()).await.is_err());
+
+        let mut udp = addresses.encode_proxy_v2();
+        udp[13] = 0x12;
+        assert!(read_proxy_v2(&mut udp.as_slice()).await.is_err());
+
+        let mut oversized = addresses.encode_proxy_v2();
+        oversized[14..16].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(read_proxy_v2(&mut oversized.as_slice()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_and_malformed_headers() {
+        assert!(read_proxy_v2(&mut [].as_slice()).await.is_err());
+        let mut malformed = vec![0_u8; 16];
+        malformed[12] = 0x21;
+        malformed[13] = 0x11;
+        malformed[14..16].copy_from_slice(&12_u16.to_be_bytes());
+        assert!(read_proxy_v2(&mut malformed.as_slice()).await.is_err());
+    }
+
     #[test]
     fn cidr_membership_requires_matching_family_and_prefix() {
         let network: TrustedNetwork = "10.0.0.0/8".parse().unwrap();

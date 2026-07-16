@@ -578,6 +578,7 @@ mod tests {
         let router_task = spawn_router_task(listener, router);
 
         let mut visitor = TcpStream::connect(visitor_addr).await?;
+        let visitor_source = visitor.local_addr()?;
         let client_hello = build_client_hello("app.example.test")?;
         visitor.write_all(&client_hello).await?;
         visitor.shutdown().await?;
@@ -589,9 +590,11 @@ mod tests {
         .await
         .map_err(|_| timeout_error("router should open a tunnel stream"))?
         .map_err(io::Error::other)?;
-        crate::proxy_protocol::read_proxy_v2(&mut tunnel_recv)
+        let addresses = crate::proxy_protocol::read_proxy_v2(&mut tunnel_recv)
             .await
             .map_err(io::Error::other)?;
+        assert_eq!(addresses.source, visitor_source);
+        assert_eq!(addresses.destination, visitor_addr);
         tunnel_send.finish().map_err(io::Error::other)?;
         let forwarded = timeout(
             Duration::from_secs(1),

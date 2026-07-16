@@ -11,7 +11,7 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::acme::ACME_TLS_ALPN;
 use crate::client::{ClientStreamLimits, ServiceSelector, TerminationTlsConfigs};
-use crate::client_hello::{ParsedClientHello, read_client_hello_with_timeout};
+use crate::client_hello::{ParsedClientHello, read_client_hello};
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
 use crate::{
@@ -40,18 +40,29 @@ impl TunnelConnectionStreamHandler {
     }
 
     pub(crate) async fn handle(&self, send: SendStream, mut recv: RecvStream) -> io::Result<()> {
-        let addresses = read_proxy_v2(&mut recv).await.map_err(io::Error::other)?;
-        let parsed_client_hello = match read_client_hello_with_timeout(
-            &mut recv,
-            self.stream_limits.client_hello_timeout,
-        )
-        .await
-        {
-            Ok(parsed_client_hello) => parsed_client_hello,
-            Err(error) => {
+        let intake = tokio::time::timeout(self.stream_limits.client_hello_timeout, async {
+            let addresses = read_proxy_v2(&mut recv).await.map_err(io::Error::other)?;
+            let hello = read_client_hello(&mut recv)
+                .await
+                .map_err(io::Error::other)?;
+            Ok::<_, io::Error>((addresses, hello))
+        })
+        .await;
+        let (addresses, parsed_client_hello) = match intake {
+            Ok(Ok(intake)) => intake,
+            Err(_) => {
+                let error = format!(
+                    "Tunnel stream intake did not complete within {:?}",
+                    self.stream_limits.client_hello_timeout
+                );
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
                 reject_stream(send, recv);
-                return Err(io::Error::other(error));
+                return Err(io::Error::new(io::ErrorKind::TimedOut, error));
+            }
+            Ok(Err(error)) => {
+                runtime_log::warning("client", &format!("rejected stream: {error}"));
+                reject_stream(send, recv);
+                return Err(error);
             }
         };
         let public_hostname = parsed_client_hello.public_hostname().clone();
@@ -526,6 +537,35 @@ mod tests {
             .map_err(|_| timeout_error("handler should finish after ClientHello timeout"))?
             .map_err(io::Error::other)?;
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_internal_proxy_header_before_client_hello() -> io::Result<()> {
+        let stream_handler = TunnelConnectionStreamHandler::new(
+            vec![ServiceConfig {
+                public_hostnames: None,
+                backend_address: "127.0.0.1:9".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
+            }],
+            TerminationTlsConfigs::empty(),
+            ClientStreamLimits::for_test(),
+        );
+        let fixture = TunnelConnectionFixture::connect().await?;
+        let client_connection = fixture.client_connection.clone();
+        let (mut tunnel_send, _tunnel_recv) = fixture
+            .server_connection
+            .open_bi()
+            .await
+            .map_err(io::Error::other)?;
+        tunnel_send.write_all(&[0_u8; 16]).await?;
+        let (send, recv) = client_connection
+            .accept_bi()
+            .await
+            .map_err(io::Error::other)?;
+
+        assert!(stream_handler.handle(send, recv).await.is_err());
         Ok(())
     }
 
@@ -1232,12 +1272,20 @@ mod tests {
         // Plain-TCP backend (receives decrypted data)
         let backend_listener = TcpListener::bind(localhost(0)).await?;
         let backend_address = backend_listener.local_addr()?.to_string();
+        let expected_proxy_header = crate::VisitorTcpAddresses {
+            source: "192.0.2.10:12345".parse().unwrap(),
+            destination: "198.51.100.20:443".parse().unwrap(),
+        }
+        .encode_proxy_v2();
         let backend_task = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let (mut backend_stream, _) =
                 timeout(Duration::from_secs(1), backend_listener.accept())
                     .await
                     .map_err(|_| timeout_error("backend should accept a forwarded connection"))??;
+            let mut proxy_header = vec![0_u8; expected_proxy_header.len()];
+            backend_stream.read_exact(&mut proxy_header).await?;
+            assert_eq!(proxy_header, expected_proxy_header);
             let mut request = [0_u8; 4];
             timeout(
                 Duration::from_secs(1),
@@ -1259,7 +1307,7 @@ mod tests {
             public_hostnames: Some(vec![public_hostname(hostname)]),
             backend_address,
             tls_mode: ClientTlsMode::Terminate,
-            proxy_protocol: None,
+            proxy_protocol: Some(crate::ProxyProtocolVersion::V2),
         }];
         let mut tls_configs = HashMap::new();
         tls_configs.insert(hostname.to_owned(), tls_config.clone());

@@ -548,6 +548,23 @@ mod tests {
     }
 
     #[test]
+    fn canonical_sources_are_counted_after_global_admission() {
+        let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
+            max_pending_visitors: 2,
+            max_pending_visitors_per_source: 1,
+            ..ServerAdmissionLimits::for_test()
+        });
+        let mut first = policy.try_admit_visitor_global().unwrap();
+        let mut second = policy.try_admit_visitor_global().unwrap();
+        first
+            .use_canonical_source(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 1)
+            .unwrap();
+        second
+            .use_canonical_source(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)), 1)
+            .unwrap();
+    }
+
+    #[test]
     fn handshake_admission_releases_capacity_after_completion() {
         let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
             max_pending_handshakes: 1,

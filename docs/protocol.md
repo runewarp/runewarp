@@ -15,17 +15,18 @@ This document describes Runewarp's wire behavior and runtime invariants.
 For each inbound TCP connection on the configured `server.public-bind-address`:
 
 1. Acquire one pre-routing admission slot before starting per-Visitor work.
-2. Buffer bytes until the TLS ClientHello can be parsed, up to a hard cap of **16 KB** and a **5-second** completion deadline.
-3. Release pre-routing capacity as soon as ClientHello parsing succeeds or fails; routed Visitor streams do not retain it.
-4. If the deadline or byte cap is hit before SNI is extracted, drop the connection.
-5. If the bytes are not valid TLS, drop the connection.
-6. If TLS is valid but SNI is missing, drop the connection.
-7. If SNI equals `server.hostname` and ALPN is `acme-tls/1`, handle the ACME challenge.
-8. If SNI equals `server.hostname` and ALPN is anything else, drop the connection.
-9. Otherwise, select a **Tunnel** by exact normalized **Public hostname** from `server.tunnels[].public-hostnames`.
-10. If no Tunnel owns that hostname, drop the connection.
-11. If the selected Tunnel has no active **Tunnel connection**, drop the connection.
-12. Acquire one pending stream-open slot, then open a bidirectional stream on the selected Tunnel connection with a **5-second** deadline. On success, acquire one active routed-stream slot, release the pending slot, forward the buffered ClientHello bytes, and continue streaming in both directions. Successfully established proxies have no additional lifetime or idle deadline.
+2. In direct mode, derive the canonical Visitor tuple from the socket. In strict PROXY v2 mode, verify the accepted peer against configured CIDRs and consume a bounded valid header.
+3. Buffer bytes until the TLS ClientHello can be parsed. PROXY header plus ClientHello intake shares a **5-second** deadline; each has a **16 KB** cap.
+4. Release pre-routing capacity as soon as ClientHello parsing succeeds or fails; routed Visitor streams do not retain it.
+5. If the deadline or byte cap is hit before SNI is extracted, drop the connection.
+6. If the bytes are not valid TLS, drop the connection.
+7. If TLS is valid but SNI is missing, drop the connection.
+8. If SNI equals `server.hostname` and ALPN is `acme-tls/1`, handle the ACME challenge.
+9. If SNI equals `server.hostname` and ALPN is anything else, drop the connection.
+10. Otherwise, select a **Tunnel** by exact normalized **Public hostname** from `server.tunnels[].public-hostnames`.
+11. If no Tunnel owns that hostname, drop the connection.
+12. If the selected Tunnel has no active **Tunnel connection**, drop the connection.
+13. Acquire one pending stream-open slot, then open a bidirectional stream on the selected Tunnel connection with a **5-second** deadline. On success, acquire one active routed-stream slot, release the pending slot, forward the buffered ClientHello bytes, and continue streaming in both directions. Successfully established proxies have no additional lifetime or idle deadline.
 
 The buffered ClientHello must never be logged or echoed back in diagnostics. With top-level `log-level = "debug"`, stderr diagnostics may log the normalized **Public hostname** using stable event plus key=value fields such as `public-hostname`, `backend-address`, and `reason`. `acme-tls/1` traffic for the **Server hostname** is logged as `server acme challenge handled` with `server-hostname=...`, while Client-side `acme-tls/1` traffic for terminating **Public hostnames** is logged as distinct ACME challenge handling rather than ordinary terminate routing. Runtime tunnel failure causes keep separate full-detail lines whose operator-facing `warn` lines are shortened.
 The buffered ClientHello must never be logged or echoed back in diagnostics.
@@ -58,7 +59,7 @@ Server admission uses fixed production limits; these are runtime safety policy, 
 | Work | Limit | Saturation behavior |
 | --- | ---: | --- |
 | Visitor pre-routing work | **4,096** globally | Close the newest accepted socket before spawning its handler |
-| Visitor pre-routing work from one accepted peer IP | **256** | Close the newest socket from that source before spawning its handler |
+| Visitor pre-routing work from one canonical source IP | **256** | Close the newest socket from that source after direct/proxied tuple resolution |
 | Concurrent Server-side QUIC handshakes | **256** | Refuse the newest QUIC `Incoming` before spawning handshake work |
 | Pending Server `open_bi()` opens | **1,024** | Drop the newest Visitor before waiting on stream open |
 | Active routed Visitor streams | **4,096** | Reset/stop the newest opened QUIC stream before proxying |
@@ -66,7 +67,7 @@ Server admission uses fixed production limits; these are runtime safety policy, 
 | Active Tunnel connections in one Tunnel pool | **256** | Close the newest connection; keep existing pool members |
 | Active Tunnel connections for one Client identity | **64** globally | Close the newest connection; keep existing connections for that identity |
 
-The per-source Visitor limit uses only the peer IP returned by the accepted TCP socket. Behind a load balancer, many Visitors may therefore share one source bucket. Core does not trust `Forwarded`, `X-Forwarded-For`, PROXY protocol, or any other application-supplied source identity. Completed ClientHellos release both Visitor admission slots before Tunnel selection and proxying, so saturation does not consume capacity from already-routed Visitor traffic.
+The global slot protects PROXY header and ClientHello intake. The per-source slot uses the direct socket source or the validated tuple from a trusted strict-PROXY peer. Core never trusts `Forwarded`, `X-Forwarded-For`, or PROXY bytes from an untrusted peer. Completed ClientHellos release both slots before Tunnel selection and proxying.
 
 Pending stream-open capacity is acquired immediately before `open_bi()` and released on open success, open failure, the **5-second** open deadline, active-stream rejection, cancellation, and shutdown. Active routed-stream capacity is acquired after a successful open and retained for the proxy lifetime, including selective Authorization revocation; it is released when the proxy task exits. Established proxies have no additional lifetime or idle deadline in this policy.
 

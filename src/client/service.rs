@@ -93,7 +93,7 @@ pub(crate) fn validate_services(
             public_hostnames,
             backend_address: service.backend_address.clone(),
             tls_mode: service.tls_mode.clone(),
-            proxy_protocol: None,
+            proxy_protocol: service.proxy_protocol,
         });
     }
 
@@ -172,6 +172,21 @@ mod tests {
         assert_eq!(
             selected.map(|service| service.backend_address.as_str()),
             Some("127.0.0.1:443")
+        );
+    }
+
+    #[test]
+    fn validation_preserves_proxy_protocol_emission() {
+        let service = ServiceConfig {
+            public_hostnames: None,
+            backend_address: "127.0.0.1:443".to_owned(),
+            tls_mode: ClientTlsMode::Passthrough,
+            proxy_protocol: Some(crate::ProxyProtocolVersion::V2),
+        };
+
+        assert_eq!(
+            validate_services(&[service]).unwrap()[0].proxy_protocol,
+            Some(crate::ProxyProtocolVersion::V2)
         );
     }
 

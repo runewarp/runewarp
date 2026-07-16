@@ -11,9 +11,10 @@ use runewarp::{
     OrderlyShutdown, PreparedClient, PreparedServer, PublicHostname, QUIC_CLOSE_FLUSH_DURATION,
     SelectedClientConfig, Server, ServerAddress, ServerAdmission, ServerAuthorization,
     ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, ShutdownMode,
-    generate_client_identity, initialize_manual_server_certificate, load_client_config,
-    load_server_config, make_client_quic_config, make_client_quic_config_with_client_auth,
-    make_server_quic_config, make_server_quic_config_with_client_admission,
+    VisitorTcpAddresses, generate_client_identity, initialize_manual_server_certificate,
+    load_client_config, load_server_config, make_client_quic_config,
+    make_client_quic_config_with_client_auth, make_server_quic_config,
+    make_server_quic_config_with_client_admission,
     make_server_quic_config_with_client_admission_resolver, resolve_selected_client_config,
 };
 use rustls::RootCertStore;
@@ -135,7 +136,7 @@ async fn forwards_tls_passthrough_end_to_end() {
 }
 
 #[tokio::test]
-async fn forwards_tls_passthrough_end_to_end_with_manual_private_ca_material() {
+async fn trusted_proxy_v2_ingress_reaches_opted_in_passthrough_backend() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
         tempdir.path().join("server-cert").as_path(),
@@ -170,9 +171,14 @@ async fn forwards_tls_passthrough_end_to_end_with_manual_private_ca_material() {
     .unwrap();
 
     let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
-    let backend = spawn_tls_backend(
+    let visitor_addresses = VisitorTcpAddresses {
+        source: "203.0.113.9:54321".parse().unwrap(),
+        destination: "198.51.100.10:443".parse().unwrap(),
+    };
+    let backend = spawn_proxy_tls_backend(
         private_key_from_der(&backend_key),
         backend_cert.clone(),
+        visitor_addresses,
         *b"pong",
     )
     .await;
@@ -184,6 +190,8 @@ async fn forwards_tls_passthrough_end_to_end_with_manual_private_ca_material() {
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
+visitor-proxy-protocol = "v2"
+visitor-proxy-trusted-networks = ["127.0.0.0/8"]
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -204,6 +212,7 @@ identity-dir = "client-identity"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
+proxy-protocol = "v2"
 "#
         .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
     )
@@ -223,9 +232,14 @@ backend-address = "__BACKEND_ADDRESS__"
         .unwrap();
     let client_task = tokio::spawn(client.run());
 
-    let response = wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
-        .await
-        .unwrap();
+    let response = wait_for_proxy_tls_response(
+        public_addr,
+        &backend_cert,
+        "app.example.test",
+        visitor_addresses,
+    )
+    .await
+    .unwrap();
     assert_eq!(response, *b"pong");
 
     backend.1.abort();
@@ -2702,6 +2716,35 @@ async fn spawn_tls_backend(
     (addr, task)
 }
 
+async fn spawn_proxy_tls_backend(
+    private_key: PrivateKeyDer<'static>,
+    certificate: CertificateDer<'static>,
+    expected_addresses: VisitorTcpAddresses,
+    response: [u8; 4],
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], private_key)
+            .unwrap(),
+    ));
+    let task = tokio::spawn(async move {
+        let (mut tcp_stream, _) = listener.accept().await.unwrap();
+        let expected = expected_addresses.encode_proxy_v2();
+        let mut header = vec![0_u8; expected.len()];
+        tcp_stream.read_exact(&mut header).await.unwrap();
+        assert_eq!(header, expected);
+        let mut tls_stream = acceptor.accept(tcp_stream).await.unwrap();
+        let mut request = [0_u8; 4];
+        tls_stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"ping");
+        tls_stream.write_all(&response).await.unwrap();
+    });
+    (addr, task)
+}
+
 async fn spawn_staged_tls_backend(
     private_key: PrivateKeyDer<'static>,
     certificate: CertificateDer<'static>,
@@ -2775,6 +2818,45 @@ async fn wait_for_tls_response(
     timeout(Duration::from_secs(1), async move {
         loop {
             match request_tls_response(public_addr, backend_cert, server_name).await {
+                Ok(response) => return Ok(response),
+                Err(_) => sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+async fn wait_for_proxy_tls_response(
+    public_addr: SocketAddr,
+    backend_cert: &CertificateDer<'static>,
+    server_name: &str,
+    addresses: VisitorTcpAddresses,
+) -> io::Result<[u8; 4]> {
+    timeout(Duration::from_secs(1), async move {
+        loop {
+            let result = async {
+                let connector = TlsConnector::from(Arc::new(
+                    rustls::ClientConfig::builder()
+                        .with_root_certificates(root_store_with(backend_cert))
+                        .with_no_client_auth(),
+                ));
+                let mut tcp_stream = TcpStream::connect(public_addr).await?;
+                tcp_stream.write_all(&addresses.encode_proxy_v2()).await?;
+                let mut tls_stream = connector
+                    .connect(
+                        ServerName::try_from(server_name.to_owned()).map_err(io::Error::other)?,
+                        tcp_stream,
+                    )
+                    .await
+                    .map_err(io::Error::other)?;
+                tls_stream.write_all(b"ping").await?;
+                let mut response = [0_u8; 4];
+                tls_stream.read_exact(&mut response).await?;
+                Ok::<_, io::Error>(response)
+            }
+            .await;
+            match result {
                 Ok(response) => return Ok(response),
                 Err(_) => sleep(Duration::from_millis(10)).await,
             }

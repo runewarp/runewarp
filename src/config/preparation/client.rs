@@ -54,6 +54,7 @@ pub(crate) struct PreparedClientServiceConfig {
     pub(crate) public_hostnames: Option<Vec<String>>,
     pub(crate) backend_address: Option<String>,
     pub(crate) tls_mode: PreparedClientTlsMode,
+    pub(crate) proxy_protocol: Option<String>,
 }
 
 struct ClientPreparationDefaults<'a> {
@@ -205,6 +206,7 @@ fn prepare_selected_config_client_config(
                 public_hostnames: None,
                 backend_address: Some(backend_address.clone()),
                 tls_mode: None,
+                proxy_protocol: None,
             }];
         }
     }
@@ -289,6 +291,7 @@ fn prepare_cli_only_client_config(
                 public_hostnames: None,
                 backend_address: runtime.backend_address.clone(),
                 tls_mode: None,
+                proxy_protocol: None,
             }],
         },
         Vec::new(),
@@ -443,6 +446,7 @@ fn prepare_client_service(raw: RawClientServiceConfig) -> PreparedClientServiceC
             Some("terminate") => PreparedClientTlsMode::Terminate,
             Some(value) => PreparedClientTlsMode::Invalid(value.to_owned()),
         },
+        proxy_protocol: raw.proxy_protocol,
     }
 }
 
@@ -767,6 +771,7 @@ hostname = "tunnel.example.test"
                     public_hostnames: Some(vec!["app.example.test".to_owned()]),
                     backend_address: Some("127.0.0.1:443".to_owned()),
                     tls_mode: Some("terminate".to_owned()),
+                    proxy_protocol: None,
                 }],
             },
             Vec::new(),
@@ -824,6 +829,7 @@ hostname = "tunnel.example.test"
                     public_hostnames: None,
                     backend_address: Some("127.0.0.1:443".to_owned()),
                     tls_mode: None,
+                    proxy_protocol: None,
                 }],
             },
             Vec::new(),

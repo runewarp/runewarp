@@ -88,6 +88,7 @@ impl std::error::Error for ClientHelloError {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn read_client_hello_with_timeout<R>(
     reader: &mut R,
     timeout: Duration,

@@ -231,6 +231,8 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** **Tunnel connections**. Defaults to `0.0.0.0:443`. |
 | `server.readiness-bind-address` | no | Optional literal TCP socket address for a probe-only **Server readiness** listener. When configured, TCP accept success means the Server is ready for new ingress admission. There is no default listener. In managed mode the listener address is validated at startup, but the probe stays Unready until the first successful Server input apply. |
 | `server.graceful-shutdown-duration` | no | Operator-facing graceful drain window for the Server role. Defaults to `"60s"`. Supports non-negative integer durations with `ms`, `s`, `m`, or `h` suffixes. `"0s"` disables the longer drain window and makes graceful Server shutdown converge to fast Server behavior. |
+| `server.visitor-proxy-protocol` | no | `"v2"` requires strict PROXY v2 framing on every Visitor connection. Omission keeps direct ingress. |
+| `server.visitor-proxy-trusted-networks` | with Visitor PROXY v2 | Non-empty canonical IPv4/IPv6 CIDRs whose accepted socket peers may supply Visitor metadata. Network entries must use their network address; individual hosts require `/32` or `/128`. |
 | `server.acme.email` | with ACME | Let's Encrypt ACME contact address. TLS-ALPN-01 only. |
 | `server.acme.state-dir` | no | Writable path for durable ACME account and certificate state. When omitted, Runewarp uses the XDG default state path and creates it during startup after validation succeeds. |
 | `server.tunnels[].public-hostnames` | per static Tunnel | One or more exact **Public hostnames** routed through this Tunnel. Managed Server authorization comes from Control instead. |
@@ -252,6 +254,7 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `client.services[].public-hostnames` | when exact-match local routing is desired | Exact **Public hostnames** this Service accepts locally. Omit only on the sole Catch-all Service. Required when `tls-mode = "terminate"`. |
 | `client.services[].backend-address` | yes, per Service block | TCP endpoint for the forwarded traffic. Under `passthrough` the **Local backend** terminates TLS. Under `terminate` the Client terminates TLS and connects to the backend in plaintext. `runewarp client --backend-address` may synthesize the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks at all. |
 | `client.services[].tls-mode` | no | `passthrough` or `terminate`. Defaults to `passthrough`. Catch-all Services must use `passthrough`. |
+| `client.services[].proxy-protocol` | no | `"v2"` emits a regenerated PROXY v2 header to this Local backend. Omission preserves the existing byte stream. |
 
 Client reconnect behavior is runtime-owned. There is no `client.reconnect-interval` setting or CLI flag; both config-driven and CLI-only startup use the same built-in jittered backoff described in `docs/protocol.md`.
 
@@ -347,6 +350,8 @@ Runewarp supports two Client trust modes:
 - every authorized Client identity must be unique across all Server Tunnels
 - `server.public-bind-address`, `server.tunnel-bind-address`, and `server.readiness-bind-address` when present must be literal socket addresses
 - `server.graceful-shutdown-duration` must be a non-negative duration string such as `"0s"`, `"60s"`, `"5m"`, or `"250ms"`
+- Visitor PROXY v2 requires a non-empty CIDR-only trusted-network list; trusted networks without the protocol setting are rejected
+- `client.services[].proxy-protocol`, when present, must be `"v2"`
 - the selected or defaulted material directories and files must exist and be readable, except that omitted ACME state directories are resolved during config preparation and created only during startup after validation succeeds
 - `backend-address` must parse as a TCP address or host:port pair
 

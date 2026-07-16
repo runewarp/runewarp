@@ -32,6 +32,8 @@ pub(crate) struct PreparedServerConfig {
     pub(crate) tunnel_bind_address: String,
     pub(crate) readiness_bind_address: Option<String>,
     pub(crate) graceful_shutdown_duration: String,
+    pub(crate) visitor_proxy_protocol: Option<String>,
+    pub(crate) visitor_proxy_trusted_networks: Option<Vec<String>>,
     pub(crate) manual_cert_present: bool,
     pub(crate) acme_present: bool,
     pub(crate) manual_certificate_directory: Option<PreparedValue<PathBuf>>,
@@ -145,6 +147,8 @@ fn prepare_raw_server_config_with_defaults(
         graceful_shutdown_duration: raw
             .graceful_shutdown_duration
             .unwrap_or_else(|| "60s".to_owned()),
+        visitor_proxy_protocol: raw.visitor_proxy_protocol,
+        visitor_proxy_trusted_networks: raw.visitor_proxy_trusted_networks,
         manual_cert_present,
         acme_present,
         manual_certificate_directory: if !acme_present {
@@ -515,6 +519,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 tunnel_bind_address: None,
                 readiness_bind_address: None,
                 graceful_shutdown_duration: None,
+                visitor_proxy_protocol: None,
+                visitor_proxy_trusted_networks: None,
                 tunnels: vec![RawServerTunnelConfig {
                     public_hostnames: Some(vec!["app.example.test".to_owned()]),
                     client_identity: Some(
@@ -559,6 +565,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 tunnel_bind_address: None,
                 readiness_bind_address: None,
                 graceful_shutdown_duration: None,
+                visitor_proxy_protocol: None,
+                visitor_proxy_trusted_networks: None,
                 tunnels: vec![RawServerTunnelConfig {
                     public_hostnames: Some(vec!["app.example.test".to_owned()]),
                     client_identity: Some(
@@ -612,6 +620,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 tunnel_bind_address: Some("127.0.0.1:9443".to_owned()),
                 readiness_bind_address: Some("127.0.0.1:9000".to_owned()),
                 graceful_shutdown_duration: Some("45s".to_owned()),
+                visitor_proxy_protocol: None,
+                visitor_proxy_trusted_networks: None,
                 tunnels: vec![RawServerTunnelConfig {
                     public_hostnames: Some(vec!["app.example.test".to_owned()]),
                     client_identity: Some(
@@ -670,6 +680,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 tunnel_bind_address: None,
                 readiness_bind_address: None,
                 graceful_shutdown_duration: None,
+                visitor_proxy_protocol: None,
+                visitor_proxy_trusted_networks: None,
                 tunnels: Vec::new(),
             },
             Vec::new(),
@@ -706,6 +718,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 tunnel_bind_address: None,
                 readiness_bind_address: None,
                 graceful_shutdown_duration: None,
+                visitor_proxy_protocol: None,
+                visitor_proxy_trusted_networks: None,
                 tunnels: vec![RawServerTunnelConfig {
                     public_hostnames: Some(vec!["app.example.test".to_owned()]),
                     client_identity: Some(

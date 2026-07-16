@@ -630,6 +630,7 @@ mod tests {
                 public_hostnames: None,
                 backend_address: backend_address.to_string(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             }],
             public_cert_config: None,
             control: None,

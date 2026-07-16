@@ -12,6 +12,60 @@ fn public_hostname(hostname: &str) -> PublicHostname {
 }
 
 #[test]
+fn client_service_accepts_proxy_v2_emission() {
+    let tempdir = tempdir().unwrap();
+    let identity = tempdir.path().join("identity");
+    fs::create_dir(&identity).unwrap();
+    for name in ["client.crt", "client.key", "client-identity.txt"] {
+        fs::write(identity.join(name), "placeholder").unwrap();
+    }
+    let path = tempdir.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "identity"
+[[client.services]]
+backend-address = "localhost:8443"
+proxy-protocol = "v2"
+"#,
+    )
+    .unwrap();
+    let settings = load_client_config(&path).unwrap();
+    assert_eq!(
+        settings.services[0].proxy_protocol,
+        Some(runewarp::ProxyProtocolVersion::V2)
+    );
+}
+
+#[test]
+fn client_service_rejects_unsupported_proxy_protocol() {
+    let tempdir = tempdir().unwrap();
+    let identity = tempdir.path().join("identity");
+    fs::create_dir(&identity).unwrap();
+    for name in ["client.crt", "client.key", "client-identity.txt"] {
+        fs::write(identity.join(name), "placeholder").unwrap();
+    }
+    let path = tempdir.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+[client]
+server-address = "tunnel.example.test"
+identity-dir = "identity"
+[[client.services]]
+backend-address = "localhost:8443"
+proxy-protocol = "v1"
+"#,
+    )
+    .unwrap();
+
+    let error = load_client_config(&path).unwrap_err().to_string();
+    assert!(error.contains("client.services[].proxy-protocol must be \"v2\""));
+}
+
+#[test]
 fn client_config_accept_exact_match_services_and_default_log_level_to_info() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
@@ -49,6 +103,7 @@ backend-address = "localhost:8443"
     assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
     assert_eq!(settings.log_level, LogLevel::Info);
+    assert_eq!(settings.services[0].proxy_protocol, None);
     assert_eq!(
         settings.services[0].public_hostnames,
         Some(vec![

@@ -271,6 +271,7 @@ fn services_and_configs_for_route_mode(
                 public_hostnames: None,
                 backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             }],
             TerminationTlsConfigs::empty(),
             Arc::new(ClientStreamBudget::new(ClientStreamLimits::default())),

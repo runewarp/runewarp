@@ -11,11 +11,12 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::acme::ACME_TLS_ALPN;
 use crate::client::{ClientStreamLimits, ServiceSelector, TerminationTlsConfigs};
-use crate::client_hello::{ParsedClientHello, read_client_hello_with_timeout};
+use crate::client_hello::{ParsedClientHello, read_client_hello};
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
 use crate::{
     ClientTlsMode, ServiceConfig, proxy::proxy_stream_error_code, proxy::proxy_tcp_over_quic,
+    proxy_protocol::read_proxy_v2,
 };
 
 #[derive(Clone)]
@@ -39,17 +40,29 @@ impl TunnelConnectionStreamHandler {
     }
 
     pub(crate) async fn handle(&self, send: SendStream, mut recv: RecvStream) -> io::Result<()> {
-        let parsed_client_hello = match read_client_hello_with_timeout(
-            &mut recv,
-            self.stream_limits.client_hello_timeout,
-        )
-        .await
-        {
-            Ok(parsed_client_hello) => parsed_client_hello,
-            Err(error) => {
+        let intake = tokio::time::timeout(self.stream_limits.client_hello_timeout, async {
+            let addresses = read_proxy_v2(&mut recv).await.map_err(io::Error::other)?;
+            let hello = read_client_hello(&mut recv)
+                .await
+                .map_err(io::Error::other)?;
+            Ok::<_, io::Error>((addresses, hello))
+        })
+        .await;
+        let (addresses, parsed_client_hello) = match intake {
+            Ok(Ok(intake)) => intake,
+            Err(_) => {
+                let error = format!(
+                    "Tunnel stream intake did not complete within {:?}",
+                    self.stream_limits.client_hello_timeout
+                );
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
                 reject_stream(send, recv);
-                return Err(io::Error::other(error));
+                return Err(io::Error::new(io::ErrorKind::TimedOut, error));
+            }
+            Ok(Err(error)) => {
+                runtime_log::warning("client", &format!("rejected stream: {error}"));
+                reject_stream(send, recv);
+                return Err(error);
             }
         };
         let public_hostname = parsed_client_hello.public_hostname().clone();
@@ -64,7 +77,7 @@ impl TunnelConnectionStreamHandler {
 
         if service.tls_mode == ClientTlsMode::Terminate {
             return self
-                .handle_terminate(send, recv, parsed_client_hello, service)
+                .handle_terminate(send, recv, parsed_client_hello, service, addresses)
                 .await;
         }
 
@@ -88,9 +101,14 @@ impl TunnelConnectionStreamHandler {
                 return Err(error);
             }
         };
+        let mut initial_bytes = service
+            .proxy_protocol
+            .map(|_| addresses.encode_proxy_v2())
+            .unwrap_or_default();
+        initial_bytes.extend_from_slice(&buffered_bytes);
         if let Err(error) = write_backend_with_timeout(
             &mut backend_stream,
-            &buffered_bytes,
+            &initial_bytes,
             self.stream_limits.initial_backend_write_timeout,
         )
         .await
@@ -120,6 +138,7 @@ impl TunnelConnectionStreamHandler {
         recv: RecvStream,
         parsed_client_hello: ParsedClientHello,
         service: &ServiceConfig,
+        addresses: crate::VisitorTcpAddresses,
     ) -> io::Result<()> {
         let public_hostname = parsed_client_hello.public_hostname().clone();
         if parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN)
@@ -207,6 +226,15 @@ impl TunnelConnectionStreamHandler {
                 backend_address: service.backend_address.as_str(),
             },
         );
+
+        if service.proxy_protocol.is_some() {
+            write_backend_with_timeout(
+                &mut backend_stream,
+                &addresses.encode_proxy_v2(),
+                self.stream_limits.initial_backend_write_timeout,
+            )
+            .await?;
+        }
 
         copy_bidirectional(&mut tls_stream, &mut backend_stream)
             .await
@@ -389,6 +417,16 @@ mod tests {
         make_client_quic_config, make_server_quic_config,
     };
 
+    fn internal_stream_bytes(bytes: &[u8]) -> Vec<u8> {
+        let addresses = crate::VisitorTcpAddresses {
+            source: "192.0.2.10:12345".parse().unwrap(),
+            destination: "198.51.100.20:443".parse().unwrap(),
+        };
+        let mut framed = addresses.encode_proxy_v2();
+        framed.extend_from_slice(bytes);
+        framed
+    }
+
     static LOG_CAPTURE_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 
     fn public_hostname(hostname: &str) -> PublicHostname {
@@ -403,11 +441,13 @@ mod tests {
                     public_hostnames: Some(vec![public_hostname("app.example.test")]),
                     backend_address: "127.0.0.1:443".to_owned(),
                     tls_mode: ClientTlsMode::Passthrough,
+                    proxy_protocol: None,
                 },
                 ServiceConfig {
                     public_hostnames: Some(vec![public_hostname("api.example.test")]),
                     backend_address: backend_placeholder(),
                     tls_mode: ClientTlsMode::Passthrough,
+                    proxy_protocol: None,
                 },
             ],
             "api.example.test",
@@ -422,6 +462,7 @@ mod tests {
             public_hostnames: None,
             backend_address: "192.0.2.1:9".to_owned(),
             tls_mode: ClientTlsMode::Passthrough,
+            proxy_protocol: None,
         }];
         let stream_handler = TunnelConnectionStreamHandler::new(
             services,
@@ -432,17 +473,25 @@ mod tests {
             },
         );
         let fixture = TunnelConnectionFixture::connect().await?;
-        let (mut send, recv) = timeout(Duration::from_secs(1), fixture.server_connection.open_bi())
-            .await
-            .map_err(|_| timeout_error("server should open a stream"))?
-            .map_err(io::Error::other)?;
+        let client_connection = fixture.client_connection.clone();
+        let (mut send, _recv) =
+            timeout(Duration::from_secs(1), fixture.server_connection.open_bi())
+                .await
+                .map_err(|_| timeout_error("server should open a stream"))?
+                .map_err(io::Error::other)?;
         let client_hello = build_client_hello("app.example.test")?;
-        send.write_all(&client_hello)
+        send.write_all(&internal_stream_bytes(&client_hello))
             .await
             .map_err(io::Error::other)?;
         send.finish().map_err(io::Error::other)?;
 
-        let handle = tokio::spawn(async move { stream_handler.handle(send, recv).await });
+        let handle = tokio::spawn(async move {
+            let (send, recv) = client_connection
+                .accept_bi()
+                .await
+                .map_err(io::Error::other)?;
+            stream_handler.handle(send, recv).await
+        });
         let result = timeout(Duration::from_secs(1), handle)
             .await
             .map_err(|_| timeout_error("handler should finish after backend connect timeout"))?
@@ -457,6 +506,7 @@ mod tests {
             public_hostnames: None,
             backend_address: "127.0.0.1:9".to_owned(),
             tls_mode: ClientTlsMode::Passthrough,
+            proxy_protocol: None,
         }];
         let stream_handler = TunnelConnectionStreamHandler::new(
             services,
@@ -467,17 +517,55 @@ mod tests {
             },
         );
         let fixture = TunnelConnectionFixture::connect().await?;
-        let (send, recv) = timeout(Duration::from_secs(1), fixture.server_connection.open_bi())
-            .await
-            .map_err(|_| timeout_error("server should open a stream"))?
-            .map_err(io::Error::other)?;
+        let client_connection = fixture.client_connection.clone();
+        let (mut send, _recv) =
+            timeout(Duration::from_secs(1), fixture.server_connection.open_bi())
+                .await
+                .map_err(|_| timeout_error("server should open a stream"))?
+                .map_err(io::Error::other)?;
 
-        let handle = tokio::spawn(async move { stream_handler.handle(send, recv).await });
+        send.write_all(&internal_stream_bytes(&[])).await?;
+        let handle = tokio::spawn(async move {
+            let (send, recv) = client_connection
+                .accept_bi()
+                .await
+                .map_err(io::Error::other)?;
+            stream_handler.handle(send, recv).await
+        });
         let result = timeout(Duration::from_secs(1), handle)
             .await
             .map_err(|_| timeout_error("handler should finish after ClientHello timeout"))?
             .map_err(io::Error::other)?;
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_internal_proxy_header_before_client_hello() -> io::Result<()> {
+        let stream_handler = TunnelConnectionStreamHandler::new(
+            vec![ServiceConfig {
+                public_hostnames: None,
+                backend_address: "127.0.0.1:9".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
+            }],
+            TerminationTlsConfigs::empty(),
+            ClientStreamLimits::for_test(),
+        );
+        let fixture = TunnelConnectionFixture::connect().await?;
+        let client_connection = fixture.client_connection.clone();
+        let (mut tunnel_send, _tunnel_recv) = fixture
+            .server_connection
+            .open_bi()
+            .await
+            .map_err(io::Error::other)?;
+        tunnel_send.write_all(&[0_u8; 16]).await?;
+        let (send, recv) = client_connection
+            .accept_bi()
+            .await
+            .map_err(io::Error::other)?;
+
+        assert!(stream_handler.handle(send, recv).await.is_err());
         Ok(())
     }
 
@@ -488,6 +576,7 @@ mod tests {
                 public_hostnames: None,
                 backend_address: backend_placeholder(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             }],
             "app.example.test",
         )
@@ -501,6 +590,7 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:443".to_owned(),
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             }],
             "api.example.test",
             |result: io::Result<()>| assert!(result.is_ok()),
@@ -517,6 +607,7 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             }],
             "app.example.test",
             |result: io::Result<()>| assert!(result.is_err()),
@@ -543,6 +634,7 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             }],
             "app.example.test",
             |result: io::Result<()>| assert!(result.is_err()),
@@ -566,6 +658,7 @@ mod tests {
                         public_hostnames: Some(vec![public_hostname("app.example.test")]),
                         backend_address: backend_placeholder(),
                         tls_mode: ClientTlsMode::Passthrough,
+                        proxy_protocol: None,
                     }],
                     "app.example.test",
                 )
@@ -590,6 +683,7 @@ mod tests {
                         public_hostnames: Some(vec![public_hostname("app.example.test")]),
                         backend_address: backend_placeholder(),
                         tls_mode: ClientTlsMode::Passthrough,
+                        proxy_protocol: None,
                     }],
                     "app.example.test",
                 )
@@ -600,6 +694,7 @@ mod tests {
                         public_hostnames: Some(vec![public_hostname("app.example.test")]),
                         backend_address: "127.0.0.1:443".to_owned(),
                         tls_mode: ClientTlsMode::Passthrough,
+                        proxy_protocol: None,
                     }],
                     "api.example.test",
                     |result: io::Result<()>| assert!(result.is_ok()),
@@ -612,6 +707,7 @@ mod tests {
                         public_hostnames: Some(vec![public_hostname("app.example.test")]),
                         backend_address,
                         tls_mode: ClientTlsMode::Passthrough,
+                        proxy_protocol: None,
                     }],
                     "app.example.test",
                     |result: io::Result<()>| assert!(result.is_err()),
@@ -623,6 +719,7 @@ mod tests {
                         public_hostnames: Some(vec![public_hostname("app.example.test")]),
                         backend_address: "127.0.0.1:8080".to_owned(),
                         tls_mode: ClientTlsMode::Terminate,
+                        proxy_protocol: None,
                     }],
                     "app.example.test",
                     |result: io::Result<()>| assert!(result.is_err()),
@@ -720,7 +817,9 @@ mod tests {
                     .await
                     .map_err(|_| timeout_error("test should open a tunnel stream"))?
                     .map_err(io::Error::other)?;
-            tunnel_send.write_all(&client_hello).await?;
+            tunnel_send
+                .write_all(&internal_stream_bytes(&client_hello))
+                .await?;
             tunnel_send.finish().map_err(io::Error::other)?;
 
             if let Ok(Ok(response)) =
@@ -814,7 +913,9 @@ mod tests {
                 .await
                 .map_err(|_| timeout_error("test should open a tunnel stream"))?
                 .map_err(io::Error::other)?;
-        tunnel_send.write_all(&client_hello).await?;
+        tunnel_send
+            .write_all(&internal_stream_bytes(&client_hello))
+            .await?;
         tunnel_send.finish().map_err(io::Error::other)?;
 
         if let Ok(Ok(response)) = timeout(Duration::from_secs(1), tunnel_recv.read_to_end(1)).await
@@ -872,10 +973,12 @@ mod tests {
         backend_cert: &CertificateDer<'static>,
         requested_hostname: &str,
     ) -> io::Result<[u8; 4]> {
-        let (send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
+        let (mut send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
             .await
             .map_err(|_| timeout_error("test should open a tunnel stream"))?
             .map_err(io::Error::other)?;
+        let framing = internal_stream_bytes(&[]);
+        send.write_all(&framing).await?;
         let connector = TlsConnector::from(Arc::new(
             rustls::ClientConfig::builder()
                 .with_root_certificates(root_store_with(backend_cert)?)
@@ -1169,12 +1272,20 @@ mod tests {
         // Plain-TCP backend (receives decrypted data)
         let backend_listener = TcpListener::bind(localhost(0)).await?;
         let backend_address = backend_listener.local_addr()?.to_string();
+        let expected_proxy_header = crate::VisitorTcpAddresses {
+            source: "192.0.2.10:12345".parse().unwrap(),
+            destination: "198.51.100.20:443".parse().unwrap(),
+        }
+        .encode_proxy_v2();
         let backend_task = tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
             let (mut backend_stream, _) =
                 timeout(Duration::from_secs(1), backend_listener.accept())
                     .await
                     .map_err(|_| timeout_error("backend should accept a forwarded connection"))??;
+            let mut proxy_header = vec![0_u8; expected_proxy_header.len()];
+            backend_stream.read_exact(&mut proxy_header).await?;
+            assert_eq!(proxy_header, expected_proxy_header);
             let mut request = [0_u8; 4];
             timeout(
                 Duration::from_secs(1),
@@ -1196,6 +1307,7 @@ mod tests {
             public_hostnames: Some(vec![public_hostname(hostname)]),
             backend_address,
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: Some(crate::ProxyProtocolVersion::V2),
         }];
         let mut tls_configs = HashMap::new();
         tls_configs.insert(hostname.to_owned(), tls_config.clone());
@@ -1282,6 +1394,7 @@ mod tests {
             public_hostnames: Some(vec![public_hostname(hostname)]),
             backend_address,
             tls_mode: ClientTlsMode::Terminate,
+            proxy_protocol: None,
         }];
         let mut tls_configs = HashMap::new();
         tls_configs.insert(hostname.to_owned(), default_tls_config);
@@ -1323,10 +1436,11 @@ mod tests {
                 .await?;
                 assert_eq!(response, *b"pong");
 
-                let (send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
+                let (mut send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
                     .await
                     .map_err(|_| timeout_error("test should open a tunnel stream"))?
                     .map_err(io::Error::other)?;
+                send.write_all(&internal_stream_bytes(&[])).await?;
                 let mut client_tls_config = rustls::ClientConfig::builder()
                     .with_root_certificates(root_store_with(&public_cert)?)
                     .with_no_client_auth();
@@ -1378,10 +1492,11 @@ mod tests {
         public_cert: &CertificateDer<'static>,
         hostname: &str,
     ) -> io::Result<[u8; 4]> {
-        let (send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
+        let (mut send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
             .await
             .map_err(|_| timeout_error("test should open a tunnel stream"))?
             .map_err(io::Error::other)?;
+        send.write_all(&internal_stream_bytes(&[])).await?;
         let connector = TlsConnector::from(Arc::new(
             rustls::ClientConfig::builder()
                 .with_root_certificates(root_store_with(public_cert)?)
@@ -1463,11 +1578,13 @@ mod tests {
                 public_hostnames: Some(vec![public_hostname(terminate_hostname)]),
                 backend_address: term_backend_address,
                 tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
             },
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname(passthrough_hostname)]),
                 backend_address: pass_backend_address,
                 tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
             },
         ];
         let mut tls_configs = HashMap::new();

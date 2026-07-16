@@ -134,8 +134,8 @@ The client validates the server certificate either through system trust or throu
 
 ## Current runtime limits
 
-- public pre-routing work is bounded to 4,096 concurrent ClientHellos globally and 256 per accepted peer IP, with a 5-second ClientHello completion deadline in addition to the 16 KB byte limit
-- the accepted socket peer IP is the only per-source admission identity; deployments behind a load balancer share that load balancer IP's bucket, and Core does not infer source identity from forwarded headers
+- public pre-routing work is bounded to 4,096 concurrent intakes globally and 256 per canonical Visitor source IP after direct/proxied tuple resolution, with one 5-second PROXY-header-plus-ClientHello deadline and separate 16 KB caps
+- direct ingress uses the accepted socket source for per-source admission; strict PROXY v2 ingress uses the validated canonical source after trusted-peer verification, and Core ignores HTTP forwarding headers and untrusted PROXY bytes
 - concurrent Server-side QUIC handshakes are bounded to 256 before per-handshake work is spawned
 - pending Server `open_bi()` opens are bounded to 1,024 with a 5-second open deadline; active routed Visitor streams are bounded to 4,096 and tracked in a keyed map for selective Authorization revocation
 - active **Tunnel connections** are bounded to 4,096 globally, 256 per **Tunnel pool**, and 64 per authenticated **Client identity**; saturation rejects the newest connection without replacing healthy members

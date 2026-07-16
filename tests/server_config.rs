@@ -37,6 +37,67 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert!(settings.visitor_proxy_trusted_networks[0].contains("10.1.2.3".parse().unwrap()));
 }
 
+#[test]
+fn server_config_rejects_invalid_proxy_v2_combinations() {
+    let cases = [
+        (
+            "visitor-proxy-protocol = \"v2\"",
+            "visitor-proxy-trusted-networks must be non-empty",
+        ),
+        (
+            "visitor-proxy-protocol = \"v2\"\nvisitor-proxy-trusted-networks = []",
+            "visitor-proxy-trusted-networks must be non-empty",
+        ),
+        (
+            "visitor-proxy-trusted-networks = [\"10.0.0.0/8\"]",
+            "visitor-proxy-trusted-networks requires visitor-proxy-protocol",
+        ),
+        (
+            "visitor-proxy-protocol = \"v1\"\nvisitor-proxy-trusted-networks = [\"10.0.0.0/8\"]",
+            "visitor-proxy-protocol must be \"v2\"",
+        ),
+        (
+            "visitor-proxy-protocol = \"v2\"\nvisitor-proxy-trusted-networks = [\"10.0.0.1/8\"]",
+            "must use a canonical network address",
+        ),
+        (
+            "visitor-proxy-protocol = \"v2\"\nvisitor-proxy-trusted-networks = [\"10.0.0.1\"]",
+            "must use CIDR notation",
+        ),
+    ];
+
+    for (proxy_config, expected_error) in cases {
+        let tempdir = tempdir().unwrap();
+        initialize_manual_server_certificate(
+            tempdir.path().join("server-cert").as_path(),
+            "tunnel.example.test",
+        )
+        .unwrap();
+        let path = tempdir.path().join("config.toml");
+        fs::write(
+            &path,
+            format!(
+                r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+{proxy_config}
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#
+            ),
+        )
+        .unwrap();
+
+        let error = load_server_config(&path).unwrap_err().to_string();
+        assert!(
+            error.contains(expected_error),
+            "expected `{expected_error}` in `{error}`"
+        );
+    }
+}
+
 fn hostname_strings(hostnames: &[runewarp::PublicHostname]) -> Vec<&str> {
     hostnames.iter().map(|hostname| hostname.as_str()).collect()
 }
@@ -67,6 +128,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
     assert_eq!(settings.hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.log_level, LogLevel::Info);
+    assert_eq!(settings.visitor_proxy_protocol, None);
+    assert!(settings.visitor_proxy_trusted_networks.is_empty());
     assert_eq!(settings.admission, runewarp::ServerAdmission::Static);
     assert_eq!(
         hostname_strings(&settings.tunnels[0].public_hostnames),

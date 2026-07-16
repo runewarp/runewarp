@@ -136,6 +136,108 @@ async fn forwards_tls_passthrough_end_to_end() {
 }
 
 #[tokio::test]
+async fn forwards_tls_passthrough_end_to_end_with_manual_private_ca_material() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    let client_identity = generate_client_identity().unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
+        &client_identity.certificate_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
+        &client_identity.private_key_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_IDENTITY_FILENAME),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let backend = spawn_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"pong",
+    )
+    .await;
+
+    std::fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+"#,
+            client_identity.client_identity
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+server-trust = "ca-file"
+server-ca-file = "server-cert/server-ca.crt"
+identity-dir = "client-identity"
+
+[[client.services]]
+backend-address = "__BACKEND_ADDRESS__"
+"#
+        .replace("__BACKEND_ADDRESS__", &backend.0.to_string()),
+    )
+    .unwrap();
+
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    let response = wait_for_tls_response(public_addr, &backend_cert, "app.example.test")
+        .await
+        .unwrap();
+    assert_eq!(response, *b"pong");
+
+    backend.1.abort();
+    server_task.abort();
+    client_task.abort();
+    let _ = backend.1.await;
+    let _ = server_task.await;
+    let _ = client_task.await;
+}
+
+#[tokio::test]
 async fn trusted_proxy_v2_ingress_reaches_opted_in_passthrough_backend() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
@@ -246,6 +348,111 @@ proxy-protocol = "v2"
     server_task.abort();
     client_task.abort();
     let _ = backend.1.await;
+    let _ = server_task.await;
+    let _ = client_task.await;
+}
+
+#[tokio::test]
+async fn direct_ingress_synthesizes_proxy_v2_for_opted_in_passthrough_backend() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    let client_identity = generate_client_identity().unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
+        &client_identity.certificate_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
+        &client_identity.private_key_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_IDENTITY_FILENAME),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+    let (backend_addr, backend_header, backend_task) = spawn_recording_proxy_tls_backend(
+        private_key_from_der(&backend_key),
+        backend_cert.clone(),
+        *b"pong",
+    )
+    .await;
+    std::fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+"#,
+            client_identity.client_identity
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+server-trust = "ca-file"
+server-ca-file = "server-cert/server-ca.crt"
+identity-dir = "client-identity"
+
+[[client.services]]
+backend-address = "__BACKEND_ADDRESS__"
+proxy-protocol = "v2"
+"#
+        .replace("__BACKEND_ADDRESS__", &backend_addr.to_string()),
+    )
+    .unwrap();
+
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    let (response, expected_addresses) =
+        wait_for_direct_tls_response(public_addr, &backend_cert, "app.example.test")
+            .await
+            .unwrap();
+    assert_eq!(response, *b"pong");
+    assert_eq!(
+        backend_header.await.unwrap(),
+        expected_addresses.encode_proxy_v2()
+    );
+
+    backend_task.await.unwrap();
+    server_task.abort();
+    client_task.abort();
     let _ = server_task.await;
     let _ = client_task.await;
 }
@@ -1624,6 +1831,137 @@ tls-mode = "terminate"
     let _ = client_task.await;
 }
 
+#[tokio::test]
+async fn trusted_proxy_v2_ingress_reaches_opted_in_terminate_backend() {
+    use runewarp::{
+        CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
+        initialize_manual_client_public_cert,
+    };
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
+    let client_identity = generate_client_identity().unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_CERT_FILENAME),
+        &client_identity.certificate_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_KEY_FILENAME),
+        &client_identity.private_key_pem,
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir
+            .path()
+            .join("client-identity")
+            .join(CLIENT_IDENTITY_FILENAME),
+        client_identity.client_identity.to_string(),
+    )
+    .unwrap();
+
+    let public_cert_dir = tempdir.path().join("public-cert");
+    initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
+    let public_ca_cert_pem =
+        std::fs::read_to_string(public_cert_dir.join("public-ca.crt")).unwrap();
+    let public_ca_cert = CertificateDer::from_pem_slice(public_ca_cert_pem.as_bytes()).unwrap();
+    let visitor_addresses = VisitorTcpAddresses {
+        source: "203.0.113.9:54321".parse().unwrap(),
+        destination: "198.51.100.10:443".parse().unwrap(),
+    };
+    let backend_listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let backend_address = backend_listener.local_addr().unwrap();
+    let backend_task = tokio::spawn(async move {
+        let (mut tcp_stream, _) = backend_listener.accept().await.unwrap();
+        let expected = visitor_addresses.encode_proxy_v2();
+        let mut header = vec![0_u8; expected.len()];
+        tcp_stream.read_exact(&mut header).await.unwrap();
+        assert_eq!(header, expected);
+        let mut request = [0_u8; 4];
+        tcp_stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"ping");
+        tcp_stream.write_all(b"pong").await.unwrap();
+        tcp_stream.shutdown().await.unwrap();
+    });
+
+    std::fs::write(
+        tempdir.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+visitor-proxy-protocol = "v2"
+visitor-proxy-trusted-networks = ["127.0.0.0/8"]
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+"#,
+            client_identity.client_identity
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        tempdir.path().join("client.toml"),
+        r#"
+[client]
+server-address = "tunnel.example.test"
+server-trust = "ca-file"
+server-ca-file = "server-cert/server-ca.crt"
+identity-dir = "client-identity"
+public-cert-dir = "public-cert"
+
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "__BACKEND_ADDRESS__"
+tls-mode = "terminate"
+proxy-protocol = "v2"
+"#
+        .replace("__BACKEND_ADDRESS__", &backend_address.to_string()),
+    )
+    .unwrap();
+
+    let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
+    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
+        .await
+        .unwrap();
+    let public_addr = server.public_addr().unwrap();
+    let tunnel_addr = server.tunnel_addr().unwrap();
+    let server_task = tokio::spawn(server.run());
+    let client_settings = load_client_config(&tempdir.path().join("client.toml")).unwrap();
+    let client = PreparedClient::connect_to(&client_settings, localhost(0), tunnel_addr)
+        .await
+        .unwrap();
+    let client_task = tokio::spawn(client.run());
+
+    let response = wait_for_proxy_tls_response(
+        public_addr,
+        &public_ca_cert,
+        "app.example.test",
+        visitor_addresses,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response, *b"pong");
+
+    backend_task.await.unwrap();
+    server_task.abort();
+    client_task.abort();
+    let _ = server_task.await;
+    let _ = client_task.await;
+}
+
 /// One Client connects with both a terminating service (`app.example.test`) and a
 /// passthrough service (`api.example.test`).  Visitor connections to each hostname
 /// travel through the same tunnel but are routed independently:
@@ -2745,6 +3083,42 @@ async fn spawn_proxy_tls_backend(
     (addr, task)
 }
 
+async fn spawn_recording_proxy_tls_backend(
+    private_key: PrivateKeyDer<'static>,
+    certificate: CertificateDer<'static>,
+    response: [u8; 4],
+) -> (
+    SocketAddr,
+    oneshot::Receiver<Vec<u8>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], private_key)
+            .unwrap(),
+    ));
+    let (header_tx, header_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (mut tcp_stream, _) = listener.accept().await.unwrap();
+        let mut fixed = [0_u8; 16];
+        tcp_stream.read_exact(&mut fixed).await.unwrap();
+        let payload_len = u16::from_be_bytes([fixed[14], fixed[15]]) as usize;
+        let mut header = fixed.to_vec();
+        header.resize(16 + payload_len, 0);
+        tcp_stream.read_exact(&mut header[16..]).await.unwrap();
+        let _ = header_tx.send(header);
+        let mut tls_stream = acceptor.accept(tcp_stream).await.unwrap();
+        let mut request = [0_u8; 4];
+        tls_stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"ping");
+        tls_stream.write_all(&response).await.unwrap();
+    });
+    (addr, header_rx, task)
+}
+
 async fn spawn_staged_tls_backend(
     private_key: PrivateKeyDer<'static>,
     certificate: CertificateDer<'static>,
@@ -2818,6 +3192,47 @@ async fn wait_for_tls_response(
     timeout(Duration::from_secs(1), async move {
         loop {
             match request_tls_response(public_addr, backend_cert, server_name).await {
+                Ok(response) => return Ok(response),
+                Err(_) => sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+async fn wait_for_direct_tls_response(
+    public_addr: SocketAddr,
+    backend_cert: &CertificateDer<'static>,
+    server_name: &str,
+) -> io::Result<([u8; 4], VisitorTcpAddresses)> {
+    timeout(Duration::from_secs(1), async move {
+        loop {
+            let result = async {
+                let connector = TlsConnector::from(Arc::new(
+                    rustls::ClientConfig::builder()
+                        .with_root_certificates(root_store_with(backend_cert))
+                        .with_no_client_auth(),
+                ));
+                let tcp_stream = TcpStream::connect(public_addr).await?;
+                let addresses = VisitorTcpAddresses {
+                    source: tcp_stream.local_addr()?,
+                    destination: tcp_stream.peer_addr()?,
+                };
+                let mut tls_stream = connector
+                    .connect(
+                        ServerName::try_from(server_name.to_owned()).map_err(io::Error::other)?,
+                        tcp_stream,
+                    )
+                    .await
+                    .map_err(io::Error::other)?;
+                tls_stream.write_all(b"ping").await?;
+                let mut response = [0_u8; 4];
+                tls_stream.read_exact(&mut response).await?;
+                Ok::<_, io::Error>((response, addresses))
+            }
+            .await;
+            match result {
                 Ok(response) => return Ok(response),
                 Err(_) => sleep(Duration::from_millis(10)).await,
             }

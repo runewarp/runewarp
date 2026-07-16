@@ -36,6 +36,18 @@ _Avoid_: Client, connection, replica
 The outside party that connects to a routed **Public hostname** through Runewarp.
 _Avoid_: Client, user agent
 
+**Canonical Visitor TCP tuple**:
+The normalized Visitor source and original destination IP addresses and ports. Direct ingress derives it from the accepted socket; strict PROXY v2 ingress derives it from a validated header supplied by a trusted socket peer. Every application Tunnel stream carries it.
+_Avoid_: accepted peer, forwarded headers, raw PROXY header
+
+**Visitor PROXY ingress**:
+The optional strict Server-listener mode that requires trusted peers to supply a valid PROXY protocol v2 TCP tuple on every Visitor connection. It is independent from backend emission.
+_Avoid_: automatic PROXY detection, mixed ingress
+
+**Backend PROXY emission**:
+The per-**Service** option that regenerates the **Canonical Visitor TCP tuple** as PROXY protocol v2 for that **Local backend**. It is independent from Server ingress and omitted Services retain their existing byte stream.
+_Avoid_: forwarding the ingress header, global backend emission
+
 **Server hostname**:
 The hostname that identifies the Runewarp public edge itself.
 _Avoid_: Public hostname, app hostname, server address

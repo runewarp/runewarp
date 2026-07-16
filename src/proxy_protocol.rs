@@ -100,6 +100,27 @@ impl FromStr for TrustedNetwork {
         if prefix > maximum {
             return Err("contains an invalid prefix");
         }
+        let is_canonical = match network {
+            IpAddr::V4(network) => {
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - prefix)
+                };
+                u32::from(network) & mask == u32::from(network)
+            }
+            IpAddr::V6(network) => {
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - prefix)
+                };
+                u128::from(network) & mask == u128::from(network)
+            }
+        };
+        if !is_canonical {
+            return Err("must use a canonical network address");
+        }
         Ok(Self { network, prefix })
     }
 }
@@ -249,5 +270,13 @@ mod tests {
         assert!(network.contains("10.1.2.3".parse().unwrap()));
         assert!(!network.contains("11.1.2.3".parse().unwrap()));
         assert!("10.0.0.1".parse::<TrustedNetwork>().is_err());
+    }
+
+    #[test]
+    fn cidr_networks_require_canonical_network_addresses() {
+        assert!("10.0.0.1/8".parse::<TrustedNetwork>().is_err());
+        assert!("2001:db8::1/32".parse::<TrustedNetwork>().is_err());
+        assert!("192.0.2.1/32".parse::<TrustedNetwork>().is_ok());
+        assert!("2001:db8::1/128".parse::<TrustedNetwork>().is_ok());
     }
 }

@@ -29,7 +29,6 @@ For each inbound TCP connection on the configured `server.public-bind-address`:
 13. Acquire one pending stream-open slot, then open a bidirectional stream on the selected Tunnel connection with a **5-second** deadline. On success, acquire one active routed-stream slot, release the pending slot, forward the buffered ClientHello bytes, and continue streaming in both directions. Successfully established proxies have no additional lifetime or idle deadline.
 
 The buffered ClientHello must never be logged or echoed back in diagnostics. With top-level `log-level = "debug"`, stderr diagnostics may log the normalized **Public hostname** using stable event plus key=value fields such as `public-hostname`, `backend-address`, and `reason`. `acme-tls/1` traffic for the **Server hostname** is logged as `server acme challenge handled` with `server-hostname=...`, while Client-side `acme-tls/1` traffic for terminating **Public hostnames** is logged as distinct ACME challenge handling rather than ordinary terminate routing. Runtime tunnel failure causes keep separate full-detail lines whose operator-facing `warn` lines are shortened.
-The buffered ClientHello must never be logged or echoed back in diagnostics.
 
 At `log-level = "debug"`, stderr may include:
 

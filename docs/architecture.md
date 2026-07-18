@@ -102,8 +102,8 @@ Both shapes still use **Server-authoritative routing** for public ingress.
 4. The Server rejects non-TLS traffic, missing-SNI traffic, and non-ACME application traffic addressed to the **Server hostname**.
 5. The Server selects a **Tunnel** by exact **Public hostname**.
 6. If that Tunnel has no active **Tunnel connection**, the Server drops the connection.
-7. Otherwise, the Server forwards the original encrypted bytes over the selected Tunnel connection.
-8. The receiving **Client instance** re-reads the forwarded ClientHello, selects a **Service**, and connects to the **Local backend**.
+7. Otherwise, one Tunnel-framing module writes the canonical Visitor tuple followed by the original encrypted bytes over the selected Tunnel connection.
+8. The receiving **Client instance** crosses the same framing seam to validate and consume the tuple before re-reading the forwarded ClientHello, selecting a **Service**, and connecting to the **Local backend**.
 9. If no Client Service matches, the Client rejects the stream.
 10. The Local backend terminates TLS and serves the application.
 
@@ -116,6 +116,8 @@ Steps 1–9 are the same. In step 8, when the matched Service has `tls-mode = "t
 8c. The Client proxies decrypted data between the TLS stream and the plaintext backend connection.
 
 The Local backend receives unencrypted bytes directly and does not need to terminate TLS.
+
+The Tunnel-framing module owns the complete internal `runewarp/1` application-stream envelope on both ends. **Backend PROXY emission** remains a distinct per-Service seam and only reuses the PROXY v2 codec internally.
 
 ## Trust model
 

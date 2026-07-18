@@ -17,6 +17,7 @@ use crate::proxy::{proxy_stream_error_code, proxy_tcp_over_quic};
 use crate::proxy_protocol::read_proxy_v2;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ServerRouteOutcome};
+use crate::tunnel_framing::encode_tunnel_stream;
 use crate::{
     ProxyProtocolVersion, PublicHostname, ServerHostname, TrustedNetwork, VisitorTcpAddresses,
 };
@@ -300,8 +301,7 @@ impl VisitorIntake {
         let proxy_task = tokio::spawn(async move {
             let _active_stream_guard = active_stream_guard;
             let _active_stream_permit = active_stream_permit;
-            let mut initial_bytes = addresses.encode_proxy_v2();
-            initial_bytes.extend_from_slice(&buffered_bytes);
+            let initial_bytes = encode_tunnel_stream(addresses, &buffered_bytes);
             proxy_tcp_over_quic(visitor_stream, initial_bytes, send, recv).await
         });
         // Track synchronously before the next await so commit-time revocation cannot miss

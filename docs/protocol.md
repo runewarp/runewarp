@@ -125,6 +125,8 @@ Notes:
 
 Every Server-opened `runewarp/1` application stream begins with a regenerated PROXY protocol v2 header containing the canonical Visitor TCP source and original destination. The Client validates and consumes it before parsing the Visitor ClientHello; original TLS bytes follow immediately. Invalid metadata rejects only that stream.
 
+One internal Tunnel-framing module owns this ordering for Server encoding and Client decoding. Backend PROXY emission is separate and independently controlled per Service.
+
 This changes framing in place without changing ALPN. Mixed old/new Server and Client binaries are unsupported; upgrade both sides together.
 
 Runewarp uses symmetric close behavior:

@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed Client Tunnel reconnect logs so `next-retry-delay` reports the same jittered delay the **Address worker** actually awaits after a Connected session ends. (#229)
 - Fixed Client ACME and Terminate-mode TLS preparation so one **Client instance** owns validated Services and ACME managers once across multi-address fanout and Tunnel reconnects, with supervised ACME shutdown instead of per-connection fire-and-forget tasks. (#203)
 - Fixed the amd64 runtime regression where a long-lived top-level stderr lock could stall background runtime logging and break idle tunnel registration. (#140)
 

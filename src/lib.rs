@@ -32,11 +32,11 @@ pub use client::{
     AddressWorkerControl, AddressWorkerDial, AddressWorkerFactory, AddressWorkerHooks,
     AssignmentConvergence, Client, ClientAssignmentAdapter, ClientConfigResolutionDefaults,
     ClientConfigResolutionError, ClientConnectConfig, ClientConnectError, ClientRuntimeArgs,
-    ConnectedTunnelRun, EstablishOutcome, FixedBackoff, MaintenanceIntent, SelectedClientConfig,
-    SilentAddressWorkerHooks, connected_session_until, production_address_worker_factory,
-    resolve_client_config_from_cli, resolve_selected_client_config, run_address_worker,
-    run_address_worker_with_reconnect_policy, select_client_config, wait_for_retry_delay,
-    wait_for_shutdown,
+    ConnectedTunnelFailure, ConnectedTunnelRun, EstablishOutcome, FixedBackoff, MaintenanceIntent,
+    ReportedConnectedTunnelRun, SelectedClientConfig, SilentAddressWorkerHooks,
+    connected_session_until, production_address_worker_factory, resolve_client_config_from_cli,
+    resolve_selected_client_config, run_address_worker, run_address_worker_with_reconnect_policy,
+    select_client_config, wait_for_retry_delay, wait_for_shutdown,
 };
 pub use client_admission::ClientAdmission;
 pub use client_hello::{

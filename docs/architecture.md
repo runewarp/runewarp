@@ -97,22 +97,23 @@ Both shapes still use **Server-authoritative routing** for public ingress.
 ### Passthrough (default)
 
 1. A **Visitor** connects to the **Server** on its configured public TCP listener, `server.public-bind-address`, which defaults to `0.0.0.0:443`.
-2. The Server buffers enough of the ClientHello to extract SNI.
-3. The Server rejects non-TLS traffic, missing-SNI traffic, and non-ACME application traffic addressed to the **Server hostname**.
-4. The Server selects a **Tunnel** by exact **Public hostname**.
-5. If that Tunnel has no active **Tunnel connection**, the Server drops the connection.
-6. Otherwise, the Server forwards the original encrypted bytes over the selected Tunnel connection.
-7. The receiving **Client instance** re-reads the forwarded ClientHello, selects a **Service**, and connects to the **Local backend**.
-8. If no Client Service matches, the Client rejects the stream.
-9. The Local backend terminates TLS and serves the application.
+2. One Server Visitor-intake module owns global admission, trusted direct-or-strict-PROXY tuple resolution, canonical-source admission, the shared intake deadline, ClientHello parsing, permit release, shutdown cancellation, and rejection/recovery reporting.
+3. The Server buffers enough of the ClientHello to extract SNI.
+4. The Server rejects non-TLS traffic, missing-SNI traffic, and non-ACME application traffic addressed to the **Server hostname**.
+5. The Server selects a **Tunnel** by exact **Public hostname**.
+6. If that Tunnel has no active **Tunnel connection**, the Server drops the connection.
+7. Otherwise, the Server forwards the original encrypted bytes over the selected Tunnel connection.
+8. The receiving **Client instance** re-reads the forwarded ClientHello, selects a **Service**, and connects to the **Local backend**.
+9. If no Client Service matches, the Client rejects the stream.
+10. The Local backend terminates TLS and serves the application.
 
 ### Terminate (opt-in per Service)
 
-Steps 1–8 are the same. In step 7, when the matched Service has `tls-mode = "terminate"`:
+Steps 1–9 are the same. In step 8, when the matched Service has `tls-mode = "terminate"`:
 
-7a. The Client completes the TLS handshake with the Visitor using the per-hostname leaf certificate — from `client.public-cert-dir` (manual path) or from `[client.acme]` (ACME path). In Client ACME mode the **Client instance** owns one live ACME manager per terminating **Public hostname** for the process lifetime, shared across independent Server-address workers and Tunnel-connection reconnects, and does not block startup on certificate readiness; a hostname without a ready certificate fails closed at the TLS handshake with no fallback to passthrough.
-7b. The Client connects to the Local backend in plaintext TCP.
-7c. The Client proxies decrypted data between the TLS stream and the plaintext backend connection.
+8a. The Client completes the TLS handshake with the Visitor using the per-hostname leaf certificate — from `client.public-cert-dir` (manual path) or from `[client.acme]` (ACME path). In Client ACME mode the **Client instance** owns one live ACME manager per terminating **Public hostname** for the process lifetime, shared across independent Server-address workers and Tunnel-connection reconnects, and does not block startup on certificate readiness; a hostname without a ready certificate fails closed at the TLS handshake with no fallback to passthrough.
+8b. The Client connects to the Local backend in plaintext TCP.
+8c. The Client proxies decrypted data between the TLS stream and the plaintext backend connection.
 
 The Local backend receives unencrypted bytes directly and does not need to terminate TLS.
 

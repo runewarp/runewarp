@@ -8,9 +8,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
-use super::admission::{
-    AdmissionLimit, AdmissionRejection, ServerAdmissionPolicy, VisitorAdmissionPermit,
-};
+use super::admission::{AdmissionLimit, ServerAdmissionPolicy, VisitorAdmissionPermit};
 use super::tunnel_registry::{TunnelRegistry, TunnelRouteOutcome};
 use crate::acme::ACME_TLS_ALPN;
 use crate::client_hello::ParsedClientHello;
@@ -24,7 +22,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub(crate) struct VisitorStreamHandler {
+pub(crate) struct VisitorIntake {
     server_hostname: ServerHostname,
     tunnel_registry: TunnelRegistry,
     public_tls_config: Option<Arc<rustls::ServerConfig>>,
@@ -33,7 +31,7 @@ pub(crate) struct VisitorStreamHandler {
     visitor_proxy_trusted_networks: Vec<TrustedNetwork>,
 }
 
-impl VisitorStreamHandler {
+impl VisitorIntake {
     #[cfg(test)]
     pub(crate) fn new(
         server_hostname: ServerHostname,
@@ -69,36 +67,44 @@ impl VisitorStreamHandler {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) async fn handle(&self, mut visitor_stream: TcpStream) -> io::Result<()> {
-        let addresses = VisitorTcpAddresses::from_socket(&visitor_stream)?;
-        let parsed_client_hello = match read_client_hello(&mut visitor_stream).await {
-            Ok(parsed_client_hello) => parsed_client_hello,
-            Err(error) => {
-                runtime_log::server_route_rejected_client_hello(&error);
-                return Ok(());
-            }
-        };
-        self.handle_parsed(visitor_stream, parsed_client_hello, addresses)
-            .await
-    }
-
-    pub(crate) async fn handle_admitted(
+    pub(crate) fn accept(
         &self,
         visitor_stream: TcpStream,
-        timeout: std::time::Duration,
-        admission_permit: VisitorAdmissionPermit,
-    ) -> io::Result<()> {
-        self.handle_admitted_until(
-            visitor_stream,
-            timeout,
-            admission_permit,
-            std::future::pending(),
-        )
-        .await
+        shutdown: Option<crate::shutdown::OrderlyShutdown>,
+    ) {
+        let permit = match self.admission_policy.try_admit_visitor_global() {
+            Ok(permit) => permit,
+            Err(rejection) => {
+                drop(visitor_stream);
+                self.admission_policy.report_saturation(rejection);
+                return;
+            }
+        };
+        self.admission_policy.report_recovery(&[
+            AdmissionLimit::VisitorsGlobal,
+            AdmissionLimit::VisitorSource,
+        ]);
+        let intake = self.clone();
+        let timeout = self.admission_policy.limits().client_hello_timeout;
+        tokio::spawn(async move {
+            match shutdown {
+                Some(shutdown) => {
+                    let _ = intake
+                        .intake_until(visitor_stream, timeout, permit, async move {
+                            let _ = shutdown.wait_started().await;
+                        })
+                        .await;
+                }
+                None => {
+                    let _ = intake
+                        .intake_until(visitor_stream, timeout, permit, std::future::pending())
+                        .await;
+                }
+            }
+        });
     }
 
-    pub(crate) async fn handle_admitted_until<Shutdown>(
+    async fn intake_until<Shutdown>(
         &self,
         mut visitor_stream: TcpStream,
         timeout: std::time::Duration,
@@ -126,7 +132,7 @@ impl VisitorStreamHandler {
                         .limits()
                         .max_pending_visitors_per_source,
                 ) {
-                    report_stream_admission_saturation(&self.admission_policy, rejection);
+                    self.admission_policy.report_saturation(rejection);
                     return Ok(None);
                 }
                 let hello = read_client_hello(&mut visitor_stream)
@@ -248,14 +254,12 @@ impl VisitorStreamHandler {
         let pending_open_permit = match self.admission_policy.try_admit_pending_stream_open() {
             Ok(permit) => permit,
             Err(rejection) => {
-                report_stream_admission_saturation(&self.admission_policy, rejection);
+                self.admission_policy.report_saturation(rejection);
                 return Ok(());
             }
         };
-        report_stream_admission_recovery(
-            &self.admission_policy,
-            &[AdmissionLimit::PendingStreamOpens],
-        );
+        self.admission_policy
+            .report_recovery(&[AdmissionLimit::PendingStreamOpens]);
 
         let open_bi_timeout = self.admission_policy.limits().open_bi_timeout;
         let open_result =
@@ -278,15 +282,13 @@ impl VisitorStreamHandler {
                 drop(pending_open_permit);
                 let _ = send.reset(proxy_stream_error_code());
                 let _ = recv.stop(proxy_stream_error_code());
-                report_stream_admission_saturation(&self.admission_policy, rejection);
+                self.admission_policy.report_saturation(rejection);
                 return Ok(());
             }
         };
         drop(pending_open_permit);
-        report_stream_admission_recovery(
-            &self.admission_policy,
-            &[AdmissionLimit::ActiveRoutedStreams],
-        );
+        self.admission_policy
+            .report_recovery(&[AdmissionLimit::ActiveRoutedStreams]);
 
         let active_stream_guard = tunnel_connection.record_open_stream();
         runtime_log::server_route(public_hostname.as_str(), ServerRouteOutcome::Forwarded);
@@ -319,45 +321,6 @@ impl VisitorStreamHandler {
         };
         registry.untrack_visitor_stream(stream_id);
         proxy_result
-    }
-}
-
-fn report_stream_admission_saturation(
-    admission_policy: &ServerAdmissionPolicy,
-    rejection: AdmissionRejection,
-) {
-    if let Some(limit_value) = admission_policy.limit_value(rejection.limit)
-        && admission_policy.should_log_saturation(rejection.limit)
-    {
-        runtime_log::server_admission_saturated(
-            stream_admission_limit_name(rejection.limit),
-            rejection.active_work,
-            limit_value,
-        );
-    }
-}
-
-fn report_stream_admission_recovery(
-    admission_policy: &ServerAdmissionPolicy,
-    limits: &[AdmissionLimit],
-) {
-    for limit in limits {
-        if admission_policy.take_recovered(*limit) {
-            runtime_log::server_admission_recovered(stream_admission_limit_name(*limit));
-        }
-    }
-}
-
-fn stream_admission_limit_name(limit: AdmissionLimit) -> &'static str {
-    match limit {
-        AdmissionLimit::PendingStreamOpens => "pending-stream-open",
-        AdmissionLimit::ActiveRoutedStreams => "active-routed-stream",
-        AdmissionLimit::VisitorsGlobal => "visitor-global",
-        AdmissionLimit::VisitorSource => "visitor-source",
-        AdmissionLimit::Handshakes => "quic-handshake-global",
-        AdmissionLimit::TunnelConnectionsGlobal => "tunnel-connection-global",
-        AdmissionLimit::TunnelConnectionsPerTunnel => "tunnel-connection-per-tunnel",
-        AdmissionLimit::TunnelConnectionsPerIdentity => "tunnel-connection-per-client-identity",
     }
 }
 
@@ -565,7 +528,7 @@ mod tests {
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         registry.register(fixture.server_connection.clone()).await;
-        let router = VisitorStreamHandler::new(
+        let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry,
             None,
@@ -574,7 +537,7 @@ mod tests {
 
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
-        let router_task = spawn_router_task(listener, router);
+        let intake_task = spawn_intake_task(listener, intake);
 
         let mut visitor = TcpStream::connect(visitor_addr).await?;
         let visitor_source = visitor.local_addr()?;
@@ -587,7 +550,7 @@ mod tests {
             fixture.client_connection.accept_bi(),
         )
         .await
-        .map_err(|_| timeout_error("router should open a tunnel stream"))?
+        .map_err(|_| timeout_error("intake should open a tunnel stream"))?
         .map_err(io::Error::other)?;
         let addresses = crate::proxy_protocol::read_proxy_v2(&mut tunnel_recv)
             .await
@@ -605,34 +568,73 @@ mod tests {
 
         assert_eq!(forwarded, client_hello);
 
-        router_task
+        intake_task
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|error| join_error("intake task failed", error))??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_proxy_intake_forwards_only_the_canonical_tuple_and_tls() -> io::Result<()> {
+        let (intake, tunnel_connection) =
+            configured_proxy_intake_with_active_tunnel_connection("127.0.0.0/8").await?;
+        let addresses = VisitorTcpAddresses {
+            source: "203.0.113.9:54321".parse().unwrap(),
+            destination: "198.51.100.10:443".parse().unwrap(),
+        };
+        let client_hello = build_client_hello("app.example.test")?;
+        let mut ingress = addresses.encode_proxy_v2();
+        let address_length = u16::from_be_bytes([ingress[14], ingress[15]]);
+        let ingress_only_tlv = [0xe0, 0x00, 0x03, b'r', b'a', b'w'];
+        ingress[14..16]
+            .copy_from_slice(&(address_length + ingress_only_tlv.len() as u16).to_be_bytes());
+        ingress.extend_from_slice(&ingress_only_tlv);
+        ingress.extend_from_slice(&client_hello);
+
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor.write_all(&ingress).await?;
+        visitor.shutdown().await?;
+
+        let (_send, mut recv) = timeout(Duration::from_secs(1), tunnel_connection.accept_bi())
+            .await
+            .map_err(|_| timeout_error("strict PROXY Visitor should reach the Tunnel"))?
+            .map_err(io::Error::other)?;
+        let forwarded_addresses = crate::proxy_protocol::read_proxy_v2(&mut recv)
+            .await
+            .map_err(io::Error::other)?;
+        assert_eq!(forwarded_addresses, addresses);
+        let forwarded_tls = timeout(
+            Duration::from_secs(1),
+            recv.read_to_end(client_hello.len() + 1),
+        )
+        .await
+        .map_err(|_| timeout_error("Tunnel should receive the Visitor ClientHello"))?
+        .map_err(io::Error::other)?;
+        assert_eq!(forwarded_tls, client_hello);
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
         Ok(())
     }
 
     #[tokio::test]
     async fn releases_pre_routing_capacity_before_forwarded_visitor_finishes() -> io::Result<()> {
-        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await?;
         let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
             max_pending_visitors: 1,
             max_pending_visitors_per_source: 1,
             ..ServerAdmissionLimits::for_test()
         });
-        let source = std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-        let permit = policy
-            .try_admit_visitor(source)
-            .expect("visitor should fit");
+        let (intake, tunnel_connection) =
+            configured_intake_with_active_tunnel_connection_and_policy(policy.clone()).await?;
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
-        let router_task = tokio::spawn(async move {
-            let (visitor_stream, _) = listener.accept().await?;
-            router
-                .handle_admitted(visitor_stream, Duration::from_secs(5), permit)
-                .await
-        });
+        let intake_task = spawn_intake_task(listener, intake);
 
         let mut visitor = TcpStream::connect(visitor_addr).await?;
+        let source = visitor.local_addr()?.ip();
         visitor
             .write_all(&build_client_hello("app.example.test")?)
             .await?;
@@ -645,9 +647,9 @@ mod tests {
         visitor.shutdown().await?;
         drop(send);
         drop(recv);
-        router_task
+        intake_task
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|error| join_error("intake task failed", error))??;
         Ok(())
     }
 
@@ -658,7 +660,7 @@ mod tests {
             max_pending_visitors_per_source: 1,
             ..ServerAdmissionLimits::for_test()
         });
-        let router = VisitorStreamHandler::new_with_proxy(
+        let intake = VisitorIntake::new_with_proxy(
             server_hostname("tunnel.example.test"),
             TunnelRegistry::single(vec![public_hostname("app.example.test")])?,
             None,
@@ -673,14 +675,7 @@ mod tests {
         };
         let first_listener = TcpListener::bind(localhost(0)).await?;
         let first_addr = first_listener.local_addr()?;
-        let first_permit = policy.try_admit_visitor_global().unwrap();
-        let first_router = router.clone();
-        let first_task = tokio::spawn(async move {
-            let (visitor_stream, _) = first_listener.accept().await?;
-            first_router
-                .handle_admitted(visitor_stream, Duration::from_secs(5), first_permit)
-                .await
-        });
+        let first_task = spawn_intake_task(first_listener, intake.clone());
 
         let mut first_visitor = TcpStream::connect(first_addr).await?;
         let mut partial_intake = addresses.encode_proxy_v2();
@@ -690,13 +685,7 @@ mod tests {
 
         let second_listener = TcpListener::bind(localhost(0)).await?;
         let second_addr = second_listener.local_addr()?;
-        let second_permit = policy.try_admit_visitor_global().unwrap();
-        let second_task = tokio::spawn(async move {
-            let (visitor_stream, _) = second_listener.accept().await?;
-            router
-                .handle_admitted(visitor_stream, Duration::from_secs(5), second_permit)
-                .await
-        });
+        let second_task = spawn_intake_task(second_listener, intake);
         let mut second_visitor = TcpStream::connect(second_addr).await?;
         second_visitor.write_all(&partial_intake).await?;
         let mut byte = [0_u8; 1];
@@ -712,10 +701,10 @@ mod tests {
         drop(first_visitor);
         first_task
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|error| join_error("intake task failed", error))??;
         second_task
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|error| join_error("intake task failed", error))??;
         Ok(())
     }
 
@@ -737,7 +726,7 @@ mod tests {
             max_active_routed_streams: 1,
             ..ServerAdmissionLimits::for_test()
         });
-        let router = VisitorStreamHandler::new(
+        let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry.clone(),
             None,
@@ -746,7 +735,7 @@ mod tests {
 
         let first_listener = TcpListener::bind(localhost(0)).await?;
         let first_addr = first_listener.local_addr()?;
-        let first_task = spawn_router_task(first_listener, router.clone());
+        let first_task = spawn_intake_task(first_listener, intake.clone());
 
         let mut established = TcpStream::connect(first_addr).await?;
         let client_hello = build_client_hello("app.example.test")?;
@@ -791,14 +780,23 @@ mod tests {
         drop(tunnel_send);
         drop(tunnel_recv);
         established.shutdown().await?;
-        let _ = timeout(Duration::from_secs(1), first_task).await;
+        first_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+        timeout(Duration::from_secs(1), async {
+            while registry.tracked_visitor_stream_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| timeout_error("finished Visitor should be untracked"))?;
         assert_eq!(registry.tracked_visitor_stream_count(), 0);
         assert!(policy.try_admit_active_routed_stream().is_ok());
 
         // Recovery: a new Visitor can be admitted after the established stream exits.
         let recovery_listener = TcpListener::bind(localhost(0)).await?;
         let recovery_addr = recovery_listener.local_addr()?;
-        let recovery_task = spawn_router_task(recovery_listener, router);
+        let recovery_task = spawn_intake_task(recovery_listener, intake);
         let mut recovered = TcpStream::connect(recovery_addr).await?;
         recovered.write_all(&client_hello).await?;
         recovered.shutdown().await?;
@@ -825,81 +823,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_bi_cancellation_releases_pending_stream_open_capacity() -> io::Result<()> {
-        let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRegistry::configured(
-            &server_hostname("Tunnel.Example.Test."),
-            &[ServerTunnelConfig {
-                id: None,
-                public_hostnames: vec![public_hostname("App.Example.Test.")],
-                authorized_client_identities: vec![client_identity.client_identity.clone()],
-            }],
-        )?;
-        let fixture =
-            TunnelConnectionFixture::connect_with_bidi_credit(&client_identity, 1).await?;
-        registry.register(fixture.server_connection.clone()).await;
-        let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
-            open_bi_timeout: Duration::from_secs(5),
-            max_pending_stream_opens: 1,
-            ..ServerAdmissionLimits::for_test()
-        });
-        let router = VisitorStreamHandler::new(
-            server_hostname("Tunnel.Example.Test."),
-            registry,
-            None,
-            policy.clone(),
-        )?;
-
-        let (_held_send, _held_recv) =
-            timeout(Duration::from_secs(1), fixture.server_connection.open_bi())
-                .await
-                .map_err(|_| timeout_error("first open_bi should succeed"))?
-                .map_err(io::Error::other)?;
-
-        let listener = TcpListener::bind(localhost(0)).await?;
-        let visitor_addr = listener.local_addr()?;
-        let router_task = tokio::spawn(async move {
-            let (visitor_stream, _) = listener.accept().await?;
-            router.handle(visitor_stream).await
-        });
-
-        let mut visitor = TcpStream::connect(visitor_addr).await?;
-        visitor
-            .write_all(&build_client_hello("app.example.test")?)
-            .await?;
-
-        // Wait until pending-open capacity is held by the stalled open_bi.
-        timeout(Duration::from_secs(1), async {
-            loop {
-                if policy.try_admit_pending_stream_open().is_err() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(|_| timeout_error("pending open should be held while open_bi waits"))?;
-
-        router_task.abort();
-        let _ = router_task.await;
-        drop(visitor);
-
-        timeout(Duration::from_secs(1), async {
-            loop {
-                if policy.try_admit_pending_stream_open().is_ok() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(|_| {
-            timeout_error("aborting the visitor task must release pending-open capacity")
-        })?;
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn pending_stream_open_saturation_rejects_new_visitors_then_recovers() -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
@@ -919,7 +842,7 @@ mod tests {
         let held_pending = policy
             .try_admit_pending_stream_open()
             .expect("pending open should fit");
-        let router = VisitorStreamHandler::new(
+        let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry,
             None,
@@ -928,7 +851,7 @@ mod tests {
 
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
-        let router_task = spawn_router_task(listener, router);
+        let intake_task = spawn_intake_task(listener, intake);
 
         let mut visitor = TcpStream::connect(visitor_addr).await?;
         visitor
@@ -951,9 +874,9 @@ mod tests {
             .await
             .map_err(|_| timeout_error("visitor should observe a dropped connection"))??;
         assert_eq!(read, 0);
-        router_task
+        intake_task
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|error| join_error("intake task failed", error))??;
 
         drop(held_pending);
         assert!(policy.try_admit_pending_stream_open().is_ok());
@@ -981,7 +904,7 @@ mod tests {
         let held_active = policy
             .try_admit_active_routed_stream()
             .expect("active stream should fit");
-        let router = VisitorStreamHandler::new(
+        let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry.clone(),
             None,
@@ -990,7 +913,7 @@ mod tests {
 
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
-        let router_task = spawn_router_task(listener, router);
+        let intake_task = spawn_intake_task(listener, intake);
 
         let mut visitor = TcpStream::connect(visitor_addr).await?;
         visitor
@@ -1004,9 +927,9 @@ mod tests {
         )
         .await;
 
-        router_task
+        intake_task
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|error| join_error("intake task failed", error))??;
         assert_eq!(registry.tracked_visitor_stream_count(), 0);
 
         drop(held_active);
@@ -1034,7 +957,7 @@ mod tests {
             max_pending_stream_opens: 1,
             ..ServerAdmissionLimits::for_test()
         });
-        let router = VisitorStreamHandler::new(
+        let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry,
             None,
@@ -1050,7 +973,7 @@ mod tests {
 
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
-        let router_task = spawn_router_task(listener, router);
+        let intake_task = spawn_intake_task(listener, intake);
 
         let mut visitor = TcpStream::connect(visitor_addr).await?;
         visitor
@@ -1058,9 +981,9 @@ mod tests {
             .await?;
         visitor.shutdown().await?;
 
-        router_task
+        intake_task
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|error| join_error("intake task failed", error))??;
 
         // Pending-open capacity must recover after the deadline rejects the waiter.
         let recovered = timeout(Duration::from_secs(1), async {
@@ -1080,38 +1003,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_releases_zero_byte_pre_routing_capacity() -> io::Result<()> {
-        let router = VisitorStreamHandler::new(
-            server_hostname("tunnel.example.test"),
-            TunnelRegistry::single(vec![public_hostname("app.example.test")])?,
-            None,
-            test_admission_policy(),
-        )?;
+    async fn client_hello_deadline_releases_intake_capacity() -> io::Result<()> {
         let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
+            client_hello_timeout: Duration::from_millis(50),
             max_pending_visitors: 1,
             max_pending_visitors_per_source: 1,
             ..ServerAdmissionLimits::for_test()
         });
-        let source = std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-        let permit = policy
-            .try_admit_visitor(source)
-            .expect("visitor should fit");
-        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let intake = VisitorIntake::new(
+            server_hostname("tunnel.example.test"),
+            TunnelRegistry::single(vec![public_hostname("app.example.test")])?,
+            None,
+            policy.clone(),
+        )?;
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
-        let shutdown_for_task = shutdown.clone();
-        let router_task = tokio::spawn(async move {
-            let (visitor_stream, _) = listener.accept().await?;
-            router
-                .handle_admitted_until(
-                    visitor_stream,
-                    Duration::from_secs(5),
-                    permit,
-                    shutdown_for_task.notified(),
-                )
-                .await
-        });
-        let _visitor = TcpStream::connect(visitor_addr).await?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        let source = visitor.local_addr()?.ip();
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
 
         assert!(matches!(
             policy.try_admit_visitor(source),
@@ -1120,11 +1032,66 @@ mod tests {
                 active_work: 1,
             })
         ));
-        shutdown.notify_one();
-        router_task
+        let mut byte = [0_u8; 1];
+        let read = timeout(Duration::from_secs(1), visitor.read(&mut byte))
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|_| timeout_error("deadline should reject zero-byte Visitor intake"))?;
+        match read {
+            Ok(0) => {}
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            other => panic!("expected deadline rejection, got {other:?}"),
+        }
         assert!(policy.try_admit_visitor(source).is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_zero_byte_pre_routing_capacity() -> io::Result<()> {
+        let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
+            max_pending_visitors: 1,
+            max_pending_visitors_per_source: 1,
+            ..ServerAdmissionLimits::for_test()
+        });
+        let intake = VisitorIntake::new(
+            server_hostname("tunnel.example.test"),
+            TunnelRegistry::single(vec![public_hostname("app.example.test")])?,
+            None,
+            policy.clone(),
+        )?;
+        let source = std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let shutdown =
+            crate::shutdown::OrderlyShutdown::new(Duration::from_secs(5), Duration::from_millis(1));
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let shutdown_for_task = shutdown.clone();
+        let intake_task = tokio::spawn(async move {
+            let (visitor_stream, _) = listener.accept().await?;
+            intake.accept(visitor_stream, Some(shutdown_for_task));
+            Ok::<_, io::Error>(())
+        });
+        let _visitor = TcpStream::connect(visitor_addr).await?;
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+
+        assert!(matches!(
+            policy.try_admit_visitor(source),
+            Err(crate::server::admission::AdmissionRejection {
+                limit: AdmissionLimit::VisitorsGlobal,
+                active_work: 1,
+            })
+        ));
+        shutdown.begin_fast();
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if policy.try_admit_visitor(source).is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| timeout_error("shutdown should release Visitor intake capacity"))?;
         Ok(())
     }
 
@@ -1132,7 +1099,7 @@ mod tests {
     async fn serves_acme_tls_for_the_server_hostname() -> io::Result<()> {
         let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
         let (certificate, public_tls_config) = make_public_tls_config("tunnel.example.test")?;
-        let router = VisitorStreamHandler::new(
+        let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry,
             Some(public_tls_config),
@@ -1141,7 +1108,7 @@ mod tests {
 
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
-        let router_task = spawn_router_task(listener, router);
+        let intake_task = spawn_intake_task(listener, intake);
 
         let connector = TlsConnector::from(make_client_tls_config(
             &certificate,
@@ -1160,9 +1127,9 @@ mod tests {
         .map_err(io::Error::other)?;
 
         drop(tls_stream);
-        router_task
+        intake_task
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|error| join_error("intake task failed", error))??;
         Ok(())
     }
 
@@ -1175,7 +1142,7 @@ mod tests {
                 let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
                 let (certificate, public_tls_config) =
                     make_public_tls_config("tunnel.example.test")?;
-                let router = VisitorStreamHandler::new(
+                let intake = VisitorIntake::new(
                     server_hostname("Tunnel.Example.Test."),
                     registry,
                     Some(public_tls_config),
@@ -1184,7 +1151,7 @@ mod tests {
 
                 let listener = TcpListener::bind(localhost(0)).await?;
                 let visitor_addr = listener.local_addr()?;
-                let router_task = spawn_router_task(listener, router);
+                let intake_task = spawn_intake_task(listener, intake);
 
                 let connector = TlsConnector::from(make_client_tls_config(
                     &certificate,
@@ -1204,9 +1171,9 @@ mod tests {
                 .map_err(io::Error::other)?;
 
                 drop(tls_stream);
-                router_task
+                intake_task
                     .await
-                    .map_err(|error| join_error("router task failed", error))??;
+                    .map_err(|error| join_error("intake task failed", error))??;
                 Ok(())
             },
         )
@@ -1225,10 +1192,10 @@ mod tests {
     #[tokio::test]
     async fn drops_application_traffic_for_the_server_hostname_without_opening_a_tunnel_stream()
     -> io::Result<()> {
-        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await?;
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
 
         assert_drop_without_opening_a_tunnel_stream(
-            router,
+            intake,
             build_client_hello("tunnel.example.test")?,
             Some(tunnel_connection),
         )
@@ -1237,10 +1204,10 @@ mod tests {
 
     #[tokio::test]
     async fn drops_invalid_tls_without_opening_a_tunnel_stream() -> io::Result<()> {
-        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await?;
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
 
         assert_drop_without_opening_a_tunnel_stream(
-            router,
+            intake,
             b"not tls".to_vec(),
             Some(tunnel_connection),
         )
@@ -1249,10 +1216,10 @@ mod tests {
 
     #[tokio::test]
     async fn drops_client_hello_without_sni_without_opening_a_tunnel_stream() -> io::Result<()> {
-        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await?;
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
 
         assert_drop_without_opening_a_tunnel_stream(
-            router,
+            intake,
             build_client_hello_for_server_name(ServerName::IpAddress(Ipv4Addr::LOCALHOST.into()))?,
             Some(tunnel_connection),
         )
@@ -1262,10 +1229,10 @@ mod tests {
     #[tokio::test]
     async fn drops_client_hello_with_invalid_sni_without_opening_a_tunnel_stream() -> io::Result<()>
     {
-        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await?;
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
 
         assert_drop_without_opening_a_tunnel_stream(
-            router,
+            intake,
             invalid_sni_client_hello()?,
             Some(tunnel_connection),
         )
@@ -1274,20 +1241,20 @@ mod tests {
 
     #[tokio::test]
     async fn drops_incomplete_client_hello_without_opening_a_tunnel_stream() -> io::Result<()> {
-        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await?;
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
         let mut client_hello = build_client_hello("app.example.test")?;
         client_hello.truncate(10);
 
-        assert_drop_without_opening_a_tunnel_stream(router, client_hello, Some(tunnel_connection))
+        assert_drop_without_opening_a_tunnel_stream(intake, client_hello, Some(tunnel_connection))
             .await
     }
 
     #[tokio::test]
     async fn drops_oversized_client_hello_without_opening_a_tunnel_stream() -> io::Result<()> {
-        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await?;
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
 
         assert_drop_without_opening_a_tunnel_stream(
-            router,
+            intake,
             oversized_client_hello(),
             Some(tunnel_connection),
         )
@@ -1324,22 +1291,22 @@ mod tests {
             unix_family,
             local,
         ] {
-            let (router, tunnel_connection) =
-                configured_proxy_router_with_active_tunnel_connection("127.0.0.0/8").await?;
+            let (intake, tunnel_connection) =
+                configured_proxy_intake_with_active_tunnel_connection("127.0.0.0/8").await?;
             assert_admitted_drop_without_opening_a_tunnel_stream(
-                router,
+                intake,
                 visitor_bytes,
                 tunnel_connection,
             )
             .await?;
         }
 
-        let (router, tunnel_connection) =
-            configured_proxy_router_with_active_tunnel_connection("10.0.0.0/8").await?;
+        let (intake, tunnel_connection) =
+            configured_proxy_intake_with_active_tunnel_connection("10.0.0.0/8").await?;
         let mut valid_but_untrusted = addresses.encode_proxy_v2();
         valid_but_untrusted.extend_from_slice(&build_client_hello("app.example.test")?);
         assert_admitted_drop_without_opening_a_tunnel_stream(
-            router,
+            intake,
             valid_but_untrusted,
             tunnel_connection,
         )
@@ -1349,10 +1316,10 @@ mod tests {
     #[tokio::test]
     async fn drops_unauthorized_public_hostname_without_opening_a_tunnel_stream() -> io::Result<()>
     {
-        let (router, tunnel_connection) = configured_router_with_active_tunnel_connection().await?;
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
 
         assert_drop_without_opening_a_tunnel_stream(
-            router,
+            intake,
             build_client_hello("api.example.test")?,
             Some(tunnel_connection),
         )
@@ -1362,7 +1329,7 @@ mod tests {
     #[tokio::test]
     async fn drops_public_hostname_when_the_tunnel_has_no_active_connection() -> io::Result<()> {
         let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
-        let router = VisitorStreamHandler::new(
+        let intake = VisitorIntake::new(
             server_hostname("tunnel.example.test"),
             registry,
             None,
@@ -1370,7 +1337,7 @@ mod tests {
         )?;
 
         assert_drop_without_opening_a_tunnel_stream(
-            router,
+            intake,
             build_client_hello("app.example.test")?,
             None,
         )
@@ -1394,7 +1361,7 @@ mod tests {
         fixture
             .server_connection
             .close(0_u32.into(), b"closed before visitor handling");
-        let router = VisitorStreamHandler::new(
+        let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry,
             None,
@@ -1402,15 +1369,21 @@ mod tests {
         )?;
 
         assert_drop_without_opening_a_tunnel_stream(
-            router,
+            intake,
             build_client_hello("app.example.test")?,
             Some(fixture.client_connection),
         )
         .await
     }
 
-    async fn configured_router_with_active_tunnel_connection()
-    -> io::Result<(VisitorStreamHandler, Connection)> {
+    async fn configured_intake_with_active_tunnel_connection()
+    -> io::Result<(VisitorIntake, Connection)> {
+        configured_intake_with_active_tunnel_connection_and_policy(test_admission_policy()).await
+    }
+
+    async fn configured_intake_with_active_tunnel_connection_and_policy(
+        policy: ServerAdmissionPolicy,
+    ) -> io::Result<(VisitorIntake, Connection)> {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
             &server_hostname("Tunnel.Example.Test."),
@@ -1422,19 +1395,19 @@ mod tests {
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         registry.register(fixture.server_connection.clone()).await;
-        let router = VisitorStreamHandler::new(
+        let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry,
             None,
-            test_admission_policy(),
+            policy,
         )?;
 
-        Ok((router, fixture.client_connection))
+        Ok((intake, fixture.client_connection))
     }
 
-    async fn configured_proxy_router_with_active_tunnel_connection(
+    async fn configured_proxy_intake_with_active_tunnel_connection(
         trusted_network: &str,
-    ) -> io::Result<(VisitorStreamHandler, Connection)> {
+    ) -> io::Result<(VisitorIntake, Connection)> {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
             &server_hostname("Tunnel.Example.Test."),
@@ -1446,7 +1419,7 @@ mod tests {
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         registry.register(fixture.server_connection.clone()).await;
-        let router = VisitorStreamHandler::new_with_proxy(
+        let intake = VisitorIntake::new_with_proxy(
             server_hostname("Tunnel.Example.Test."),
             registry,
             None,
@@ -1455,24 +1428,17 @@ mod tests {
             vec![trusted_network.parse().unwrap()],
         )?;
 
-        Ok((router, fixture.client_connection))
+        Ok((intake, fixture.client_connection))
     }
 
     async fn assert_admitted_drop_without_opening_a_tunnel_stream(
-        router: VisitorStreamHandler,
+        intake: VisitorIntake,
         visitor_bytes: Vec<u8>,
         tunnel_connection: Connection,
     ) -> io::Result<()> {
-        let policy = router.admission_policy.clone();
-        let permit = policy.try_admit_visitor_global().unwrap();
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
-        let router_task = tokio::spawn(async move {
-            let (visitor_stream, _) = listener.accept().await?;
-            router
-                .handle_admitted(visitor_stream, Duration::from_secs(1), permit)
-                .await
-        });
+        let intake_task = spawn_intake_task(listener, intake);
 
         let mut visitor = TcpStream::connect(visitor_addr).await?;
         visitor.write_all(&visitor_bytes).await?;
@@ -1480,7 +1446,7 @@ mod tests {
 
         match timeout(Duration::from_millis(100), tunnel_connection.accept_bi()).await {
             Err(_) | Ok(Err(_)) => {}
-            Ok(Ok(_)) => panic!("router unexpectedly opened a tunnel stream"),
+            Ok(Ok(_)) => panic!("intake unexpectedly opened a tunnel stream"),
         }
         let mut byte = [0_u8; 1];
         match visitor.read(&mut byte).await {
@@ -1488,20 +1454,20 @@ mod tests {
             Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
             other => panic!("expected rejected connection, got {other:?}"),
         }
-        router_task
+        intake_task
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|error| join_error("intake task failed", error))??;
         Ok(())
     }
 
     async fn assert_drop_without_opening_a_tunnel_stream(
-        router: VisitorStreamHandler,
+        intake: VisitorIntake,
         visitor_bytes: Vec<u8>,
         tunnel_connection: Option<Connection>,
     ) -> io::Result<()> {
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
-        let router_task = spawn_router_task(listener, router);
+        let intake_task = spawn_intake_task(listener, intake);
 
         let mut visitor = TcpStream::connect(visitor_addr).await?;
         visitor.write_all(&visitor_bytes).await?;
@@ -1510,7 +1476,7 @@ mod tests {
         if let Some(tunnel_connection) = tunnel_connection {
             match timeout(Duration::from_millis(200), tunnel_connection.accept_bi()).await {
                 Err(_) | Ok(Err(_)) => {}
-                Ok(Ok(_)) => panic!("router unexpectedly opened a tunnel stream"),
+                Ok(Ok(_)) => panic!("intake unexpectedly opened a tunnel stream"),
             }
         }
 
@@ -1520,22 +1486,23 @@ mod tests {
             .map_err(|_| timeout_error("visitor should observe a dropped connection"))??;
         assert_eq!(read, 0);
 
-        router_task
+        intake_task
             .await
-            .map_err(|error| join_error("router task failed", error))??;
+            .map_err(|error| join_error("intake task failed", error))??;
         Ok(())
     }
 
-    fn spawn_router_task(
+    fn spawn_intake_task(
         listener: TcpListener,
-        router: VisitorStreamHandler,
+        intake: VisitorIntake,
     ) -> JoinHandle<io::Result<()>> {
         tokio::spawn(async move {
             let (visitor_stream, _) =
                 timeout(Duration::from_secs(1), listener.accept())
                     .await
-                    .map_err(|_| timeout_error("router should accept a visitor connection"))??;
-            router.handle(visitor_stream).await
+                    .map_err(|_| timeout_error("intake should accept a visitor connection"))??;
+            intake.accept(visitor_stream, None);
+            Ok(())
         })
     }
 

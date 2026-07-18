@@ -11,12 +11,12 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::acme::ACME_TLS_ALPN;
 use crate::client::{ClientStreamLimits, ServiceSelector, TerminationTlsConfigs};
-use crate::client_hello::{ParsedClientHello, read_client_hello};
+use crate::client_hello::ParsedClientHello;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
+use crate::tunnel_framing::read_tunnel_stream;
 use crate::{
     ClientTlsMode, ServiceConfig, proxy::proxy_stream_error_code, proxy::proxy_tcp_over_quic,
-    proxy_protocol::read_proxy_v2,
 };
 
 #[derive(Clone)]
@@ -41,11 +41,8 @@ impl TunnelConnectionStreamHandler {
 
     pub(crate) async fn handle(&self, send: SendStream, mut recv: RecvStream) -> io::Result<()> {
         let intake = tokio::time::timeout(self.stream_limits.client_hello_timeout, async {
-            let addresses = read_proxy_v2(&mut recv).await.map_err(io::Error::other)?;
-            let hello = read_client_hello(&mut recv)
-                .await
-                .map_err(io::Error::other)?;
-            Ok::<_, io::Error>((addresses, hello))
+            let decoded = read_tunnel_stream(&mut recv).await?;
+            Ok::<_, io::Error>((decoded.addresses, decoded.client_hello))
         })
         .await;
         let (addresses, parsed_client_hello) = match intake {
@@ -422,9 +419,7 @@ mod tests {
             source: "192.0.2.10:12345".parse().unwrap(),
             destination: "198.51.100.20:443".parse().unwrap(),
         };
-        let mut framed = addresses.encode_proxy_v2();
-        framed.extend_from_slice(bytes);
-        framed
+        crate::tunnel_framing::encode_tunnel_stream(addresses, bytes)
     }
 
     static LOG_CAPTURE_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());

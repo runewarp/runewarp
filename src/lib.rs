@@ -25,6 +25,7 @@ mod shutdown;
 mod startup;
 mod tls_material;
 mod trust;
+mod tunnel_framing;
 mod tunnel_id;
 
 pub use client::{

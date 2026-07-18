@@ -8,12 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use futures_util::future::BoxFuture;
 use runewarp::{
     AddressController, AddressWorkerDial, AddressWorkerFactory, AddressWorkerHooks,
-    ClientAdmission, ClientInstancePrep, EstablishOutcome, PreparedClient, ServerAddress,
-    ShutdownMode,
+    ClientAdmission, ClientInstancePrep, ConnectedTunnelFailure, EstablishOutcome, PreparedClient,
+    ServerAddress, ShutdownMode,
 };
 use tokio::net::lookup_host;
-
-use runewarp::reconnect_policy::ReconnectPolicy;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RetryDisposition {
@@ -238,39 +236,44 @@ impl AddressWorkerDial for ProductionAddressDial {
 
             let configured = dial_target.configured_server_addr.clone();
             let resolved = dial_target.resolved_server_addr;
-            EstablishOutcome::Connected {
+            EstablishOutcome::ConnectedWithRetryReporter {
                 configured_server_addr: dial_target.configured_server_addr,
                 run: Box::new(move |process_shutdown| {
                     Box::pin(async move {
                         match client.run_until_shutdown(process_shutdown).await {
                             Ok(()) => Ok(()),
                             Err(error) => {
-                                let mut reconnect_policy = ReconnectPolicy::new();
-                                let next_attempt_kind =
-                                    client_tunnel_attempt_kind(reconnect_policy.is_fresh());
-                                let retry = reconnect_policy.next_retry();
-                                if is_unauthorized_client_connection_error(&error) {
-                                    runewarp::runtime_log::client_tunnel_unauthorized(
-                                        next_attempt_kind,
-                                        &configured,
-                                        retry.display_delay_secs,
-                                        &error.to_string(),
-                                    );
-                                } else if is_clean_client_tunnel_close(&error) {
-                                    runewarp::runtime_log::client_tunnel_closed(
-                                        &configured,
-                                        resolved,
-                                        retry.display_delay_secs,
-                                    );
-                                } else {
-                                    runewarp::runtime_log::client_tunnel_disconnected(
-                                        &configured,
-                                        resolved,
-                                        retry.display_delay_secs,
-                                        &error.to_string(),
-                                    );
-                                }
-                                Err(error.to_string())
+                                let unauthorized = is_unauthorized_client_connection_error(&error);
+                                let clean = is_clean_client_tunnel_close(&error);
+                                let message = error.to_string();
+                                let reported_message = message.clone();
+                                Err(ConnectedTunnelFailure::with_delay_reporter(
+                                    message,
+                                    move |delay_secs| {
+                                        let next_attempt_kind = client_tunnel_attempt_kind(true);
+                                        if unauthorized {
+                                            runewarp::runtime_log::client_tunnel_unauthorized(
+                                                next_attempt_kind,
+                                                &configured,
+                                                delay_secs,
+                                                &reported_message,
+                                            );
+                                        } else if clean {
+                                            runewarp::runtime_log::client_tunnel_closed(
+                                                &configured,
+                                                resolved,
+                                                delay_secs,
+                                            );
+                                        } else {
+                                            runewarp::runtime_log::client_tunnel_disconnected(
+                                                &configured,
+                                                resolved,
+                                                delay_secs,
+                                                &reported_message,
+                                            );
+                                        }
+                                    },
+                                ))
                             }
                         }
                     })

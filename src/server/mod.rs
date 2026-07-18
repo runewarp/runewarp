@@ -29,11 +29,11 @@ use crate::{
 };
 
 use self::admission::{
-    AcceptBackoff, AdmissionLimit, AdmissionRejection, ServerAdmissionLimits, ServerAdmissionPolicy,
+    AcceptBackoff, AdmissionLimit, ServerAdmissionLimits, ServerAdmissionPolicy,
 };
 use self::readiness::ReadinessGate;
 use self::tunnel_registry::{TunnelRegistrationOutcome, TunnelRegistry};
-use self::visitor_stream::VisitorStreamHandler;
+use self::visitor_stream::VisitorIntake;
 
 pub const QUIC_CLOSE_FLUSH_DURATION: Duration = Duration::from_millis(100);
 
@@ -87,7 +87,7 @@ pub struct Server {
     tunnel_endpoint: Endpoint,
     readiness_probe: Option<ReadinessProbe>,
     tunnel_registry: TunnelRegistry,
-    visitor_stream_handler: VisitorStreamHandler,
+    visitor_intake: VisitorIntake,
     authorization_adapter: ServerAuthorizationAdapter,
     fatal: FatalSignal,
     admission_policy: ServerAdmissionPolicy,
@@ -259,7 +259,7 @@ impl Server {
             config.authorization,
             admission_policy.tunnel_connections(),
         )?;
-        let visitor_stream_handler = VisitorStreamHandler::new_with_proxy(
+        let visitor_intake = VisitorIntake::new_with_proxy(
             config.server_hostname.clone(),
             tunnel_registry.clone(),
             config.public_tls_config.clone(),
@@ -318,7 +318,7 @@ impl Server {
             tunnel_endpoint,
             readiness_probe,
             tunnel_registry,
-            visitor_stream_handler,
+            visitor_intake,
             authorization_adapter,
             fatal,
             admission_policy,
@@ -350,7 +350,7 @@ impl Server {
             tunnel_endpoint,
             readiness_probe,
             tunnel_registry,
-            visitor_stream_handler,
+            visitor_intake,
             authorization_adapter: _,
             fatal,
             admission_policy,
@@ -383,7 +383,7 @@ impl Server {
                         accept_result,
                         &mut accept_backoff,
                         &admission_policy,
-                        &visitor_stream_handler,
+                        &visitor_intake,
                         None,
                     ) {
                         Ok(not_before) => public_accept_not_before = not_before,
@@ -432,7 +432,7 @@ impl Server {
             tunnel_endpoint,
             readiness_probe,
             tunnel_registry,
-            visitor_stream_handler,
+            visitor_intake,
             authorization_adapter: _,
             fatal,
             admission_policy,
@@ -469,7 +469,7 @@ impl Server {
                         accept_result,
                         &mut accept_backoff,
                         &admission_policy,
-                        &visitor_stream_handler,
+                        &visitor_intake,
                         Some(shutdown.clone()),
                     ) {
                         Ok(not_before) => public_accept_not_before = not_before,
@@ -547,21 +547,15 @@ fn process_public_accept(
     accept_result: io::Result<(tokio::net::TcpStream, SocketAddr)>,
     accept_backoff: &mut AcceptBackoff,
     admission_policy: &ServerAdmissionPolicy,
-    visitor_stream_handler: &VisitorStreamHandler,
+    visitor_intake: &VisitorIntake,
     shutdown: Option<OrderlyShutdown>,
 ) -> io::Result<Option<tokio::time::Instant>> {
     match accept_result {
-        Ok((visitor_stream, peer_address)) => {
+        Ok((visitor_stream, _peer_address)) => {
             if accept_backoff.on_success() {
                 runtime_log::server_public_listener_accept_recovered();
             }
-            admit_visitor_connection(
-                admission_policy,
-                visitor_stream_handler,
-                visitor_stream,
-                peer_address,
-                shutdown,
-            );
+            visitor_intake.accept(visitor_stream, shutdown);
             Ok(None)
         }
         Err(error) => {
@@ -576,55 +570,6 @@ fn process_public_accept(
     }
 }
 
-fn admit_visitor_connection(
-    admission_policy: &ServerAdmissionPolicy,
-    visitor_stream_handler: &VisitorStreamHandler,
-    visitor_stream: tokio::net::TcpStream,
-    _peer_address: SocketAddr,
-    shutdown: Option<OrderlyShutdown>,
-) {
-    let permit = match admission_policy.try_admit_visitor_global() {
-        Ok(permit) => permit,
-        Err(rejection) => {
-            drop(visitor_stream);
-            report_admission_saturation(admission_policy, rejection);
-            return;
-        }
-    };
-    report_admission_recovery(
-        admission_policy,
-        &[
-            AdmissionLimit::VisitorsGlobal,
-            AdmissionLimit::VisitorSource,
-        ],
-    );
-    let visitor_stream_handler = visitor_stream_handler.clone();
-    let client_hello_timeout = admission_policy.limits().client_hello_timeout;
-    match shutdown {
-        Some(shutdown) => {
-            tokio::spawn(async move {
-                let _ = visitor_stream_handler
-                    .handle_admitted_until(
-                        visitor_stream,
-                        client_hello_timeout,
-                        permit,
-                        async move {
-                            let _ = shutdown.wait_started().await;
-                        },
-                    )
-                    .await;
-            });
-        }
-        None => {
-            tokio::spawn(async move {
-                let _ = visitor_stream_handler
-                    .handle_admitted(visitor_stream, client_hello_timeout, permit)
-                    .await;
-            });
-        }
-    }
-}
-
 fn admit_tunnel_handshake(
     admission_policy: &ServerAdmissionPolicy,
     tunnel_registry: TunnelRegistry,
@@ -634,11 +579,11 @@ fn admit_tunnel_handshake(
         Ok(permit) => permit,
         Err(rejection) => {
             incoming.refuse();
-            report_admission_saturation(admission_policy, rejection);
+            admission_policy.report_saturation(rejection);
             return;
         }
     };
-    report_admission_recovery(admission_policy, &[AdmissionLimit::Handshakes]);
+    admission_policy.report_recovery(&[AdmissionLimit::Handshakes]);
     let admission_policy = admission_policy.clone();
     tokio::spawn(async move {
         register_tunnel_connection(
@@ -649,42 +594,6 @@ fn admit_tunnel_handshake(
         )
         .await;
     });
-}
-
-fn report_admission_saturation(
-    admission_policy: &ServerAdmissionPolicy,
-    rejection: AdmissionRejection,
-) {
-    if let Some(limit_value) = admission_policy.limit_value(rejection.limit)
-        && admission_policy.should_log_saturation(rejection.limit)
-    {
-        runtime_log::server_admission_saturated(
-            admission_limit_name(rejection.limit),
-            rejection.active_work,
-            limit_value,
-        );
-    }
-}
-
-fn report_admission_recovery(admission_policy: &ServerAdmissionPolicy, limits: &[AdmissionLimit]) {
-    for limit in limits {
-        if admission_policy.take_recovered(*limit) {
-            runtime_log::server_admission_recovered(admission_limit_name(*limit));
-        }
-    }
-}
-
-fn admission_limit_name(limit: AdmissionLimit) -> &'static str {
-    match limit {
-        AdmissionLimit::VisitorsGlobal => "visitor-global",
-        AdmissionLimit::VisitorSource => "visitor-source",
-        AdmissionLimit::Handshakes => "quic-handshake-global",
-        AdmissionLimit::PendingStreamOpens => "pending-stream-open",
-        AdmissionLimit::ActiveRoutedStreams => "active-routed-stream",
-        AdmissionLimit::TunnelConnectionsGlobal => "tunnel-connection-global",
-        AdmissionLimit::TunnelConnectionsPerTunnel => "tunnel-connection-per-tunnel",
-        AdmissionLimit::TunnelConnectionsPerIdentity => "tunnel-connection-per-client-identity",
-    }
 }
 
 async fn wait_for_no_active_streams(tunnel_registry: &TunnelRegistry) {
@@ -721,16 +630,13 @@ async fn register_tunnel_connection(
             }
             match tunnel_registry.register(connection).await {
                 TunnelRegistrationOutcome::Rejected(rejection) => {
-                    report_admission_saturation(&admission_policy, rejection);
+                    admission_policy.report_saturation(rejection);
                 }
-                TunnelRegistrationOutcome::Registered => report_admission_recovery(
-                    &admission_policy,
-                    &[
-                        AdmissionLimit::TunnelConnectionsGlobal,
-                        AdmissionLimit::TunnelConnectionsPerTunnel,
-                        AdmissionLimit::TunnelConnectionsPerIdentity,
-                    ],
-                ),
+                TunnelRegistrationOutcome::Registered => admission_policy.report_recovery(&[
+                    AdmissionLimit::TunnelConnectionsGlobal,
+                    AdmissionLimit::TunnelConnectionsPerTunnel,
+                    AdmissionLimit::TunnelConnectionsPerIdentity,
+                ]),
                 TunnelRegistrationOutcome::Closed => {}
             }
         }

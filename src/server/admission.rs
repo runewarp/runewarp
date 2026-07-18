@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::ClientIdentity;
+use crate::{ClientIdentity, runtime_log};
 
 const ACCEPT_BACKOFF_INITIAL: Duration = Duration::from_millis(10);
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
@@ -64,6 +64,21 @@ pub(crate) enum AdmissionLimit {
     TunnelConnectionsGlobal,
     TunnelConnectionsPerTunnel,
     TunnelConnectionsPerIdentity,
+}
+
+impl AdmissionLimit {
+    fn name(self) -> &'static str {
+        match self {
+            Self::VisitorsGlobal => "visitor-global",
+            Self::VisitorSource => "visitor-source",
+            Self::Handshakes => "quic-handshake-global",
+            Self::PendingStreamOpens => "pending-stream-open",
+            Self::ActiveRoutedStreams => "active-routed-stream",
+            Self::TunnelConnectionsGlobal => "tunnel-connection-global",
+            Self::TunnelConnectionsPerTunnel => "tunnel-connection-per-tunnel",
+            Self::TunnelConnectionsPerIdentity => "tunnel-connection-per-client-identity",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,6 +202,26 @@ impl ServerAdmissionPolicy {
     pub(crate) fn take_recovered(&self, limit: AdmissionLimit) -> bool {
         self.log_gate
             .take_recovered(AdmissionLogOutcome::Saturation(limit))
+    }
+
+    pub(crate) fn report_saturation(&self, rejection: AdmissionRejection) {
+        if let Some(limit_value) = self.limit_value(rejection.limit)
+            && self.should_log_saturation(rejection.limit)
+        {
+            runtime_log::server_admission_saturated(
+                rejection.limit.name(),
+                rejection.active_work,
+                limit_value,
+            );
+        }
+    }
+
+    pub(crate) fn report_recovery(&self, limits: &[AdmissionLimit]) {
+        for limit in limits {
+            if self.take_recovered(*limit) {
+                runtime_log::server_admission_recovered(limit.name());
+            }
+        }
     }
 
     pub(crate) fn should_log_public_accept_retry(&self) -> bool {

@@ -64,6 +64,15 @@ impl Drop for ActiveStreamGuard {
     }
 }
 
+#[cfg(test)]
+impl ActiveStreamGuard {
+    pub(crate) fn for_test() -> Self {
+        Self {
+            active_streams: Arc::new(AtomicUsize::new(1)),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ActiveClientPool {
     members: Arc<RwLock<Vec<PoolMember>>>,
@@ -300,15 +309,6 @@ impl ActiveClientPool {
 
     pub(crate) async fn connection_count(&self) -> usize {
         self.members.read().await.len()
-    }
-
-    pub(crate) async fn active_stream_count(&self) -> usize {
-        self.members
-            .read()
-            .await
-            .iter()
-            .map(|member| member.active_streams.load(Ordering::Relaxed))
-            .sum()
     }
 }
 

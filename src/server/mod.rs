@@ -20,6 +20,7 @@ use std::time::Duration;
 use quinn::Endpoint;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 
 use crate::{
     HANDSHAKE_TIMEOUT, ServerHostname,
@@ -203,8 +204,9 @@ impl ReadinessProbe {
         self.gate.clone()
     }
 
-    fn close(self) {
+    async fn close(self) {
         self.task.abort();
+        let _ = self.task.await;
     }
 }
 
@@ -345,66 +347,8 @@ impl Server {
     }
 
     pub async fn run(self) -> io::Result<()> {
-        let Self {
-            public_listener,
-            tunnel_endpoint,
-            readiness_probe,
-            tunnel_registry,
-            visitor_intake,
-            authorization_adapter: _,
-            fatal,
-            admission_policy,
-        } = self;
-        let mut accept_backoff = AcceptBackoff::default();
-        let mut public_accept_not_before = None;
-        loop {
-            match next_server_event(
-                async {
-                    fatal.wait().await;
-                },
-                std::future::pending::<()>(),
-                accept_public_connection(&public_listener, public_accept_not_before),
-                tunnel_endpoint.accept(),
-            )
-            .await
-            {
-                NextServerEvent::Fatal => {
-                    if let Some(readiness_probe) = readiness_probe {
-                        runtime_log::server_readiness_lost(readiness_probe.bind_address());
-                        readiness_probe.close();
-                    }
-                    return Err(io::Error::other(
-                        "unrecoverable server failure after authorization commit",
-                    ));
-                }
-                NextServerEvent::Shutdown => return Ok(()),
-                NextServerEvent::Visitor(accept_result) => {
-                    match process_public_accept(
-                        accept_result,
-                        &mut accept_backoff,
-                        &admission_policy,
-                        &visitor_intake,
-                        None,
-                    ) {
-                        Ok(not_before) => public_accept_not_before = not_before,
-                        Err(error) => {
-                            if let Some(readiness_probe) = readiness_probe {
-                                runtime_log::server_readiness_lost(readiness_probe.bind_address());
-                                readiness_probe.close();
-                            }
-                            return Err(error);
-                        }
-                    }
-                }
-                NextServerEvent::Tunnel(incoming) => {
-                    let Some(incoming) = incoming else {
-                        return Ok(());
-                    };
-
-                    admit_tunnel_handshake(&admission_policy, tunnel_registry.clone(), incoming);
-                }
-            }
-        }
+        let shutdown = OrderlyShutdown::new(Duration::ZERO, QUIC_CLOSE_FLUSH_DURATION);
+        self.run_with_shutdown(&shutdown).await
     }
 
     pub async fn run_until_shutdown<Shutdown>(self, shutdown_signal: Shutdown) -> io::Result<()>
@@ -412,18 +356,19 @@ impl Server {
         Shutdown: Future<Output = ShutdownMode> + Send + 'static,
     {
         let shutdown = OrderlyShutdown::new(Duration::from_secs(60), QUIC_CLOSE_FLUSH_DURATION);
-        let shutdown_trigger = shutdown.clone();
-        tokio::spawn(async move {
-            match shutdown_signal.await {
-                ShutdownMode::Graceful => {
-                    let _ = shutdown_trigger.begin_graceful();
+        let runtime = self.run_with_shutdown(&shutdown);
+        tokio::pin!(runtime);
+        tokio::pin!(shutdown_signal);
+        tokio::select! {
+            result = &mut runtime => result,
+            mode = &mut shutdown_signal => {
+                match mode {
+                    ShutdownMode::Graceful => { let _ = shutdown.begin_graceful(); }
+                    ShutdownMode::Fast => { let _ = shutdown.begin_fast(); }
                 }
-                ShutdownMode::Fast => {
-                    let _ = shutdown_trigger.begin_fast();
-                }
+                runtime.await
             }
-        });
-        self.run_with_shutdown(&shutdown).await
+        }
     }
 
     pub async fn run_with_shutdown(self, shutdown: &OrderlyShutdown) -> io::Result<()> {
@@ -439,6 +384,9 @@ impl Server {
         } = self;
         let mut accept_backoff = AcceptBackoff::default();
         let mut public_accept_not_before = None;
+        let mut handshakes = JoinSet::new();
+        let mut visitor_intakes = JoinSet::new();
+        let mut terminal_error = None;
         loop {
             match next_server_event(
                 async {
@@ -453,15 +401,11 @@ impl Server {
             .await
             {
                 NextServerEvent::Fatal => {
-                    if let Some(readiness_probe) = readiness_probe {
-                        runtime_log::server_readiness_lost(readiness_probe.bind_address());
-                        readiness_probe.close();
-                    }
-                    drop(public_listener);
-                    drop(tunnel_endpoint);
-                    return Err(io::Error::other(
+                    terminal_error = Some(io::Error::other(
                         "unrecoverable server failure after authorization commit",
                     ));
+                    let _ = shutdown.begin_fast();
+                    break;
                 }
                 NextServerEvent::Shutdown => break,
                 NextServerEvent::Visitor(accept_result) => {
@@ -470,26 +414,29 @@ impl Server {
                         &mut accept_backoff,
                         &admission_policy,
                         &visitor_intake,
-                        Some(shutdown.clone()),
+                        shutdown.clone(),
+                        &mut visitor_intakes,
                     ) {
                         Ok(not_before) => public_accept_not_before = not_before,
                         Err(error) => {
-                            if let Some(readiness_probe) = readiness_probe {
-                                runtime_log::server_readiness_lost(readiness_probe.bind_address());
-                                readiness_probe.close();
-                            }
-                            drop(public_listener);
-                            drop(tunnel_endpoint);
-                            return Err(error);
+                            terminal_error = Some(error);
+                            let _ = shutdown.begin_fast();
+                            break;
                         }
                     }
                 }
                 NextServerEvent::Tunnel(incoming) => {
                     let Some(incoming) = incoming else {
-                        return Ok(());
+                        let _ = shutdown.begin_fast();
+                        break;
                     };
 
-                    admit_tunnel_handshake(&admission_policy, tunnel_registry.clone(), incoming);
+                    admit_tunnel_handshake(
+                        &admission_policy,
+                        tunnel_registry.clone(),
+                        incoming,
+                        &mut handshakes,
+                    );
                 }
             }
         }
@@ -500,10 +447,12 @@ impl Server {
         tunnel_registry.stop_accepting_new_work();
         if let Some(readiness_probe) = readiness_probe {
             runtime_log::server_readiness_lost(readiness_probe.bind_address());
-            readiness_probe.close();
+            readiness_probe.close().await;
         }
         drop(public_listener);
         drop(tunnel_endpoint);
+        handshakes.abort_all();
+        while handshakes.join_next().await.is_some() {}
 
         if mode == ShutdownMode::Graceful && shutdown.graceful_shutdown_duration() > Duration::ZERO
         {
@@ -523,8 +472,10 @@ impl Server {
         let active_connections = tunnel_registry.active_connection_count().await;
         runtime_log::server_orderly_shutdown_closing_tunnel_connections(mode, active_connections);
         let _ = tunnel_registry.close_all(b"graceful shutdown").await;
+        visitor_intakes.abort_all();
+        while visitor_intakes.join_next().await.is_some() {}
         tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
-        Ok(())
+        terminal_error.map_or(Ok(()), Err)
     }
 }
 
@@ -547,14 +498,15 @@ fn process_public_accept(
     accept_backoff: &mut AcceptBackoff,
     admission_policy: &ServerAdmissionPolicy,
     visitor_intake: &VisitorIntake,
-    shutdown: Option<OrderlyShutdown>,
+    shutdown: OrderlyShutdown,
+    visitor_intakes: &mut JoinSet<()>,
 ) -> io::Result<Option<tokio::time::Instant>> {
     match accept_result {
         Ok((visitor_stream, _peer_address)) => {
             if accept_backoff.on_success() {
                 runtime_log::server_public_listener_accept_recovered();
             }
-            visitor_intake.accept(visitor_stream, shutdown);
+            visitor_intake.accept_scoped(visitor_stream, shutdown, visitor_intakes);
             Ok(None)
         }
         Err(error) => {
@@ -573,6 +525,7 @@ fn admit_tunnel_handshake(
     admission_policy: &ServerAdmissionPolicy,
     tunnel_registry: TunnelRegistry,
     incoming: quinn::Incoming,
+    handshakes: &mut JoinSet<()>,
 ) {
     let handshake_permit = match admission_policy.try_admit_handshake() {
         Ok(permit) => permit,
@@ -584,7 +537,7 @@ fn admit_tunnel_handshake(
     };
     admission_policy.report_recovery(&[AdmissionLimit::Handshakes]);
     let admission_policy = admission_policy.clone();
-    tokio::spawn(async move {
+    handshakes.spawn(async move {
         register_tunnel_connection(
             tunnel_registry,
             incoming,

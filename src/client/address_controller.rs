@@ -456,7 +456,7 @@ impl AddressController {
                                 Some(Ok(_)) => {}
                                 Some(Err((_address, error))) => {
                                     self.request_shutdown();
-                                    return Err(error);
+                                    return self.drain_workers_preserving(Some(error)).await;
                                 }
                                 None => {}
                             }
@@ -503,14 +503,26 @@ impl AddressController {
 
     /// Drive workers until every slot has completed, or one fails unexpectedly.
     pub async fn run_until_idle(&mut self) -> Result<(), String> {
+        self.drain_workers_preserving(None).await
+    }
+
+    async fn drain_workers_preserving(
+        &mut self,
+        mut first_error: Option<String>,
+    ) -> Result<(), String> {
         while self.worker_count() > 0 || !self.running.is_empty() {
             match self.next_completion().await {
                 Some(Ok(_)) => {}
-                Some(Err((_address, error))) => return Err(error),
+                Some(Err((_address, error))) => {
+                    if first_error.is_none() {
+                        self.request_shutdown();
+                    }
+                    first_error.get_or_insert(error);
+                }
                 None => break,
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     fn worker_is_live(&self, address: &ServerAddress) -> bool {
@@ -1563,7 +1575,7 @@ mod tests {
     }
 
     async fn wait_for_shutdown(control: &AddressWorkerControl) {
-        crate::wait_for_shutdown(control).await;
+        crate::client::wait_for_shutdown(control).await;
     }
 
     async fn wait_until_retired_or_shutdown(control: &AddressWorkerControl) {

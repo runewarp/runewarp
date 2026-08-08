@@ -1,11 +1,4 @@
-use std::io;
-use std::time::Duration;
-
-use runewarp::{
-    OrderlyShutdown, PreparedServer, QUIC_CLOSE_FLUSH_DURATION, ServerRuntimeArgs, ShutdownMode,
-    resolve_server_config_from_cli,
-};
-use tokio::sync::oneshot;
+use runewarp::{ServerRuntime, ServerRuntimeArgs, ShutdownMode, resolve_server_config_from_cli};
 
 use crate::cli;
 use crate::commands::CommandResult;
@@ -42,7 +35,7 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
     let config = resolve_server_config_from_cli(config, runtime)
         .map_err(wrap_server_config_resolution_error)?;
     runewarp::runtime_log::install(config.log_level)?;
-    let server = match PreparedServer::bind(
+    let server = match ServerRuntime::prepare(
         &config,
         config.public_bind_address,
         config.tunnel_connection_bind_address,
@@ -50,12 +43,9 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
     .await
     {
         Ok(server) => server,
-        Err(error) => return Err(logged_runtime_failure(Box::new(error))),
+        Err(error) => return Err(logged_runtime_failure(error)),
     };
-    runewarp::runtime_log::server_public_listener_ready(server.public_addr()?);
-    runewarp::runtime_log::server_tunnel_listener_ready(server.tunnel_addr()?);
-    let shutdown =
-        OrderlyShutdown::new(config.graceful_shutdown_duration, QUIC_CLOSE_FLUSH_DURATION);
+    let shutdown = server.shutdown();
     let shutdown_signal = shutdown.clone();
     tokio::spawn(async move {
         let first_signal = match super::wait_for_initial_shutdown_signal().await {
@@ -106,84 +96,7 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
             }
         }
     });
-    let server_result = if let Some(control) = config.control.as_ref() {
-        let identity = config
-            .identity
-            .as_ref()
-            .expect("managed Server config includes identity");
-        let material = runewarp::SessionMaterial {
-            control_hostname: control.address.hostname().as_str().to_owned(),
-            trust: control.trust.clone(),
-            identity: runewarp::ControlClientIdentityMaterial::from_server_identity_dir(
-                &identity.directory,
-            ),
-        };
-        let mut session = match runewarp::ManagedSession::new(
-            control.address.clone(),
-            runewarp::ManagedSessionRole::Server,
-            material,
-        ) {
-            Ok(session) => session,
-            Err(error) => return Err(logged_runtime_failure(Box::new(error))),
-        };
-        let mut adapter = server
-            .authorization_adapter()
-            .expect("managed Server config includes an authorization adapter");
-        // Keep the Managed session alive through bounded graceful drain so
-        // Authorization changes still apply. Close it at final process exit
-        // (no offline/delete request). Fast shutdown, or escalation to fast,
-        // closes the session immediately.
-        let (session_stop_tx, session_stop_rx) = oneshot::channel::<()>();
-        let shutdown_for_session = shutdown.clone();
-        let session_runtime = session.run(
-            &mut adapter,
-            |event| async move {
-                runewarp::runtime_log::managed_session_event(
-                    runewarp::ManagedSessionRole::Server,
-                    &event,
-                );
-            },
-            async move {
-                tokio::select! {
-                    biased;
-                    _ = session_stop_rx => {}
-                    _ = async {
-                        match shutdown_for_session.wait_started().await {
-                            ShutdownMode::Fast => {}
-                            ShutdownMode::Graceful => {
-                                shutdown_for_session.wait_for_fast().await;
-                            }
-                        }
-                    } => {}
-                }
-            },
-        );
-        let server_runtime = server.run_with_shutdown(&shutdown);
-        tokio::pin!(session_runtime);
-        tokio::pin!(server_runtime);
-        let server_result = tokio::select! {
-            server_result = &mut server_runtime => server_result,
-            _ = &mut session_runtime => {
-                // Fast shutdown closes the session before the Server runtime
-                // finishes; keep draining/closing Tunnel work to completion.
-                if matches!(shutdown.mode(), Some(ShutdownMode::Fast)) {
-                    server_runtime.await
-                } else {
-                    return Err(logged_runtime_failure(Box::new(io::Error::other(
-                        "managed session stopped unexpectedly",
-                    ))));
-                }
-            }
-        };
-        // Final process exit for graceful drain: end the ephemeral Managed
-        // session with the HTTP/2 connection rather than a special offline
-        // request. Fast shutdown already stopped the session above.
-        let _ = session_stop_tx.send(());
-        let _ = tokio::time::timeout(Duration::from_millis(500), &mut session_runtime).await;
-        server_result
-    } else {
-        server.run_with_shutdown(&shutdown).await
-    };
+    let server_result = server.run().await;
     if let Err(error) = server_result {
         return Err(logged_runtime_failure(Box::new(error)));
     }

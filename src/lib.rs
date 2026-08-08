@@ -4,6 +4,7 @@ mod client;
 mod client_admission;
 mod client_hello;
 mod client_public_cert;
+mod client_runtime;
 pub mod config;
 mod control_address;
 mod hostname;
@@ -21,6 +22,7 @@ mod server_address;
 mod server_admission;
 mod server_cert;
 mod server_identity;
+mod server_runtime;
 mod shutdown;
 mod startup;
 mod tls_material;
@@ -35,9 +37,8 @@ pub use client::{
     ClientConfigResolutionError, ClientConnectConfig, ClientConnectError, ClientRuntimeArgs,
     ConnectedTunnelFailure, ConnectedTunnelRun, EstablishOutcome, FixedBackoff, MaintenanceIntent,
     ReportedConnectedTunnelRun, SelectedClientConfig, SilentAddressWorkerHooks,
-    connected_session_until, production_address_worker_factory, resolve_client_config_from_cli,
-    resolve_selected_client_config, run_address_worker, run_address_worker_with_reconnect_policy,
-    select_client_config, wait_for_retry_delay, wait_for_shutdown,
+    resolve_client_config_from_cli, resolve_selected_client_config, run_address_worker,
+    select_client_config,
 };
 pub use client_admission::ClientAdmission;
 pub use client_hello::{
@@ -49,6 +50,8 @@ pub use client_public_cert::{
     client_public_cert_leaf_dir, initialize_manual_client_public_cert,
     renew_manual_client_public_cert, rotate_manual_client_public_cert_authority,
 };
+// Stable role-runtime seams used by the CLI/process adapters.
+pub use client_runtime::ClientRuntime;
 pub use config::{
     ClientConfig, ClientPublicCertConfig, ClientTlsMode, ConfigFileError, ControlConfig,
     ControlTrust, LogLevel, MaterialDirectoryError, SelectedTerminatingHostnames,
@@ -109,6 +112,7 @@ pub use server_identity::{
     SERVER_IDENTITY_KEY_FILENAME, ServerIdentity, ServerIdentityMaterialError,
     read_server_identity,
 };
+pub use server_runtime::ServerRuntime;
 pub use shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
 pub use startup::{
     ClientInstancePrep, ClientStartupError, PreparedClient, PreparedServer, ServerStartupError,

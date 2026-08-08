@@ -11,13 +11,14 @@ pub use address_controller::{
     AddressController, AddressControllerShutdown, AddressControllerView, AddressWorkerControl,
     AddressWorkerFactory, MaintenanceIntent,
 };
+pub(crate) use address_worker::run_address_worker_with_reconnect_policy;
 pub use address_worker::{
     AddressWorkerBackoff, AddressWorkerDial, AddressWorkerHooks, ConnectedTunnelFailure,
     ConnectedTunnelRun, EstablishOutcome, FixedBackoff, ReportedConnectedTunnelRun,
-    SilentAddressWorkerHooks, connected_session_until, production_address_worker_factory,
-    run_address_worker, run_address_worker_with_reconnect_policy, wait_for_retry_delay,
-    wait_for_shutdown,
+    SilentAddressWorkerHooks, run_address_worker,
 };
+#[cfg(test)]
+pub(crate) use address_worker::{wait_for_retry_delay, wait_for_shutdown};
 pub use assignment_convergence::AssignmentConvergence;
 pub use managed_adapter::ClientAssignmentAdapter;
 

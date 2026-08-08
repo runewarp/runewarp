@@ -31,9 +31,13 @@ impl SessionDeadlines {
         self.silence_deadline = now + SILENCE_TIMEOUT;
     }
 
-    pub(crate) fn note_valid_snapshot(&mut self, now: Instant) {
+    pub(crate) fn try_note_valid_snapshot(&mut self, now: Instant) -> bool {
+        if !self.received_first_snapshot && now >= self.first_snapshot_deadline {
+            return false;
+        }
         self.received_first_snapshot = true;
         self.note_bytes(now);
+        true
     }
 
     pub(crate) fn expired(&self, now: Instant) -> bool {
@@ -82,9 +86,20 @@ mod tests {
         let start = Instant::now();
         let mut deadlines = SessionDeadlines::new(start);
         let snapshot_at = start + Duration::from_secs(10);
-        deadlines.note_valid_snapshot(snapshot_at);
+        assert!(deadlines.try_note_valid_snapshot(snapshot_at));
 
         assert!(!deadlines.expired(start + FIRST_SNAPSHOT_DEADLINE));
         assert!(deadlines.expired(snapshot_at + SILENCE_TIMEOUT));
+    }
+
+    #[test]
+    fn valid_snapshot_at_deadline_cannot_clear_first_snapshot_timeout() {
+        let start = Instant::now();
+        let mut deadlines = SessionDeadlines::new(start);
+        let deadline = start + FIRST_SNAPSHOT_DEADLINE;
+
+        assert!(!deadlines.try_note_valid_snapshot(deadline));
+
+        assert!(deadlines.expired(deadline));
     }
 }

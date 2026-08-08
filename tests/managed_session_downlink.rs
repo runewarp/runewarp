@@ -54,6 +54,7 @@ const REDIRECT_TARGET: &str = "/v1/client/events/redirect-target";
 enum SseBehavior {
     SuccessSnapshot,
     DelayedHeadersThenSnapshot,
+    SnapshotAtDeadline,
     Redirect,
     CloseAfterFirstByte,
     WrongContentType,
@@ -312,6 +313,21 @@ async fn handle_request(
             let body = boxed_stream(DelayedSnapshotStream {
                 snapshot_sse,
                 delay: Box::pin(tokio::time::sleep(Duration::from_secs(30))),
+                sent_snapshot: false,
+                metrics: Some(metrics_drop),
+            });
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(body)
+                .unwrap())
+        }
+        SseBehavior::SnapshotAtDeadline => {
+            metrics.begin_sse();
+            let metrics_drop = metrics.clone();
+            let body = boxed_stream(DelayedSnapshotStream {
+                snapshot_sse,
+                delay: Box::pin(tokio::time::sleep(Duration::from_secs(60))),
                 sent_snapshot: false,
                 metrics: Some(metrics_drop),
             });
@@ -965,6 +981,62 @@ async fn delayed_headers_and_snapshot_share_one_first_snapshot_deadline() {
     assert!(matches!(event, ManagedSessionEvent::Reconnecting { .. }));
 
     tokio::time::resume();
+    runner.abort();
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn snapshot_ready_at_first_snapshot_deadline_loses_to_timeout() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(&material, SseBehavior::SnapshotAtDeadline).await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(
+        "localhost",
+        &paths.ca_cert,
+        &paths.client_cert,
+        &paths.client_key,
+    );
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut AcceptingClientAdapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                std::future::pending::<()>(),
+            )
+            .await;
+    });
+
+    for _ in 0..1_000 {
+        if fixture.metrics.concurrent_sse.load(Ordering::SeqCst) != 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(fixture.metrics.concurrent_sse.load(Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(60)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+
+    let event = event_rx
+        .try_recv()
+        .expect("deadline and snapshot should produce one observable outcome");
+    assert!(matches!(event, ManagedSessionEvent::Reconnecting { .. }));
+
     runner.abort();
     let _ = runner.await;
     fixture.shutdown().await;

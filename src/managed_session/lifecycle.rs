@@ -92,8 +92,8 @@ impl<I> ConnectionLifecycle<I> {
         tls: &ControlTlsMaterial,
         role: ManagedSessionRole,
         limits: ManagedSessionLimits,
-        connection_started_at: Instant,
     ) -> Result<Self, ManagedSessionError> {
+        let connection_started_at = Instant::now();
         let first_snapshot_deadline = connection_started_at + FIRST_SNAPSHOT_DEADLINE;
         let connection = tokio::time::timeout_at(
             first_snapshot_deadline,
@@ -213,6 +213,7 @@ impl<I> ConnectionLifecycle<I> {
     {
         loop {
             self.drive_report();
+            self.handle_timer()?;
 
             if phase == ConnectionPhase::Idle
                 && let Some(pending) = self.queue.take_next()
@@ -227,8 +228,12 @@ impl<I> ConnectionLifecycle<I> {
 
             let wait = next_wait(&self.deadlines, Instant::now());
             tokio::select! {
+                biased;
                 result = apply.as_mut(), if phase == ConnectionPhase::Applying => {
                     return Ok(ConnectionTransition::Applied(result));
+                }
+                _ = tokio::time::sleep(wait) => {
+                    self.handle_timer()?;
                 }
                 chunk = self.connection.next_chunk() => {
                     self.ingest_chunk::<A, _, _>(
@@ -242,9 +247,6 @@ impl<I> ConnectionLifecycle<I> {
                 result = wait_for_report(&mut self.report.in_flight) => {
                     self.report.in_flight = None;
                     self.on_report_finished(result)?;
-                }
-                _ = tokio::time::sleep(wait) => {
-                    self.handle_timer()?;
                 }
             }
         }
@@ -296,7 +298,10 @@ impl<I> ConnectionLifecycle<I> {
                         }
                         ManagedSessionError::Snapshot(error)
                     })?;
-                    self.deadlines.note_valid_snapshot(now);
+                    let snapshot_received_at = Instant::now();
+                    if !self.deadlines.try_note_valid_snapshot(snapshot_received_at) {
+                        return Err(ManagedSessionError::FirstSnapshotTimeout);
+                    }
                     if !self.received_valid_snapshot {
                         self.received_valid_snapshot = true;
                     }

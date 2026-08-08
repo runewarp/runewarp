@@ -3,7 +3,6 @@
 use std::future::Future;
 
 use rand::rngs::StdRng;
-use tokio::time::Instant;
 
 use super::adapter::RoleAdapter;
 use super::lifecycle::{ConnectionLifecycle, ManagedSessionError};
@@ -132,18 +131,12 @@ impl ManagedSession {
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
     {
-        let connection_started_at = Instant::now();
         let tls = load_control_tls_material(&self.material)
             .map_err(ManagedSessionAttemptError::TlsMaterial)?;
-        let lifecycle = ConnectionLifecycle::<A::Input>::connect(
-            &self.address,
-            &tls,
-            self.role,
-            self.limits,
-            connection_started_at,
-        )
-        .await
-        .map_err(ManagedSessionAttemptError::Lifecycle)?;
+        let lifecycle =
+            ConnectionLifecycle::<A::Input>::connect(&self.address, &tls, self.role, self.limits)
+                .await
+                .map_err(ManagedSessionAttemptError::Lifecycle)?;
         let outcome = lifecycle.run(adapter, &mut self.applied, on_event).await;
         if outcome.received_valid_snapshot {
             self.reconnect.reset();

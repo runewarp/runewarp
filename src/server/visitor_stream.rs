@@ -9,7 +9,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
 use super::admission::{AdmissionLimit, ServerAdmissionPolicy, VisitorAdmissionPermit};
-use super::tunnel_registry::{TunnelRegistry, TunnelRouteOutcome};
+use super::tunnel_registry::{TunnelRegistry, TunnelRouteOutcome, VisitorRoute};
 use crate::acme::ACME_TLS_ALPN;
 use crate::client_hello::ParsedClientHello;
 use crate::client_hello::read_client_hello;
@@ -249,7 +249,7 @@ impl VisitorIntake {
         visitor_stream: TcpStream,
         public_hostname: PublicHostname,
         buffered_bytes: Vec<u8>,
-        tunnel_connection: super::active_client::SelectedTunnelConnection,
+        tunnel_connection: VisitorRoute,
         addresses: VisitorTcpAddresses,
     ) -> io::Result<()> {
         let pending_open_permit = match self.admission_policy.try_admit_pending_stream_open() {
@@ -291,16 +291,22 @@ impl VisitorIntake {
         self.admission_policy
             .report_recovery(&[AdmissionLimit::ActiveRoutedStreams]);
 
-        runtime_log::server_route(public_hostname.as_str(), ServerRouteOutcome::Forwarded);
-
         let registry = self.tunnel_registry.clone();
         // Registration is synchronous and precedes proxy progress, so a concurrent
         // Authorization replacement cannot miss already-admitted Visitor work.
-        let work = registry.register_active_visitor_work(
-            public_hostname,
-            &tunnel_connection,
+        let work = match registry.register_active_visitor_work(
+            &public_hostname,
+            tunnel_connection,
             active_stream_permit,
-        );
+        ) {
+            Some(work) => work,
+            None => {
+                let _ = send.reset(proxy_stream_error_code());
+                let _ = recv.stop(proxy_stream_error_code());
+                return Ok(());
+            }
+        };
+        runtime_log::server_route(public_hostname.as_str(), ServerRouteOutcome::Forwarded);
         match work
             .run(async move {
                 let initial_bytes = encode_tunnel_stream(addresses, &buffered_bytes);

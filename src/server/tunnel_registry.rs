@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -28,7 +29,7 @@ use super::readiness::ReadinessGate;
 pub(crate) enum TunnelRouteOutcome {
     Unauthorized,
     NoActiveTunnelConnection,
-    Connected(SelectedTunnelConnection),
+    Connected(VisitorRoute),
 }
 
 pub(crate) enum TunnelRegistrationOutcome {
@@ -52,8 +53,56 @@ struct ActiveVisitorWorkRecord {
 }
 
 struct ActiveVisitorWorkState {
-    work: StdRwLock<HashMap<u64, ActiveVisitorWorkRecord>>,
+    inner: StdMutex<ActiveVisitorWorkSet>,
     quiescent: Notify,
+}
+
+struct ActiveVisitorWorkSet {
+    work: HashMap<u64, ActiveVisitorWorkRecord>,
+    pending_admissions: usize,
+    sealed: bool,
+}
+
+struct ActiveVisitorAdmission {
+    state: Arc<ActiveVisitorWorkState>,
+    pending: bool,
+}
+
+impl Drop for ActiveVisitorAdmission {
+    fn drop(&mut self) {
+        if self.pending {
+            let mut inner = self
+                .state
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner.pending_admissions -= 1;
+            drop(inner);
+            self.state.quiescent.notify_waiters();
+        }
+    }
+}
+
+pub(crate) struct VisitorRoute {
+    connection: SelectedTunnelConnection,
+    authorization: Arc<AuthorizationSnapshot>,
+    admission: ActiveVisitorAdmission,
+}
+
+impl VisitorRoute {
+    pub(crate) fn connection(&self) -> Connection {
+        self.connection.connection()
+    }
+
+    #[cfg(test)]
+    fn selected_connection(&self) -> SelectedTunnelConnection {
+        self.connection.clone()
+    }
+
+    #[cfg(test)]
+    fn client_identity(&self) -> &ClientIdentity {
+        self.connection.client_identity()
+    }
 }
 
 pub(crate) struct ActiveVisitorWork {
@@ -83,9 +132,10 @@ impl Drop for ActiveVisitorWork {
         drop(self.member_load.take());
         let removed = self
             .state
-            .work
-            .write()
+            .inner
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .work
             .remove(&self.stream_id)
             .is_some();
         if removed {
@@ -102,13 +152,28 @@ pub(crate) struct TunnelRegistry {
     visitor_work: Arc<ActiveVisitorWorkState>,
     next_stream_id: Arc<AtomicU64>,
     accepting_tunnel_connections: Arc<AtomicBool>,
-    admitting_streams: Arc<AtomicBool>,
     tunnel_connection_admission: TunnelConnectionAdmission,
     readiness: Arc<StdRwLock<Option<ReadinessGate>>>,
     first_apply_completed: Arc<AtomicBool>,
 }
 
 impl TunnelRegistry {
+    fn begin_active_visitor_admission(&self) -> Option<ActiveVisitorAdmission> {
+        let mut inner = self
+            .visitor_work
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if inner.sealed {
+            return None;
+        }
+        inner.pending_admissions += 1;
+        Some(ActiveVisitorAdmission {
+            state: self.visitor_work.clone(),
+            pending: true,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn single(public_hostnames: Vec<PublicHostname>) -> io::Result<Self> {
         use std::collections::{HashMap, HashSet};
@@ -142,12 +207,15 @@ impl TunnelRegistry {
                 tunnel_connection_admission.clone(),
             )])),
             visitor_work: Arc::new(ActiveVisitorWorkState {
-                work: StdRwLock::new(HashMap::new()),
+                inner: StdMutex::new(ActiveVisitorWorkSet {
+                    work: HashMap::new(),
+                    pending_admissions: 0,
+                    sealed: false,
+                }),
                 quiescent: Notify::new(),
             }),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
-            admitting_streams: Arc::new(AtomicBool::new(true)),
             tunnel_connection_admission,
             readiness: Arc::new(StdRwLock::new(None)),
             first_apply_completed: Arc::new(AtomicBool::new(false)),
@@ -205,12 +273,15 @@ impl TunnelRegistry {
             authorization: authorization.state().clone(),
             tunnel_pools: Arc::new(RwLock::new(tunnel_pools)),
             visitor_work: Arc::new(ActiveVisitorWorkState {
-                work: StdRwLock::new(HashMap::new()),
+                inner: StdMutex::new(ActiveVisitorWorkSet {
+                    work: HashMap::new(),
+                    pending_admissions: 0,
+                    sealed: false,
+                }),
                 quiescent: Notify::new(),
             }),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
-            admitting_streams: Arc::new(AtomicBool::new(true)),
             tunnel_connection_admission,
             readiness: Arc::new(StdRwLock::new(None)),
             first_apply_completed: Arc::new(AtomicBool::new(false)),
@@ -263,7 +334,14 @@ impl TunnelRegistry {
         // the previous pool layout. Readers acquire this lock before reading
         // the authorization snapshot for the same reason.
         let mut pools = self.tunnel_pools.write().await;
-        let next = self.authorization.commit(prepared);
+        let next = {
+            let _visitor_work = self
+                .visitor_work
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.authorization.commit(prepared)
+        };
 
         let removed_identities = previous
             .trusted_client_identities()
@@ -330,7 +408,8 @@ impl TunnelRegistry {
         }
         drop(pools);
 
-        let streams_reset = self.reset_streams_not_authorized_by(&next);
+        let streams_reset =
+            self.reset_streams_matching(|stream| !stream_remains_authorized(stream, &next));
 
         LiveWorkDispatch {
             connections_closed,
@@ -342,9 +421,9 @@ impl TunnelRegistry {
         &self,
         public_hostname: &PublicHostname,
     ) -> TunnelRouteOutcome {
-        if !self.admitting_streams.load(Ordering::SeqCst) {
+        let Some(admission) = self.begin_active_visitor_admission() else {
             return TunnelRouteOutcome::NoActiveTunnelConnection;
-        }
+        };
         // Lock pools before reading authorization so the index→pool view stays
         // coherent with replace_authorization's write-locked swap+realign.
         let pools = self.tunnel_pools.read().await;
@@ -359,7 +438,11 @@ impl TunnelRegistry {
         let Some(connection) = pool.select_connection().await else {
             return TunnelRouteOutcome::NoActiveTunnelConnection;
         };
-        TunnelRouteOutcome::Connected(connection)
+        TunnelRouteOutcome::Connected(VisitorRoute {
+            connection,
+            authorization: snapshot,
+            admission,
+        })
     }
 
     pub(crate) async fn register(&self, connection: Connection) -> TunnelRegistrationOutcome {
@@ -399,21 +482,51 @@ impl TunnelRegistry {
 
     pub(crate) fn register_active_visitor_work(
         &self,
-        public_hostname: PublicHostname,
-        connection: &SelectedTunnelConnection,
+        public_hostname: &PublicHostname,
+        route: VisitorRoute,
         active_stream_permit: OwnedSemaphorePermit,
-    ) -> ActiveVisitorWork {
-        self.register_active_visitor_work_parts(
-            public_hostname,
+    ) -> Option<ActiveVisitorWork> {
+        let VisitorRoute {
+            connection,
+            authorization,
+            mut admission,
+        } = route;
+        let mut inner = self
+            .visitor_work
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.pending_admissions -= 1;
+        admission.pending = false;
+        let snapshot = self.authorization.current();
+        let remains_current_and_authorized = Arc::ptr_eq(&authorization, &snapshot)
+            && match (
+                snapshot.tunnel_index_for_public_hostname(public_hostname),
+                snapshot.tunnel_index_for_client_identity(connection.client_identity()),
+            ) {
+                (Some(hostname_tunnel), Some(identity_tunnel)) => {
+                    hostname_tunnel == identity_tunnel
+                }
+                _ => false,
+            };
+        if inner.sealed || !remains_current_and_authorized {
+            drop(inner);
+            self.visitor_work.quiescent.notify_waiters();
+            return None;
+        }
+        Some(self.register_active_visitor_work_locked(
+            &mut inner,
+            public_hostname.clone(),
             connection.member_id(),
             connection.client_identity().clone(),
             active_stream_permit,
             connection.record_open_stream(),
-        )
+        ))
     }
 
-    fn register_active_visitor_work_parts(
+    fn register_active_visitor_work_locked(
         &self,
+        inner: &mut ActiveVisitorWorkSet,
         public_hostname: PublicHostname,
         member_id: u64,
         client_identity: ClientIdentity,
@@ -422,20 +535,16 @@ impl TunnelRegistry {
     ) -> ActiveVisitorWork {
         let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        self.visitor_work
-            .work
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                stream_id,
-                ActiveVisitorWorkRecord {
-                    public_hostname,
-                    member_id,
-                    client_identity,
-                    abort_handle,
-                    abort_requested: false,
-                },
-            );
+        inner.work.insert(
+            stream_id,
+            ActiveVisitorWorkRecord {
+                public_hostname,
+                member_id,
+                client_identity,
+                abort_handle,
+                abort_requested: false,
+            },
+        );
         ActiveVisitorWork {
             stream_id,
             state: self.visitor_work.clone(),
@@ -460,7 +569,13 @@ impl TunnelRegistry {
         let permit = Arc::new(tokio::sync::Semaphore::new(1))
             .try_acquire_owned()
             .expect("test Visitor work permit must be available");
-        let work = self.register_active_visitor_work_parts(
+        let mut inner = self
+            .visitor_work
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let work = self.register_active_visitor_work_locked(
+            &mut inner,
             public_hostname,
             member_id,
             client_identity,
@@ -483,45 +598,30 @@ impl TunnelRegistry {
         self.reset_streams_matching(|stream| stream.member_id == member_id)
     }
 
-    fn reset_streams_not_authorized_by(&self, snapshot: &AuthorizationSnapshot) -> usize {
-        self.reset_streams_matching(|stream| !stream_remains_authorized(stream, snapshot))
-    }
-
     fn reset_streams_matching(
         &self,
         mut should_reset: impl FnMut(&ActiveVisitorWorkRecord) -> bool,
     ) -> usize {
-        let mut streams = self
+        let mut inner = self
             .visitor_work
-            .work
-            .write()
+            .inner
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut reset = 0;
-        for stream in streams.values_mut() {
-            if !stream.abort_requested && should_reset(stream) {
-                stream.abort_requested = true;
-                stream.abort_handle.abort();
-                reset += 1;
-            }
-        }
-        reset
+        reset_streams_matching(&mut inner.work, &mut should_reset)
     }
 
     #[cfg(test)]
     pub(crate) fn tracked_visitor_stream_count(&self) -> usize {
-        self.visitor_work
-            .work
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
+        self.active_stream_count()
     }
 
     #[cfg(test)]
     pub(crate) fn tracked_visitor_hostnames(&self) -> Vec<PublicHostname> {
         self.visitor_work
-            .work
-            .read()
+            .inner
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .work
             .values()
             .map(|stream| stream.public_hostname.clone())
             .collect()
@@ -541,12 +641,23 @@ impl TunnelRegistry {
         active
     }
 
+    #[cfg(test)]
     pub(crate) fn active_stream_count(&self) -> usize {
         self.visitor_work
-            .work
-            .read()
+            .inner
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .work
             .len()
+    }
+
+    pub(crate) fn has_outstanding_visitor_work(&self) -> bool {
+        let inner = self
+            .visitor_work
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !inner.work.is_empty() || inner.pending_admissions > 0
     }
 
     pub(crate) async fn wait_quiescent(&self) {
@@ -554,7 +665,15 @@ impl TunnelRegistry {
             let notified = self.visitor_work.quiescent.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.active_stream_count() == 0 {
+            let quiescent = {
+                let inner = self
+                    .visitor_work
+                    .inner
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                inner.work.is_empty() && inner.pending_admissions == 0
+            };
+            if quiescent {
                 return;
             }
             notified.await;
@@ -564,7 +683,11 @@ impl TunnelRegistry {
     pub(crate) fn stop_accepting_new_work(&self) {
         self.accepting_tunnel_connections
             .store(false, Ordering::SeqCst);
-        self.admitting_streams.store(false, Ordering::SeqCst);
+        self.visitor_work
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .sealed = true;
     }
 
     fn tunnel_registration_context(
@@ -578,6 +701,21 @@ impl TunnelRegistry {
             .tunnel_index_for_client_identity(&identity)?;
         Some((tunnel_index, identity))
     }
+}
+
+fn reset_streams_matching(
+    streams: &mut HashMap<u64, ActiveVisitorWorkRecord>,
+    should_reset: &mut impl FnMut(&ActiveVisitorWorkRecord) -> bool,
+) -> usize {
+    let mut reset = 0;
+    for stream in streams.values_mut() {
+        if !stream.abort_requested && should_reset(stream) {
+            stream.abort_requested = true;
+            stream.abort_handle.abort();
+            reset += 1;
+        }
+    }
+    reset
 }
 
 fn client_identity_from_connection(connection: &Connection) -> Option<ClientIdentity> {
@@ -633,6 +771,41 @@ mod tests {
 
     fn server_hostname(hostname: &str) -> ServerHostname {
         ServerHostname::try_from(hostname).unwrap()
+    }
+
+    async fn admitted_work(
+        registry: &TunnelRegistry,
+        policy: &super::super::admission::ServerAdmissionPolicy,
+        hostname: &PublicHostname,
+    ) -> (super::ActiveVisitorWork, super::SelectedTunnelConnection) {
+        let TunnelRouteOutcome::Connected(route) = registry.route_tunnel_connection(hostname).await
+        else {
+            panic!("test route should select its registered connection");
+        };
+        let selected_connection = route.selected_connection();
+        let permit = policy
+            .try_admit_active_routed_stream()
+            .expect("test active work should be admitted");
+        let work = registry
+            .register_active_visitor_work(hostname, route, permit)
+            .expect("current test route should register");
+        (work, selected_connection)
+    }
+
+    fn assert_work_accounting(
+        registry: &TunnelRegistry,
+        policy: &super::super::admission::ServerAdmissionPolicy,
+        connection: &super::SelectedTunnelConnection,
+        active: bool,
+    ) {
+        assert_eq!(registry.active_stream_count(), usize::from(active));
+        assert_eq!(connection.active_stream_count(), usize::from(active));
+        let admission = policy.try_admit_active_routed_stream();
+        if active {
+            assert!(admission.is_err(), "active work must retain its permit");
+        } else {
+            drop(admission.expect("finished work must release its permit"));
+        }
     }
 
     #[tokio::test]
@@ -714,20 +887,19 @@ mod tests {
             .try_admit_active_routed_stream()
             .expect("first Visitor work should be admitted");
 
-        let work = registry.register_active_visitor_work(
-            public_hostname("app.example.test"),
-            &connection,
-            permit,
-        );
+        let selected_connection = connection.selected_connection();
+        let work = registry
+            .register_active_visitor_work(&public_hostname("app.example.test"), connection, permit)
+            .expect("current route should register");
 
         assert_eq!(registry.active_stream_count(), 1);
-        assert_eq!(connection.active_stream_count(), 1);
+        assert_eq!(selected_connection.active_stream_count(), 1);
         assert!(policy.try_admit_active_routed_stream().is_err());
 
         drop(work);
 
         assert_eq!(registry.active_stream_count(), 0);
-        assert_eq!(connection.active_stream_count(), 0);
+        assert_eq!(selected_connection.active_stream_count(), 0);
         assert!(policy.try_admit_active_routed_stream().is_ok());
         timeout(Duration::from_millis(10), registry.wait_quiescent())
             .await
@@ -736,40 +908,150 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_visitor_work_cleans_up_after_normal_error_cancel_and_panic() -> io::Result<()> {
-        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
-        let identity = generate_test_client_identity()?.client_identity;
+    async fn authorization_commit_cannot_miss_work_registering_from_an_old_route() -> io::Result<()>
+    {
+        let old_identity = generate_test_client_identity()?;
+        let hostname = public_hostname("app.example.test");
+        let registry = TunnelRegistry::configured_managed(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                id: Some(TunnelId::parse("tunnel-1").unwrap()),
+                public_hostnames: vec![hostname.clone()],
+                authorized_client_identities: vec![old_identity.client_identity.clone()],
+            }],
+        )?;
+        let fixture = TunnelConnectionFixture::connect(&old_identity).await?;
+        registry.register(fixture.server_connection).await;
+        let TunnelRouteOutcome::Connected(old_route) =
+            registry.route_tunnel_connection(&hostname).await
+        else {
+            panic!("old Authorization route should select its connection");
+        };
+        let selected_connection = old_route.selected_connection();
 
-        let normal = registry.spawn_active_visitor_work_for_test(
-            public_hostname("app.example.test"),
-            1,
-            identity.clone(),
-            async { 7_u8 },
+        let dispatch = registry
+            .replace_authorization(
+                &server_hostname("tunnel.example.test"),
+                &[ServerTunnelConfig {
+                    id: Some(TunnelId::parse("tunnel-2").unwrap()),
+                    public_hostnames: vec![hostname.clone()],
+                    authorized_client_identities: vec![old_identity.client_identity.clone()],
+                }],
+            )
+            .await?;
+        assert_eq!(dispatch.streams_reset, 0);
+
+        let policy =
+            super::super::admission::ServerAdmissionPolicy::new(ServerAdmissionLimits::for_test());
+        let permit = policy
+            .try_admit_active_routed_stream()
+            .expect("test active work should be admitted");
+        assert!(
+            registry
+                .register_active_visitor_work(&hostname, old_route, permit)
+                .is_none(),
+            "registration after commit must reject a route from the prior snapshot"
         );
-        assert_eq!(normal.await.expect("normal work task should join"), Ok(7));
+        assert_eq!(registry.active_stream_count(), 0);
+        assert_eq!(selected_connection.active_stream_count(), 0);
+        assert!(policy.try_admit_active_routed_stream().is_ok());
+        timeout(Duration::from_millis(10), registry.wait_quiescent())
+            .await
+            .expect("rejected old route must release its pending admission");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_quiescence_waits_for_a_zero_count_route_to_register_or_reject()
+    -> io::Result<()> {
+        let client_identity = generate_test_client_identity()?;
+        let hostname = public_hostname("app.example.test");
+        let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        let registry = TunnelRegistry::configured(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                id: None,
+                public_hostnames: vec![hostname.clone()],
+                authorized_client_identities: vec![client_identity.client_identity],
+            }],
+        )?;
+        registry.register(fixture.server_connection).await;
+        let TunnelRouteOutcome::Connected(route) =
+            registry.route_tunnel_connection(&hostname).await
+        else {
+            panic!("authorized route should select its connection");
+        };
+        let selected_connection = route.selected_connection();
         assert_eq!(registry.active_stream_count(), 0);
 
-        let error = registry.spawn_active_visitor_work_for_test(
-            public_hostname("app.example.test"),
-            1,
-            identity.clone(),
-            async { Err::<(), _>(io::Error::other("proxy failed")) },
+        registry.stop_accepting_new_work();
+        let waiting_registry = registry.clone();
+        let waiter = tokio::spawn(async move { waiting_registry.wait_quiescent().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "zero active leases are not quiescent while a pre-seal route is pending"
         );
+
+        let policy =
+            super::super::admission::ServerAdmissionPolicy::new(ServerAdmissionLimits::for_test());
+        let permit = policy
+            .try_admit_active_routed_stream()
+            .expect("test active work should be admitted");
+        assert!(
+            registry
+                .register_active_visitor_work(&hostname, route, permit)
+                .is_none(),
+            "registration after shutdown seals admission must fail"
+        );
+        timeout(Duration::from_millis(100), waiter)
+            .await
+            .expect("rejected late registration must wake quiescence")
+            .expect("quiescence waiter should not panic");
+        assert_eq!(registry.active_stream_count(), 0);
+        assert_eq!(selected_connection.active_stream_count(), 0);
+        assert!(policy.try_admit_active_routed_stream().is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_visitor_work_cleans_up_after_normal_error_cancel_and_panic() -> io::Result<()> {
+        let client_identity = generate_test_client_identity()?;
+        let hostname = public_hostname("app.example.test");
+        let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        let registry = TunnelRegistry::configured(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                id: None,
+                public_hostnames: vec![hostname.clone()],
+                authorized_client_identities: vec![client_identity.client_identity],
+            }],
+        )?;
+        registry.register(fixture.server_connection).await;
+        let policy = super::super::admission::ServerAdmissionPolicy::new(ServerAdmissionLimits {
+            max_active_routed_streams: 1,
+            ..ServerAdmissionLimits::for_test()
+        });
+
+        let (normal, normal_connection) = admitted_work(&registry, &policy, &hostname).await;
+        assert_work_accounting(&registry, &policy, &normal_connection, true);
+        assert_eq!(normal.run(async { 7_u8 }).await, Ok(7));
+        assert_work_accounting(&registry, &policy, &normal_connection, false);
+
+        let (error, error_connection) = admitted_work(&registry, &policy, &hostname).await;
+        assert_work_accounting(&registry, &policy, &error_connection, true);
         assert!(
             error
+                .run(async { Err::<(), _>(io::Error::other("proxy failed")) })
                 .await
-                .expect("error work task should join")
                 .expect("work was not revoked")
                 .is_err()
         );
-        assert_eq!(registry.active_stream_count(), 0);
+        assert_work_accounting(&registry, &policy, &error_connection, false);
 
-        let cancelled = registry.spawn_active_visitor_work_for_test(
-            public_hostname("app.example.test"),
-            1,
-            identity.clone(),
-            std::future::pending::<()>(),
-        );
+        let (cancelled, cancelled_connection) = admitted_work(&registry, &policy, &hostname).await;
+        assert_work_accounting(&registry, &policy, &cancelled_connection, true);
+        let cancelled = tokio::spawn(cancelled.run(std::future::pending::<()>()));
         cancelled.abort();
         assert!(
             cancelled
@@ -777,21 +1059,18 @@ mod tests {
                 .expect_err("cancelled work task should not join normally")
                 .is_cancelled()
         );
-        assert_eq!(registry.active_stream_count(), 0);
+        assert_work_accounting(&registry, &policy, &cancelled_connection, false);
 
-        let panicked = registry.spawn_active_visitor_work_for_test(
-            public_hostname("app.example.test"),
-            1,
-            identity,
-            async { panic!("proxy panic") },
-        );
+        let (panicked, panicked_connection) = admitted_work(&registry, &policy, &hostname).await;
+        assert_work_accounting(&registry, &policy, &panicked_connection, true);
+        let panicked = tokio::spawn(panicked.run(async { panic!("proxy panic") }));
         assert!(
             panicked
                 .await
                 .expect_err("panicked work task should not join normally")
                 .is_panic()
         );
-        assert_eq!(registry.active_stream_count(), 0);
+        assert_work_accounting(&registry, &policy, &panicked_connection, false);
         Ok(())
     }
 

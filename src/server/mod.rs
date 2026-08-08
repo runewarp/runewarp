@@ -510,8 +510,7 @@ impl Server {
             tokio::select! {
                 _ = tunnel_registry.wait_quiescent() => {}
                 _ = tokio::time::sleep(shutdown.graceful_shutdown_duration()) => {
-                    let active_streams = tunnel_registry.active_stream_count();
-                    if active_streams > 0 {
+                    if tunnel_registry.has_outstanding_visitor_work() {
                         runtime_log::server_graceful_shutdown_deadline_expired(
                             tunnel_registry.active_connection_count().await,
                         );

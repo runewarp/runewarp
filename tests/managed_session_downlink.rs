@@ -53,6 +53,7 @@ const REDIRECT_TARGET: &str = "/v1/client/events/redirect-target";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SseBehavior {
     SuccessSnapshot,
+    DelayedHeadersThenSnapshot,
     Redirect,
     CloseAfterFirstByte,
     WrongContentType,
@@ -304,6 +305,22 @@ async fn handle_request(
     let behavior = *behavior.lock().unwrap();
     match behavior {
         SseBehavior::NeverRespond => std::future::pending().await,
+        SseBehavior::DelayedHeadersThenSnapshot => {
+            tokio::time::sleep(Duration::from_secs(40)).await;
+            metrics.begin_sse();
+            let metrics_drop = metrics.clone();
+            let body = boxed_stream(DelayedSnapshotStream {
+                snapshot_sse,
+                delay: Box::pin(tokio::time::sleep(Duration::from_secs(30))),
+                sent_snapshot: false,
+                metrics: Some(metrics_drop),
+            });
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(body)
+                .unwrap())
+        }
         SseBehavior::Redirect => Ok(Response::builder()
             .status(StatusCode::FOUND)
             .header(LOCATION, REDIRECT_TARGET)
@@ -377,6 +394,38 @@ impl Drop for HoldAfterSnapshotStream {
 struct CloseAfterFirstByteStream {
     sent_byte: bool,
     metrics: Option<Arc<FixtureMetrics>>,
+}
+
+struct DelayedSnapshotStream {
+    snapshot_sse: &'static str,
+    delay: Pin<Box<tokio::time::Sleep>>,
+    sent_snapshot: bool,
+    metrics: Option<Arc<FixtureMetrics>>,
+}
+
+impl Stream for DelayedSnapshotStream {
+    type Item = Result<Frame<Bytes>, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.sent_snapshot {
+            return Poll::Pending;
+        }
+        if self.delay.as_mut().poll(context).is_pending() {
+            return Poll::Pending;
+        }
+        self.sent_snapshot = true;
+        Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(
+            self.snapshot_sse.as_bytes(),
+        )))))
+    }
+}
+
+impl Drop for DelayedSnapshotStream {
+    fn drop(&mut self) {
+        if let Some(metrics) = self.metrics.take() {
+            metrics.end_sse();
+        }
+    }
 }
 
 impl Stream for CloseAfterFirstByteStream {
@@ -842,6 +891,80 @@ async fn response_header_stall_reconnects_after_first_snapshot_deadline() {
         .expect("session should emit a reconnect event");
     assert!(matches!(event, ManagedSessionEvent::Reconnecting { .. }));
 
+    runner.abort();
+    let _ = runner.await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn delayed_headers_and_snapshot_share_one_first_snapshot_deadline() {
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(&material, SseBehavior::DelayedHeadersThenSnapshot).await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(
+        "localhost",
+        &paths.ca_cert,
+        &paths.client_cert,
+        &paths.client_key,
+    );
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut AcceptingClientAdapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                std::future::pending::<()>(),
+            )
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture
+                .metrics
+                .request_paths
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path == CLIENT_EVENTS_PATH)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fixture should receive the SSE request before time is paused");
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(40)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(fixture.metrics.concurrent_sse.load(Ordering::SeqCst), 1);
+
+    tokio::time::advance(Duration::from_secs(21)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let event = event_rx
+        .try_recv()
+        .expect("one first-snapshot deadline should cover headers and snapshot");
+    assert!(matches!(event, ManagedSessionEvent::Reconnecting { .. }));
+
+    tokio::time::resume();
     runner.abort();
     let _ = runner.await;
     fixture.shutdown().await;

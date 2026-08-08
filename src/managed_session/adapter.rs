@@ -1,8 +1,9 @@
 //! Role-adapter seam for Managed-session reconciliation.
 //!
-//! The shared session owns transport, revision tracking, and state acknowledgment.
-//! Role-specific apply behavior lives behind this trait so Server and Client
-//! do not duplicate those concerns.
+//! The shared session owns reconnect and applied-revision memory. Each
+//! connection lifecycle owns transport and state acknowledgment. Role-specific
+//! apply behavior lives behind this trait so Server and Client do not duplicate
+//! those concerns.
 
 use std::fmt;
 use std::future::Future;

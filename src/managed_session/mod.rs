@@ -13,6 +13,7 @@
 mod adapter;
 mod connection;
 mod input;
+mod lifecycle;
 mod limits;
 mod reconcile;
 mod role;

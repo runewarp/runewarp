@@ -508,9 +508,9 @@ impl Server {
         if mode == ShutdownMode::Graceful && shutdown.graceful_shutdown_duration() > Duration::ZERO
         {
             tokio::select! {
-                _ = wait_for_no_active_streams(&tunnel_registry) => {}
+                _ = tunnel_registry.wait_quiescent() => {}
                 _ = tokio::time::sleep(shutdown.graceful_shutdown_duration()) => {
-                    let active_streams = tunnel_registry.active_stream_count().await;
+                    let active_streams = tunnel_registry.active_stream_count();
                     if active_streams > 0 {
                         runtime_log::server_graceful_shutdown_deadline_expired(
                             tunnel_registry.active_connection_count().await,
@@ -594,15 +594,6 @@ fn admit_tunnel_handshake(
         )
         .await;
     });
-}
-
-async fn wait_for_no_active_streams(tunnel_registry: &TunnelRegistry) {
-    loop {
-        if tunnel_registry.active_stream_count().await == 0 {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }
 
 async fn register_tunnel_connection(

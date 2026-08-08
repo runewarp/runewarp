@@ -1,20 +1,21 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::io;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use futures_util::future::{AbortHandle, AbortRegistration, Abortable, Aborted};
 use quinn::Connection;
 use rustls::pki_types::CertificateDer;
-use tokio::sync::RwLock;
-use tokio::task::AbortHandle;
+use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock};
 
 use crate::{
     ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig,
     client_identity_from_certificate_der,
 };
 
-use super::active_client::{ActiveClientPool, SelectedTunnelConnection};
+use super::active_client::{ActiveClientPool, ActiveStreamGuard, SelectedTunnelConnection};
 #[cfg(test)]
 use super::admission::ServerAdmissionLimits;
 use super::admission::{AdmissionRejection, TunnelConnectionAdmission};
@@ -42,19 +43,63 @@ pub(crate) struct LiveWorkDispatch {
     pub streams_reset: usize,
 }
 
-struct ActiveVisitorStream {
+struct ActiveVisitorWorkRecord {
     public_hostname: PublicHostname,
     member_id: u64,
     client_identity: ClientIdentity,
     abort_handle: AbortHandle,
+    abort_requested: bool,
+}
+
+struct ActiveVisitorWorkState {
+    work: StdRwLock<HashMap<u64, ActiveVisitorWorkRecord>>,
+    quiescent: Notify,
+}
+
+pub(crate) struct ActiveVisitorWork {
+    stream_id: u64,
+    state: Arc<ActiveVisitorWorkState>,
+    abort_registration: Option<AbortRegistration>,
+    active_stream_permit: Option<OwnedSemaphorePermit>,
+    member_load: Option<ActiveStreamGuard>,
+}
+
+impl ActiveVisitorWork {
+    pub(crate) async fn run<F>(mut self, future: F) -> Result<F::Output, Aborted>
+    where
+        F: Future,
+    {
+        let registration = self
+            .abort_registration
+            .take()
+            .expect("active Visitor work abort registration is consumed once");
+        Abortable::new(future, registration).await
+    }
+}
+
+impl Drop for ActiveVisitorWork {
+    fn drop(&mut self) {
+        drop(self.active_stream_permit.take());
+        drop(self.member_load.take());
+        let removed = self
+            .state
+            .work
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.stream_id)
+            .is_some();
+        if removed {
+            self.state.quiescent.notify_waiters();
+        }
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct TunnelRegistry {
     authorization: Arc<AuthorizationState>,
     tunnel_pools: Arc<RwLock<Vec<ActiveClientPool>>>,
-    // std lock so track/reset stay synchronous (no await gap after stream admission).
-    visitor_streams: Arc<StdRwLock<HashMap<u64, ActiveVisitorStream>>>,
+    // std lock so registration, revocation, and drop cleanup stay synchronous.
+    visitor_work: Arc<ActiveVisitorWorkState>,
     next_stream_id: Arc<AtomicU64>,
     accepting_tunnel_connections: Arc<AtomicBool>,
     admitting_streams: Arc<AtomicBool>,
@@ -96,7 +141,10 @@ impl TunnelRegistry {
             tunnel_pools: Arc::new(RwLock::new(vec![ActiveClientPool::with_admission(
                 tunnel_connection_admission.clone(),
             )])),
-            visitor_streams: Arc::new(StdRwLock::new(HashMap::new())),
+            visitor_work: Arc::new(ActiveVisitorWorkState {
+                work: StdRwLock::new(HashMap::new()),
+                quiescent: Notify::new(),
+            }),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
             admitting_streams: Arc::new(AtomicBool::new(true)),
@@ -156,7 +204,10 @@ impl TunnelRegistry {
         Ok(Self {
             authorization: authorization.state().clone(),
             tunnel_pools: Arc::new(RwLock::new(tunnel_pools)),
-            visitor_streams: Arc::new(StdRwLock::new(HashMap::new())),
+            visitor_work: Arc::new(ActiveVisitorWorkState {
+                work: StdRwLock::new(HashMap::new()),
+                quiescent: Notify::new(),
+            }),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
             admitting_streams: Arc::new(AtomicBool::new(true)),
@@ -346,34 +397,77 @@ impl TunnelRegistry {
         closed
     }
 
-    pub(crate) fn track_visitor_stream(
+    pub(crate) fn register_active_visitor_work(
+        &self,
+        public_hostname: PublicHostname,
+        connection: &SelectedTunnelConnection,
+        active_stream_permit: OwnedSemaphorePermit,
+    ) -> ActiveVisitorWork {
+        self.register_active_visitor_work_parts(
+            public_hostname,
+            connection.member_id(),
+            connection.client_identity().clone(),
+            active_stream_permit,
+            connection.record_open_stream(),
+        )
+    }
+
+    fn register_active_visitor_work_parts(
         &self,
         public_hostname: PublicHostname,
         member_id: u64,
         client_identity: ClientIdentity,
-        abort_handle: AbortHandle,
-    ) -> u64 {
+        active_stream_permit: OwnedSemaphorePermit,
+        member_load: ActiveStreamGuard,
+    ) -> ActiveVisitorWork {
         let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
-        self.visitor_streams
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        self.visitor_work
+            .work
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(
                 stream_id,
-                ActiveVisitorStream {
+                ActiveVisitorWorkRecord {
                     public_hostname,
                     member_id,
                     client_identity,
                     abort_handle,
+                    abort_requested: false,
                 },
             );
-        stream_id
+        ActiveVisitorWork {
+            stream_id,
+            state: self.visitor_work.clone(),
+            abort_registration: Some(abort_registration),
+            active_stream_permit: Some(active_stream_permit),
+            member_load: Some(member_load),
+        }
     }
 
-    pub(crate) fn untrack_visitor_stream(&self, stream_id: u64) {
-        self.visitor_streams
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&stream_id);
+    #[cfg(test)]
+    fn spawn_active_visitor_work_for_test<F>(
+        &self,
+        public_hostname: PublicHostname,
+        member_id: u64,
+        client_identity: ClientIdentity,
+        future: F,
+    ) -> tokio::task::JoinHandle<Result<F::Output, Aborted>>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let permit = Arc::new(tokio::sync::Semaphore::new(1))
+            .try_acquire_owned()
+            .expect("test Visitor work permit must be available");
+        let work = self.register_active_visitor_work_parts(
+            public_hostname,
+            member_id,
+            client_identity,
+            permit,
+            ActiveStreamGuard::for_test(),
+        );
+        tokio::spawn(work.run(future))
     }
 
     #[allow(dead_code)] // selective hostname revocation; also used by tests
@@ -395,28 +489,28 @@ impl TunnelRegistry {
 
     fn reset_streams_matching(
         &self,
-        mut should_reset: impl FnMut(&ActiveVisitorStream) -> bool,
+        mut should_reset: impl FnMut(&ActiveVisitorWorkRecord) -> bool,
     ) -> usize {
         let mut streams = self
-            .visitor_streams
+            .visitor_work
+            .work
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut reset = 0;
-        streams.retain(|_, stream| {
-            if should_reset(stream) {
+        for stream in streams.values_mut() {
+            if !stream.abort_requested && should_reset(stream) {
+                stream.abort_requested = true;
                 stream.abort_handle.abort();
                 reset += 1;
-                false
-            } else {
-                true
             }
-        });
+        }
         reset
     }
 
     #[cfg(test)]
     pub(crate) fn tracked_visitor_stream_count(&self) -> usize {
-        self.visitor_streams
+        self.visitor_work
+            .work
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len()
@@ -424,7 +518,8 @@ impl TunnelRegistry {
 
     #[cfg(test)]
     pub(crate) fn tracked_visitor_hostnames(&self) -> Vec<PublicHostname> {
-        self.visitor_streams
+        self.visitor_work
+            .work
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
@@ -446,13 +541,24 @@ impl TunnelRegistry {
         active
     }
 
-    pub(crate) async fn active_stream_count(&self) -> usize {
-        let pools = self.tunnel_pools.read().await.clone();
-        let mut active = 0;
-        for pool in pools.iter() {
-            active += pool.active_stream_count().await;
+    pub(crate) fn active_stream_count(&self) -> usize {
+        self.visitor_work
+            .work
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    pub(crate) async fn wait_quiescent(&self) {
+        loop {
+            let notified = self.visitor_work.quiescent.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.active_stream_count() == 0 {
+                return;
+            }
+            notified.await;
         }
-        active
     }
 
     pub(crate) fn stop_accepting_new_work(&self) {
@@ -482,7 +588,7 @@ fn client_identity_from_connection(connection: &Connection) -> Option<ClientIden
 }
 
 fn stream_remains_authorized(
-    stream: &ActiveVisitorStream,
+    stream: &ActiveVisitorWorkRecord,
     snapshot: &AuthorizationSnapshot,
 ) -> bool {
     match (
@@ -577,6 +683,142 @@ mod tests {
                 .await,
             TunnelRouteOutcome::Connected(_)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_visitor_work_dropped_before_first_poll_releases_all_accounting()
+    -> io::Result<()> {
+        let client_identity = generate_test_client_identity()?;
+        let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        let registry = TunnelRegistry::configured(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                id: None,
+                public_hostnames: vec![public_hostname("app.example.test")],
+                authorized_client_identities: vec![client_identity.client_identity.clone()],
+            }],
+        )?;
+        registry.register(fixture.server_connection).await;
+        let TunnelRouteOutcome::Connected(connection) = registry
+            .route_tunnel_connection(&public_hostname("app.example.test"))
+            .await
+        else {
+            panic!("registered Tunnel connection must be routable");
+        };
+        let policy = super::super::admission::ServerAdmissionPolicy::new(ServerAdmissionLimits {
+            max_active_routed_streams: 1,
+            ..ServerAdmissionLimits::for_test()
+        });
+        let permit = policy
+            .try_admit_active_routed_stream()
+            .expect("first Visitor work should be admitted");
+
+        let work = registry.register_active_visitor_work(
+            public_hostname("app.example.test"),
+            &connection,
+            permit,
+        );
+
+        assert_eq!(registry.active_stream_count(), 1);
+        assert_eq!(connection.active_stream_count(), 1);
+        assert!(policy.try_admit_active_routed_stream().is_err());
+
+        drop(work);
+
+        assert_eq!(registry.active_stream_count(), 0);
+        assert_eq!(connection.active_stream_count(), 0);
+        assert!(policy.try_admit_active_routed_stream().is_ok());
+        timeout(Duration::from_millis(10), registry.wait_quiescent())
+            .await
+            .expect("quiescence should be observable without polling");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_visitor_work_cleans_up_after_normal_error_cancel_and_panic() -> io::Result<()> {
+        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
+        let identity = generate_test_client_identity()?.client_identity;
+
+        let normal = registry.spawn_active_visitor_work_for_test(
+            public_hostname("app.example.test"),
+            1,
+            identity.clone(),
+            async { 7_u8 },
+        );
+        assert_eq!(normal.await.expect("normal work task should join"), Ok(7));
+        assert_eq!(registry.active_stream_count(), 0);
+
+        let error = registry.spawn_active_visitor_work_for_test(
+            public_hostname("app.example.test"),
+            1,
+            identity.clone(),
+            async { Err::<(), _>(io::Error::other("proxy failed")) },
+        );
+        assert!(
+            error
+                .await
+                .expect("error work task should join")
+                .expect("work was not revoked")
+                .is_err()
+        );
+        assert_eq!(registry.active_stream_count(), 0);
+
+        let cancelled = registry.spawn_active_visitor_work_for_test(
+            public_hostname("app.example.test"),
+            1,
+            identity.clone(),
+            std::future::pending::<()>(),
+        );
+        cancelled.abort();
+        assert!(
+            cancelled
+                .await
+                .expect_err("cancelled work task should not join normally")
+                .is_cancelled()
+        );
+        assert_eq!(registry.active_stream_count(), 0);
+
+        let panicked = registry.spawn_active_visitor_work_for_test(
+            public_hostname("app.example.test"),
+            1,
+            identity,
+            async { panic!("proxy panic") },
+        );
+        assert!(
+            panicked
+                .await
+                .expect_err("panicked work task should not join normally")
+                .is_panic()
+        );
+        assert_eq!(registry.active_stream_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wait_quiescent_cannot_miss_the_last_work_drop() -> io::Result<()> {
+        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
+        let identity = generate_test_client_identity()?.client_identity;
+        let work = registry.spawn_active_visitor_work_for_test(
+            public_hostname("app.example.test"),
+            1,
+            identity,
+            std::future::pending::<()>(),
+        );
+        let waiting_registry = registry.clone();
+        let waiter = tokio::spawn(async move {
+            waiting_registry.wait_quiescent().await;
+        });
+
+        tokio::task::yield_now().await;
+        work.abort();
+        let _ = work.await;
+
+        timeout(Duration::from_millis(100), waiter)
+            .await
+            .expect("last work drop must wake quiescence waiters")
+            .expect("quiescence waiter should not panic");
+        assert_eq!(registry.active_stream_count(), 0);
         Ok(())
     }
 
@@ -980,50 +1222,46 @@ mod tests {
         let keep_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let app_keep = keep_running.clone();
         let api_keep = keep_running.clone();
-        let app_task = tokio::spawn(async move {
-            while app_keep.load(std::sync::atomic::Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        });
-        let api_task = tokio::spawn(async move {
-            while api_keep.load(std::sync::atomic::Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        });
         let app_identity = generate_test_client_identity()?.client_identity;
         let api_identity = generate_test_client_identity()?.client_identity;
-        let app_stream_id = registry.track_visitor_stream(
+        let app_task = registry.spawn_active_visitor_work_for_test(
             public_hostname("app.example.test"),
             1,
             app_identity,
-            app_task.abort_handle(),
+            async move {
+                while app_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            },
         );
-        let api_stream_id = registry.track_visitor_stream(
+        let api_task = registry.spawn_active_visitor_work_for_test(
             public_hostname("api.example.test"),
             2,
             api_identity,
-            api_task.abort_handle(),
+            async move {
+                while api_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            },
         );
 
         assert_eq!(
             registry.reset_streams_for_public_hostname(&public_hostname("app.example.test")),
             1
         );
-        assert!(
-            app_task
-                .await
-                .expect_err("app stream should abort")
-                .is_cancelled()
+        assert_eq!(
+            registry.reset_streams_for_public_hostname(&public_hostname("app.example.test")),
+            0,
+            "revocation dispatch must be counted once while lease cleanup is pending"
         );
+        assert!(app_task.await.expect("app work task should join").is_err());
         assert_eq!(
             registry.tracked_visitor_hostnames(),
             vec![public_hostname("api.example.test")]
         );
 
         keep_running.store(false, std::sync::atomic::Ordering::Relaxed);
-        api_task.await.expect("api stream should finish normally");
-        registry.untrack_visitor_stream(api_stream_id);
-        registry.untrack_visitor_stream(app_stream_id);
+        assert!(api_task.await.expect("api work task should join").is_ok());
         assert_eq!(registry.tracked_visitor_stream_count(), 0);
         Ok(())
     }
@@ -1049,33 +1287,25 @@ mod tests {
         let remapped_keep = keep_running.clone();
         let surviving_keep = keep_running.clone();
         let revoked_keep = keep_running.clone();
-        let remapped_task = tokio::spawn(async move {
-            while remapped_keep.load(std::sync::atomic::Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        });
-        let surviving_task = tokio::spawn(async move {
-            while surviving_keep.load(std::sync::atomic::Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        });
-        let revoked_task = tokio::spawn(async move {
-            while revoked_keep.load(std::sync::atomic::Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        });
-
-        registry.track_visitor_stream(
+        let remapped_task = registry.spawn_active_visitor_work_for_test(
             public_hostname("shared.example.test"),
             1,
             first_identity.client_identity.clone(),
-            remapped_task.abort_handle(),
+            async move {
+                while remapped_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            },
         );
-        registry.track_visitor_stream(
+        let surviving_task = registry.spawn_active_visitor_work_for_test(
             public_hostname("app.example.test"),
             1,
             first_identity.client_identity.clone(),
-            surviving_task.abort_handle(),
+            async move {
+                while surviving_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            },
         );
 
         let dispatch = registry
@@ -1099,19 +1329,23 @@ mod tests {
         assert!(
             remapped_task
                 .await
-                .expect_err("hostname remapped away from serving identity should abort")
-                .is_cancelled()
+                .expect("remapped work task should join")
+                .is_err()
         );
         assert_eq!(
             registry.tracked_visitor_hostnames(),
             vec![public_hostname("app.example.test")]
         );
 
-        registry.track_visitor_stream(
+        let revoked_task = registry.spawn_active_visitor_work_for_test(
             public_hostname("app.example.test"),
             1,
             first_identity.client_identity.clone(),
-            revoked_task.abort_handle(),
+            async move {
+                while revoked_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            },
         );
 
         let dispatch = registry
@@ -1137,14 +1371,14 @@ mod tests {
         assert!(
             surviving_task
                 .await
-                .expect_err("revoked Client identity stream should abort")
-                .is_cancelled()
+                .expect("surviving work task should join")
+                .is_err()
         );
         assert!(
             revoked_task
                 .await
-                .expect_err("later stream for revoked identity should abort")
-                .is_cancelled()
+                .expect("revoked work task should join")
+                .is_err()
         );
         assert_eq!(registry.tracked_visitor_stream_count(), 0);
 
@@ -1170,28 +1404,25 @@ mod tests {
         let keep_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let app_keep = keep_running.clone();
         let api_keep = keep_running.clone();
-        let app_task = tokio::spawn(async move {
-            while app_keep.load(std::sync::atomic::Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        });
-        let api_task = tokio::spawn(async move {
-            while api_keep.load(std::sync::atomic::Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        });
-
-        registry.track_visitor_stream(
+        let app_task = registry.spawn_active_visitor_work_for_test(
             public_hostname("app.example.test"),
             1,
             identity.client_identity.clone(),
-            app_task.abort_handle(),
+            async move {
+                while app_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            },
         );
-        registry.track_visitor_stream(
+        let api_task = registry.spawn_active_visitor_work_for_test(
             public_hostname("api.example.test"),
             1,
             identity.client_identity.clone(),
-            api_task.abort_handle(),
+            async move {
+                while api_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            },
         );
 
         let dispatch = registry
@@ -1206,12 +1437,7 @@ mod tests {
             .await?;
         assert_eq!(dispatch.connections_closed, 0);
         assert_eq!(dispatch.streams_reset, 1);
-        assert!(
-            api_task
-                .await
-                .expect_err("removed Public hostname stream should abort")
-                .is_cancelled()
-        );
+        assert!(api_task.await.expect("api work task should join").is_err());
         assert_eq!(
             registry.tracked_visitor_hostnames(),
             vec![public_hostname("app.example.test")]
@@ -1224,9 +1450,7 @@ mod tests {
         );
 
         keep_running.store(false, std::sync::atomic::Ordering::Relaxed);
-        app_task
-            .await
-            .expect("surviving Public hostname stream should finish normally");
+        assert!(app_task.await.expect("app work task should join").is_ok());
         Ok(())
     }
 
@@ -1488,43 +1712,44 @@ mod tests {
         let keep_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let first_keep = keep_running.clone();
         let second_keep = keep_running.clone();
-        let first_task = tokio::spawn(async move {
-            while first_keep.load(std::sync::atomic::Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        });
-        let second_task = tokio::spawn(async move {
-            while second_keep.load(std::sync::atomic::Ordering::Relaxed) {
-                tokio::task::yield_now().await;
-            }
-        });
         let identity = generate_test_client_identity()?.client_identity;
-        registry.track_visitor_stream(
+        let first_task = registry.spawn_active_visitor_work_for_test(
             public_hostname("app.example.test"),
             7,
             identity.clone(),
-            first_task.abort_handle(),
+            async move {
+                while first_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            },
         );
-        registry.track_visitor_stream(
+        let second_task = registry.spawn_active_visitor_work_for_test(
             public_hostname("app.example.test"),
             8,
             identity,
-            second_task.abort_handle(),
+            async move {
+                while second_keep.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                }
+            },
         );
 
         assert_eq!(registry.reset_streams_for_member(7), 1);
         assert!(
             first_task
                 .await
-                .expect_err("member stream should abort")
-                .is_cancelled()
+                .expect("first work task should join")
+                .is_err()
         );
         assert_eq!(registry.tracked_visitor_stream_count(), 1);
 
         keep_running.store(false, std::sync::atomic::Ordering::Relaxed);
-        second_task
-            .await
-            .expect("other member stream should finish normally");
+        assert!(
+            second_task
+                .await
+                .expect("second work task should join")
+                .is_ok()
+        );
         Ok(())
     }
 

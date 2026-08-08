@@ -291,36 +291,26 @@ impl VisitorIntake {
         self.admission_policy
             .report_recovery(&[AdmissionLimit::ActiveRoutedStreams]);
 
-        let active_stream_guard = tunnel_connection.record_open_stream();
         runtime_log::server_route(public_hostname.as_str(), ServerRouteOutcome::Forwarded);
 
-        let member_id = tunnel_connection.member_id();
-        let client_identity = tunnel_connection.client_identity().clone();
         let registry = self.tunnel_registry.clone();
-        let tracked_hostname = public_hostname.clone();
-        let proxy_task = tokio::spawn(async move {
-            let _active_stream_guard = active_stream_guard;
-            let _active_stream_permit = active_stream_permit;
-            let initial_bytes = encode_tunnel_stream(addresses, &buffered_bytes);
-            proxy_tcp_over_quic(visitor_stream, initial_bytes, send, recv).await
-        });
-        // Track synchronously before the next await so commit-time revocation cannot miss
-        // a stream that has already been admitted.
-        let stream_id = registry.track_visitor_stream(
-            tracked_hostname,
-            member_id,
-            client_identity,
-            proxy_task.abort_handle(),
+        // Registration is synchronous and precedes proxy progress, so a concurrent
+        // Authorization replacement cannot miss already-admitted Visitor work.
+        let work = registry.register_active_visitor_work(
+            public_hostname,
+            &tunnel_connection,
+            active_stream_permit,
         );
-        let proxy_result = match proxy_task.await {
+        match work
+            .run(async move {
+                let initial_bytes = encode_tunnel_stream(addresses, &buffered_bytes);
+                proxy_tcp_over_quic(visitor_stream, initial_bytes, send, recv).await
+            })
+            .await
+        {
             Ok(result) => result,
-            Err(join_error) if join_error.is_cancelled() => Ok(()),
-            Err(join_error) => Err(io::Error::other(format!(
-                "visitor stream proxy task failed: {join_error}"
-            ))),
-        };
-        registry.untrack_visitor_stream(stream_id);
-        proxy_result
+            Err(_) => Ok(()),
+        }
     }
 }
 

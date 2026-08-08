@@ -262,7 +262,7 @@ Any downlink or state-acknowledgment failure closes the whole connection. Reconn
    - removing only a Public hostname resets matching Visitor streams
    - unrelated authorized work survives
 5. After the first successful apply, Control loss retains the last authorization and readiness while the session reconnects.
-6. **Graceful shutdown** drops readiness immediately but keeps the Managed session, snapshot application, and revision acknowledgment active through bounded drain so Authorization changes still apply; the session ends when the HTTP/2 connection closes at final process exit. **Fast shutdown** may close the session immediately.
+6. The Server role runtime owns Server and Managed-session completion together. **Graceful shutdown** drops readiness immediately but keeps the Managed session, snapshot application, and revision acknowledgment active through bounded drain so Authorization changes still apply; the session ends when the HTTP/2 connection closes at final process exit. **Fast shutdown** may close the session immediately.
 7. A pre-commit failure retains prior authorization. An unrecoverable failure after commit begins never restores revoked authorization: readiness drops and the process exits nonzero.
 
 ## Managed Client behavior

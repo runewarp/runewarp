@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
-use runewarp::{ClientRuntimeArgs, resolve_client_config_from_cli};
+use runewarp::{ClientRuntime, ClientRuntimeArgs, resolve_client_config_from_cli};
 
 use crate::cli;
 use crate::commands::CommandResult;
@@ -59,12 +59,17 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
     let config = resolve_client_config_from_cli(config.clone(), runtime)
         .map_err(wrap_client_config_resolution_error)?;
     runewarp::runtime_log::install(config.log_level)?;
-    crate::client_runtime::run_until_orderly_shutdown(&config, wildcard(0), async {
-        let signal = super::wait_for_initial_shutdown_signal().await?;
-        Ok::<runewarp::ShutdownMode, std::io::Error>(super::shutdown_mode_for_first_signal(signal))
-    })
-    .await
-    .map_err(logged_runtime_failure)
+    ClientRuntime::prepare(&config, wildcard(0))
+        .await
+        .map_err(|error| logged_runtime_failure(Box::new(error)))?
+        .run(async {
+            let signal = super::wait_for_initial_shutdown_signal().await?;
+            Ok::<runewarp::ShutdownMode, std::io::Error>(super::shutdown_mode_for_first_signal(
+                signal,
+            ))
+        })
+        .await
+        .map_err(logged_runtime_failure)
 }
 
 fn client_identity_forbidden_runtime_flags(

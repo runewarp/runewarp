@@ -12,6 +12,7 @@ Runewarp keeps public ingress simple: the server routes encrypted traffic to a c
 | **Client instance behavior** | The **Client instance** selects a **Service** locally and either forwards TLS bytes to a TLS-terminating **Local backend** (**TLS passthrough**) or terminates TLS itself before proxying plaintext to the **Local backend** (**Terminate mode**) |
 | Tunnel transport | One long-lived QUIC/TLS **Tunnel connection** per **Client instance** |
 | Trust model | Server certificate validation plus pinned **Client identity** authentication |
+| Process lifecycle | Separate Client and Server role runtimes own preparation, static/Managed construction, ACME, shutdown, fatal propagation, and teardown |
 
 ## Roles
 
@@ -35,6 +36,12 @@ Runewarp prepares config in three steps:
 Runtime commands request a full prepared-and-validated **Server** or **Client** config from Config preparation. Material-management commands request command-specific outcomes from the same seam (material directories, Server hostname, terminating Public hostnames, managed-mode detection) without reopening raw config sections or coordinating parsing helpers themselves.
 
 This keeps config discovery and defaulting predictable without mixing them into startup side effects.
+
+After Config preparation, the binary is only a process adapter: it translates CLI input and
+operating-system signals, then crosses one `ClientRuntime` or `ServerRuntime` library seam. The
+separate role runtimes own startup side effects, static-versus-Managed construction, optional ACME
+work, child-runtime completion, orderly shutdown, and teardown. Client and Server deliberately do
+not share a generic runtime framework because their drain and Managed-session lifetimes differ.
 
 ## Hostname domain values
 
@@ -159,6 +166,7 @@ The client validates the server certificate either through system trust or throu
 - multiple Client instances across different Tunnels are supported
 - optional **Server readiness** is ingress-admission-only: when `server.readiness-bind-address` is configured, a probe-only TCP listener stays up only while the Server should admit new ingress traffic
 - orderly local shutdown is runtime-owned: the **Server** drops **Server readiness** immediately, stops accepting new Visitor traffic, new **Tunnel connections**, and new streams on already-open **Tunnel connections**, while the **Client instance** stops reconnect work before closing its active **Tunnel connection**
+- every role-runtime exit path requests shutdown where needed and awaits its owned runtime work; signal-adapter errors remain the reported cause after teardown
 - **Graceful shutdown** on the **Server** keeps already-landed Visitor streams alive only up to `server.graceful-shutdown-duration`, then force-closes remaining work
 - **Fast shutdown** on the **Server** skips that longer drain window
 - the short **QUIC close flush duration** remains a fixed runtime-owned courtesy window after the close frame is sent; it is not an operator-facing drain knob

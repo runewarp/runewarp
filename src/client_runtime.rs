@@ -5,12 +5,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use futures_util::future::BoxFuture;
-use runewarp::{
+use crate::{
     AddressController, AddressWorkerDial, AddressWorkerFactory, AddressWorkerHooks,
     ClientAdmission, ClientInstancePrep, ConnectedTunnelFailure, EstablishOutcome, PreparedClient,
     ServerAddress, ShutdownMode,
 };
+use futures_util::future::BoxFuture;
 use tokio::net::lookup_host;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,19 +25,59 @@ struct ClientTunnelDialTarget {
     resolved_server_addr: SocketAddr,
 }
 
-pub(crate) async fn run_until_orderly_shutdown<F>(
-    settings: &runewarp::ClientConfig,
+pub struct ClientRuntime {
+    settings: Arc<crate::ClientConfig>,
+    instance: Arc<ClientInstancePrep>,
+    local_bind_addr: SocketAddr,
+}
+
+impl ClientRuntime {
+    pub async fn prepare(
+        settings: &crate::ClientConfig,
+        local_bind_addr: SocketAddr,
+    ) -> Result<Self, crate::ClientStartupError> {
+        let settings = Arc::new(settings.clone());
+        let instance = ClientInstancePrep::prepare(settings.as_ref()).await?;
+        Ok(Self {
+            settings,
+            instance,
+            local_bind_addr,
+        })
+    }
+
+    pub async fn run<F>(self, shutdown_signal: F) -> Result<(), Box<dyn Error>>
+    where
+        F: Future<Output = io::Result<ShutdownMode>>,
+    {
+        let Self {
+            settings,
+            instance,
+            local_bind_addr,
+        } = self;
+        instance.start_acme_once();
+
+        let result = run_client(
+            Arc::clone(&settings),
+            Arc::clone(&instance),
+            local_bind_addr,
+            shutdown_signal,
+        )
+        .await;
+        instance.stop_acme().await;
+        result
+    }
+}
+
+async fn run_client<F>(
+    settings: Arc<crate::ClientConfig>,
+    instance: Arc<ClientInstancePrep>,
     local_bind_addr: SocketAddr,
     shutdown_signal: F,
 ) -> Result<(), Box<dyn Error>>
 where
     F: Future<Output = io::Result<ShutdownMode>>,
 {
-    let settings = Arc::new(settings.clone());
-    let instance = ClientInstancePrep::prepare(settings.as_ref()).await?;
-    instance.start_acme_once();
-
-    let result = match settings.admission {
+    match settings.admission {
         ClientAdmission::Managed => {
             let control = settings.control.as_ref().ok_or_else(|| {
                 io::Error::other("managed Client admission requires Control config")
@@ -67,21 +107,22 @@ where
             let client_result = tokio::select! {
                 result = &mut runtime => result,
                 signal_result = &mut shutdown_signal => {
-                    let _mode = signal_result?;
-                    runewarp::runtime_log::client_graceful_shutdown_started();
+                    if signal_result.is_ok() {
+                        crate::runtime_log::client_graceful_shutdown_started();
+                    }
                     shutdown.request();
-                    runtime.await
+                    let runtime_result = runtime.await;
+                    signal_result?;
+                    runtime_result
                 }
             };
             client_result.map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
         }
-    };
-    instance.stop_acme().await;
-    result
+    }
 }
 
 fn production_client_address_worker_factory(
-    settings: Arc<runewarp::ClientConfig>,
+    settings: Arc<crate::ClientConfig>,
     instance: Arc<ClientInstancePrep>,
     local_bind_addr: SocketAddr,
 ) -> AddressWorkerFactory {
@@ -94,7 +135,7 @@ fn production_client_address_worker_factory(
             establish_attempts: Arc::new(AtomicUsize::new(0)),
         });
         Box::pin(async move {
-            runewarp::run_address_worker_with_reconnect_policy(
+            crate::run_address_worker_with_reconnect_policy(
                 server_address,
                 control,
                 dial,
@@ -109,12 +150,12 @@ struct RuntimeClientReadyHooks;
 
 impl AddressWorkerHooks for RuntimeClientReadyHooks {
     fn on_client_ready(&self, configured_server_addr: &str) {
-        runewarp::runtime_log::client_ready(configured_server_addr);
+        crate::runtime_log::client_ready(configured_server_addr);
     }
 }
 
 struct ProductionAddressDial {
-    settings: Arc<runewarp::ClientConfig>,
+    settings: Arc<crate::ClientConfig>,
     instance: Arc<ClientInstancePrep>,
     local_bind_addr: SocketAddr,
     connected_once: Arc<AtomicBool>,
@@ -146,7 +187,7 @@ impl AddressWorkerDial for ProductionAddressDial {
                         EstablishOutcome::Retryable {
                             message: message.clone(),
                             log_with_delay: Some(Box::new(move |delay_secs| {
-                                runewarp::runtime_log::client_tunnel_resolution_failed(
+                                crate::runtime_log::client_tunnel_resolution_failed(
                                     phase,
                                     attempt_kind,
                                     &configured_server_addr,
@@ -163,7 +204,7 @@ impl AddressWorkerDial for ProductionAddressDial {
                 }
             };
 
-            runewarp::runtime_log::client_tunnel_connecting(
+            crate::runtime_log::client_tunnel_connecting(
                 phase,
                 attempt_kind,
                 &dial_target.configured_server_addr,
@@ -187,11 +228,9 @@ impl AddressWorkerDial for ProductionAddressDial {
                     ) {
                         let unauthorized = error
                             .source()
-                            .and_then(|source| {
-                                source.downcast_ref::<runewarp::ClientConnectError>()
-                            })
+                            .and_then(|source| source.downcast_ref::<crate::ClientConnectError>())
                             .is_some_and(
-                                runewarp::ClientConnectError::is_unauthorized_client_identity,
+                                crate::ClientConnectError::is_unauthorized_client_identity,
                             );
                         let configured = dial_target.configured_server_addr.clone();
                         let resolved = dial_target.resolved_server_addr;
@@ -200,14 +239,14 @@ impl AddressWorkerDial for ProductionAddressDial {
                             message: message.clone(),
                             log_with_delay: Some(Box::new(move |delay_secs| {
                                 if unauthorized {
-                                    runewarp::runtime_log::client_tunnel_unauthorized(
+                                    crate::runtime_log::client_tunnel_unauthorized(
                                         attempt_kind,
                                         &configured,
                                         delay_secs,
                                         &message,
                                     );
                                 } else {
-                                    runewarp::runtime_log::client_tunnel_connect_failed(
+                                    crate::runtime_log::client_tunnel_connect_failed(
                                         phase,
                                         attempt_kind,
                                         &configured,
@@ -228,7 +267,7 @@ impl AddressWorkerDial for ProductionAddressDial {
 
             connected_once.store(true, Ordering::SeqCst);
             establish_attempts.store(0, Ordering::SeqCst);
-            runewarp::runtime_log::client_tunnel_connected(
+            crate::runtime_log::client_tunnel_connected(
                 phase,
                 &dial_target.configured_server_addr,
                 dial_target.resolved_server_addr,
@@ -252,20 +291,20 @@ impl AddressWorkerDial for ProductionAddressDial {
                                     move |delay_secs| {
                                         let next_attempt_kind = client_tunnel_attempt_kind(true);
                                         if unauthorized {
-                                            runewarp::runtime_log::client_tunnel_unauthorized(
+                                            crate::runtime_log::client_tunnel_unauthorized(
                                                 next_attempt_kind,
                                                 &configured,
                                                 delay_secs,
                                                 &reported_message,
                                             );
                                         } else if clean {
-                                            runewarp::runtime_log::client_tunnel_closed(
+                                            crate::runtime_log::client_tunnel_closed(
                                                 &configured,
                                                 resolved,
                                                 delay_secs,
                                             );
                                         } else {
-                                            runewarp::runtime_log::client_tunnel_disconnected(
+                                            crate::runtime_log::client_tunnel_disconnected(
                                                 &configured,
                                                 resolved,
                                                 delay_secs,
@@ -284,9 +323,9 @@ impl AddressWorkerDial for ProductionAddressDial {
 }
 
 async fn run_managed_client<F>(
-    settings: Arc<runewarp::ClientConfig>,
+    settings: Arc<crate::ClientConfig>,
     instance: Arc<ClientInstancePrep>,
-    control: &runewarp::ControlConfig,
+    control: &crate::ControlConfig,
     local_bind_addr: SocketAddr,
     shutdown_signal: F,
 ) -> Result<(), Box<dyn Error>>
@@ -301,26 +340,23 @@ where
     let (mut controller, mut adapter) = AddressController::for_managed(factory);
     let shutdown = controller.shutdown_handle();
 
-    let material = runewarp::SessionMaterial {
+    let material = crate::SessionMaterial {
         control_hostname: control.address.hostname().as_str().to_owned(),
         trust: control.trust.clone(),
-        identity: runewarp::ControlClientIdentityMaterial::from_client_identity_dir(
+        identity: crate::ControlClientIdentityMaterial::from_client_identity_dir(
             &settings.identity_directory,
         ),
     };
-    let mut session = runewarp::ManagedSession::new(
+    let mut session = crate::ManagedSession::new(
         control.address.clone(),
-        runewarp::ManagedSessionRole::Client,
+        crate::ManagedSessionRole::Client,
         material,
     )?;
 
     let session_runtime = session.run(
         &mut adapter,
         |event| async move {
-            runewarp::runtime_log::managed_session_event(
-                runewarp::ManagedSessionRole::Client,
-                &event,
-            );
+            crate::runtime_log::managed_session_event(crate::ManagedSessionRole::Client, &event);
         },
         shutdown_signal,
     );
@@ -333,54 +369,57 @@ where
             result.map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
         }
         session_result = &mut session_runtime => {
-            let _mode = session_result?;
-            runewarp::runtime_log::client_graceful_shutdown_started();
+            if session_result.is_ok() {
+                crate::runtime_log::client_graceful_shutdown_started();
+            }
             shutdown.request();
-            runtime.await.map_err(|error| {
+            let runtime_result = runtime.await.map_err(|error| {
                 Box::new(io::Error::other(error)) as Box<dyn Error>
-            })?;
+            });
+            session_result?;
+            runtime_result?;
             Ok(())
         }
     }
 }
 
 fn retry_disposition_for_client_connect_error(
-    error: &runewarp::ClientStartupError,
+    error: &crate::ClientStartupError,
 ) -> RetryDisposition {
     match error {
-        runewarp::ClientStartupError::Resolve(_)
-        | runewarp::ClientStartupError::MissingServerAddress { .. }
-        | runewarp::ClientStartupError::Connect(_) => RetryDisposition::Retry,
+        crate::ClientStartupError::Resolve(_)
+        | crate::ClientStartupError::MissingServerAddress { .. }
+        | crate::ClientStartupError::Connect(_) => RetryDisposition::Retry,
         _ => RetryDisposition::Stop,
     }
 }
 
-fn client_tunnel_phase(connected_once: bool) -> runewarp::runtime_log::ClientTunnelPhase {
+fn client_tunnel_phase(connected_once: bool) -> crate::runtime_log::ClientTunnelPhase {
     if connected_once {
-        runewarp::runtime_log::ClientTunnelPhase::Reconnecting
+        crate::runtime_log::ClientTunnelPhase::Reconnecting
     } else {
-        runewarp::runtime_log::ClientTunnelPhase::Establishing
+        crate::runtime_log::ClientTunnelPhase::Establishing
     }
 }
 
 fn client_tunnel_attempt_kind(
     is_fresh_attempt: bool,
-) -> runewarp::runtime_log::ClientTunnelAttemptKind {
+) -> crate::runtime_log::ClientTunnelAttemptKind {
     if is_fresh_attempt {
-        runewarp::runtime_log::ClientTunnelAttemptKind::Initial
+        crate::runtime_log::ClientTunnelAttemptKind::Initial
     } else {
-        runewarp::runtime_log::ClientTunnelAttemptKind::Retry
+        crate::runtime_log::ClientTunnelAttemptKind::Retry
     }
 }
 
 async fn resolve_client_tunnel_dial_target(
     server_address: &ServerAddress,
-) -> Result<ClientTunnelDialTarget, runewarp::ClientStartupError> {
+) -> Result<ClientTunnelDialTarget, crate::ClientStartupError> {
     let mut server_addrs = lookup_host((server_address.hostname().as_str(), server_address.port()))
         .await
-        .map_err(runewarp::ClientStartupError::Resolve)?;
+        .map_err(crate::ClientStartupError::Resolve)?;
     let Some(resolved_server_addr) = server_addrs.next() else {
-        return Err(runewarp::ClientStartupError::MissingServerAddress {
+        return Err(crate::ClientStartupError::MissingServerAddress {
             server_hostname: server_address.hostname().to_string(),
         });
     };
@@ -430,7 +469,7 @@ mod tests {
     use tokio::time::{sleep, timeout};
     use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-    use runewarp::{
+    use crate::{
         AddressController, AddressWorkerControl, CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME,
         CLIENT_KEY_FILENAME, ClientAdmission, ClientConfig, ClientTlsMode, LogLevel,
         PublicHostname, Server, ServerAddress, ServerAdmission, ServerAuthorization,
@@ -439,17 +478,17 @@ mod tests {
         wait_for_retry_delay, wait_for_shutdown,
     };
 
-    use super::{RetryDisposition, client_tunnel_attempt_kind, run_until_orderly_shutdown};
+    use super::{ClientRuntime, RetryDisposition, client_tunnel_attempt_kind};
 
     #[test]
     fn retry_attempt_kind_matches_fresh_policy_state() {
         assert_eq!(
             client_tunnel_attempt_kind(true),
-            runewarp::runtime_log::ClientTunnelAttemptKind::Initial
+            crate::runtime_log::ClientTunnelAttemptKind::Initial
         );
         assert_eq!(
             client_tunnel_attempt_kind(false),
-            runewarp::runtime_log::ClientTunnelAttemptKind::Retry
+            crate::runtime_log::ClientTunnelAttemptKind::Retry
         );
     }
 
@@ -476,11 +515,11 @@ mod tests {
 
     #[test]
     fn client_connect_failures_share_one_retry_disposition() {
-        let resolve = runewarp::ClientStartupError::Resolve(std::io::Error::other("lookup failed"));
-        let missing = runewarp::ClientStartupError::MissingServerAddress {
+        let resolve = crate::ClientStartupError::Resolve(std::io::Error::other("lookup failed"));
+        let missing = crate::ClientStartupError::MissingServerAddress {
             server_hostname: "tunnel.example.test".to_owned(),
         };
-        let connect = runewarp::ClientStartupError::Connect(runewarp::ClientConnectError::Bind(
+        let connect = crate::ClientStartupError::Connect(crate::ClientConnectError::Bind(
             std::io::Error::other("dial failed"),
         ));
 
@@ -641,7 +680,10 @@ mod tests {
         };
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let client_future = run_until_orderly_shutdown(&settings, localhost(0), async move {
+        let runtime = ClientRuntime::prepare(&settings, localhost(0))
+            .await
+            .unwrap();
+        let client_future = runtime.run(async move {
             let _ = shutdown_rx.await;
             Ok(ShutdownMode::Graceful)
         });

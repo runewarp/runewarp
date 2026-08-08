@@ -156,22 +156,11 @@ impl PreparedServer {
     }
 
     pub async fn run(self) -> io::Result<()> {
-        let Self {
-            server,
-            acme_runtime,
-            ..
-        } = self;
-        if let Some(acme_runtime) = acme_runtime {
-            tokio::select! {
-                server_result = server.run() => server_result,
-                acme_result = run_acme_state(acme_runtime.state, acme_runtime.lifecycle) => match acme_result {
-                    Ok(never) => match never {},
-                    Err(error) => Err(error),
-                },
-            }
-        } else {
-            server.run().await
-        }
+        let shutdown = OrderlyShutdown::new(
+            self.graceful_shutdown_duration,
+            crate::server::QUIC_CLOSE_FLUSH_DURATION,
+        );
+        self.run_with_shutdown(&shutdown).await
     }
 
     pub async fn run_until_shutdown<Shutdown>(self, shutdown_signal: Shutdown) -> io::Result<()>
@@ -182,18 +171,19 @@ impl PreparedServer {
             self.graceful_shutdown_duration,
             crate::server::QUIC_CLOSE_FLUSH_DURATION,
         );
-        let shutdown_trigger = shutdown.clone();
-        tokio::spawn(async move {
-            match shutdown_signal.await {
-                ShutdownMode::Graceful => {
-                    let _ = shutdown_trigger.begin_graceful();
+        let runtime = self.run_with_shutdown(&shutdown);
+        tokio::pin!(runtime);
+        tokio::pin!(shutdown_signal);
+        tokio::select! {
+            result = &mut runtime => result,
+            mode = &mut shutdown_signal => {
+                match mode {
+                    ShutdownMode::Graceful => { let _ = shutdown.begin_graceful(); }
+                    ShutdownMode::Fast => { let _ = shutdown.begin_fast(); }
                 }
-                ShutdownMode::Fast => {
-                    let _ = shutdown_trigger.begin_fast();
-                }
+                runtime.await
             }
-        });
-        self.run_with_shutdown(&shutdown).await
+        }
     }
 
     pub async fn run_with_shutdown(self, shutdown: &OrderlyShutdown) -> io::Result<()> {
@@ -203,15 +193,38 @@ impl PreparedServer {
             ..
         } = self;
         if let Some(acme_runtime) = acme_runtime {
-            tokio::select! {
-                server_result = server.run_with_shutdown(shutdown) => server_result,
-                acme_result = run_acme_state(acme_runtime.state, acme_runtime.lifecycle) => match acme_result {
-                    Ok(never) => match never {},
-                    Err(error) => Err(error),
-                },
-            }
+            coordinate_server_acme(
+                server.run_with_shutdown(shutdown),
+                run_acme_state(acme_runtime.state, acme_runtime.lifecycle),
+                shutdown,
+            )
+            .await
         } else {
             server.run_with_shutdown(shutdown).await
+        }
+    }
+}
+
+async fn coordinate_server_acme<ServerFuture, AcmeFuture, AcmeOutput>(
+    server: ServerFuture,
+    acme: AcmeFuture,
+    shutdown: &OrderlyShutdown,
+) -> io::Result<()>
+where
+    ServerFuture: Future<Output = io::Result<()>>,
+    AcmeFuture: Future<Output = io::Result<AcmeOutput>>,
+{
+    tokio::pin!(server);
+    tokio::pin!(acme);
+    tokio::select! {
+        result = &mut server => result,
+        result = &mut acme => {
+            let error = result.err().unwrap_or_else(|| {
+                io::Error::other("ACME certificate manager stopped unexpectedly")
+            });
+            let _ = shutdown.begin_fast();
+            let _ = server.await;
+            Err(error)
         }
     }
 }
@@ -934,18 +947,43 @@ mod tests {
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use super::{
         ClientInstancePrep, ClientStartupError, NativeRootsLoad, PreparedClient, PreparedServer,
-        ServerStartupError, acme_terminating_hostnames, build_root_store,
+        ServerStartupError, acme_terminating_hostnames, build_root_store, coordinate_server_acme,
     };
     use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
     use crate::{
         ClientConfig, ClientIdentity, ClientPublicCertConfig, ClientTlsMode, ControlAddress,
-        ControlConfig, ControlTrust, LogLevel, PublicHostname, ServerAddress, ServerAdmission,
-        ServerCertificateConfig, ServerConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
+        ControlConfig, ControlTrust, LogLevel, OrderlyShutdown, PublicHostname, ServerAddress,
+        ServerAdmission, ServerCertificateConfig, ServerConfig, ServerHostname, ServerTunnelConfig,
+        ServiceConfig, ShutdownMode,
     };
+
+    #[tokio::test]
+    async fn server_acme_failure_awaits_fast_server_teardown_and_preserves_error() {
+        let shutdown = OrderlyShutdown::new(Duration::ZERO, Duration::ZERO);
+        let server_shutdown = shutdown.clone();
+        let server_finished = Arc::new(AtomicBool::new(false));
+        let observed_finished = Arc::clone(&server_finished);
+
+        let result = coordinate_server_acme(
+            async move {
+                server_shutdown.wait_started().await;
+                observed_finished.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            async { Err::<(), _>(io::Error::other("ACME stopped")) },
+            &shutdown,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().to_string(), "ACME stopped");
+        assert!(server_finished.load(Ordering::SeqCst));
+        assert_eq!(shutdown.mode(), Some(ShutdownMode::Fast));
+    }
 
     fn public_hostname(hostname: &str) -> PublicHostname {
         PublicHostname::try_from(hostname).unwrap()

@@ -68,17 +68,39 @@ impl VisitorIntake {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn accept(
         &self,
         visitor_stream: TcpStream,
         shutdown: Option<crate::shutdown::OrderlyShutdown>,
     ) {
+        if let Some(task) = self.accepted_task(visitor_stream, shutdown) {
+            tokio::spawn(task);
+        }
+    }
+
+    pub(crate) fn accept_scoped(
+        &self,
+        visitor_stream: TcpStream,
+        shutdown: crate::shutdown::OrderlyShutdown,
+        tasks: &mut tokio::task::JoinSet<()>,
+    ) {
+        if let Some(task) = self.accepted_task(visitor_stream, Some(shutdown)) {
+            tasks.spawn(task);
+        }
+    }
+
+    fn accepted_task(
+        &self,
+        visitor_stream: TcpStream,
+        shutdown: Option<crate::shutdown::OrderlyShutdown>,
+    ) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
         let permit = match self.admission_policy.try_admit_visitor_global() {
             Ok(permit) => permit,
             Err(rejection) => {
                 drop(visitor_stream);
                 self.admission_policy.report_saturation(rejection);
-                return;
+                return None;
             }
         };
         self.admission_policy.report_recovery(&[
@@ -87,7 +109,7 @@ impl VisitorIntake {
         ]);
         let intake = self.clone();
         let timeout = self.admission_policy.limits().client_hello_timeout;
-        tokio::spawn(async move {
+        Some(async move {
             match shutdown {
                 Some(shutdown) => {
                     let _ = intake
@@ -102,7 +124,7 @@ impl VisitorIntake {
                         .await;
                 }
             }
-        });
+        })
     }
 
     async fn intake_until<Shutdown>(

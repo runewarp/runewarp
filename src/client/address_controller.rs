@@ -1575,7 +1575,7 @@ mod tests {
     }
 
     async fn wait_for_shutdown(control: &AddressWorkerControl) {
-        crate::wait_for_shutdown(control).await;
+        crate::client::wait_for_shutdown(control).await;
     }
 
     async fn wait_until_retired_or_shutdown(control: &AddressWorkerControl) {

@@ -1,7 +1,6 @@
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use tokio::sync::oneshot;
 
@@ -31,11 +30,7 @@ impl ServerRuntime {
         public_bind_addr: SocketAddr,
         tunnel_bind_addr: SocketAddr,
     ) -> Result<Self, Box<dyn Error>> {
-        let server = PreparedServer::bind(config, public_bind_addr, tunnel_bind_addr).await?;
-        crate::runtime_log::server_public_listener_ready(server.public_addr()?);
-        crate::runtime_log::server_tunnel_listener_ready(server.tunnel_addr()?);
-
-        let mode = if let Some(control) = config.control.as_ref() {
+        let session = if let Some(control) = config.control.as_ref() {
             let identity = config.identity.as_ref().ok_or_else(|| {
                 io::Error::other("managed Server admission requires Server identity")
             })?;
@@ -46,18 +41,24 @@ impl ServerRuntime {
                     &identity.directory,
                 ),
             };
-            let session = ManagedSession::new(
+            Some(Box::new(ManagedSession::new(
                 control.address.clone(),
                 ManagedSessionRole::Server,
                 material,
-            )?;
-            let adapter = server.authorization_adapter().ok_or_else(|| {
-                io::Error::other("managed Server admission requires authorization adapter")
-            })?;
-            ServerRuntimeMode::Managed {
-                session: Box::new(session),
-                adapter,
-            }
+            )?))
+        } else {
+            None
+        };
+
+        let server = PreparedServer::bind(config, public_bind_addr, tunnel_bind_addr).await?;
+        crate::runtime_log::server_public_listener_ready(server.public_addr()?);
+        crate::runtime_log::server_tunnel_listener_ready(server.tunnel_addr()?);
+
+        let mode = if let Some(session) = session {
+            let adapter = server
+                .authorization_adapter()
+                .expect("managed Server preparation constructs an authorization adapter");
+            ServerRuntimeMode::Managed { session, adapter }
         } else {
             ServerRuntimeMode::Static
         };
@@ -131,23 +132,71 @@ async fn run_managed(
         },
     );
     let server_runtime = server.run_with_shutdown(&shutdown);
-    tokio::pin!(session_runtime);
-    tokio::pin!(server_runtime);
+    coordinate_managed_server(server_runtime, session_runtime, &shutdown, session_stop_tx).await
+}
+
+async fn coordinate_managed_server<ServerFuture, SessionFuture>(
+    server: ServerFuture,
+    session: SessionFuture,
+    shutdown: &OrderlyShutdown,
+    session_stop: oneshot::Sender<()>,
+) -> io::Result<()>
+where
+    ServerFuture: std::future::Future<Output = io::Result<()>>,
+    SessionFuture: std::future::Future<Output = ()>,
+{
+    tokio::pin!(server);
+    tokio::pin!(session);
 
     let result = tokio::select! {
-        server_result = &mut server_runtime => server_result,
-        _ = &mut session_runtime => {
+        server_result = &mut server => server_result,
+        _ = &mut session => {
             if matches!(shutdown.mode(), Some(ShutdownMode::Fast)) {
-                server_runtime.await
+                server.await
             } else {
                 let original = io::Error::other("managed session stopped unexpectedly");
                 let _ = shutdown.begin_fast();
-                let _ = server_runtime.await;
+                let _ = server.await;
                 Err(original)
             }
         }
     };
-    let _ = session_stop_tx.send(());
-    let _ = tokio::time::timeout(Duration::from_millis(500), &mut session_runtime).await;
+    let _ = session_stop.send(());
+    let _ = session.await;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use tokio::sync::oneshot;
+
+    use super::coordinate_managed_server;
+    use crate::OrderlyShutdown;
+
+    #[tokio::test]
+    async fn server_failure_stops_and_awaits_managed_session_before_returning() {
+        let shutdown = OrderlyShutdown::new(Duration::ZERO, Duration::ZERO);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let session_finished = Arc::new(AtomicBool::new(false));
+        let observed_finished = Arc::clone(&session_finished);
+
+        let result = coordinate_managed_server(
+            async { Err(io::Error::other("server failed")) },
+            async move {
+                let _ = stop_rx.await;
+                observed_finished.store(true, Ordering::SeqCst);
+            },
+            &shutdown,
+            stop_tx,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().to_string(), "server failed");
+        assert!(session_finished.load(Ordering::SeqCst));
+    }
 }

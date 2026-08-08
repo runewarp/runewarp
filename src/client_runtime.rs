@@ -5,13 +5,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::{
+use crate::client::{
     AddressController, AddressWorkerDial, AddressWorkerFactory, AddressWorkerHooks,
-    ClientAdmission, ClientInstancePrep, ConnectedTunnelFailure, EstablishOutcome, PreparedClient,
-    ServerAddress, ShutdownMode,
+    ConnectedTunnelFailure, EstablishOutcome,
 };
+use crate::{ClientAdmission, ClientInstancePrep, PreparedClient, ServerAddress, ShutdownMode};
 use futures_util::future::BoxFuture;
 use tokio::net::lookup_host;
+use tokio::sync::oneshot;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RetryDisposition {
@@ -135,7 +136,7 @@ fn production_client_address_worker_factory(
             establish_attempts: Arc::new(AtomicUsize::new(0)),
         });
         Box::pin(async move {
-            crate::run_address_worker_with_reconnect_policy(
+            crate::client::run_address_worker_with_reconnect_policy(
                 server_address,
                 control,
                 dial,
@@ -353,32 +354,70 @@ where
         material,
     )?;
 
+    let (session_stop_tx, session_stop_rx) = oneshot::channel();
     let session_runtime = session.run(
         &mut adapter,
         |event| async move {
             crate::runtime_log::managed_session_event(crate::ManagedSessionRole::Client, &event);
         },
-        shutdown_signal,
+        async move {
+            tokio::select! {
+                signal_result = shutdown_signal => {
+                    ClientSessionCompletion::ShutdownSignal(signal_result)
+                }
+                _ = session_stop_rx => ClientSessionCompletion::ControllerStopped,
+            }
+        },
     );
-    tokio::pin!(session_runtime);
     let runtime = controller.run();
-    tokio::pin!(runtime);
+    coordinate_managed_client(runtime, session_runtime, shutdown, session_stop_tx).await
+}
 
+enum ClientSessionCompletion {
+    ShutdownSignal(io::Result<ShutdownMode>),
+    ControllerStopped,
+}
+
+async fn coordinate_managed_client<Controller, Session>(
+    controller: Controller,
+    session: Session,
+    shutdown: crate::client::AddressControllerShutdown,
+    session_stop: oneshot::Sender<()>,
+) -> Result<(), Box<dyn Error>>
+where
+    Controller: Future<Output = Result<(), String>>,
+    Session: Future<Output = ClientSessionCompletion>,
+{
+    tokio::pin!(controller);
+    tokio::pin!(session);
     tokio::select! {
-        result = &mut runtime => {
+        result = &mut controller => {
+            let _ = session_stop.send(());
+            let _ = session.await;
             result.map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
         }
-        session_result = &mut session_runtime => {
-            if session_result.is_ok() {
-                crate::runtime_log::client_graceful_shutdown_started();
+        completion = &mut session => {
+            match completion {
+                ClientSessionCompletion::ShutdownSignal(signal_result) => {
+                    if signal_result.is_ok() {
+                        crate::runtime_log::client_graceful_shutdown_started();
+                    }
+                    shutdown.request();
+                    let runtime_result = controller.await.map_err(|error| {
+                        Box::new(io::Error::other(error)) as Box<dyn Error>
+                    });
+                    signal_result?;
+                    runtime_result?;
+                    Ok(())
+                }
+                ClientSessionCompletion::ControllerStopped => {
+                    shutdown.request();
+                    let _ = controller.await;
+                    Err(Box::new(io::Error::other(
+                        "managed Client session stopped unexpectedly",
+                    )))
+                }
             }
-            shutdown.request();
-            let runtime_result = runtime.await.map_err(|error| {
-                Box::new(io::Error::other(error)) as Box<dyn Error>
-            });
-            session_result?;
-            runtime_result?;
-            Ok(())
         }
     }
 }
@@ -457,6 +496,7 @@ mod tests {
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use quinn::{ApplicationClose, ConnectionClose, TransportErrorCode, VarInt};
@@ -469,16 +509,45 @@ mod tests {
     use tokio::time::{sleep, timeout};
     use tokio_rustls::{TlsAcceptor, TlsConnector};
 
+    use crate::client::{
+        AddressController, AddressWorkerControl, wait_for_retry_delay, wait_for_shutdown,
+    };
     use crate::{
-        AddressController, AddressWorkerControl, CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME,
-        CLIENT_KEY_FILENAME, ClientAdmission, ClientConfig, ClientTlsMode, LogLevel,
-        PublicHostname, Server, ServerAddress, ServerAdmission, ServerAuthorization,
-        ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, ShutdownMode,
-        generate_client_identity, make_server_quic_config_with_client_admission,
-        wait_for_retry_delay, wait_for_shutdown,
+        CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientAdmission,
+        ClientConfig, ClientTlsMode, LogLevel, PublicHostname, Server, ServerAddress,
+        ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname, ServerTunnelConfig,
+        ServiceConfig, ShutdownMode, generate_client_identity,
+        make_server_quic_config_with_client_admission,
     };
 
-    use super::{ClientRuntime, RetryDisposition, client_tunnel_attempt_kind};
+    use super::{
+        ClientRuntime, ClientSessionCompletion, RetryDisposition, client_tunnel_attempt_kind,
+        coordinate_managed_client,
+    };
+
+    #[tokio::test]
+    async fn managed_controller_failure_stops_and_awaits_session_before_returning() {
+        let controller = AddressController::new();
+        let shutdown = controller.shutdown_handle();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let session_finished = Arc::new(AtomicBool::new(false));
+        let observed_finished = Arc::clone(&session_finished);
+
+        let result = coordinate_managed_client(
+            async { Err("controller failed".to_owned()) },
+            async move {
+                let _ = stop_rx.await;
+                observed_finished.store(true, Ordering::SeqCst);
+                ClientSessionCompletion::ControllerStopped
+            },
+            shutdown,
+            stop_tx,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().to_string(), "controller failed");
+        assert!(session_finished.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn retry_attempt_kind_matches_fresh_policy_state() {

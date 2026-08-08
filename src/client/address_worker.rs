@@ -6,7 +6,9 @@
 //! remote close or process **Infrastructure drain**, re-adopts without a duplicate dial,
 //! and observes connect/disconnect for **Assignment convergence**.
 
+#[cfg(test)]
 use std::future::Future;
+#[cfg(test)]
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -338,6 +340,7 @@ pub async fn wait_for_shutdown(control: &AddressWorkerControl) {
 }
 
 /// Build an [`AddressWorkerFactory`] that runs the production lifecycle with `dial`.
+#[cfg(test)]
 pub fn production_address_worker_factory<D, H>(
     dial: Arc<D>,
     hooks: Arc<H>,
@@ -356,6 +359,7 @@ where
 }
 
 /// Test helper: Connected session that stays open until `remote_close` or process shutdown.
+#[cfg(test)]
 pub fn connected_session_until(
     configured_server_addr: String,
     remote_close: Pin<Box<dyn Future<Output = ()> + Send>>,

@@ -12,7 +12,7 @@
   </p>
 </div>
 
-Runewarp is an ingress tunneling platform for securely exposing local services over outbound QUIC connections. Publish them without opening inbound ports or exposing your public IP, while preserving end-to-end TLS.
+Runewarp is an ingress tunneling platform for securely exposing local services over outbound QUIC connections. Publish them without opening inbound ports at the Client or exposing its public IP, while preserving end-to-end TLS by default in passthrough mode.
 
 ## Install
 
@@ -40,7 +40,7 @@ Choose the path that matches what you want to do:
 - **Privacy-respecting by design** — Server never sees HTTP headers or application plaintext
 - **Traverse NAT and firewalls** — Client uses outbound QUIC, so no port forwarding or public IP is required
 - **Self-hostable and operator-controlled** — single Rust binary for both Client and Server
-- **Remain operationally simple** — TOML config, a handful of CLI commands, no runtime dependencies
+- **Remain operationally simple** — TOML config, a handful of CLI commands, and no companion daemon or database
 
 ## Non-goals
 
@@ -57,21 +57,23 @@ Runewarp is pre-1.0. Patch releases aim to stay low-risk, but minor releases may
 flowchart TD
     V[Visitor]
     C["Client instance"]
-    B["Local backend<br/>terminates TLS"]
+    B["Local backend"]
 
     subgraph S["Server"]
         direction TB
-        P["Public listener<br/>TCP 443 / Visitor TLS"]
+        P["Public listener<br/>TCP 443 by default / Visitor TLS"]
         R["SNI router<br/>select Tunnel by Public hostname"]
-        U["Tunnel listener<br/>UDP 443 / QUIC/TLS"]
+        U["Tunnel listener<br/>UDP 443 by default / QUIC/TLS"]
+        T["Active Tunnel connection"]
 
         P -->|"read ClientHello + SNI"| R
-        R -->|"open stream on active Tunnel"| U
+        U -->|"accept and authenticate"| T
+        R -->|"open stream"| T
     end
 
     V -->|"Visitor TLS for a Public hostname"| P
-    C -->|"dials QUIC/TLS Tunnel connection"| U
-    U -->|"deliver encrypted stream"| C
+    C -->|"establish QUIC/TLS"| U
+    T -->|"deliver encrypted stream"| C
     C -->|"select Service and proxy"| B
 ```
 
@@ -106,7 +108,7 @@ A tailnet-based way to publish a local service publicly without exposing the dev
 
 A simple, open-source client/server tunneling tool whose config model and simple client/server architecture helped inspire Runewarp.
 
-- **Runewarp keeps routing explicit:** one QUIC/TLS Tunnel connection per Client instance and Server-authoritative routing by Public hostname. Configuration may be static or delivered over a separate Managed session to Control; Visitor traffic never shares that session.
+- **Runewarp keeps routing explicit:** one QUIC/TLS Tunnel connection per effective Server address and Server-authoritative routing by Public hostname. Configuration may be static or delivered over a separate Managed session to Control; Visitor traffic never shares that session.
 - **rathole supports more protocols today:** service tokens, UDP forwarding, and more transport options.
 
 ## Documentation

@@ -85,7 +85,7 @@ For manual `rehearsal`, the workflow:
 3. validates release metadata and release-notes rendering
 4. checks whether the crates.io version already exists through the same repo-owned probe used by the real publish path
 5. skips signed-tag and protected-tag enforcement because rehearsal happens before the irreversible tag is created
-6. runs `cargo publish --dry-run` against the tagged release source tree
+6. runs `cargo publish --dry-run` against the current `main` release candidate
 7. summarizes the workflow ref, release source ref, release commit, source image lineage, exact stable Docker tags, and rendered release notes that the real release would use
 8. skips Docker Hub publication, Sigstore signing, and GitHub Release mutation
 
@@ -98,7 +98,7 @@ For manual `publish`, the workflow:
 1. runs the current workflow definition and scripts from `main`
 2. checks out the selected existing `vX.Y.Z` tag as the release source tree
 3. applies the same signed-tag, trusted-commit, and prior-green-`CI` checks as the tag-driven publish path
-4. skips any already-published crates.io, Docker Hub, or GitHub release surface instead of mutating it
+4. skips an already-published crates.io version or Docker Hub release tag instead of mutating those artifacts
 5. publishes only the still-missing crate or Docker surfaces for that tag
 6. always refreshes the GitHub Release title and notes from the current workflow checkout on `main`, so release-note fixes can be replayed for an existing tag without rebuilding artifacts from a new commit
 

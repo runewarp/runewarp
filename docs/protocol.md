@@ -23,12 +23,10 @@ For each inbound TCP connection on the configured `server.public-bind-address`:
 7. If TLS is valid but SNI is missing, drop the connection.
 8. If SNI equals `server.hostname` and ALPN is `acme-tls/1`, handle the ACME challenge.
 9. If SNI equals `server.hostname` and ALPN is anything else, drop the connection.
-10. Otherwise, select a **Tunnel** by exact normalized **Public hostname** from `server.tunnels[].public-hostnames`.
+10. Otherwise, select a **Tunnel** by exact normalized **Public hostname** from the current **Authorization snapshot**. Static config supplies `server.tunnels[].public-hostnames`; Managed mode receives authorization from Control.
 11. If no Tunnel owns that hostname, drop the connection.
 12. If the selected Tunnel has no active **Tunnel connection**, drop the connection.
-13. Acquire one pending stream-open slot, then open a bidirectional stream on the selected Tunnel connection with a **5-second** deadline. On success, acquire one active routed-stream slot, release the pending slot, forward the buffered ClientHello bytes, and continue streaming in both directions. Successfully established proxies have no additional lifetime or idle deadline.
-
-The buffered ClientHello must never be logged or echoed back in diagnostics. With top-level `log-level = "debug"`, stderr diagnostics may log the normalized **Public hostname** using stable event plus key=value fields such as `public-hostname`, `backend-address`, and `reason`. `acme-tls/1` traffic for the **Server hostname** is logged as `server acme challenge handled` with `server-hostname=...`, while Client-side `acme-tls/1` traffic for terminating **Public hostnames** is logged as distinct ACME challenge handling rather than ordinary terminate routing. Runtime tunnel failure causes keep separate full-detail lines whose operator-facing `warn` lines are shortened.
+13. Acquire one pending stream-open slot, then open a bidirectional stream on the selected Tunnel connection with a **5-second** deadline. On success, acquire one active routed-stream slot, release the pending slot, write a regenerated PROXY v2 header containing the canonical Visitor TCP tuple, then forward the buffered ClientHello and continue streaming in both directions. Successfully established proxies have no additional lifetime or idle deadline.
 
 At `log-level = "debug"`, stderr may include:
 
@@ -38,6 +36,8 @@ At `log-level = "debug"`, stderr may include:
 - separate Client ACME challenge handling lines for terminating **Public hostnames**
 
 It must not include HTTP headers, bodies, decrypted application plaintext, or the raw buffered ClientHello.
+
+Runtime tunnel failures keep full detail at debug level while operator-facing warning lines remain concise.
 
 ## Drop conditions
 
@@ -78,7 +78,7 @@ Admission saturation warnings include the active-work count and limit and are li
 
 ## Tunnel connection handshake
 
-Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. Effective **Server addresses** come from either `client.server-address`, `client.server-addresses`, or repeated runtime `--server-address` flags. Config validation prepares **Client admission** (static vs managed) once from Control address presence; Client startup wires one **Address controller** from that outcome. The controller owns the complete assigned Server-address lifecycle (one worker per normalized address, maintenance intent, production Retiring / reconnect-vs-exit policy, Assignment convergence, apply acknowledgment, and shutdown) so static fanout and Managed-session assignment changes cannot start duplicate dial loops for the same target:
+Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. Effective **Server addresses** come from `client.server-address`, `client.server-addresses`, repeated runtime `--server-address` flags, or a Control-published Managed assignment. Config validation prepares **Client admission** (static vs managed) once from Control address presence; Client startup wires one **Address controller** from that outcome. The controller owns the complete assigned Server-address lifecycle (one worker per normalized address, maintenance intent, production Retiring / reconnect-vs-exit policy, Assignment convergence, apply acknowledgment, and shutdown) so static fanout and Managed-session assignment changes cannot start duplicate dial loops for the same target:
 
 1. Resolve the hostname portion of one effective **Server address**.
 2. Dial the UDP port from that **Server address**, defaulting to `443` when the port is omitted.
@@ -99,8 +99,8 @@ Rules:
 When the Client receives a new QUIC stream:
 
 1. Acquire one Client-instance stream-handler slot shared across every live Tunnel connection for that process. Saturation resets/stops the newest accepted stream without spawning handler work.
-2. Buffer the forwarded ClientHello and parse it using the same **16 KB** cap and a **5-second** completion deadline.
-3. Extract and normalize the SNI hostname.
+2. Validate and consume the mandatory internal PROXY v2 header, then buffer the forwarded ClientHello. Header and ClientHello intake share a **5-second** completion deadline and have separate **16 KB** caps.
+3. Extract the canonical Visitor TCP tuple from the header and the normalized SNI hostname from the ClientHello.
 4. If there is exactly one configured **Service** and it omits `public-hostnames`, select that **Catch-all Service**.
 5. Otherwise, match the hostname to `client.services[*].public-hostnames`.
 6. If no Service matches, reject the stream immediately.
@@ -145,7 +145,7 @@ For orderly local shutdown that the runtime controls:
 - **Graceful shutdown** lets only already-landed Visitor streams continue, up to `server.graceful-shutdown-duration`
 - when that graceful deadline expires, the **Server** force-closes remaining active **Tunnel connections**
 - **Fast shutdown** skips the longer graceful-drain window
-- the **Client instance** stops new dial and retry work before it closes its active **Tunnel connection**
+- the **Client instance** stops new dial and retry work before it closes all active **Tunnel connections**
 - both orderly shutdown modes still send the normal QUIC connection close and then wait the short fixed runtime-owned **QUIC close flush duration** before exit
 
 ## Retry behavior
@@ -176,7 +176,7 @@ The 60-second first-snapshot/silence windows and Tunnel reconnect backoff apply 
 ## Runtime invariants
 
 - each **Client instance** has one or more **Tunnel connections** once dialing has succeeded
-- in static Client mode, Client-ready means at least one configured **Server address** has an authenticated live **Tunnel connection**; managed Client mode uses **Assignment convergence** instead (see [`managed.md`](managed.md))
+- in Static mode, the Client emits one **Client readiness** signal when the first configured **Server address** authenticates; Managed mode uses **Assignment convergence** instead (see [`managed.md`](managed.md))
 - failure, retry, and recovery stay isolated per effective **Server address**
 - a **Tunnel** may have one or more authenticated live **Tunnel connections** on one **Server** node
 - a **Tunnel** stays available while at least one of those **Tunnel connections** remains live
@@ -185,4 +185,4 @@ The 60-second first-snapshot/silence windows and Tunnel reconnect backoff apply 
 - the runtime does not validate cross-side hostname coverage under **Hostname mirroring**
 - there is no pre-flight **Local backend** health check
 - multiple Client instances across different Tunnels are supported
-- orderly runtime shutdown closes active **Tunnel connections** but does not add stream migration or draining guarantees
+- orderly runtime shutdown offers a bounded graceful-drain opportunity but does not guarantee stream completion or migration

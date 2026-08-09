@@ -1,6 +1,6 @@
 # Docker example
 
-This is the fastest way to see Runewarp working end to end. It runs one server, one client, one tunnel, and a catch-all service that forwards both `app.example.test` and `api.example.test` to Caddy.
+This is the fastest way to see Runewarp working end to end. It runs one **Server**, one **Client**, one **Tunnel**, and a **Catch-all Service** that forwards both `app.example.test` and `api.example.test` to Caddy.
 
 ## What you'll verify
 
@@ -89,7 +89,7 @@ The stack contains:
 - `client`: the Runewarp **Client**
 - `caddy`: the TLS-terminating backend
 
-The example publishes the Server on `localhost:8443` for local testing while the Client reaches the Server over the Docker network.
+The example publishes only the Server's Visitor TCP listener on `localhost:8443` for local testing. Its UDP Tunnel listener stays inside the Docker network, where the example Client can reach it. A real deployment must expose the configured UDP listener to remote Clients as described in [`docs/usage.md`](../../docs/usage.md).
 
 ## Verify the example
 

@@ -1,6 +1,6 @@
 # Security
 
-In the default passthrough mode, Runewarp does not terminate customer TLS on the public server. The server sees only the metadata it needs to authorize hostnames and forward traffic. When a service opts into terminate mode, the client terminates TLS and the local backend receives plaintext.
+In the default passthrough mode, Runewarp does not terminate customer TLS on the public Server. The Server inspects the initial ClientHello metadata needed to route traffic but cannot read application plaintext. When a Service opts into Terminate mode, the Client terminates TLS and the Local backend receives plaintext.
 
 ## Secure deployment checklist
 
@@ -15,8 +15,8 @@ In the default passthrough mode, Runewarp does not terminate customer TLS on the
 
 | Visible to the Server | Not visible to the Server |
 | --- | --- |
-| **Public hostname** from SNI | HTTP headers and bodies |
-| Visitor source IP and port | Application plaintext |
+| Initial ClientHello bytes and metadata, including **Public hostname** from SNI and offered ALPN | HTTP headers and bodies |
+| Canonical Visitor source and original destination IP addresses and ports | Application plaintext |
 | Connection timing and byte counts | Local backend TLS private keys |
 | Authenticated **Client identity** | Decrypted customer traffic |
 
@@ -24,13 +24,15 @@ In the default passthrough mode, Runewarp does not terminate customer TLS on the
 
 | Boundary | What it protects |
 | --- | --- |
-| Server-side **Public hostname** authorization | Prevents random public traffic from entering a Tunnel just because some Client is connected |
+| Server-side **Public hostname** authorization | Prevents traffic for unauthorized hostnames from entering a Tunnel just because some Client is connected |
 | Server certificate validation | Confirms the Client is connected to the intended **Server hostname** |
 | **Exclusive CA trust** | Limits trust for the Tunnel connection to the configured CA bundle |
 | **Control trust** | Limits trust for the Control endpoint to system roots or an exclusive CA bundle |
 | Pinned **Client identity** | Confirms the Client public key authorized for the selected Tunnel |
 | Backend TLS termination (passthrough) | Keeps customer TLS termination off the public edge in the default mode |
 | **Public hostname CA** (terminate) | Operator-managed trust anchor for Visitors when the Client terminates TLS |
+
+**Public hostname authorization** is a routing boundary, not Visitor authentication or application access control. The Local backend or application remains responsible for authenticating Visitors and authorizing their actions.
 
 ## Diagnostics visibility
 
@@ -60,8 +62,7 @@ Runtime diagnostics follow the same boundary.
 
 - customer TLS is never terminated on the **Server**
 - the Server reads only enough of the ClientHello to route
-- the Server requires the complete initial ClientHello within 5 seconds and 16 KB
-- pre-routing admission is bounded to 4,096 Visitors globally and 256 per canonical source IP; strict PROXY v2 metadata is trusted only from configured peer CIDRs
+- the Server bounds initial ClientHello intake by time, size, global capacity, and canonical source IP; strict PROXY v2 metadata is trusted only from configured peer CIDRs
 - the Server routes only **Public hostnames** explicitly authorized on the matched **Tunnel**
 - public traffic must be TLS
 - non-TLS traffic and TLS without SNI are dropped
@@ -70,18 +71,15 @@ Runtime diagnostics follow the same boundary.
 
 ## Admission and overload protection
 
-The Server and Client apply fixed admission and setup-deadline policies across their distinct public and authenticated trust boundaries:
+The Server and Client bound work at each public or authenticated trust boundary before it can consume unbounded runtime resources:
 
-- Visitor pre-routing capacity is acquired before spawning a handler and released immediately after ClientHello completion, rejection, error, timeout, cancellation, or shutdown. Existing routed Visitor streams do not retain this capacity.
-- The public limits are 4,096 concurrent pre-routing Visitors globally and 256 per canonical source IP. Direct sockets supply that source normally; strict PROXY v2 supplies it only after trusted-peer and header validation.
-- QUIC handshake capacity is acquired before spawning handshake work and is limited to 256 concurrent handshakes.
-- After routing, pending `open_bi()` opens are limited to 1,024 with a 5-second deadline, and active routed Visitor streams are limited to 4,096. One synchronous registry gate reserves routes before stream open, revalidates Public hostname and Client identity at lease registration, serializes registration with Authorization revocation, and seals admission at shutdown. Each registered lease keeps its active permit, Tunnel-member load, Public hostname, serving member, Client identity, and revocation registration inseparable until exactly-once cleanup. Selective revocation can target Public hostname, Tunnel connection, or Client identity, while graceful shutdown observes both pending reservations and active leases through event-driven quiescence.
-- Authenticated active Tunnel connections are limited to 4,096 globally, 256 per Tunnel, and 64 per Client identity.
-- Each Client instance enforces one aggregate stream-handler budget of 1,024 across all live Tunnel connections. Per-connection QUIC bidirectional stream credit is capped at that same 1,024 so one connection cannot advertise more than the instance can service; when multiple connections share the budget, the Client-instance semaphore remains authoritative and excess accepted streams are reset without spawning handlers. Internal PROXY header plus tunneled ClientHello intake shares a 5-second deadline; backend connect, initial backend write, Terminate-mode handshake, and ACME challenge handshake each have a 5-second setup deadline. Successfully established proxies remain long-lived; this policy does not add a proxy lifetime or idle timeout.
-- Saturation always rejects the newest work. It never evicts an existing healthy Tunnel connection or consumes capacity reserved by already-admitted Visitor traffic.
-- Authorization replacement is one Server operation covering validation, atomic routing/admission commit, Tunnel-ID-keyed pool realignment, selective revocation, and first-success readiness. Continuity is first-class on the Authorization snapshot (static has no Tunnel ID; managed carries Tunnel IDs, including empty before first apply). Connections keep their active-admission accounting while moving between pools. Existing healthy connections are grandfathered if realignment combines pools above the per-Tunnel admission limit; new connections remain rejected until churn restores capacity. Orderly shutdown retains its existing behavior.
-- Transient public accept failures retry with exponential backoff from 10 ms to a 1-second cap. Other accept errors drop readiness and remain fatal.
-- Saturation warnings include active work and the applicable limit and are rate-limited per scope to one every 10 seconds. Repetitive unauthorized-identity and QUIC handshake-failure warnings use the same rate bound; recovery is emitted once when capacity becomes available. Logs do not add remote Tunnel socket addresses or buffered ClientHello data.
+- per-source Visitor limits use the canonical source only after direct or trusted-PROXY tuple resolution
+- saturation rejects the newest work and never evicts a healthy Tunnel connection
+- authorization replacement commits routing and handshake admission together, then selectively revokes only affected connections or streams
+- existing healthy connections remain accounted for when managed pool continuity changes
+- repetitive saturation and authentication warnings are rate-limited and exclude buffered ClientHello bytes and remote Tunnel socket addresses
+
+[`protocol.md`](protocol.md#server-admission-and-overload) is canonical for exact limits, deadlines, accounting lifetimes, and failure behavior.
 
 ## Tunnel authentication
 

@@ -89,27 +89,31 @@ The Server-owned rule that allows a **Tunnel** to admit traffic only for its exp
 _Avoid_: Client registration, wildcard routing
 
 **Authorization snapshot**:
-The immutable Server-owned Public-hostname routing and trusted Client-identity set that Public-hostname routing and QUIC Client-identity handshake admission consult together. Continuity is first-class: static snapshots have no **Tunnel ID** (startup-only, ordinal pools); managed snapshots carry Tunnel IDs (live replacement, ID-keyed pools), including an empty managed snapshot before the first Control apply. Static configuration loads one static snapshot at startup. Live replacement is one Server operation that validates a managed candidate beside the live snapshot, commits routing and admission together, realigns Tunnel pools, dispatches selective live-work revocation, and opens first-success Server readiness.
+The immutable Server-owned set of **Public hostname authorizations** and trusted **Client identities** used together for routing and admission. Static snapshots have no **Tunnel ID**; Managed snapshots use Tunnel IDs to preserve Tunnel continuity.
 _Avoid_: Tunnel registry, handshake config, routing table
 
 **Server admission**:
-The prepared Server static-vs-managed outcome decided once during Config validation from Control address presence. Startup binds Authorization construction and readiness policy from that outcome instead of re-checking Control at every layer.
+The startup decision that selects whether the Server receives authorization from local configuration or **Control**.
 _Avoid_: RuntimeMode, global mode flag
 
 **Client admission**:
-The prepared Client static-vs-managed outcome decided once during Config validation from Control address presence. Client startup wires the **Address controller** from that outcome (`for_static` + seeded addresses vs `for_managed` + empty start with convergence and apply) instead of re-checking Control at every layer.
+The startup decision that selects whether the Client receives **Server addresses** from local configuration or **Control**.
 _Avoid_: RuntimeMode, global mode flag
 
 **Address controller**:
-The Client-owned runtime that owns the complete assigned **Server address** lifecycle: maintenance intent, address workers, **Retiring**, **Assignment convergence**, managed apply acknowledgment, fatal worker completion, static **Client-ready** policy, and shutdown draining. Production Retiring / reconnect-vs-exit / re-adopt-without-duplicate-dial policy lives with the controller seam (library address-worker lifecycle); factories supply dial/connect adapters only. It maintains at most one address worker per normalized **Server address**. Static Client startup seeds it from the configured address set; Managed-session Client reconciliation drives the same seam through complete Server-address snapshots.
+The Client authority for assigned **Server addresses** and their connection lifecycles. It owns assignment changes, **Retiring**, **Assignment convergence**, and **Client readiness**.
 _Avoid_: fanout loop, connection pool, dial manager
 
 **Assignment convergence**:
-The managed Client aggregate of whether currently assigned **Server addresses** have live Connected tunnels: Unconverged when none of a non-empty assignment are connected, Partially converged when some are connected, and Converged when every assigned address is connected or the assignment is empty. Retiring connections are excluded. Distinct from applied revision acknowledgment.
-_Avoid_: Client-ready, readiness, applied revision
+The Managed Client aggregate of whether assigned **Server addresses** have live **Tunnel connections**: Unconverged when none are connected, Partially converged when some are connected, and Converged when all are connected or the assignment is empty. **Retiring** addresses are excluded.
+_Avoid_: Client readiness, readiness, applied revision
+
+**Client readiness**:
+The one-shot **Static mode** signal emitted when the first configured **Server address** establishes an authenticated **Tunnel connection**.
+_Avoid_: Assignment convergence, Server readiness
 
 **Retiring**:
-The managed Client address-worker state after a connected **Server address** is removed from assignment intent: reconnect stops, the live **Tunnel connection** stays open until remote **Server** closure or process shutdown, and re-adding the address before remote closure re-adopts that connection without dialing a duplicate.
+The Managed Client lifecycle state for a connected **Server address** removed from its assignment. Its live **Tunnel connection** remains until remote Server closure or process shutdown and can be re-adopted if the address returns.
 _Avoid_: drain, local close, cancelled
 
 **Infrastructure drain**:
@@ -125,8 +129,12 @@ The DNS hostname with optional port that identifies the Control endpoint. Writte
 _Avoid_: Server address, URL
 
 **Managed mode**:
-Configuration and runtime shape where an effective Control address is present. Managed Servers omit static `[[server.tunnels]]` authorization and use `server.identity-dir`. Managed Clients omit static Server addresses.
-_Avoid_: static mode, self-hosted baseline
+The startup shape in which **Control** supplies Server authorization or Client **Server address** assignments.
+_Avoid_: Static mode, self-hosted baseline
+
+**Static mode**:
+The startup shape in which local configuration supplies Server authorization and Client **Server addresses**.
+_Avoid_: Managed mode
 
 **Server identity**:
 The durable pinned public-key identity a **Server** presents to **Control**, distinct from the **Server certificate** used on the Tunnel endpoint. A **Server identity certificate** attests this identity; certificate renewal and process restart preserve it, while key rotation changes it.
@@ -161,15 +169,19 @@ The operator-run local endpoint that a **Client** connects to after it selects a
 _Avoid_: Service, tunnel
 
 **Client identity**:
-The stable trust identity used by one or more **Client instances**, defined by its pinned public key rather than a certificate lifetime, issuer, or certificate purpose metadata; newly generated self-signed Client identity certificates use Ed25519 with explicit client-authentication purpose, while existing algorithm profiles remain valid when their SPKI fingerprint is authorized. Certificate renewal or attestation with the same key preserves the identity; explicit key rotation changes it. One **Tunnel** may authorize one or more **Client identities**.
+The stable public-key identity used by one or more **Client instances**. Certificate renewal or attestation with the same key preserves the identity; key rotation changes it.
 _Avoid_: Certificate, serial number
 
+**Client identity certificate**:
+The certificate that carries and attests a **Client identity** without defining that identity.
+_Avoid_: Client identity, Server certificate
+
 **Server identity certificate**:
-The certificate a **Server** presents to authenticate its **Server identity** to a managed control plane. It attests the identity without defining it, so renewal with the same key preserves the **Server identity**.
+The certificate a **Server** presents to authenticate its **Server identity** to **Control**. It attests the identity without defining it.
 _Avoid_: Server certificate, Server identity
 
 **Managed session**:
-The authenticated live relationship between one **Server** or **Client instance** and a managed control plane for receiving versioned full-input snapshots and acknowledging successfully applied revisions. Core exposes it as one domain seam (`ManagedSession` plus a role adapter); transport framing and reporting stay behind that seam. It is separate from **Server readiness**, Visitor traffic, and **Tunnel connections**.
+The authenticated live relationship between one **Server** or **Client instance** and **Control** for receiving versioned snapshots and acknowledging applied revisions. It is separate from **Server readiness**, Visitor traffic, and **Tunnel connections**.
 _Avoid_: Tunnel connection, data path, control channel
 
 **Tunnel pool**:
@@ -276,7 +288,7 @@ _Avoid_: Duplicate hostname config, registration
 > **Dev:** "If the self-signed Client identity certificate expires, did the **Client identity** change?"
 > **Domain expert:** "No. The **Client identity** is the pinned public key. Encoded certificate expiry has no operational effect in pinned-key mode; only explicit key rotation changes the identity."
 >
-> **Dev:** "If a managed control plane signs a certificate for the Client's existing public key, does it now own the **Client identity**?"
+> **Dev:** "If **Control** signs a certificate for the Client's existing public key, does it now own the **Client identity**?"
 > **Domain expert:** "No. The public key remains the **Client identity**, and the operator retains its private key. The certificate only attests that identity."
 >
 > **Dev:** "Why does the manual Server path trust a **Server CA** instead of the leaf cert directly?"
@@ -338,6 +350,8 @@ _Avoid_: Duplicate hostname config, registration
 - "ca-file trust" sounded like a file-path detail instead of a trust model — resolved: **Exclusive CA trust** means the **Client** trusts only the configured CA bundle for the **Server certificate**.
 - "public CA" was too vague once Client-side TLS termination existed — resolved: **Public hostname CA** is the issuer for manual **Public hostname certificates**, distinct from the **Server CA**.
 - "readiness" and orderly exit were easy to blur — resolved: **Server readiness** is the ingress-admission signal, while **Graceful shutdown** is the bounded orderly-exit lifecycle.
+- "Client readiness" and Managed connection coverage were easy to blur — resolved: **Client readiness** is a one-shot **Static mode** signal, while **Assignment convergence** describes Managed assignment coverage.
+- "static" and "managed" were treated as loose adjectives — resolved: **Static mode** uses local authorization and addresses; **Managed mode** receives them from **Control**.
 - "graceful" and "fast" shutdown were easy to blur — resolved: both are orderly shutdown modes, but **Fast shutdown** skips the longer graceful-drain window while keeping the short **QUIC close flush duration**.
 - "ACME" was too broad once both sides could obtain certificates automatically — resolved: **Server ACME** covers the **Server hostname** only, while **Client ACME** covers terminating **Public hostnames** only.
 - "authorized hostname" was being described ad hoc — resolved: **Public hostname authorization** is the Server-owned rule that binds explicit **Public hostnames** to a **Tunnel**.

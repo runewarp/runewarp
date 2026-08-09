@@ -1,4 +1,4 @@
-# Domain Docs
+# Domain docs
 
 How the engineering skills should consume this repo's domain documentation when exploring the codebase.
 
@@ -20,8 +20,8 @@ Single-context repo:
 /
 ├── CONTEXT.md
 ├── docs/adr/
-│   ├── 0001-event-sourced-orders.md
-│   └── 0002-postgres-for-write-model.md
+│   ├── 0001-server-authoritative-routing-with-hostname-mirroring.md
+│   └── 0002-manual-server-ca-and-exclusive-client-trust.md
 └── src/
 ```
 

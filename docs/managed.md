@@ -15,18 +15,6 @@ This document describes what Core implements today. Product policy (lifecycle la
 - **Role inputs:** Server authorization and Client Server-address assignment use separate schemas
 - **Failure model:** protocol or reporting failure replaces the session; reconnect retains last-applied in-memory state after the first successful apply
 
-## Navigate this contract
-
-- [Domain boundary](#domain-boundary)
-- [Mode selection and trust](#mode-selection-and-configuration)
-- [Transport and endpoints](#transport-contract)
-- [Schemas and reconciliation](#sse-framing)
-- [Limits and timing](#input-and-reporting-limits)
-- [Server and Client behavior](#managed-server-behavior)
-- [Failure taxonomy](#failure-taxonomy)
-- [Wire examples](#wire-examples)
-- [Control interoperability checklist](#interoperability-checklist-for-control)
-
 ## Related documentation
 
 | Document | What it owns |
@@ -51,7 +39,7 @@ This document describes what Core implements today. Product policy (lifecycle la
 | **Tunnel connection** | QUIC data-path session between Client and Server; separate from the Managed session |
 | **Authorization snapshot** | Server-side Public-hostname routing plus trusted Client identities applied from Control; managed tunnels are keyed by **Tunnel ID** |
 | **Tunnel ID** | Control-owned opaque identifier for one managed Server **Tunnel**; continuity key for live pools; absent in static mode |
-| **Address controller** | Client-owned complete assigned Server-address lifecycle (intent, workers, production Retiring policy, Assignment convergence, apply ack, fatal completion, static Client-ready, shutdown) |
+| **Address controller** | Client-owned complete assigned Server-address lifecycle (intent, workers, production Retiring policy, Assignment convergence, apply acknowledgment, static Client readiness, shutdown) |
 | **Client admission** | Prepared Client static-vs-managed outcome set once during Config validation; startup wires the Address controller from it |
 | **Assignment convergence** | Client aggregate of whether assigned Server addresses are Connected (separate from revision acknowledgment) |
 | **Retiring** | Connected address removed from assignment intent: reconnect stops; live Tunnel connection stays until remote Server closure |
@@ -148,7 +136,7 @@ Unknown JSON fields in a known v1 snapshot are ignored. Behavior-changing fields
     {
       "id": "<opaque Tunnel ID>",
       "public_hostnames": ["app.example.com"],
-      "client_identities": ["4f7b6f7a9b0f0d2b..."]
+      "client_identities": ["4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef"]
     }
   ]
 }
@@ -207,7 +195,7 @@ A Server revision is acknowledged only after the atomic authorization swap and d
 
 ## State acknowledgment
 
-For each valid snapshot that names a successfully applied revision:
+For each valid snapshot envelope whose revision is newly applied or already matches the applied revision:
 
 1. Apply a new revision, or skip apply when the revision already matches the process's applied revision.
 2. Schedule one `PUT .../state` with body `{"revision":"<applied>"}` off the downlink reconciliation critical path.
@@ -241,14 +229,14 @@ Limit violations fail the entire Managed session and reconnect; Core never parti
 
 | Window | Value | Notes |
 | --- | --- | --- |
-| First-snapshot deadline | **60 s** from connection start | Bounds dial + TLS + SSE open + first valid snapshot; keepalive comments do not extend it |
+| First-snapshot deadline | **60 s** from connection start | Bounds dial + TLS + SSE open + first valid snapshot envelope; keepalive comments do not extend it |
 | Silence timeout | **60 s** without any SSE bytes | Reset by any SSE bytes, including `:` comments |
 | State request deadline | **5 s** | Bounds `PUT .../state` through response headers |
 | State response deadline | **5 s** | Bounds classifying an already-ended bodyless `204` |
 | Control keepalive cadence | Less than **60 s** between SSE bytes | `:` comments keep quiet sessions active; **20 s** is recommended, not required |
 | Reconnect backoff | `1, 2, 3, 5, 8, 12, 18, 27, 41, 60` s | Full jitter over `0..window`; same policy as Tunnel reconnect |
 
-Any downlink or state-acknowledgment failure closes the whole connection. Reconnect resets only after a valid snapshot establishes the new session. On reconnection, the first fresh full snapshot must confirm currency: an equal already-applied revision is acknowledged without reconciliation churn.
+Any downlink or state-acknowledgment failure closes the whole connection. Reconnect backoff resets after a valid snapshot envelope establishes the new session, even when its role input is later rejected. On reconnection, the first fresh full snapshot must confirm currency: an equal already-applied revision is acknowledged without reconciliation churn.
 
 ## Managed Server behavior
 
@@ -278,7 +266,7 @@ Any downlink or state-acknowledgment failure closes the whole connection. Reconn
 9. Healthy assigned Servers keep serving during partial convergence; one unavailable address never blocks others.
 10. After the first successful apply, Control loss retains the last assignment and independent reconnect loops while the session reconnects.
 11. Process restart restores no managed input or applied revision and dials nothing until a fresh snapshot applies.
-12. Managed Client mode emits per-address Establishing, Connected, Reconnecting, Retiring, Closed, and failed-attempt events plus convergence transitions. It does not emit the static one-shot Client-ready event.
+12. Managed Client mode emits per-address Establishing, Connected, Reconnecting, Retiring, Closed, and failed-attempt events plus convergence transitions. It does not emit the Static-mode one-shot Client readiness event.
 
 Service selection, Services, Local backends, and TLS mode remain Client-local configuration.
 

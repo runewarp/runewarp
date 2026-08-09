@@ -1,6 +1,6 @@
 # Agents
 
-- Read `README.md` and the files in `docs/` before changing behavior. In particular `docs/architecture.md`, `docs/protocol.md` and `docs/security.md`.
+- Read `README.md`, `docs/architecture.md`, `docs/protocol.md`, and `docs/security.md` before changing runtime behavior. Read the other documents relevant to the area being changed.
 - Keep documentation up to date with implementation. If behavior or design changes, update the relevant docs in the same change.
 - All documents (except for roadmap) should be evergreen and represent the current state of implementation, not planned state (unless otherwise mentioned).
 - Prioritize privacy, speed, security, ease of use, and simple designs.
@@ -14,7 +14,7 @@
 - Run relevant tests after changes. Run the full suite before any commit.
 - Keep comments and doc-comments useful, detailed where needed, and not excessive.
 - Always use TDD during implementation.
-- When release workflows, changelog discipline, or maintainer release expectations change, update `docs/release-guide.md` in the same change.
+- When release automation mechanics or contracts change, update `docs/release-automation.md`. When maintainer procedure, recovery, or changelog discipline changes, update `docs/release-guide.md`.
 - Keep Ruby automation simple with consistent plain-text section headers and polished manual-run output.
 - Any user facing changes should be added to the "Unreleased" section of `CHANGELOG.md` during implementation strictly following "Keep a Changelog" format. Each new changelog item must reference the PR that introduced it, and refactor-only or other internal-only changes should be omitted.
 

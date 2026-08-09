@@ -27,7 +27,6 @@ The open questions are shared UDP listener classification, routing and trust, re
 
 ## Availability — Exploring
 
-- drain-aware Tunnel-pool withdrawal without promising live stream migration
 - predictable handling of pre-establishment placement failure
 - clearer pool-member diagnostics and replica identity failures
 - multi-node Server routing and failover without centralizing the data path
@@ -36,9 +35,8 @@ The open questions are shared UDP listener classification, routing and trust, re
 ## Routing and metadata — Exploring
 
 - bounded wildcard Public-hostname authorization with explicit precedence and overlap rules
-- per-Service PROXY protocol delivery for backends that deliberately accept original Visitor metadata
 - health-aware routing that fails closed when no healthy target exists
-- routing lint and doctor tooling for Hostname-mirroring drift and trust-material errors
+- routing lint and doctor tooling for Hostname mirroring drift and trust-material errors
 
 ## Operator experience — Exploring
 

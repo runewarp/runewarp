@@ -74,6 +74,8 @@ When a selected config file is involved:
 
 ## Default locations
 
+Explicit paths in a selected config file resolve relative to that file's directory. This applies to certificate, identity, CA-bundle, public-certificate, and ACME state paths. Paths passed directly to material-management CLI options resolve from the process working directory. Omitted paths use the XDG defaults below.
+
 When the matching config key is omitted, Runewarp uses:
 
 | Purpose | Default location |
@@ -100,9 +102,10 @@ hostname = "tunnel.example.com"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.com", "api.example.com"]
+# Replace these examples with `runewarp client identity show` output.
 client-identities = [
-  "4f7b6f7a9b0f0d2b...",
-  "91e92c8a5df6a44e...",
+  "4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef",
+  "91e92c8a5df6a44e91e92c8a5df6a44e91e92c8a5df6a44e91e92c8a5df6a44e",
 ]
 ```
 
@@ -338,7 +341,6 @@ Runewarp supports two Client trust modes:
 - `runewarp client` must end up with at least one effective **Server address** after any allowed `--server-address` overlay in static mode
 - `client.server-address` and `client.server-addresses` are mutually exclusive
 - `client.server-addresses` must contain at least one entry when present
-- there must be at least one `[[server.tunnels]]` entry in static mode
 - `runewarp client` must end up with at least one **Service**, either from config or from the runtime `--backend-address` Catch-all overlay
 - `client.server-trust` must be either `system` or `ca-file`
 - `client.server-ca-file` may be set only when `client.server-trust = "ca-file"`

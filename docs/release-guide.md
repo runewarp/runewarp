@@ -62,10 +62,11 @@ Rehearsal validates release metadata and gates, runs `cargo publish --dry-run`, 
 Once the candidate is green, cut the real stable release:
 
 1. Check out the exact green `main` commit you want to publish.
-2. Create an SSH-signed tag in `vX.Y.Z` form on that commit.
-3. Push the tag.
-4. Watch the `Release` workflow until the crates.io publish completes, the Docker tag promotion follows, and all publish jobs finish.
-5. Confirm the public surfaces now agree on the released version:
+2. Create an SSH-signed tag in `vX.Y.Z` form on that commit: `git tag -s vX.Y.Z <commit>`.
+3. Verify the signature locally with `git tag -v vX.Y.Z`.
+4. Push only that tag with `git push origin vX.Y.Z`.
+5. Watch the `Release` workflow until the crates.io publish completes, the Docker tag promotion follows, and all publish jobs finish.
+6. Confirm the public surfaces now agree on the released version:
    - Docker Hub has the released `X.Y.Z`, `X.Y`, `X`, and `latest` tags.
    - crates.io serves the released `runewarp` version.
    - GitHub shows the release record only after the publish jobs complete successfully.
@@ -80,7 +81,7 @@ Use manual publish when the tag already exists and you need the current release 
 2. Run the `Release` workflow manually with `mode` set to `publish`.
 3. Set `release_tag` to the existing stable tag you want to recover.
 4. Watch the workflow summary to confirm it is in publish mode and targeting the expected tag.
-5. Let the workflow skip any surface that is already published and complete any missing surface that is still absent.
+5. Let the workflow skip an existing crates.io version or Docker release tag, publish any missing artifact, and refresh the GitHub Release title and notes.
 
 Manual publish applies the same signed-tag, trusted-commit, prior-green-`CI`, successful-`Images`, and trusted-image-lineage checks as the normal tag-driven release path. The workflow definition, Ruby release helpers, and release notes come from the current `main`, while crate publication still targets the selected release tag's source tree and Docker promotion still targets that tag's previously published commit-lineage image after re-verifying its baked-in 12-character commit SHA. If the GitHub release already exists, the workflow updates its title and notes to match the current rendered changelog entry for that version.
 
@@ -100,10 +101,10 @@ Typical causes are changelog structure mistakes, version/tag mismatch, or other 
 
 If the pushed release tag fails in the gate stage before Docker Hub or crates.io publication begins, decide whether the problem is the candidate itself or only the automation around it.
 
-1. If the release candidate metadata or trust requirements are wrong, fix the cause on `main`, wait for `CI` to go green again on the new release commit, and cut a fresh SSH-signed release tag for the intended version only after the corrected commit is ready.
+1. If the release candidate metadata or trust requirements are wrong, do not move or reuse the pushed tag. Fix the cause on `main`, prepare a new patch version, wait for `CI` to go green, and cut a new SSH-signed tag for that version.
 2. If the release candidate is still correct but the workflow or scripts on `main` needed a recovery fix, rerun the `Release` workflow manually in `publish` mode against the existing tag after that fix lands on `main`.
 
-The key distinction is that no public artifact has been published yet, so you can either repair the candidate and recut the tag or repair the automation and rerun publish against the same trusted tag.
+Pushed stable tags are immutable. Candidate defects consume that version even before artifact publication; automation-only defects can use manual publish against the unchanged trusted tag.
 
 ### Publication failed after a public side effect
 

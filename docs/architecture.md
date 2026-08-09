@@ -8,9 +8,9 @@ Runewarp keeps public ingress simple: the server routes encrypted traffic to a c
 | --- | --- |
 | Public traffic | TLS passthrough by default; the public edge does not terminate customer TLS |
 | Visitor addresses | Direct sockets or trusted PROXY v2 ingress become one canonical TCP tuple carried on every Tunnel stream |
-| Routing authority | The **Server** selects the **Tunnel** from explicit Server-configured **Public hostnames** |
+| Routing authority | The **Server** selects the **Tunnel** from the current **Authorization snapshot** |
 | **Client instance behavior** | The **Client instance** selects a **Service** locally and either forwards TLS bytes to a TLS-terminating **Local backend** (**TLS passthrough**) or terminates TLS itself before proxying plaintext to the **Local backend** (**Terminate mode**) |
-| Tunnel transport | One long-lived QUIC/TLS **Tunnel connection** per **Client instance** |
+| Tunnel transport | One long-lived QUIC/TLS **Tunnel connection** per effective **Server address** |
 | Trust model | Server certificate validation plus pinned **Client identity** authentication |
 | Process lifecycle | Separate Client and Server role runtimes own preparation, static/Managed construction, ACME, shutdown, fatal propagation, and teardown |
 
@@ -63,21 +63,23 @@ After a hostname crosses that seam, routing and service-selection code carries t
 flowchart TD
     V[Visitor]
     C["Client instance"]
-    B["Local backend<br/>terminates TLS"]
+    B["Local backend"]
 
     subgraph S["Server"]
         direction TB
-        P["Public listener<br/>TCP 443 / Visitor TLS"]
+        P["Public listener<br/>TCP 443 by default / Visitor TLS"]
         R["SNI router<br/>select Tunnel by Public hostname"]
-        U["Tunnel listener<br/>UDP 443 / QUIC/TLS"]
+        U["Tunnel listener<br/>UDP 443 by default / QUIC/TLS"]
+        T["Active Tunnel connection"]
 
         P -->|"read ClientHello + SNI"| R
-        R -->|"open stream on active Tunnel"| U
+        U -->|"accept and authenticate"| T
+        R -->|"open stream"| T
     end
 
     V -->|"Visitor TLS for a Public hostname"| P
-    C -->|"dials QUIC/TLS Tunnel connection"| U
-    U -->|"deliver encrypted stream"| C
+    C -->|"establish QUIC/TLS"| U
+    T -->|"deliver encrypted stream"| C
     C -->|"select Service and proxy"| B
 ```
 
@@ -87,7 +89,7 @@ In passthrough mode, the forwarded byte stream stays encrypted until the local b
 
 Runewarp keeps public routing authority on the server:
 
-- every Server `[[tunnels]]` entry lists explicit **Public hostnames**
+- every static Server `[[server.tunnels]]` entry lists explicit **Public hostnames**; Managed mode receives the same authorization from Control
 - the Server routes only those hostnames into a **Tunnel**
 - the Client does not register hostnames with the Server
 - hostname overlap is rejected within Server **Tunnels** and within Client **Services**
@@ -144,37 +146,22 @@ The Tunnel-framing module owns the complete internal `runewarp/1` application-st
 | **Public hostname CA** (manual) | Private trust anchor in `client.public-cert-dir` shared with Visitors when `tls-mode = "terminate"` is in use |
 | **Public hostname certificates via Client ACME** | Automatically provisioned by Let's Encrypt via `[client.acme]` for **Public hostnames** of terminating Services; `acme-tls/1` challenge traffic for those hostnames is routed through the Server to the Client like ordinary Visitor TLS |
 
-The client validates the server certificate either through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle. The server authenticates one of the Tunnel's pinned `client-identity` values from the client public key rather than the certificate lifetime. Config validation prepares a static-or-managed **Server admission** outcome once from Control address presence; Server startup consumes that outcome to build Authorization and bind readiness policy without re-deriving mode. Config validation likewise prepares **Client admission** once; Client startup wires the **Address controller** (`for_static` + seed vs `for_managed` + session) from that outcome without re-checking Control in every touched layer. Static Server startup loads one static **Authorization snapshot** (no Tunnel IDs) shared by Public-hostname routing and the live QUIC Client-identity verifier. Managed Server startup begins with an empty managed snapshot and defers readiness until the first successful apply. Live Authorization replacement is one Server operation on managed authorization: it validates a candidate beside the live snapshot, commits Public-hostname routing and Client-identity handshake admission together, realigns Tunnel pools by Tunnel ID, dispatches selective live-work revocation, and opens first-success **Server readiness** without exposing a mixed view. Static Client startup seeds one **Address controller** from the configured **Server addresses**; the controller owns the complete assigned Server-address lifecycle (workers, Retiring with production reconnect-vs-exit policy, static Client-ready, shutdown) while preserving today's reconnect and traffic behavior. Validated Services, Terminate-mode TLS resolver state, and Client ACME managers are prepared once for the **Client instance** and reused by those workers; each Tunnel-connection attempt still reloads Server trust and Client identity material. In **Managed mode**, each runtime also maintains one role-neutral **Managed session** over mutually authenticated HTTP/2. The Managed Server role adapter supplies validated authorization input to that same Authorization replacement operation and observes success or failure; readiness, Retiring, convergence, Control-loss retention, and drain interaction are specified in [`managed.md`](managed.md).
+The Client validates the Server certificate through system trust or an exclusive CA bundle. The Server authenticates a pinned **Client identity** from the Client public key rather than the certificate lifetime.
 
-## Current runtime limits
+In **Static mode**, the Server loads one startup-only **Authorization snapshot** and the Client starts one address worker per configured **Server address**. In **Managed mode**, Control replaces the same complete authorization or assignment inputs. Server replacement commits routing and handshake admission together and preserves Tunnel-pool continuity by **Tunnel ID**; Client replacement adds, Retires, or re-adopts address workers without duplicate dialing.
 
-- public pre-routing work is bounded to 4,096 concurrent intakes globally and 256 per canonical Visitor source IP after direct/proxied tuple resolution, with one 5-second PROXY-header-plus-ClientHello deadline and separate 16 KB caps
-- direct ingress uses the accepted socket source for per-source admission; strict PROXY v2 ingress uses the validated canonical source after trusted-peer verification, and Core ignores HTTP forwarding headers and untrusted PROXY bytes
-- concurrent Server-side QUIC handshakes are bounded to 256 before per-handshake work is spawned
-- pending Server `open_bi()` opens are bounded to 1,024 with a 5-second open deadline; routing first reserves one registry admission, then atomically validates current Authorization and converts that reservation into one active Visitor-work lease holding admission and Tunnel-member load accounting, stable routing identity, selective-revocation registration, and exactly-once cleanup; the same gate seals shutdown admission and provides event-driven graceful quiescence across pending reservations and active leases
-- active **Tunnel connections** are bounded to 4,096 globally, 256 per **Tunnel pool**, and 64 per authenticated **Client identity**; saturation rejects the newest connection without replacing healthy members
-- each **Client instance** enforces one aggregate stream-handler budget of 1,024 across all live **Tunnel connections**, and advertises at most 1,024 Server-opened bidirectional QUIC streams per connection so one connection cannot request more than the instance budget; the shared semaphore remains authoritative when multiple connections compete
-- Client routed-stream setup uses 5-second deadlines for tunneled ClientHello completion, backend connect, initial backend write, Terminate-mode TLS handshake, and ACME challenge TLS handshake; successfully established proxies remain long-lived without a new idle or lifetime deadline
-- transient public-listener accept errors retry with backoff from 10 ms to 1 s; unrecoverable listener failures remain fatal and drop readiness
-- each **Client instance** establishes one or more **Tunnel connections**
-- static Client startup seeds one **Address controller** from the configured **Server addresses**; the controller owns the complete assigned Server-address lifecycle and allows maintenance intent to be replaced (add / remove / re-adopt) without process restart
-- managed Server and Client runtimes maintain one **Managed session** to Control through the role-neutral `ManagedSession` domain seam and a role adapter; the wire contract, schemas, readiness/Retiring/convergence rules, input/reporting limits, and failure taxonomy are in [`managed.md`](managed.md)
-- Managed-session SSE lines, event types, event data, snapshot bytes, decoded allocation, Tunnel/Public-hostname/Client-identity/Server-address cardinalities, and applied-state request/response deadlines are fixed production limits documented in [`managed.md`](managed.md); oversized input fails the session without partial apply
-- static and managed modes are mutually exclusive at startup: static-to-managed and managed-to-static changes require configuration replacement plus process restart, with no overlapping sources or in-process mode switch
-- in static Client mode, Client-ready means at least one configured **Server address** is connected; managed Client mode reports **Assignment convergence** instead and does not emit the static one-shot Client-ready event
-- failure of one configured **Server address** does not tear down healthy **Tunnel connections** to other configured **Server addresses**
-- a **Tunnel** stays available while at least one authenticated **Tunnel connection** is live
-- when a **Tunnel** has more than one live **Tunnel connection** on one **Server** node, the runtime treats them as a **Tunnel pool**
-- new Visitor streams are placed onto the least-busy **Tunnel pool** member, with round-robin tie-breaking when active-stream load is equal
-- once placed, a proxied stream stays on its chosen **Tunnel connection** until it closes or that connection dies
-- multiple Client instances across different Tunnels are supported
-- optional **Server readiness** is ingress-admission-only: when `server.readiness-bind-address` is configured, a probe-only TCP listener stays up only while the Server should admit new ingress traffic
-- orderly local shutdown is runtime-owned: the **Server** drops **Server readiness** immediately, stops accepting new Visitor traffic, new **Tunnel connections**, and new streams on already-open **Tunnel connections**, while the **Client instance** stops reconnect work before closing its active **Tunnel connection**
-- every role-runtime exit path requests shutdown where needed and awaits its owned runtime work; this includes Managed sessions, ACME drivers, Server readiness, pending QUIC handshakes, admitted Visitor-intake tasks, and Address workers; signal-adapter and initiating runtime errors remain the reported cause after teardown
-- **Graceful shutdown** on the **Server** keeps already-landed Visitor streams alive only up to `server.graceful-shutdown-duration`, then force-closes remaining work
-- **Fast shutdown** on the **Server** skips that longer drain window
-- the short **QUIC close flush duration** remains a fixed runtime-owned courtesy window after the close frame is sent; it is not an operator-facing drain knob
-- TLS passthrough is the default and lowest-privilege mode
-- customer TLS is terminated either on the **Local backend** (passthrough) or on the **Client instance** (terminate)
-- plain HTTP backends require `tls-mode = "terminate"` on the matching Service
-- the server does not terminate customer TLS
+Each Managed runtime maintains one mutually authenticated HTTP/2 **Managed session**. The full apply, readiness, convergence, Retiring, Control-loss, and drain contract is in [`managed.md`](managed.md).
+
+## Operational boundaries
+
+- Visitor intake, QUIC handshakes, stream opening, active streams, and Client stream handlers are bounded; overload rejects the newest work
+- each effective **Server address** has an independent connection and retry lifecycle, so one failure does not tear down healthy connections to other addresses
+- a **Tunnel** remains available while one authenticated **Tunnel connection** is live; pooled connections use least-active placement with round-robin tie-breaking
+- a placed stream stays on its selected **Tunnel connection** and is never migrated
+- Static and Managed modes are mutually exclusive startup shapes; switching requires configuration replacement and process restart
+- Static Clients emit a one-shot **Client readiness** signal; Managed Clients report **Assignment convergence** instead
+- optional **Server readiness** reports ingress admission only, not Tunnel coverage or application health
+- orderly shutdown stops new work before closing all active **Tunnel connections**; graceful shutdown offers a bounded opportunity for completion without guaranteeing it, while fast shutdown skips that longer window
+- TLS passthrough remains the default; plain HTTP backends require Terminate mode
+
+[`protocol.md`](protocol.md) is canonical for exact wire ordering, limits, deadlines, retry, placement, and shutdown behavior. [`managed.md`](managed.md) owns Managed-session limits and reconciliation behavior.

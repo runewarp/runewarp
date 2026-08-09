@@ -15,6 +15,6 @@ Runewarp keeps public routing authority on the Server and does not use Client re
 ## Consequences
 
 - public hostname authorization remains explicit and Server-owned
-- the public data path stays independent of control-plane negotiation
+- the public data path stays independent of Control negotiation
 - operators must keep mirrored hostname sets consistent when they do not use a Catch-all Service
 - Tunnel and Service groupings may differ as long as the hostname coverage agrees

@@ -10,13 +10,10 @@ Container builds need useful Rust dependency caching without allowing untrusted 
 
 ## Decision
 
-Cache scope is part of the trust boundary. Pull requests use per-PR namespaces; trusted `main` CI warms the trusted-main cache reused by native `amd64` and `arm64` Images jobs. Each architecture publishes and smokes an immutable commit tag before manifest merge. The merged bare 12-character commit tag is the release handoff artifact.
-
-Runewarp keeps the dependency-aware multi-stage Dockerfile instead of adding heavier cache tooling.
+Cache scope is part of the trust boundary: untrusted pull-request output must never feed a privileged image publication. Current cache namespaces, image build stages, smoke order, and release lineage are implementation details documented in [`../release-automation.md`](../release-automation.md).
 
 ## Consequences
 
 - untrusted and trusted cache output remain separated
-- native images are smoke-tested before merge and stable-tag promotion
-- released `--version` output retains commit provenance
-- the application crate still recompiles per commit even when dependencies are cached
+- trusted publication may reuse only trusted cache output
+- cache or workflow changes must preserve that boundary even when their mechanics change

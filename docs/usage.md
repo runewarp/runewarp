@@ -105,6 +105,8 @@ Or derive the terminating hostnames from the selected Client config:
 runewarp client public-cert init
 ```
 
+Client ACME does not block startup or Tunnel establishment while certificates are being issued. Until a terminating Public hostname has a ready certificate, its TLS handshake fails closed; Runewarp never falls back to passthrough. Each such hostname must be authorized by the Server, resolve to the Server, and be externally reachable on TCP 443 for TLS-ALPN-01.
+
 ### 5. Write the smallest practical config
 
 The smallest practical setup is a server with explicit **Public hostnames** and one client **Catch-all Service**:
@@ -121,7 +123,8 @@ email = "admin@example.com"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.com", "api.example.com"]
-client-identity = "4f7b6f7a9b0f0d2b..."
+# Replace with `runewarp client identity show` output.
+client-identity = "4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef"
 ```
 
 ```toml
@@ -163,7 +166,9 @@ Run the **Server** on a machine with a public IP so **Visitors** and **Client in
 
 - create an A record for the **Server hostname** that points to that machine's public IP
 - use each **Public hostname** as a CNAME to the **Server hostname** as the standard DNS pattern
-- if you deploy the Server behind NAT or port mapping, make sure public TCP 443 still reaches the Server for Visitor TLS and ACME traffic
+- allow Visitor and ACME traffic to reach `server.public-bind-address` over TCP (TCP 443 by default)
+- allow Clients to reach `server.tunnel-bind-address` over UDP (UDP 443 by default)
+- if you deploy behind NAT, a load balancer, or port mapping, preserve both transports and map their external ports to the configured listeners
 
 Pointing a **Public hostname** directly at the same public IP can also work, but a CNAME to the **Server hostname** is usually clearer.
 
@@ -180,6 +185,25 @@ When one shared Server config needs a per-process **Server hostname**, `runewarp
 
 For runtime-only startup, `--server-address` is repeatable. One occurrence gives the ordinary single-target shape; multiple occurrences make one Client reconcile those Server addresses concurrently.
 
+For a static CLI-only Client with a Catch-all Service:
+
+```bash
+runewarp client \
+  --server-address tunnel-a.example.com \
+  --server-address tunnel-b.example.com \
+  --backend-address 127.0.0.1:8443
+```
+
+For a managed CLI-only Client:
+
+```bash
+runewarp client \
+  --control-address control.example.com \
+  --backend-address 127.0.0.1:8443
+```
+
+CLI-only startup uses the default identity locations and system trust. Use a config file for exclusive CA trust, custom material paths, explicit Services, or Terminate mode.
+
 ### 8. Verify traffic
 
 1. Point each **Public hostname** at the Server.
@@ -187,6 +211,8 @@ For runtime-only startup, `--server-address` is repeatable. One occurrence gives
 3. Confirm the expected application answers.
 
 Under **TLS passthrough**, the backend's own certificate should appear. In **Terminate mode**, the client-presented **Public hostname certificate** should appear and the backend should receive plaintext.
+
+With Client ACME, an immediate Terminate-mode handshake failure can mean issuance is still pending. Confirm that the Public hostname reaches the Server on TCP 443 and is authorized and routed to the Client; there is no temporary passthrough fallback.
 
 At the default `log-level = "info"`, Runewarp logs readiness, tunnel connection lifecycle, warnings, and errors to stderr. Set `log-level = "debug"` when you need per-connection routing detail.
 

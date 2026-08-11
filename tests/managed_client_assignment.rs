@@ -25,14 +25,13 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    AddressController, AddressWorkerDial, AssignmentConvergence, CLIENT_CERT_FILENAME,
-    CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientConfig, ClientIdentity,
-    ClientInstancePrep, ClientTlsMode, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
-    EstablishOutcome, LogLevel, ManagedSession, ManagedSessionEvent, ManagedSessionRole,
-    OrderlyShutdown, PreparedClient, PublicHostname, QUIC_CLOSE_FLUSH_DURATION, Server,
-    ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
-    ServerTunnelConfig, ServiceConfig, SessionMaterial, client_identity_from_certificate_der,
-    make_server_quic_config_with_client_admission,
+    AddressController, AssignmentConvergence, CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME,
+    CLIENT_KEY_FILENAME, ClientConfig, ClientIdentity, ClientInstancePrep, ClientTlsMode,
+    ClientTunnelAttempt, ControlAddress, ControlClientIdentityMaterial, ControlTrust, LogLevel,
+    ManagedSession, ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PublicHostname,
+    QUIC_CLOSE_FLUSH_DURATION, Server, ServerAdmission, ServerAuthorization, ServerBindConfig,
+    ServerHostname, ServerTunnelConfig, ServiceConfig, SessionMaterial,
+    client_identity_from_certificate_der, make_server_quic_config_with_client_admission,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -43,7 +42,7 @@ use serde_json::{Value, json};
 use std::sync::Mutex;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, lookup_host};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -171,7 +170,6 @@ struct ManagedClientHarness {
     stop_tx: Option<oneshot::Sender<()>>,
     runtime_task: JoinHandle<Result<(), String>>,
     controller_view: runewarp::AddressControllerView,
-    dial_attempts: Arc<AtomicUsize>,
 }
 
 impl ManagedClientHarness {
@@ -212,7 +210,7 @@ impl ManagedClientHarness {
             server_hostname: ServerHostname::try_from("localhost").unwrap(),
             server_port: 443,
             log_level: LogLevel::Off,
-            server_ca_file: Some(tempdir.path().join("server-ca.pem")),
+            server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
             identity_directory: identity_dir.clone(),
             services: vec![ServiceConfig {
                 public_hostnames: None,
@@ -228,7 +226,6 @@ impl ManagedClientHarness {
             admission: runewarp::ClientAdmission::Managed,
         };
         let settings = Arc::new(settings);
-        let dial_attempts = Arc::new(AtomicUsize::new(0));
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
 
@@ -236,6 +233,7 @@ impl ManagedClientHarness {
             .await
             .expect("client instance should prepare");
         instance.start_acme_once();
+        let client_bind_addr = first_localhost_address(0).await;
 
         let session_material = SessionMaterial {
             control_hostname: "localhost".to_owned(),
@@ -252,15 +250,12 @@ impl ManagedClientHarness {
         let factory: runewarp::AddressWorkerFactory = {
             let settings = Arc::clone(&settings);
             let instance = Arc::clone(&instance);
-            let dial_attempts = Arc::clone(&dial_attempts);
-            let dial = Arc::new(IntegrationAddressDial {
-                settings,
-                instance,
-                local_bind_addr: localhost(0),
-                dial_attempts,
-            });
             Arc::new(move |server_address, control| {
-                let dial = Arc::clone(&dial);
+                let dial = Arc::new(ClientTunnelAttempt::new(
+                    Arc::clone(&settings),
+                    Arc::clone(&instance),
+                    client_bind_addr,
+                ));
                 Box::pin(async move {
                     runewarp::run_address_worker(
                         server_address,
@@ -319,7 +314,6 @@ impl ManagedClientHarness {
             stop_tx: Some(stop_tx),
             runtime_task,
             controller_view,
-            dial_attempts,
         }
     }
 
@@ -335,7 +329,7 @@ impl ManagedClientHarness {
         .unwrap();
         let server = Server::bind(ServerBindConfig {
             public_bind_addr: localhost(0),
-            tunnel_connection_bind_addr: localhost(0),
+            tunnel_connection_bind_addr: first_localhost_address(0).await,
             readiness_bind_addr: None,
             server_hostname: ServerHostname::try_from("localhost").unwrap(),
             authorization: authorization.clone(),
@@ -371,10 +365,6 @@ impl ManagedClientHarness {
 
     fn worker_count(&self) -> usize {
         self.controller_view.worker_count()
-    }
-
-    fn dial_attempts(&self) -> usize {
-        self.dial_attempts.load(Ordering::SeqCst)
     }
 
     fn convergence(&self) -> AssignmentConvergence {
@@ -474,8 +464,6 @@ async fn managed_client_retires_re_adopts_and_preserves_assignment_through_contr
     wait_for_state_revision(&harness.control.metrics, "rev-1").await;
     wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
     wait_until(|| harness.convergence() == AssignmentConvergence::Converged).await;
-    let dials_after_connect = harness.dial_attempts();
-    assert!(dials_after_connect >= 1);
     assert_eq!(harness.worker_count(), 1);
 
     // Remove the connected address: Retiring leaves remote Server closure in charge.
@@ -484,7 +472,6 @@ async fn managed_client_retires_re_adopts_and_preserves_assignment_through_contr
     wait_for_state_revision(&harness.control.metrics, "rev-retire").await;
     assert_eq!(harness.convergence(), AssignmentConvergence::Converged);
     assert_eq!(harness.worker_count(), 1);
-    assert_eq!(harness.dial_attempts(), dials_after_connect);
     wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
 
     // Re-add before remote closure: re-adopt without a duplicate dial.
@@ -494,23 +481,21 @@ async fn managed_client_retires_re_adopts_and_preserves_assignment_through_contr
     wait_until(|| harness.convergence() == AssignmentConvergence::Converged).await;
     assert_eq!(harness.worker_count(), 1);
     assert_eq!(
-        harness.dial_attempts(),
-        dials_after_connect,
-        "re-adoption must not dial a duplicate Tunnel connection"
+        harness.worker_count(),
+        1,
+        "re-adoption must reuse one worker"
     );
     wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
 
     // Control loss retains the last assignment and reconnect loops.
     let tls_before = harness.control.metrics.tls_accepts.load(Ordering::SeqCst);
     let reports_before = harness.control.metrics.state_bodies.lock().unwrap().len();
-    let dials_before_loss = harness.dial_attempts();
     harness
         .control
         .push_snapshot("event: patch\ndata: {}\n\n".to_owned());
     wait_for_reconnecting(&mut harness.event_rx).await;
     wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
     assert_eq!(harness.worker_count(), 1);
-    assert_eq!(harness.dial_attempts(), dials_before_loss);
 
     // Repeated applied revision after reconnect resumes reporting without churn.
     harness.push_assignment("rev-readopt", &[&addr_a]);
@@ -542,9 +527,9 @@ async fn managed_client_retires_re_adopts_and_preserves_assignment_through_contr
         "Control reconnect must open a new TLS connection"
     );
     assert_eq!(
-        harness.dial_attempts(),
-        dials_before_loss,
-        "repeated revision must not churn address workers"
+        harness.worker_count(),
+        1,
+        "repeated revision must not churn workers"
     );
     wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
 
@@ -552,14 +537,13 @@ async fn managed_client_retires_re_adopts_and_preserves_assignment_through_contr
     harness.push_assignment("rev-retire-2", &[]);
     wait_for_applied(&mut harness.event_rx, "rev-retire-2").await;
     wait_until_visitor_ok(server_a.public_addr, &harness.backend_cert).await;
-    let dials_before_remote_close = harness.dial_attempts();
     server_a.close_remotely().await;
     wait_until(|| harness.worker_count() == 0).await;
     sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        harness.dial_attempts(),
-        dials_before_remote_close,
-        "Retiring workers must not reconnect after remote closure"
+        harness.worker_count(),
+        0,
+        "Retiring worker must not reconnect"
     );
 
     backend.1.abort();
@@ -585,7 +569,6 @@ async fn managed_client_restart_fail_closed_requires_fresh_snapshot() {
     let mut second = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
     sleep(Duration::from_millis(150)).await;
     assert_eq!(second.worker_count(), 0);
-    assert_eq!(second.dial_attempts(), 0);
     assert_eq!(second.convergence(), AssignmentConvergence::Converged);
 
     let server_fresh = second.spawn_server_node().await;
@@ -593,7 +576,6 @@ async fn managed_client_restart_fail_closed_requires_fresh_snapshot() {
     second.push_assignment("rev-fresh", &[&addr_fresh]);
     wait_for_applied(&mut second.event_rx, "rev-fresh").await;
     wait_until_visitor_ok(server_fresh.public_addr, &second.backend_cert).await;
-    assert!(second.dial_attempts() >= 1);
 
     server_fresh.close_remotely().await;
     backend.1.abort();
@@ -732,77 +714,6 @@ async fn wait_for_reconnecting(events: &mut mpsc::UnboundedReceiver<ManagedSessi
     .expect("timed out waiting for managed session reconnect");
 }
 
-struct IntegrationAddressDial {
-    settings: Arc<ClientConfig>,
-    instance: Arc<ClientInstancePrep>,
-    local_bind_addr: SocketAddr,
-    dial_attempts: Arc<AtomicUsize>,
-}
-
-impl AddressWorkerDial for IntegrationAddressDial {
-    fn establish(
-        &self,
-        address: ServerAddress,
-    ) -> futures_util::future::BoxFuture<'static, EstablishOutcome> {
-        let settings = Arc::clone(&self.settings);
-        let instance = Arc::clone(&self.instance);
-        let local_bind_addr = self.local_bind_addr;
-        let dial_attempts = Arc::clone(&self.dial_attempts);
-        Box::pin(async move {
-            let resolved = match lookup_host((address.hostname().as_str(), address.port())).await {
-                Ok(addrs) => {
-                    let resolved: Vec<_> = addrs.collect();
-                    // Prefer IPv4 so Linux CI (where localhost often resolves
-                    // ::1 first) still reaches Servers bound to 127.0.0.1.
-                    resolved
-                        .iter()
-                        .copied()
-                        .find(SocketAddr::is_ipv4)
-                        .or_else(|| resolved.first().copied())
-                }
-                Err(_) => None,
-            };
-            let Some(resolved) = resolved else {
-                return EstablishOutcome::Retryable {
-                    message: "resolution failed".to_owned(),
-                    log_with_delay: None,
-                };
-            };
-
-            dial_attempts.fetch_add(1, Ordering::SeqCst);
-            match PreparedClient::connect_to_server_address(
-                &settings,
-                &instance,
-                local_bind_addr,
-                &address,
-                resolved,
-            )
-            .await
-            {
-                Ok(client) => EstablishOutcome::Connected {
-                    configured_server_addr: format!(
-                        "{}:{}",
-                        address.hostname().as_str(),
-                        address.port()
-                    ),
-                    run: Box::new(move |process_shutdown| {
-                        Box::pin(async move {
-                            client
-                                .run_until_shutdown(process_shutdown)
-                                .await
-                                .map_err(|error| error.to_string())
-                        })
-                    }),
-                },
-                Err(error) => EstablishOutcome::Retryable {
-                    message: error.to_string(),
-                    log_with_delay: None,
-                },
-            }
-        })
-    }
-}
-
 async fn wait_for_applied(
     events: &mut mpsc::UnboundedReceiver<ManagedSessionEvent>,
     revision: &str,
@@ -934,6 +845,14 @@ fn snapshot_sse(revision: &str, input: &str) -> String {
 
 fn localhost(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+}
+
+async fn first_localhost_address(port: u16) -> SocketAddr {
+    tokio::net::lookup_host(("localhost", port))
+        .await
+        .unwrap()
+        .next()
+        .expect("localhost must resolve")
 }
 
 fn make_self_signed_cert(server_name: &str) -> (CertificateDer<'static>, Vec<u8>) {

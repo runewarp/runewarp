@@ -647,8 +647,8 @@ backend-address = "localhost:8443"
     let settings = load_client_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(
-        settings.server_ca_file,
-        Some(tempdir.path().join("server-ca.pem"))
+        settings.server_trust,
+        runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem"))
     );
 }
 

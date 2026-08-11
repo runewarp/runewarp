@@ -146,9 +146,15 @@ The Tunnel-framing module owns the complete internal `runewarp/1` application-st
 | **Public hostname CA** (manual) | Private trust anchor in `client.public-cert-dir` shared with Visitors when `tls-mode = "terminate"` is in use |
 | **Public hostname certificates via Client ACME** | Automatically provisioned by Let's Encrypt via `[client.acme]` for **Public hostnames** of terminating Services; `acme-tls/1` challenge traffic for those hostnames is routed through the Server to the Client like ordinary Visitor TLS |
 
-The Client validates the Server certificate through system trust or an exclusive CA bundle. The Server authenticates a pinned **Client identity** from the Client public key rather than the certificate lifetime.
+The Client validates the Server certificate through typed system trust or an exclusive CA bundle. Exclusive-CA attempts do not load or combine system roots. The Server authenticates a pinned **Client identity** from the Client public key rather than the certificate lifetime.
 
 In **Static mode**, the Server loads one startup-only **Authorization snapshot** and the Client starts one address worker per configured **Server address**. In **Managed mode**, Control replaces the same complete authorization or assignment inputs. Server replacement commits routing and handshake admission together and preserves Tunnel-pool continuity by **Tunnel ID**; Client replacement adds, Retires, or re-adopts address workers without duplicate dialing.
+
+Static and Managed Client address workers cross the same production Tunnel-connection-attempt module. That
+module owns ordered DNS selection, per-attempt trust and Client-identity reload, QUIC establishment,
+typed attempt and connection-end classification, and lifecycle reporting context. DNS is its only
+internal seam: the runtime uses the system resolver and deterministic tests use scripted results.
+The Address worker remains the sole owner of retry jitter, delay reporting, waiting, and reset.
 
 Each Managed runtime maintains one mutually authenticated HTTP/2 **Managed session**. The full apply, readiness, convergence, Retiring, Control-loss, and drain contract is in [`managed.md`](managed.md).
 

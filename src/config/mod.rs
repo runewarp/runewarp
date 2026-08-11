@@ -116,7 +116,7 @@ pub struct ClientConfig {
     pub server_hostname: ServerHostname,
     pub server_port: u16,
     pub log_level: LogLevel,
-    pub server_ca_file: Option<PathBuf>,
+    pub server_trust: crate::trust::ClientServerTrust,
     pub identity_directory: PathBuf,
     pub services: Vec<ServiceConfig>,
     pub public_cert_config: Option<ClientPublicCertConfig>,
@@ -750,13 +750,14 @@ pub(crate) fn validate_prepared_client_config(
         validate_unique_server_addresses(&validated_server_addresses, &mut messages);
     }
 
-    let server_ca_file = match trust {
-        PreparedClientTrust::System => None,
+    let server_trust = match trust {
+        PreparedClientTrust::System => Some(crate::trust::ClientServerTrust::System),
         PreparedClientTrust::CaFile(server_ca_file) => server_ca_file
             .into_option(&mut messages)
             .and_then(|server_ca_file| {
                 validate_existing_file("client.server-ca-file", server_ca_file, &mut messages)
-            }),
+            })
+            .map(crate::trust::ClientServerTrust::CaFile),
         PreparedClientTrust::InvalidMode(value) => {
             messages.push(format!(
                 "client.server-trust must be one of `system` or `ca-file`, got `{value}`"
@@ -895,7 +896,7 @@ pub(crate) fn validate_prepared_client_config(
             server_hostname,
             server_port,
             log_level,
-            server_ca_file,
+            server_trust: server_trust.expect("validated client.server-trust"),
             identity_directory: identity_directory.expect("validated client.identity-dir"),
             services,
             public_cert_config,

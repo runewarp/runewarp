@@ -5,6 +5,7 @@ mod managed_adapter;
 mod service;
 mod stream_limits;
 mod termination_tls;
+mod tunnel_attempt;
 mod tunnel_stream;
 
 pub use address_controller::{
@@ -13,14 +14,17 @@ pub use address_controller::{
 };
 pub(crate) use address_worker::run_address_worker_with_reconnect_policy;
 pub use address_worker::{
-    AddressWorkerBackoff, AddressWorkerDial, AddressWorkerHooks, ConnectedTunnelFailure,
-    ConnectedTunnelRun, EstablishOutcome, FixedBackoff, ReportedConnectedTunnelRun,
+    AddressWorkerBackoff, AddressWorkerDial, AddressWorkerHooks, FixedBackoff,
     SilentAddressWorkerHooks, run_address_worker,
 };
 #[cfg(test)]
 pub(crate) use address_worker::{wait_for_retry_delay, wait_for_shutdown};
 pub use assignment_convergence::AssignmentConvergence;
 pub use managed_adapter::ClientAssignmentAdapter;
+pub use tunnel_attempt::{
+    ClientTunnelAttempt, TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionEnd,
+    TunnelConnectionRun,
+};
 
 use std::fmt;
 use std::future::Future;
@@ -113,8 +117,17 @@ impl std::error::Error for ClientConnectError {
 
 impl ClientConnectError {
     pub fn is_unauthorized_client_identity(&self) -> bool {
-        matches!(self, Self::Handshake(error) if error.to_string().contains("ApplicationVerificationFailure"))
+        matches!(self, Self::Handshake(error) if is_tls_access_denied(error))
     }
+}
+
+pub(crate) fn is_tls_access_denied(error: &quinn::ConnectionError) -> bool {
+    const TLS_ACCESS_DENIED_ALERT: u8 = 0x31;
+    matches!(
+        error,
+        quinn::ConnectionError::TransportError(error)
+            if error.code == quinn::TransportErrorCode::crypto(TLS_ACCESS_DENIED_ALERT)
+    )
 }
 
 impl Client {

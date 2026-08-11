@@ -20,7 +20,7 @@ async fn client_runtime_tears_down_after_shutdown_signal_failure() {
         server_port: server_address.port(),
         server_addresses: vec![server_address],
         log_level: LogLevel::Off,
-        server_ca_file: None,
+        server_trust: runewarp::ClientServerTrust::System,
         identity_directory: "/missing/client-identity".into(),
         services: vec![ServiceConfig {
             public_hostnames: None,

@@ -422,12 +422,8 @@ impl PreparedClient {
         server_address: &ServerAddress,
         server_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
-        let loaded_roots = load_root_store(config.server_ca_file.as_deref())?;
-        let cert_chain =
-            load_certificate_chain(&config.identity_directory.join(CLIENT_CERT_FILENAME))
-                .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
-        let private_key = load_private_key(&config.identity_directory.join(CLIENT_KEY_FILENAME))
-            .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
+        let loaded_roots = load_root_store(&config.server_trust)?;
+        let (cert_chain, private_key) = load_client_identity_material(&config.identity_directory)?;
         let quic_client_config =
             make_client_quic_config_with_client_auth(loaded_roots.roots, cert_chain, private_key)
                 .map_err(ClientStartupError::QuicConfig)?;
@@ -747,16 +743,47 @@ struct LoadedRootStore {
 }
 
 fn load_root_store(
-    server_ca_file: Option<&std::path::Path>,
+    trust: &crate::trust::ClientServerTrust,
 ) -> Result<LoadedRootStore, ClientStartupError> {
-    let native_certs = rustls_native_certs::load_native_certs();
-    build_root_store(
+    load_root_store_with(trust, || {
+        let native_certs = rustls_native_certs::load_native_certs();
         NativeRootsLoad {
             certs: native_certs.certs,
             error_count: native_certs.errors.len(),
-        },
-        server_ca_file,
-    )
+        }
+    })
+}
+
+fn load_client_identity_material(
+    identity_directory: &std::path::Path,
+) -> Result<
+    (
+        Vec<CertificateDer<'static>>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    ),
+    ClientStartupError,
+> {
+    let cert_chain = load_certificate_chain(&identity_directory.join(CLIENT_CERT_FILENAME))
+        .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
+    let private_key = load_private_key(&identity_directory.join(CLIENT_KEY_FILENAME))
+        .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
+    Ok((cert_chain, private_key))
+}
+
+fn load_root_store_with(
+    trust: &crate::trust::ClientServerTrust,
+    load_native_roots: impl FnOnce() -> NativeRootsLoad,
+) -> Result<LoadedRootStore, ClientStartupError> {
+    match trust {
+        crate::trust::ClientServerTrust::System => build_root_store(load_native_roots(), None),
+        crate::trust::ClientServerTrust::CaFile(server_ca_file) => build_root_store(
+            NativeRootsLoad {
+                certs: Vec::new(),
+                error_count: 0,
+            },
+            Some(server_ca_file),
+        ),
+    }
 }
 
 fn build_root_store(
@@ -953,6 +980,7 @@ mod tests {
     use super::{
         ClientInstancePrep, ClientStartupError, NativeRootsLoad, PreparedClient, PreparedServer,
         ServerStartupError, acme_terminating_hostnames, build_root_store, coordinate_server_acme,
+        load_client_identity_material, load_root_store, load_root_store_with,
     };
     use crate::tls_material::{SERVER_CERT_FILENAME, SERVER_KEY_FILENAME};
     use crate::{
@@ -1014,6 +1042,71 @@ mod tests {
 
         assert_eq!(loaded.native_root_error_count, 0);
         assert_eq!(loaded.loaded_root_count, 1);
+    }
+
+    #[test]
+    fn exclusive_server_ca_never_requests_native_roots() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let extra_ca = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+        let server_ca_file = tempdir.path().join("server-ca.pem");
+        fs::write(&server_ca_file, extra_ca.cert.pem()).unwrap();
+        let native_roots_requested = AtomicBool::new(false);
+
+        let loaded = load_root_store_with(
+            &crate::trust::ClientServerTrust::CaFile(server_ca_file),
+            || {
+                native_roots_requested.store(true, Ordering::SeqCst);
+                NativeRootsLoad {
+                    certs: Vec::new(),
+                    error_count: 0,
+                }
+            },
+        )
+        .unwrap();
+
+        assert!(!native_roots_requested.load(Ordering::SeqCst));
+        assert_eq!(loaded.loaded_root_count, 1);
+    }
+
+    #[test]
+    fn exclusive_server_ca_is_reloaded_for_each_attempt() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let extra_ca = generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+        let server_ca_file = tempdir.path().join("server-ca.pem");
+        let trust = crate::ClientServerTrust::CaFile(server_ca_file.clone());
+        fs::write(&server_ca_file, extra_ca.cert.pem()).unwrap();
+
+        load_root_store(&trust).unwrap();
+        fs::write(&server_ca_file, "not a certificate").unwrap();
+
+        assert!(matches!(
+            load_root_store(&trust),
+            Err(ClientStartupError::TlsMaterial(_))
+        ));
+    }
+
+    #[test]
+    fn client_certificate_and_key_are_reloaded_for_each_attempt() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let identity = crate::generate_client_identity().unwrap();
+        fs::write(
+            tempdir.path().join(crate::CLIENT_CERT_FILENAME),
+            identity.certificate_pem,
+        )
+        .unwrap();
+        fs::write(
+            tempdir.path().join(crate::CLIENT_KEY_FILENAME),
+            identity.private_key_pem,
+        )
+        .unwrap();
+
+        load_client_identity_material(tempdir.path()).unwrap();
+        fs::write(tempdir.path().join(crate::CLIENT_KEY_FILENAME), "not a key").unwrap();
+
+        assert!(matches!(
+            load_client_identity_material(tempdir.path()),
+            Err(ClientStartupError::TlsMaterial(_))
+        ));
     }
 
     #[test]
@@ -1266,7 +1359,7 @@ mod tests {
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
             log_level: LogLevel::Info,
-            server_ca_file: None,
+            server_trust: crate::ClientServerTrust::System,
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: Some(vec![
@@ -1314,7 +1407,7 @@ mod tests {
             server_hostname: server_hostname("tunnel-a.example.test"),
             server_port: 443,
             log_level: LogLevel::Off,
-            server_ca_file: None,
+            server_trust: crate::ClientServerTrust::System,
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: Some(vec![public_hostname(hostname)]),
@@ -1413,7 +1506,7 @@ mod tests {
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
             log_level: LogLevel::Info,
-            server_ca_file: None,
+            server_trust: crate::ClientServerTrust::System,
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
@@ -1491,7 +1584,7 @@ mod tests {
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
             log_level: LogLevel::Info,
-            server_ca_file: None,
+            server_trust: crate::ClientServerTrust::System,
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
@@ -1613,7 +1706,7 @@ mod tests {
             server_hostname: server_hostname("unassigned.invalid"),
             server_port: 443,
             log_level: LogLevel::Info,
-            server_ca_file: None,
+            server_trust: crate::ClientServerTrust::System,
             identity_directory: PathBuf::from("/tmp/unused-client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),

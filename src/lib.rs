@@ -35,10 +35,10 @@ pub use client::{
     AddressWorkerControl, AddressWorkerDial, AddressWorkerFactory, AddressWorkerHooks,
     AssignmentConvergence, Client, ClientAssignmentAdapter, ClientConfigResolutionDefaults,
     ClientConfigResolutionError, ClientConnectConfig, ClientConnectError, ClientRuntimeArgs,
-    ConnectedTunnelFailure, ConnectedTunnelRun, EstablishOutcome, FixedBackoff, MaintenanceIntent,
-    ReportedConnectedTunnelRun, SelectedClientConfig, SilentAddressWorkerHooks,
-    resolve_client_config_from_cli, resolve_selected_client_config, run_address_worker,
-    select_client_config,
+    ClientTunnelAttempt, FixedBackoff, MaintenanceIntent, SelectedClientConfig,
+    SilentAddressWorkerHooks, TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionEnd,
+    TunnelConnectionRun, resolve_client_config_from_cli, resolve_selected_client_config,
+    run_address_worker, select_client_config,
 };
 pub use client_admission::ClientAdmission;
 pub use client_hello::{
@@ -117,4 +117,5 @@ pub use shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
 pub use startup::{
     ClientInstancePrep, ClientStartupError, PreparedClient, PreparedServer, ServerStartupError,
 };
+pub use trust::ClientServerTrust;
 pub use tunnel_id::TunnelId;

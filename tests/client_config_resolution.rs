@@ -31,7 +31,7 @@ fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<
     assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
     assert_eq!(settings.log_level, LogLevel::Info);
-    assert_eq!(settings.server_ca_file, None);
+    assert_eq!(settings.server_trust, runewarp::ClientServerTrust::System);
     assert_eq!(settings.identity_directory, identity_directory);
     assert_eq!(settings.services.len(), 1);
     assert_eq!(settings.services[0].public_hostnames, None);

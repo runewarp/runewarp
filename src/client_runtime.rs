@@ -3,28 +3,10 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::client::{
-    AddressController, AddressWorkerDial, AddressWorkerFactory, AddressWorkerHooks,
-    ConnectedTunnelFailure, EstablishOutcome,
-};
-use crate::{ClientAdmission, ClientInstancePrep, PreparedClient, ServerAddress, ShutdownMode};
-use futures_util::future::BoxFuture;
-use tokio::net::lookup_host;
+use crate::client::{AddressController, AddressWorkerFactory, AddressWorkerHooks};
+use crate::{ClientAdmission, ClientInstancePrep, ShutdownMode};
 use tokio::sync::oneshot;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RetryDisposition {
-    Retry,
-    Stop,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ClientTunnelDialTarget {
-    configured_server_addr: String,
-    resolved_server_addr: SocketAddr,
-}
 
 pub struct ClientRuntime {
     settings: Arc<crate::ClientConfig>,
@@ -128,13 +110,11 @@ fn production_client_address_worker_factory(
     local_bind_addr: SocketAddr,
 ) -> AddressWorkerFactory {
     Arc::new(move |server_address, control| {
-        let dial = Arc::new(ProductionAddressDial {
-            settings: Arc::clone(&settings),
-            instance: Arc::clone(&instance),
+        let dial = Arc::new(crate::ClientTunnelAttempt::new(
+            Arc::clone(&settings),
+            Arc::clone(&instance),
             local_bind_addr,
-            connected_once: Arc::new(AtomicBool::new(false)),
-            establish_attempts: Arc::new(AtomicUsize::new(0)),
-        });
+        ));
         Box::pin(async move {
             crate::client::run_address_worker_with_reconnect_policy(
                 server_address,
@@ -152,174 +132,6 @@ struct RuntimeClientReadyHooks;
 impl AddressWorkerHooks for RuntimeClientReadyHooks {
     fn on_client_ready(&self, configured_server_addr: &str) {
         crate::runtime_log::client_ready(configured_server_addr);
-    }
-}
-
-struct ProductionAddressDial {
-    settings: Arc<crate::ClientConfig>,
-    instance: Arc<ClientInstancePrep>,
-    local_bind_addr: SocketAddr,
-    connected_once: Arc<AtomicBool>,
-    establish_attempts: Arc<AtomicUsize>,
-}
-
-impl AddressWorkerDial for ProductionAddressDial {
-    fn establish(&self, address: ServerAddress) -> BoxFuture<'static, EstablishOutcome> {
-        let settings = Arc::clone(&self.settings);
-        let instance = Arc::clone(&self.instance);
-        let local_bind_addr = self.local_bind_addr;
-        let connected_once = Arc::clone(&self.connected_once);
-        let establish_attempts = Arc::clone(&self.establish_attempts);
-        Box::pin(async move {
-            let phase = client_tunnel_phase(connected_once.load(Ordering::SeqCst));
-            let attempt_number = establish_attempts.fetch_add(1, Ordering::SeqCst);
-            let attempt_kind = client_tunnel_attempt_kind(attempt_number == 0);
-            let configured_server_addr =
-                configured_server_addr(address.hostname().as_str(), address.port());
-
-            let dial_target = match resolve_client_tunnel_dial_target(&address).await {
-                Ok(dial_target) => dial_target,
-                Err(error) => {
-                    return if matches!(
-                        retry_disposition_for_client_connect_error(&error),
-                        RetryDisposition::Retry
-                    ) {
-                        let message = error.to_string();
-                        EstablishOutcome::Retryable {
-                            message: message.clone(),
-                            log_with_delay: Some(Box::new(move |delay_secs| {
-                                crate::runtime_log::client_tunnel_resolution_failed(
-                                    phase,
-                                    attempt_kind,
-                                    &configured_server_addr,
-                                    delay_secs,
-                                    &message,
-                                );
-                            })),
-                        }
-                    } else {
-                        EstablishOutcome::Fatal {
-                            message: error.to_string(),
-                        }
-                    };
-                }
-            };
-
-            crate::runtime_log::client_tunnel_connecting(
-                phase,
-                attempt_kind,
-                &dial_target.configured_server_addr,
-                dial_target.resolved_server_addr,
-            );
-
-            let client = match PreparedClient::connect_to_server_address(
-                &settings,
-                &instance,
-                local_bind_addr,
-                &address,
-                dial_target.resolved_server_addr,
-            )
-            .await
-            {
-                Ok(client) => client,
-                Err(error) => {
-                    return if matches!(
-                        retry_disposition_for_client_connect_error(&error),
-                        RetryDisposition::Retry
-                    ) {
-                        let unauthorized = error
-                            .source()
-                            .and_then(|source| source.downcast_ref::<crate::ClientConnectError>())
-                            .is_some_and(
-                                crate::ClientConnectError::is_unauthorized_client_identity,
-                            );
-                        let configured = dial_target.configured_server_addr.clone();
-                        let resolved = dial_target.resolved_server_addr;
-                        let message = error.to_string();
-                        EstablishOutcome::Retryable {
-                            message: message.clone(),
-                            log_with_delay: Some(Box::new(move |delay_secs| {
-                                if unauthorized {
-                                    crate::runtime_log::client_tunnel_unauthorized(
-                                        attempt_kind,
-                                        &configured,
-                                        delay_secs,
-                                        &message,
-                                    );
-                                } else {
-                                    crate::runtime_log::client_tunnel_connect_failed(
-                                        phase,
-                                        attempt_kind,
-                                        &configured,
-                                        resolved,
-                                        delay_secs,
-                                        &message,
-                                    );
-                                }
-                            })),
-                        }
-                    } else {
-                        EstablishOutcome::Fatal {
-                            message: error.to_string(),
-                        }
-                    };
-                }
-            };
-
-            connected_once.store(true, Ordering::SeqCst);
-            establish_attempts.store(0, Ordering::SeqCst);
-            crate::runtime_log::client_tunnel_connected(
-                phase,
-                &dial_target.configured_server_addr,
-                dial_target.resolved_server_addr,
-            );
-
-            let configured = dial_target.configured_server_addr.clone();
-            let resolved = dial_target.resolved_server_addr;
-            EstablishOutcome::ConnectedWithRetryReporter {
-                configured_server_addr: dial_target.configured_server_addr,
-                run: Box::new(move |process_shutdown| {
-                    Box::pin(async move {
-                        match client.run_until_shutdown(process_shutdown).await {
-                            Ok(()) => Ok(()),
-                            Err(error) => {
-                                let unauthorized = is_unauthorized_client_connection_error(&error);
-                                let clean = is_clean_client_tunnel_close(&error);
-                                let message = error.to_string();
-                                let reported_message = message.clone();
-                                Err(ConnectedTunnelFailure::with_delay_reporter(
-                                    message,
-                                    move |delay_secs| {
-                                        let next_attempt_kind = client_tunnel_attempt_kind(true);
-                                        if unauthorized {
-                                            crate::runtime_log::client_tunnel_unauthorized(
-                                                next_attempt_kind,
-                                                &configured,
-                                                delay_secs,
-                                                &reported_message,
-                                            );
-                                        } else if clean {
-                                            crate::runtime_log::client_tunnel_closed(
-                                                &configured,
-                                                resolved,
-                                                delay_secs,
-                                            );
-                                        } else {
-                                            crate::runtime_log::client_tunnel_disconnected(
-                                                &configured,
-                                                resolved,
-                                                delay_secs,
-                                                &reported_message,
-                                            );
-                                        }
-                                    },
-                                ))
-                            }
-                        }
-                    })
-                }),
-            }
-        })
     }
 }
 
@@ -422,74 +234,6 @@ where
     }
 }
 
-fn retry_disposition_for_client_connect_error(
-    error: &crate::ClientStartupError,
-) -> RetryDisposition {
-    match error {
-        crate::ClientStartupError::Resolve(_)
-        | crate::ClientStartupError::MissingServerAddress { .. }
-        | crate::ClientStartupError::Connect(_) => RetryDisposition::Retry,
-        _ => RetryDisposition::Stop,
-    }
-}
-
-fn client_tunnel_phase(connected_once: bool) -> crate::runtime_log::ClientTunnelPhase {
-    if connected_once {
-        crate::runtime_log::ClientTunnelPhase::Reconnecting
-    } else {
-        crate::runtime_log::ClientTunnelPhase::Establishing
-    }
-}
-
-fn client_tunnel_attempt_kind(
-    is_fresh_attempt: bool,
-) -> crate::runtime_log::ClientTunnelAttemptKind {
-    if is_fresh_attempt {
-        crate::runtime_log::ClientTunnelAttemptKind::Initial
-    } else {
-        crate::runtime_log::ClientTunnelAttemptKind::Retry
-    }
-}
-
-async fn resolve_client_tunnel_dial_target(
-    server_address: &ServerAddress,
-) -> Result<ClientTunnelDialTarget, crate::ClientStartupError> {
-    let mut server_addrs = lookup_host((server_address.hostname().as_str(), server_address.port()))
-        .await
-        .map_err(crate::ClientStartupError::Resolve)?;
-    let Some(resolved_server_addr) = server_addrs.next() else {
-        return Err(crate::ClientStartupError::MissingServerAddress {
-            server_hostname: server_address.hostname().to_string(),
-        });
-    };
-    Ok(ClientTunnelDialTarget {
-        configured_server_addr: configured_server_addr(
-            server_address.hostname().as_str(),
-            server_address.port(),
-        ),
-        resolved_server_addr,
-    })
-}
-
-fn configured_server_addr(server_hostname: &str, server_port: u16) -> String {
-    if server_hostname.contains(':') && !server_hostname.starts_with('[') {
-        format!("[{server_hostname}]:{server_port}")
-    } else {
-        format!("{server_hostname}:{server_port}")
-    }
-}
-
-fn is_unauthorized_client_connection_error(error: &quinn::ConnectionError) -> bool {
-    error.to_string().contains("ApplicationVerificationFailure")
-}
-
-fn is_clean_client_tunnel_close(error: &quinn::ConnectionError) -> bool {
-    matches!(
-        error,
-        quinn::ConnectionError::ApplicationClosed(_) | quinn::ConnectionError::ConnectionClosed(_)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -499,7 +243,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use quinn::{ApplicationClose, ConnectionClose, TransportErrorCode, VarInt};
     use rustls::RootCertStore;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
     use tempfile::tempdir;
@@ -520,10 +263,7 @@ mod tests {
         make_server_quic_config_with_client_admission,
     };
 
-    use super::{
-        ClientRuntime, ClientSessionCompletion, RetryDisposition, client_tunnel_attempt_kind,
-        coordinate_managed_client,
-    };
+    use super::{ClientRuntime, ClientSessionCompletion, coordinate_managed_client};
 
     #[tokio::test]
     async fn managed_controller_failure_stops_and_awaits_session_before_returning() {
@@ -549,18 +289,6 @@ mod tests {
         assert!(session_finished.load(Ordering::SeqCst));
     }
 
-    #[test]
-    fn retry_attempt_kind_matches_fresh_policy_state() {
-        assert_eq!(
-            client_tunnel_attempt_kind(true),
-            crate::runtime_log::ClientTunnelAttemptKind::Initial
-        );
-        assert_eq!(
-            client_tunnel_attempt_kind(false),
-            crate::runtime_log::ClientTunnelAttemptKind::Retry
-        );
-    }
-
     #[tokio::test]
     async fn wait_for_retry_delay_completes_when_the_delay_elapses() {
         let (control, mut controller) = spawn_idle_worker_control().await;
@@ -580,50 +308,6 @@ mod tests {
         controller.request_shutdown();
         assert!(!wait.await.unwrap());
         controller.run_until_idle().await.unwrap();
-    }
-
-    #[test]
-    fn client_connect_failures_share_one_retry_disposition() {
-        let resolve = crate::ClientStartupError::Resolve(std::io::Error::other("lookup failed"));
-        let missing = crate::ClientStartupError::MissingServerAddress {
-            server_hostname: "tunnel.example.test".to_owned(),
-        };
-        let connect = crate::ClientStartupError::Connect(crate::ClientConnectError::Bind(
-            std::io::Error::other("dial failed"),
-        ));
-
-        assert_eq!(
-            super::retry_disposition_for_client_connect_error(&resolve),
-            RetryDisposition::Retry
-        );
-        assert_eq!(
-            super::retry_disposition_for_client_connect_error(&missing),
-            RetryDisposition::Retry
-        );
-        assert_eq!(
-            super::retry_disposition_for_client_connect_error(&connect),
-            RetryDisposition::Retry
-        );
-    }
-
-    #[test]
-    fn remote_graceful_tunnel_closes_are_classified_as_clean() {
-        assert!(super::is_clean_client_tunnel_close(
-            &quinn::ConnectionError::ApplicationClosed(ApplicationClose {
-                error_code: VarInt::from_u32(0),
-                reason: b"graceful shutdown".to_vec().into(),
-            })
-        ));
-        assert!(super::is_clean_client_tunnel_close(
-            &quinn::ConnectionError::ConnectionClosed(ConnectionClose {
-                error_code: TransportErrorCode::NO_ERROR,
-                frame_type: None,
-                reason: b"graceful shutdown".to_vec().into(),
-            })
-        ));
-        assert!(!super::is_clean_client_tunnel_close(
-            &quinn::ConnectionError::TimedOut
-        ));
     }
 
     #[tokio::test]
@@ -735,7 +419,7 @@ mod tests {
             server_hostname: failing_server_address.hostname().clone(),
             server_port: failing_server_address.port(),
             log_level: LogLevel::Off,
-            server_ca_file: Some(tempdir.path().join("server-ca.pem")),
+            server_trust: crate::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: None,

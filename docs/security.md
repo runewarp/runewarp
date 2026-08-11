@@ -86,7 +86,7 @@ The Server and Client bound work at each public or authenticated trust boundary 
 The tunnel-connection trust model is:
 
 1. the Server presents a certificate for `server.hostname`
-2. the Client validates that certificate through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle
+2. the Client validates that certificate through system trust or through `client.server-trust = "ca-file"` with an exclusive CA bundle; exclusive mode never loads or combines system roots
 3. the Client presents its own certificate
 4. the Server verifies one of the Tunnel's pinned `client-identity` values from the Client public key
 
@@ -140,6 +140,8 @@ In the manual/private-CA path:
 - `runewarp server cert rotate-ca` changes the trust anchor itself, so Clients must trust a new CA
 
 Existing QUIC connections continue with the certificate from their original handshake until they reconnect.
+
+Each new Tunnel-connection attempt reloads the selected Server trust roots and Client certificate/key. Material replacement therefore takes effect on reconnect without changing established Tunnel connections.
 
 ### Public hostname certificates (TLS termination)
 

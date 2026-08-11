@@ -16,74 +16,20 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 
 use super::address_controller::{AddressWorkerControl, MaintenanceIntent};
+#[cfg(test)]
+use super::tunnel_attempt::TunnelConnectionEnd;
+use super::tunnel_attempt::{TunnelAttemptOutcome, TunnelConnectionRun};
 use crate::ServerAddress;
 use crate::reconnect_policy::ReconnectPolicy;
 use crate::shutdown::ShutdownMode;
 use rand::RngCore;
-
-/// Runs a Connected tunnel until process shutdown or remote close.
-pub type ConnectedTunnelRun = Box<
-    dyn FnOnce(BoxFuture<'static, ShutdownMode>) -> BoxFuture<'static, Result<(), String>> + Send,
->;
-
-/// Runs a Connected tunnel and preserves its typed operator-reporting context until the
-/// Address worker chooses the retry delay.
-pub type ReportedConnectedTunnelRun = Box<
-    dyn FnOnce(
-            BoxFuture<'static, ShutdownMode>,
-        ) -> BoxFuture<'static, Result<(), ConnectedTunnelFailure>>
-        + Send,
->;
-
-/// A retryable failure plus optional operator reporting that needs the chosen delay.
-pub struct ConnectedTunnelFailure {
-    message: String,
-    delay_reporter: Box<dyn FnOnce(u64) + Send>,
-}
-
-impl ConnectedTunnelFailure {
-    pub fn with_delay_reporter(
-        message: String,
-        delay_reporter: impl FnOnce(u64) + Send + 'static,
-    ) -> Self {
-        Self {
-            message,
-            delay_reporter: Box::new(delay_reporter),
-        }
-    }
-}
-
-/// Result of one establish attempt under the production address-worker policy.
-pub enum EstablishOutcome {
-    /// Tunnel is Connected. `run` must stay live until remote close or the provided
-    /// process-shutdown future completes — never solely because maintenance became Retire.
-    Connected {
-        configured_server_addr: String,
-        run: ConnectedTunnelRun,
-    },
-    /// Tunnel is Connected and needs classified operator reporting if its session ends.
-    ConnectedWithRetryReporter {
-        configured_server_addr: String,
-        run: ReportedConnectedTunnelRun,
-    },
-    /// Transient failure; lifecycle backs off and retries unless Retire/shutdown.
-    ///
-    /// `log_with_delay` receives the lifecycle's chosen backoff display seconds so dial
-    /// adapters can emit operator logs with the real retry delay.
-    Retryable {
-        message: String,
-        log_with_delay: Option<Box<dyn FnOnce(u64) + Send>>,
-    },
-    /// Fatal failure; lifecycle returns `Err`.
-    Fatal { message: String },
-}
 
 /// Dial / connect adapter for [`run_address_worker`].
 ///
 /// Production wires DNS + QUIC connect; tests supply in-memory Connected sessions so
 /// Retiring correctness exercises the same policy path as production.
 pub trait AddressWorkerDial: Send + Sync {
-    fn establish(&self, address: ServerAddress) -> BoxFuture<'static, EstablishOutcome>;
+    fn establish(&self, address: ServerAddress) -> BoxFuture<'static, TunnelAttemptOutcome>;
 }
 
 /// Backoff between dial / reconnect attempts.
@@ -167,32 +113,25 @@ where
             return Ok(());
         }
 
-        let (configured_server_addr, run, reported_run) = match outcome {
-            EstablishOutcome::Connected {
+        let (configured_server_addr, run): (String, TunnelConnectionRun) = match outcome {
+            TunnelAttemptOutcome::Connected {
                 configured_server_addr,
                 run,
-            } => (configured_server_addr, Some(run), None),
-            EstablishOutcome::ConnectedWithRetryReporter {
-                configured_server_addr,
-                run,
-            } => (configured_server_addr, None, Some(run)),
-            EstablishOutcome::Retryable {
-                message,
-                log_with_delay,
-            } => {
+            } => (configured_server_addr, run),
+            TunnelAttemptOutcome::Retryable(failure) => {
                 let delay = backoff.next_delay();
                 let delay_secs = display_delay_secs(delay);
-                if let Some(log) = log_with_delay {
-                    log(delay_secs);
+                if let Some(message) = failure.unclassified_message() {
+                    hooks.on_retryable_failure(message, delay_secs);
                 } else {
-                    hooks.on_retryable_failure(&message, delay_secs);
+                    failure.report_after_retry_delay(delay_secs);
                 }
                 if wait_for_retry_delay(delay, &control).await {
                     continue;
                 }
                 return Ok(());
             }
-            EstablishOutcome::Fatal { message } => return Err(message),
+            TunnelAttemptOutcome::FatalLocalMaterial(message) => return Err(message),
         };
 
         let first_connection = !connected_once;
@@ -216,16 +155,7 @@ where
                 ShutdownMode::Graceful
             }
         });
-        let (run_result, retry_reporter) = if let Some(run) = run {
-            (run(process_shutdown).await, None)
-        } else if let Some(run) = reported_run {
-            match run(process_shutdown).await {
-                Ok(()) => (Ok(()), None),
-                Err(failure) => (Err(failure.message), Some(failure.delay_reporter)),
-            }
-        } else {
-            unreachable!("Connected outcome always has one run adapter")
-        };
+        let run_result = run(process_shutdown).await;
 
         if let Some(status) = control.observe_disconnected(&address) {
             crate::runtime_log::client_assignment_convergence(status);
@@ -240,13 +170,13 @@ where
 
         match run_result {
             Ok(()) => return Ok(()),
-            Err(error) => {
+            Err(end) => {
                 let delay = backoff.next_delay();
                 let delay_secs = display_delay_secs(delay);
-                if let Some(report) = retry_reporter {
-                    report(delay_secs);
+                if let Some(message) = end.unclassified_message() {
+                    hooks.on_session_ended(Some(message), delay_secs);
                 } else {
-                    hooks.on_session_ended(Some(&error), delay_secs);
+                    end.report_after_retry_delay(delay_secs);
                 }
                 if wait_for_retry_delay(delay, &control).await {
                     continue;
@@ -363,8 +293,8 @@ where
 pub fn connected_session_until(
     configured_server_addr: String,
     remote_close: Pin<Box<dyn Future<Output = ()> + Send>>,
-) -> EstablishOutcome {
-    EstablishOutcome::Connected {
+) -> TunnelAttemptOutcome {
+    TunnelAttemptOutcome::Connected {
         configured_server_addr,
         run: Box::new(move |process_shutdown| {
             Box::pin(async move {
@@ -399,28 +329,23 @@ mod tests {
     async fn connected_session_reports_the_delay_it_actually_awaits() {
         struct DisconnectingDial {
             attempts: Arc<AtomicUsize>,
-            reported_delay_secs: Arc<AtomicUsize>,
         }
 
         impl AddressWorkerDial for DisconnectingDial {
-            fn establish(&self, _address: ServerAddress) -> BoxFuture<'static, EstablishOutcome> {
+            fn establish(
+                &self,
+                _address: ServerAddress,
+            ) -> BoxFuture<'static, TunnelAttemptOutcome> {
                 let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
-                let reported_delay_secs = Arc::clone(&self.reported_delay_secs);
                 Box::pin(async move {
                     if attempt > 0 {
-                        return std::future::pending::<EstablishOutcome>().await;
+                        return std::future::pending::<TunnelAttemptOutcome>().await;
                     }
-                    EstablishOutcome::ConnectedWithRetryReporter {
+                    TunnelAttemptOutcome::Connected {
                         configured_server_addr: "a.example.test:443".to_owned(),
                         run: Box::new(move |_process_shutdown| {
                             Box::pin(async move {
-                                Err(ConnectedTunnelFailure::with_delay_reporter(
-                                    "connection ended".to_owned(),
-                                    move |delay_secs| {
-                                        reported_delay_secs
-                                            .store(delay_secs as usize, Ordering::SeqCst);
-                                    },
-                                ))
+                                Err(TunnelConnectionEnd::unclassified("connection ended"))
                             })
                         }),
                     }
@@ -428,20 +353,29 @@ mod tests {
             }
         }
 
+        struct DelayHooks(Arc<AtomicUsize>);
+
+        impl AddressWorkerHooks for DelayHooks {
+            fn on_session_ended(&self, _error: Option<&str>, retry_delay_secs: u64) {
+                self.0.store(retry_delay_secs as usize, Ordering::SeqCst);
+            }
+        }
+
         let attempts = Arc::new(AtomicUsize::new(0));
         let reported_delay_secs = Arc::new(AtomicUsize::new(0));
         let dial = Arc::new(DisconnectingDial {
             attempts: Arc::clone(&attempts),
-            reported_delay_secs: Arc::clone(&reported_delay_secs),
         });
+        let hook_delay = Arc::clone(&reported_delay_secs);
         let factory: crate::AddressWorkerFactory = Arc::new(move |address, control| {
             let dial = Arc::clone(&dial);
+            let reported_delay_secs = Arc::clone(&hook_delay);
             Box::pin(async move {
                 run_address_worker(
                     address,
                     control,
                     dial,
-                    Arc::new(SilentAddressWorkerHooks),
+                    Arc::new(DelayHooks(Arc::clone(&reported_delay_secs))),
                     FixedBackoff(Duration::from_secs(2)),
                 )
                 .await
@@ -479,7 +413,7 @@ mod tests {
     }
 
     impl AddressWorkerDial for ScriptedDial {
-        fn establish(&self, _address: ServerAddress) -> BoxFuture<'static, EstablishOutcome> {
+        fn establish(&self, _address: ServerAddress) -> BoxFuture<'static, TunnelAttemptOutcome> {
             let dial_count = Arc::clone(&self.dial_count);
             let connected_hold = Arc::clone(&self.connected_hold);
             let remote_close = self
@@ -621,7 +555,10 @@ mod tests {
         }
 
         impl AddressWorkerDial for HangingDial {
-            fn establish(&self, _address: ServerAddress) -> BoxFuture<'static, EstablishOutcome> {
+            fn establish(
+                &self,
+                _address: ServerAddress,
+            ) -> BoxFuture<'static, TunnelAttemptOutcome> {
                 let started = Arc::clone(&self.started);
                 let dropped = Arc::clone(&self.dropped);
                 Box::pin(async move {
@@ -675,7 +612,10 @@ mod tests {
         struct ImmediateDial;
 
         impl AddressWorkerDial for ImmediateDial {
-            fn establish(&self, _address: ServerAddress) -> BoxFuture<'static, EstablishOutcome> {
+            fn establish(
+                &self,
+                _address: ServerAddress,
+            ) -> BoxFuture<'static, TunnelAttemptOutcome> {
                 Box::pin(async {
                     connected_session_until(
                         "a.example.test:443".to_owned(),
@@ -718,7 +658,10 @@ mod tests {
         }
 
         impl AddressWorkerDial for ImmediateDial {
-            fn establish(&self, _address: ServerAddress) -> BoxFuture<'static, EstablishOutcome> {
+            fn establish(
+                &self,
+                _address: ServerAddress,
+            ) -> BoxFuture<'static, TunnelAttemptOutcome> {
                 let connected = Arc::clone(&self.connected);
                 Box::pin(async move {
                     connected.store(true, Ordering::SeqCst);

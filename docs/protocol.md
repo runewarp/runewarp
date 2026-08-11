@@ -78,7 +78,7 @@ Admission saturation warnings include the active-work count and limit and are li
 
 ## Tunnel connection handshake
 
-Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. Effective **Server addresses** come from `client.server-address`, `client.server-addresses`, repeated runtime `--server-address` flags, or a Control-published Managed assignment. Config validation prepares **Client admission** (static vs managed) once from Control address presence; Client startup wires one **Address controller** from that outcome. The controller owns the complete assigned Server-address lifecycle (one worker per normalized address, maintenance intent, production Retiring / reconnect-vs-exit policy, Assignment convergence, apply acknowledgment, and shutdown) so static fanout and Managed-session assignment changes cannot start duplicate dial loops for the same target:
+Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. Effective **Server addresses** come from `client.server-address`, `client.server-addresses`, repeated runtime `--server-address` flags, or a Control-published Managed assignment. Config validation prepares **Client admission** (static vs managed) once from Control address presence; Client startup wires one **Address controller** from that outcome. The controller owns the complete assigned Server-address lifecycle (one worker per normalized address, maintenance intent, production Retiring / reconnect-vs-exit policy, Assignment convergence, apply acknowledgment, and shutdown) so static fanout and Managed-session assignment changes cannot start duplicate dial loops for the same target. Every worker uses the same production Tunnel-connection-attempt implementation, which owns resolution, per-attempt material reload, QUIC establishment, typed failure/connection-end classification, and reporting context:
 
 1. Resolve the hostname portion of one effective **Server address**.
 2. Dial the UDP port from that **Server address**, defaulting to `443` when the port is omitted.
@@ -89,7 +89,9 @@ Each **Client instance** establishes one long-lived QUIC connection per effectiv
 Rules:
 
 - QUIC **0-RTT is disabled**
+- when DNS returns multiple addresses, the Client selects the first result in resolver order without preferring an address family
 - reconnect attempts re-resolve the hostname portion of each effective **Server address** every time, including the first jittered retry window
+- every attempt reloads the selected system or exclusive-CA trust roots and the Client certificate/key; exclusive-CA mode never loads or combines system roots
 - tunnel handshakes time out after **10 seconds** on both the Client and Server sides
 - idle timeout is **60 seconds**
 - keepalive pings are sent every **20 seconds**
@@ -159,7 +161,7 @@ Client instance reconnect behavior is:
 
 This reconnect policy is fixed. There is no reconnect tuning knob in the config or the CLI-only startup path.
 
-Unauthorized **Client identity** failures use the same reconnect policy as every other reconnect failure. There is no dedicated immediate-retry exception for that case.
+Unauthorized **Client identity** failures are classified from the TLS access-denied alert and use the same reconnect policy as every other reconnect failure. There is no dedicated immediate-retry exception for that case.
 
 Failure and reconnect logs report the chosen next retry delay as `next-retry-delay=<Ns>`. The runtime rounds that displayed value up to whole seconds and never shows `0s`, even when jitter selects a sub-second delay.
 

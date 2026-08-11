@@ -2197,7 +2197,9 @@ client-identity = "{}"
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
-        server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
+        server_trust: runewarp::ClientServerTrust::CaFile(
+            tempdir.path().join("server-cert/server-ca.crt"),
+        ),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
@@ -2365,7 +2367,9 @@ client-identity = "{}"
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
-        server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
+        server_trust: runewarp::ClientServerTrust::CaFile(
+            tempdir.path().join("server-cert/server-ca.crt"),
+        ),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
@@ -2521,7 +2525,9 @@ client-identity = "{}"
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
-        server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
+        server_trust: runewarp::ClientServerTrust::CaFile(
+            tempdir.path().join("server-cert/server-ca.crt"),
+        ),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
@@ -2712,7 +2718,9 @@ client-identity = "{}"
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
-        server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
+        server_trust: runewarp::ClientServerTrust::CaFile(
+            tempdir.path().join("server-cert/server-ca.crt"),
+        ),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
@@ -2852,7 +2860,9 @@ client-identity = "{}"
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
-        server_ca_file: Some(tempdir.path().join("server-cert/server-ca.crt")),
+        server_trust: runewarp::ClientServerTrust::CaFile(
+            tempdir.path().join("server-cert/server-ca.crt"),
+        ),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),

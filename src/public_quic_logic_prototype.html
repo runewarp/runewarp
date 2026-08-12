@@ -194,6 +194,14 @@
       is enough, two early packets may be buffered, and an MTU cliff stops new admission. Those
       activation, count, limit, and withdrawal policies remain provisional.
     </p>
+    <p>
+      <strong>Packet-lab correction:</strong> this state model can express a same-Server path
+      update, but the sibling CID/rebinding prototype found that an opaque multi-session relay
+      cannot necessarily associate the first packet when source tuple and backend-issued DCID
+      change together. Treat the rebinding action below as a desired transition whose admission
+      key is unresolved, not as proven behavior. The sibling MTU prototype also measures the
+      framing cliff with a real 1200-byte QUIC Initial and live Quinn DATAGRAM ceilings.
+    </p>
   </section>
 
   <section class="grid" aria-live="polite">
@@ -438,7 +446,7 @@
           const oldPath = target.visitorPath;
           const nextPath = oldPath === "203.0.113.7:51000" ? "198.51.100.22:62000" : "203.0.113.7:51000";
           const next = replaceContext(state, target.key, context => ({ ...context, visitorPath: nextPath }));
-          return record(next, `${target.key} moved from ${oldPath} to ${nextPath} on the same Server; identity did not change.`);
+          return record(next, `${target.key} moved from ${oldPath} to ${nextPath} in the abstract model; the packet lab shows that recognizing this transition requires an unresolved routing key.`);
         }
 
         case "CLOSE_CONTEXT": {
@@ -679,7 +687,7 @@
     },
     {
       name: "Server affinity",
-      description: "A packet landing on the wrong Server cannot recover an established association. Same-Server rebinding remains a separate, supported path update in this model.",
+      description: "A packet landing on the wrong Server cannot recover an established association. This model can express same-Server rebinding, but the packet lab found that recognizing the new tuple plus rotated DCID requires endpoint or load-balancer cooperation.",
       steps: [
         ...setup,
         { label: "Admit and register a Visitor", action: { type: "ADMIT_VISITOR" } },

@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Public QUIC lifecycle prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18201d;
+      --muted: #607069;
+      --line: #d8e0dc;
+      --paper: #f7f9f8;
+      --panel: #ffffff;
+      --accent: #087f5b;
+      --accent-soft: #dff5ed;
+      --warn: #9a6700;
+      --danger: #b42318;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font: 16px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1120px, calc(100% - 32px));
+      margin: 40px auto 72px;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 8px; font-size: clamp(2rem, 5vw, 3.2rem); letter-spacing: -0.04em; }
+    h2 { margin-bottom: 16px; font-size: 1.25rem; }
+    h3 { margin-bottom: 8px; font-size: 1rem; }
+    code { font-size: 0.9em; }
+
+    .intro {
+      max-width: 850px;
+      margin-bottom: 28px;
+    }
+
+    .intro p { color: var(--muted); }
+
+    .notice {
+      border-left: 4px solid var(--warn);
+      padding: 10px 14px;
+      background: #fff8df;
+      color: #5f4800;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 3px 14px rgb(24 32 29 / 5%);
+    }
+
+    .summary { grid-column: span 12; }
+    .tunnel { grid-column: span 4; }
+    .contexts { grid-column: span 8; }
+    .log { grid-column: span 12; }
+
+    .fields {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .field {
+      min-width: 0;
+      padding: 10px 12px;
+      background: var(--paper);
+      border-radius: 8px;
+    }
+
+    .label {
+      display: block;
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .value { display: block; margin-top: 3px; font-weight: 650; overflow-wrap: anywhere; }
+    .ok { color: var(--accent); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--danger); }
+
+    .change {
+      margin: 0;
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      color: #075f45;
+      font-weight: 600;
+    }
+
+    .context-list { display: grid; gap: 12px; }
+
+    .context {
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 14px;
+    }
+
+    .context header {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .context .fields { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .empty { color: var(--muted); font-style: italic; }
+
+    .actions, .walkthroughs { margin-top: 24px; }
+    .action-groups { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+    button {
+      border: 1px solid #aebbb5;
+      border-radius: 7px;
+      background: white;
+      color: var(--ink);
+      padding: 9px 12px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { border-color: var(--accent); background: var(--accent); color: white; }
+    button:disabled { cursor: default; opacity: 0.48; }
+
+    .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+    .tab[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft); color: #075f45; }
+
+    .walkthrough-body { min-height: 230px; }
+    .steps { display: grid; gap: 9px; margin-top: 18px; }
+    .step { display: flex; align-items: center; gap: 10px; }
+    .step span { color: var(--muted); }
+    .step.done span { color: var(--accent); text-decoration: line-through; }
+    .step.current button { border-color: var(--accent); background: var(--accent); color: white; }
+
+    .event-log {
+      margin: 0;
+      padding-left: 22px;
+      max-height: 230px;
+      overflow: auto;
+    }
+
+    .event-log li { margin-bottom: 6px; }
+    .event-log li:first-child { font-weight: 650; }
+
+    @media (max-width: 820px) {
+      .tunnel, .contexts { grid-column: span 12; }
+      .action-groups { grid-template-columns: 1fr; }
+      .context .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="intro">
+    <p class="label">Throwaway logic prototype · Public QUIC Wayfinder #114 / #180</p>
+    <h1>Can the relay lifecycle stay coherent?</h1>
+    <p>
+      This demo tests one provisional model: the Server allocates a never-reused Context ID,
+      reliable Capsules register and close it, and unreliable H3 Datagrams carry one opaque
+      Visitor QUIC packet each. Push it through reordering, rebinding, drain, isolation, and
+      Tunnel loss to find where the ownership model feels wrong.
+    </p>
+    <p class="notice">
+      This is a state-model experiment, not network proof. It assumes classification already
+      produced an authorized Public hostname. It cannot validate Initial parsing, ECH, real MTU,
+      packet loss, nested congestion, Rust H3 APIs, or backend HTTP/3 behavior.
+    </p>
+    <p>
+      <strong>Inputs retained from current issue evidence:</strong> one existing authenticated H3
+      connection; H3 Datagrams for packets; reliable Capsules for lifecycle; Server-allocated,
+      carrier-local Context IDs; no reliable packet fallback; no cross-Tunnel continuity.
+      <strong>Assumptions to challenge here:</strong> capability gates carrier opening, one carrier
+      is enough, two early packets may be buffered, and an MTU cliff stops new admission. Those
+      activation, count, limit, and withdrawal policies remain provisional.
+    </p>
+  </section>
+
+  <section class="grid" aria-live="polite">
+    <article class="panel summary">
+      <h2>What just happened</h2>
+      <p id="last-change" class="change"></p>
+    </article>
+
+    <article class="panel tunnel">
+      <h2>Tunnel and carrier</h2>
+      <div id="tunnel-state" class="fields"></div>
+    </article>
+
+    <article class="panel contexts">
+      <h2>Visitor associations</h2>
+      <div id="context-state" class="context-list"></div>
+    </article>
+
+    <article class="panel log">
+      <h2>Recent outcomes</h2>
+      <ol id="event-log" class="event-log"></ol>
+    </article>
+  </section>
+
+  <section class="panel actions">
+    <h2>Free play</h2>
+    <div id="free-play" class="action-groups"></div>
+  </section>
+
+  <section class="panel walkthroughs">
+    <h2>Guided walkthroughs</h2>
+    <div id="tabs" class="tabs" role="tablist"></div>
+    <div id="walkthrough" class="walkthrough-body"></div>
+  </section>
+</main>
+
+<script>
+  // Portable prototype module: pure state, action, and transition logic.
+  const PublicQuicModel = (() => {
+    const INNER_INITIAL_MINIMUM = 1200;
+    const DATAGRAM_OVERHEAD = 32;
+    const UNKNOWN_CONTEXT_BUFFER_LIMIT = 2;
+    const MAX_ACTIVE_CONTEXTS = 3;
+
+    const initialState = () => ({
+      clock: 0,
+      tunnel: {
+        generation: 1,
+        authenticatedH3: false,
+        publicQuicNegotiated: false,
+        carrier: "closed",
+        carrierGeneration: 0,
+        placement: "eligible",
+        outerDatagramSize: 1350,
+      },
+      nextContextId: 1,
+      contexts: [],
+      rejectedVisitors: 0,
+      capacityRefusals: 0,
+      affinityDrops: 0,
+      droppedDatagrams: 0,
+      lastChange: "Fresh model. Establish the authenticated H3 Tunnel first.",
+      events: ["Model reset"],
+    });
+
+    const usableInnerSize = state => state.tunnel.outerDatagramSize - DATAGRAM_OVERHEAD;
+    const mtuViable = state => usableInnerSize(state) >= INNER_INITIAL_MINIMUM;
+    const activeContexts = state => state.contexts.filter(context => context.clientState !== "closed");
+    const latestContext = state => [...state.contexts].reverse().find(context => context.clientState !== "closed");
+    const contextKey = (state, id) => `T${state.tunnel.generation}/C${state.tunnel.carrierGeneration}:${id}`;
+
+    function record(state, message) {
+      return {
+        ...state,
+        clock: state.clock + 1,
+        lastChange: message,
+        events: [message, ...state.events].slice(0, 18),
+      };
+    }
+
+    function replaceContext(state, key, update) {
+      return {
+        ...state,
+        contexts: state.contexts.map(context => context.key === key ? update(context) : context),
+      };
+    }
+
+    function reject(state, message) {
+      return record(state, `No state change: ${message}`);
+    }
+
+    function reduce(state, action) {
+      switch (action.type) {
+        case "RESET":
+          return initialState();
+
+        case "AUTHENTICATE_H3":
+          if (state.tunnel.authenticatedH3) return reject(state, "the Tunnel is already authenticated");
+          return record({
+            ...state,
+            tunnel: { ...state.tunnel, authenticatedH3: true },
+          }, "Authenticated one ordinary-H3 Tunnel connection; Public QUIC is still dormant.");
+
+        case "NEGOTIATE_PUBLIC_QUIC":
+          if (!state.tunnel.authenticatedH3) return reject(state, "authenticate H3 before optional capability negotiation");
+          if (!mtuViable(state)) return reject(state, "the live outer datagram budget cannot carry a 1200-byte inner Initial");
+          if (state.tunnel.publicQuicNegotiated) return reject(state, "Public QUIC is already negotiated");
+          return record({
+            ...state,
+            tunnel: { ...state.tunnel, publicQuicNegotiated: true },
+          }, "Both peers now expose the optional Public QUIC seam; no packet carrier exists yet.");
+
+        case "OPEN_CARRIER":
+          if (!state.tunnel.publicQuicNegotiated) return reject(state, "negotiate the optional capability before opening its carrier");
+          if (state.tunnel.carrier === "open") return reject(state, "the dedicated carrier is already open");
+          return record({
+            ...state,
+            tunnel: {
+              ...state.tunnel,
+              carrier: "open",
+              carrierGeneration: state.tunnel.carrierGeneration + 1,
+            },
+            nextContextId: 1,
+          }, "A new Extended CONNECT carrier is open; its own Context ID namespace starts at 1.");
+
+        case "ADMIT_VISITOR": {
+          if (state.tunnel.carrier !== "open") return reject(state, "an open carrier is required before admitting Visitor QUIC");
+          if (state.tunnel.placement !== "eligible") return reject(state, "drain has stopped new Visitor placement");
+          if (!mtuViable(state)) return reject(state, "the current outer datagram budget is below the 1200-byte admission floor");
+          if (activeContexts(state).length >= MAX_ACTIVE_CONTEXTS) {
+            return record({ ...state, capacityRefusals: state.capacityRefusals + 1 },
+              `Refused ${action.hostname || "the Visitor"}: this prototype's three-context carrier limit is full.`);
+          }
+          const id = state.nextContextId;
+          const context = {
+            key: contextKey(state, id),
+            id,
+            carrierGeneration: state.tunnel.carrierGeneration,
+            hostname: action.hostname || "alpha.example",
+            service: action.service || "web-quic",
+            serverState: "active",
+            clientState: "unknown",
+            visitorPath: action.path || "203.0.113.7:51000",
+            pendingDatagrams: 0,
+            backendPackets: 0,
+            visitorPackets: 0,
+            closeCapsule: "none",
+          };
+          return record({
+            ...state,
+            nextContextId: id + 1,
+            contexts: [...state.contexts, context],
+          }, `Server admitted ${context.hostname} as ${context.key}; its registration Capsule is in flight.`);
+        }
+
+        case "REJECT_VISITOR":
+          return record({ ...state, rejectedVisitors: state.rejectedVisitors + 1 },
+            "Fail closed: the unclassifiable or unauthorized Initial created no Context ID and reached no Client.");
+
+        case "SEND_VISITOR_PACKET": {
+          const target = latestContext(state);
+          if (!target) return reject(state, "there is no open Visitor association");
+          if (target.serverState !== "active") return reject(state, `${target.key} is no longer active at the Server`);
+          if (action.bytes && action.bytes > usableInnerSize(state)) {
+            return record({ ...state, droppedDatagrams: state.droppedDatagrams + 1 },
+              `Dropped one oversized ${action.bytes}-byte packet; no reliable fallback was used.`);
+          }
+          if (target.clientState === "unknown") {
+            if (target.pendingDatagrams >= UNKNOWN_CONTEXT_BUFFER_LIMIT) {
+              return record({ ...state, droppedDatagrams: state.droppedDatagrams + 1 },
+                `Dropped a pre-registration Datagram for ${target.key}; its bounded reorder buffer is full.`);
+            }
+            const next = replaceContext(state, target.key, context => ({
+              ...context,
+              pendingDatagrams: context.pendingDatagrams + 1,
+              visitorPackets: context.visitorPackets + 1,
+            }));
+            return record(next, `Buffered one Datagram for unknown ${target.key}; it did not create a Client context implicitly.`);
+          }
+          if (target.clientState === "closed") {
+            return record({ ...state, droppedDatagrams: state.droppedDatagrams + 1 },
+              `Dropped a late Datagram for tombstoned ${target.key}.`);
+          }
+          const next = replaceContext(state, target.key, context => ({
+            ...context,
+            visitorPackets: context.visitorPackets + 1,
+            backendPackets: context.backendPackets + 1,
+          }));
+          return record(next, `Relayed one opaque Visitor packet through ${target.key} to ${target.service}.`);
+        }
+
+        case "SEND_LATE_PACKET": {
+          const target = state.contexts[state.contexts.length - 1];
+          if (!target) return reject(state, "there is no allocated Context ID to receive a late packet");
+          if (target.clientState !== "closed") return reject(state, `${target.key} is not tombstoned yet`);
+          return record({ ...state, droppedDatagrams: state.droppedDatagrams + 1 },
+              `Dropped a late Datagram for tombstoned ${target.key}; it could not recreate the context.`);
+        }
+
+        case "EXPIRE_REORDER_BUFFER": {
+          const target = [...state.contexts].reverse().find(context => context.pendingDatagrams > 0);
+          if (!target) return reject(state, "no pre-registration Datagram is buffered");
+          const expired = target.pendingDatagrams;
+          const next = replaceContext(state, target.key, context => ({ ...context, pendingDatagrams: 0 }));
+          return record({ ...next, droppedDatagrams: state.droppedDatagrams + expired },
+            `Expired ${expired} buffered packet(s) for ${target.key} after the provisional one-RTT window; no context was created implicitly.`);
+        }
+
+        case "MISROUTE_TO_OTHER_SERVER":
+          return record({
+            ...state,
+            affinityDrops: state.affinityDrops + 1,
+            droppedDatagrams: state.droppedDatagrams + 1,
+          }, "A different Server received the packet, found no owning association, and dropped it without migration or forwarding.");
+
+        case "DELIVER_REGISTRATION": {
+          const target = [...state.contexts].reverse().find(context => context.clientState === "unknown");
+          if (!target) return reject(state, "no registration Capsule is awaiting delivery");
+          const buffered = target.pendingDatagrams;
+          const next = replaceContext(state, target.key, context => ({
+            ...context,
+            clientState: "active",
+            backendPackets: context.backendPackets + buffered,
+            pendingDatagrams: 0,
+          }));
+          return record(next, `Client registered ${target.key} from a reliable Capsule and released ${buffered} buffered packet(s).`);
+        }
+
+        case "SEND_BACKEND_PACKET": {
+          const target = latestContext(state);
+          if (!target || target.clientState !== "active") return reject(state, "no active Client context can return a backend packet");
+          const next = replaceContext(state, target.key, context => ({
+            ...context,
+            visitorPackets: context.visitorPackets + 1,
+          }));
+          return record(next, `Relayed one opaque backend packet through ${target.key} to the Visitor's current path.`);
+        }
+
+        case "REBIND_VISITOR": {
+          const target = latestContext(state);
+          if (!target || target.clientState !== "active") return reject(state, "only an active Visitor association can rebind");
+          const oldPath = target.visitorPath;
+          const nextPath = oldPath === "203.0.113.7:51000" ? "198.51.100.22:62000" : "203.0.113.7:51000";
+          const next = replaceContext(state, target.key, context => ({ ...context, visitorPath: nextPath }));
+          return record(next, `${target.key} moved from ${oldPath} to ${nextPath} on the same Server; identity did not change.`);
+        }
+
+        case "CLOSE_CONTEXT": {
+          const target = latestContext(state);
+          if (!target) return reject(state, "there is no open context to close");
+          const next = replaceContext(state, target.key, context => ({
+            ...context,
+            serverState: "closed",
+            closeCapsule: "in flight",
+          }));
+          return record(next, `Server closed ${target.key}; its idempotent close Capsule is in flight and the ID stays reserved.`);
+        }
+
+        case "DELIVER_CLOSE": {
+          const target = [...state.contexts].reverse().find(context => context.closeCapsule === "in flight");
+          if (!target) return reject(state, "no close Capsule is awaiting delivery");
+          const next = replaceContext(state, target.key, context => ({
+            ...context,
+            clientState: "closed",
+            pendingDatagrams: 0,
+            closeCapsule: "delivered",
+          }));
+          return record(next, `Client tombstoned ${target.key}; repeats and late Datagrams are harmless drops.`);
+        }
+
+        case "START_DRAIN":
+          if (state.tunnel.placement === "draining") return reject(state, "placement is already draining");
+          return record({
+            ...state,
+            tunnel: { ...state.tunnel, placement: "draining" },
+          }, "Tunnel withdrawal committed: new placement stopped; existing Visitor associations remain visible.");
+
+        case "LOSE_CARRIER": {
+          if (state.tunnel.carrier !== "open") return reject(state, "there is no Public QUIC carrier to lose");
+          const carrierGeneration = state.tunnel.carrierGeneration;
+          const contexts = state.contexts.map(context =>
+            context.carrierGeneration !== carrierGeneration || context.clientState === "closed" ? context : ({
+              ...context,
+              serverState: "closed",
+              clientState: "closed",
+              pendingDatagrams: 0,
+              closeCapsule: "carrier cleanup",
+            }));
+          return record({
+            ...state,
+            tunnel: { ...state.tunnel, carrier: "closed" },
+            contexts,
+          }, "The extension request ended and retired only its contexts; authenticated ordinary-H3 signaling stayed live.");
+        }
+
+        case "LOSE_TUNNEL": {
+          if (!state.tunnel.authenticatedH3) return reject(state, "there is no live Tunnel to lose");
+          const contexts = state.contexts.map(context => context.clientState === "closed" ? context : ({
+            ...context,
+            serverState: "closed",
+            clientState: "closed",
+            pendingDatagrams: 0,
+            closeCapsule: "connection cleanup",
+          }));
+          return record({
+            ...state,
+            tunnel: {
+              ...state.tunnel,
+              authenticatedH3: false,
+              publicQuicNegotiated: false,
+              carrier: "closed",
+              carrierGeneration: state.tunnel.carrierGeneration,
+              placement: "ineligible",
+            },
+            contexts,
+          }, "H3 Tunnel loss atomically retired the carrier and every remaining context; none migrate.");
+        }
+
+        case "RECONNECT_TUNNEL":
+          if (state.tunnel.authenticatedH3) return reject(state, "the current Tunnel is still live");
+          return record({
+            ...state,
+            tunnel: {
+              generation: state.tunnel.generation + 1,
+              authenticatedH3: true,
+              publicQuicNegotiated: false,
+              carrier: "closed",
+              carrierGeneration: 0,
+              placement: "eligible",
+              outerDatagramSize: 1350,
+            },
+            nextContextId: 1,
+          }, "A new authenticated Tunnel generation exists; old Visitor associations did not reconnect or migrate.");
+
+        case "SHRINK_MTU":
+          return record({
+            ...state,
+            tunnel: { ...state.tunnel, outerDatagramSize: 1220 },
+          }, "Outer budget shrank: only 1188 inner bytes fit. This model stops new admission and drops oversized packets; final withdrawal policy is unresolved.");
+
+        case "RESTORE_MTU":
+          return record({
+            ...state,
+            tunnel: { ...state.tunnel, outerDatagramSize: 1350 },
+          }, "Outer budget recovered: a 1318-byte inner payload fits again.");
+
+        default:
+          return reject(state, `unknown action ${action.type}`);
+      }
+    }
+
+    return { initialState, reduce, usableInnerSize, mtuViable, activeContexts };
+  })();
+
+  const actions = [
+    { group: "Tunnel", label: "Authenticate H3 Tunnel", action: { type: "AUTHENTICATE_H3" } },
+    { group: "Tunnel", label: "Negotiate Public QUIC", action: { type: "NEGOTIATE_PUBLIC_QUIC" } },
+    { group: "Tunnel", label: "Open carrier", action: { type: "OPEN_CARRIER" } },
+    { group: "Tunnel", label: "Lose carrier only", action: { type: "LOSE_CARRIER" } },
+    { group: "Tunnel", label: "Start drain", action: { type: "START_DRAIN" } },
+    { group: "Tunnel", label: "Lose Tunnel", action: { type: "LOSE_TUNNEL" } },
+    { group: "Tunnel", label: "Reconnect new Tunnel", action: { type: "RECONNECT_TUNNEL" } },
+    { group: "Admission", label: "Admit alpha.example", action: { type: "ADMIT_VISITOR" } },
+    { group: "Admission", label: "Admit beta.example", action: { type: "ADMIT_VISITOR", hostname: "beta.example", service: "game-quic", path: "192.0.2.44:53000" } },
+    { group: "Admission", label: "Reject unauthorized Initial", action: { type: "REJECT_VISITOR" } },
+    { group: "Association", label: "Deliver registration Capsule", action: { type: "DELIVER_REGISTRATION" } },
+    { group: "Association", label: "Visitor sends packet", action: { type: "SEND_VISITOR_PACKET", bytes: 1200 } },
+    { group: "Association", label: "Backend sends packet", action: { type: "SEND_BACKEND_PACKET" } },
+    { group: "Association", label: "Visitor rebinds", action: { type: "REBIND_VISITOR" } },
+    { group: "Association", label: "Close latest context", action: { type: "CLOSE_CONTEXT" } },
+    { group: "Association", label: "Deliver close Capsule", action: { type: "DELIVER_CLOSE" } },
+    { group: "Association", label: "Send late packet to tombstone", action: { type: "SEND_LATE_PACKET" } },
+    { group: "Association", label: "Expire early-packet buffer", action: { type: "EXPIRE_REORDER_BUFFER" } },
+    { group: "Association", label: "Packet reaches wrong Server", action: { type: "MISROUTE_TO_OTHER_SERVER" } },
+    { group: "Transport budget", label: "Shrink outer MTU", action: { type: "SHRINK_MTU" } },
+    { group: "Transport budget", label: "Send 1300-byte packet", action: { type: "SEND_VISITOR_PACKET", bytes: 1300 } },
+    { group: "Transport budget", label: "Restore outer MTU", action: { type: "RESTORE_MTU" } },
+  ];
+
+  const setup = [
+    { label: "Authenticate H3 Tunnel", action: { type: "AUTHENTICATE_H3" } },
+    { label: "Negotiate optional capability", action: { type: "NEGOTIATE_PUBLIC_QUIC" } },
+    { label: "Open dedicated carrier", action: { type: "OPEN_CARRIER" } },
+  ];
+
+  const walkthroughs = [
+    {
+      name: "Happy path",
+      description: "Watch authority stay split: Server admission allocates identity; Client registration selects the Local backend; packets remain opaque.",
+      steps: [
+        ...setup,
+        { label: "Server admits alpha.example", action: { type: "ADMIT_VISITOR" } },
+        { label: "Client receives registration Capsule", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Visitor packet reaches backend", action: { type: "SEND_VISITOR_PACKET", bytes: 1200 } },
+        { label: "Backend packet reaches Visitor", action: { type: "SEND_BACKEND_PACKET" } },
+        { label: "Visitor changes network path", action: { type: "REBIND_VISITOR" } },
+      ],
+    },
+    {
+      name: "Reordered lifecycle",
+      description: "A Datagram beats its reliable registration Capsule. It may be boundedly buffered, but it must never create authority implicitly.",
+      steps: [
+        ...setup,
+        { label: "Server allocates a Context ID", action: { type: "ADMIT_VISITOR" } },
+        { label: "Datagram arrives before registration", action: { type: "SEND_VISITOR_PACKET", bytes: 1200 } },
+        { label: "Registration arrives and releases buffer", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Server starts context close", action: { type: "CLOSE_CONTEXT" } },
+        { label: "Client receives close Capsule", action: { type: "DELIVER_CLOSE" } },
+        { label: "Late packet is harmless", action: { type: "SEND_LATE_PACKET" } },
+      ],
+    },
+    {
+      name: "Isolation",
+      description: "Unauthorized traffic creates nothing. Closing beta must not corrupt alpha, and Context IDs are not reused.",
+      steps: [
+        ...setup,
+        { label: "Reject unauthorized Initial", action: { type: "REJECT_VISITOR" } },
+        { label: "Admit alpha.example", action: { type: "ADMIT_VISITOR" } },
+        { label: "Register alpha", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Admit beta.example", action: { type: "ADMIT_VISITOR", hostname: "beta.example", service: "game-quic", path: "192.0.2.44:53000" } },
+        { label: "Register beta", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Close beta only", action: { type: "CLOSE_CONTEXT" } },
+        { label: "Deliver beta close", action: { type: "DELIVER_CLOSE" } },
+        { label: "Alpha still relays a packet", action: { type: "SEND_VISITOR_PACKET", bytes: 1200 } },
+      ],
+    },
+    {
+      name: "Drain and loss",
+      description: "Drain stops new placement without redefining existing carrier lifecycle. Tunnel loss retires everything; reconnect creates no continuity promise.",
+      steps: [
+        ...setup,
+        { label: "Admit an active Visitor", action: { type: "ADMIT_VISITOR" } },
+        { label: "Register the Visitor", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Commit Tunnel drain", action: { type: "START_DRAIN" } },
+        { label: "Try to admit another Visitor", action: { type: "ADMIT_VISITOR", hostname: "beta.example" } },
+        { label: "Existing Visitor still sends", action: { type: "SEND_VISITOR_PACKET", bytes: 1200 } },
+        { label: "Tunnel connection disappears", action: { type: "LOSE_TUNNEL" } },
+        { label: "Reconnect as a new generation", action: { type: "RECONNECT_TUNNEL" } },
+      ],
+    },
+    {
+      name: "MTU cliff",
+      description: "Expose the 1200-byte inner Initial constraint. The stop-admission behavior is a candidate, not a settled Public QUIC decision.",
+      steps: [
+        ...setup,
+        { label: "Admit and register a Visitor", action: { type: "ADMIT_VISITOR" } },
+        { label: "Deliver registration", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Outer path budget shrinks", action: { type: "SHRINK_MTU" } },
+        { label: "Try a new admission", action: { type: "ADMIT_VISITOR", hostname: "beta.example" } },
+        { label: "Try an oversized packet", action: { type: "SEND_VISITOR_PACKET", bytes: 1300 } },
+        { label: "Outer path budget recovers", action: { type: "RESTORE_MTU" } },
+      ],
+    },
+    {
+      name: "Carrier isolation",
+      description: "The Public QUIC extension request can fail without taking down ordinary-H3 signaling. A replacement carrier gets a distinct identity even if its numeric Context IDs restart.",
+      steps: [
+        ...setup,
+        { label: "Admit and register a Visitor", action: { type: "ADMIT_VISITOR" } },
+        { label: "Deliver registration", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Lose only the carrier request", action: { type: "LOSE_CARRIER" } },
+        { label: "Try placement without a carrier", action: { type: "ADMIT_VISITOR", hostname: "beta.example" } },
+        { label: "Open a replacement carrier", action: { type: "OPEN_CARRIER" } },
+        { label: "Allocate ID 1 under the new carrier", action: { type: "ADMIT_VISITOR", hostname: "beta.example", service: "game-quic" } },
+        { label: "Register the replacement association", action: { type: "DELIVER_REGISTRATION" } },
+      ],
+    },
+    {
+      name: "Bounds and expiry",
+      description: "Early packets consume a tiny temporary budget, expire rather than granting authority, and active Context IDs stop at an explicit carrier limit.",
+      steps: [
+        ...setup,
+        { label: "Allocate alpha Context ID", action: { type: "ADMIT_VISITOR" } },
+        { label: "Buffer an early alpha packet", action: { type: "SEND_VISITOR_PACKET", bytes: 1200 } },
+        { label: "Expire the reorder buffer", action: { type: "EXPIRE_REORDER_BUFFER" } },
+        { label: "Registration still activates alpha", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Admit beta", action: { type: "ADMIT_VISITOR", hostname: "beta.example", service: "game-quic" } },
+        { label: "Register beta", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Admit gamma", action: { type: "ADMIT_VISITOR", hostname: "gamma.example", service: "voice-quic" } },
+        { label: "Register gamma", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Refuse delta at capacity", action: { type: "ADMIT_VISITOR", hostname: "delta.example" } },
+      ],
+    },
+    {
+      name: "Server affinity",
+      description: "A packet landing on the wrong Server cannot recover an established association. Same-Server rebinding remains a separate, supported path update in this model.",
+      steps: [
+        ...setup,
+        { label: "Admit and register a Visitor", action: { type: "ADMIT_VISITOR" } },
+        { label: "Deliver registration", action: { type: "DELIVER_REGISTRATION" } },
+        { label: "Packet lands on another Server", action: { type: "MISROUTE_TO_OTHER_SERVER" } },
+        { label: "Packet on owner Server succeeds", action: { type: "SEND_VISITOR_PACKET", bytes: 1200 } },
+        { label: "Same-Server Visitor path rebinds", action: { type: "REBIND_VISITOR" } },
+      ],
+    },
+  ];
+
+  let state = PublicQuicModel.initialState();
+  let selectedWalkthrough = 0;
+  let walkthroughStep = 0;
+
+  function field(label, value, tone = "") {
+    return `<div class="field"><span class="label">${label}</span><span class="value ${tone}">${value}</span></div>`;
+  }
+
+  function renderState() {
+    document.querySelector("#last-change").textContent = state.lastChange;
+    const tunnelTone = state.tunnel.authenticatedH3 ? "ok" : "bad";
+    const carrierTone = state.tunnel.carrier === "open" ? "ok" : "warn";
+    const mtuTone = PublicQuicModel.mtuViable(state) ? "ok" : "bad";
+    document.querySelector("#tunnel-state").innerHTML = [
+      field("Generation", `G${state.tunnel.generation}`),
+      field("Authenticated H3", state.tunnel.authenticatedH3 ? "yes" : "no", tunnelTone),
+      field("Public QUIC seam", state.tunnel.publicQuicNegotiated ? "negotiated" : "dormant"),
+      field("Carrier", `${state.tunnel.carrier} · C${state.tunnel.carrierGeneration}`, carrierTone),
+      field("Placement", state.tunnel.placement),
+      field("Usable inner size", `${PublicQuicModel.usableInnerSize(state)} bytes`, mtuTone),
+      field("Open associations", PublicQuicModel.activeContexts(state).length),
+      field("Rejected / capacity", `${state.rejectedVisitors} / ${state.capacityRefusals}`),
+      field("Dropped / wrong Server", `${state.droppedDatagrams} / ${state.affinityDrops}`),
+    ].join("");
+
+    const contextState = document.querySelector("#context-state");
+    if (!state.contexts.length) {
+      contextState.innerHTML = '<p class="empty">No Context ID has been allocated.</p>';
+    } else {
+      contextState.innerHTML = state.contexts.map(context => `
+        <section class="context">
+          <header><strong>${context.key}</strong><span>${context.hostname} → ${context.service}</span></header>
+          <div class="fields">
+            ${field("Server", context.serverState, context.serverState === "active" ? "ok" : "warn")}
+            ${field("Client", context.clientState, context.clientState === "active" ? "ok" : "warn")}
+            ${field("Visitor path", context.visitorPath)}
+            ${field("Buffered", context.pendingDatagrams)}
+            ${field("Packets to backend", context.backendPackets)}
+            ${field("Relayed both ways", context.visitorPackets)}
+            ${field("Close Capsule", context.closeCapsule)}
+            ${field("ID reuse", "forbidden in carrier")}
+          </div>
+        </section>
+      `).join("");
+    }
+
+    document.querySelector("#event-log").innerHTML = state.events.map(event => `<li>${event}</li>`).join("");
+  }
+
+  function dispatch(action) {
+    state = PublicQuicModel.reduce(state, action);
+    renderState();
+  }
+
+  function renderFreePlay() {
+    const groups = [...new Set(actions.map(item => item.group))];
+    document.querySelector("#free-play").innerHTML = groups.map(group => `
+      <section>
+        <h3>${group}</h3>
+        <div class="button-row">
+          ${actions.filter(item => item.group === group).map((item, index) =>
+            `<button data-free="${actions.indexOf(item)}">${item.label}</button>`).join("")}
+        </div>
+      </section>
+    `).join("");
+    document.querySelectorAll("[data-free]").forEach(button => {
+      button.addEventListener("click", () => dispatch(actions[Number(button.dataset.free)].action));
+    });
+  }
+
+  function startWalkthrough(index) {
+    selectedWalkthrough = index;
+    walkthroughStep = 0;
+    state = PublicQuicModel.initialState();
+    renderState();
+    renderWalkthrough();
+  }
+
+  function renderWalkthrough() {
+    const current = walkthroughs[selectedWalkthrough];
+    document.querySelector("#tabs").innerHTML = walkthroughs.map((walkthrough, index) =>
+      `<button class="tab" role="tab" aria-selected="${index === selectedWalkthrough}" data-tab="${index}">${walkthrough.name}</button>`
+    ).join("");
+    document.querySelectorAll("[data-tab]").forEach(button => {
+      button.addEventListener("click", () => startWalkthrough(Number(button.dataset.tab)));
+    });
+
+    document.querySelector("#walkthrough").innerHTML = `
+      <p>${current.description}</p>
+      <button class="primary" id="restart">Restart this walkthrough</button>
+      <div class="steps">
+        ${current.steps.map((step, index) => `
+          <div class="step ${index < walkthroughStep ? "done" : ""} ${index === walkthroughStep ? "current" : ""}">
+            <button data-step="${index}" ${index === walkthroughStep ? "" : "disabled"}>${index + 1}</button>
+            <span>${step.label}</span>
+          </div>
+        `).join("")}
+      </div>
+    `;
+    document.querySelector("#restart").addEventListener("click", () => startWalkthrough(selectedWalkthrough));
+    const currentButton = document.querySelector(`[data-step="${walkthroughStep}"]`);
+    if (currentButton) {
+      currentButton.addEventListener("click", () => {
+        dispatch(current.steps[walkthroughStep].action);
+        walkthroughStep += 1;
+        renderWalkthrough();
+      });
+    }
+  }
+
+  renderFreePlay();
+  renderState();
+  renderWalkthrough();
+</script>
+</body>
+</html>

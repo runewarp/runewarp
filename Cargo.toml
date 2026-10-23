@@ -38,6 +38,9 @@ hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto",
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
+# PROTOTYPE (examples/prototype_stock_h3_signaling.rs): unmodified upstream hyperium/h3 main.
+h3 = { git = "https://github.com/hyperium/h3", rev = "43745ad87e95b0c035ac9c547aad467303213425", features = ["tracing"] }
+h3-quinn = { git = "https://github.com/hyperium/h3", rev = "43745ad87e95b0c035ac9c547aad467303213425" }
 bytes = "1.10"
 futures-util = "0.3.32"
 http = "1.4.2"

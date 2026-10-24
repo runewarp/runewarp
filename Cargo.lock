@@ -770,6 +770,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "h3"
+version = "0.0.8"
+source = "git+https://github.com/hyperium/h3?rev=43745ad87e95b0c035ac9c547aad467303213425#43745ad87e95b0c035ac9c547aad467303213425"
+dependencies = [
+ "bytes",
+ "fastrand",
+ "futures-util",
+ "http",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
+name = "h3-quinn"
+version = "0.0.10"
+source = "git+https://github.com/hyperium/h3?rev=43745ad87e95b0c035ac9c547aad467303213425#43745ad87e95b0c035ac9c547aad467303213425"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "h3",
+ "quinn",
+ "tokio-util",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1210,6 +1235,7 @@ checksum = "0c1a41e437b6bbd489372cd4971de128e85c855f56c57f283d20ff016cf7c0a8"
 dependencies = [
  "bytes",
  "cfg_aliases",
+ "futures-io",
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
@@ -1404,6 +1430,8 @@ dependencies = [
  "bytes",
  "clap",
  "futures-util",
+ "h3",
+ "h3-quinn",
  "http",
  "http-body",
  "http-body-util",

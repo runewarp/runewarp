@@ -8,13 +8,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable, Aborted};
 use quinn::Connection;
-use rustls::pki_types::CertificateDer;
 use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock};
 
-use crate::{
-    ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig,
-    client_identity_from_certificate_der,
-};
+use crate::{ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig};
 
 use super::active_client::{ActiveClientPool, ActiveStreamGuard, SelectedTunnelConnection};
 #[cfg(test)]
@@ -694,7 +690,7 @@ impl TunnelRegistry {
         &self,
         connection: &Connection,
     ) -> Option<(usize, ClientIdentity)> {
-        let identity = client_identity_from_connection(connection)?;
+        let identity = crate::quic::peer_client_identity(connection)?;
         let tunnel_index = self
             .authorization
             .current()
@@ -716,13 +712,6 @@ fn reset_streams_matching(
         }
     }
     reset
-}
-
-fn client_identity_from_connection(connection: &Connection) -> Option<ClientIdentity> {
-    let identity = connection.peer_identity()?;
-    let certificate_chain = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
-    let certificate = certificate_chain.first()?;
-    client_identity_from_certificate_der(certificate.as_ref()).ok()
 }
 
 fn stream_remains_authorized(

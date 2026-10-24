@@ -19,7 +19,6 @@ mod reconcile;
 mod role;
 mod session;
 mod snapshot;
-mod sse;
 mod status;
 mod timing;
 mod tls;

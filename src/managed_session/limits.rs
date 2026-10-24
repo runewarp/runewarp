@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use crate::opaque_control_token::OPAQUE_CONTROL_TOKEN_MAX_CHARS;
+use crate::sse::{SseLimitKind, SseLimits};
 
 /// Production and injectable budgets for one Managed session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,6 +64,15 @@ impl Default for ManagedSessionLimits {
 }
 
 impl ManagedSessionLimits {
+    /// SSE framing bounds for the Managed-session downlink.
+    pub(crate) fn sse_limits(&self) -> SseLimits {
+        SseLimits {
+            max_line_bytes: self.max_sse_line_bytes,
+            max_event_type_bytes: self.max_sse_event_type_bytes,
+            max_event_data_bytes: self.max_sse_event_data_bytes,
+        }
+    }
+
     /// Smaller deadlines for deterministic Tokio time tests; byte and
     /// cardinality caps remain at production defaults unless overridden.
     #[cfg(test)]
@@ -90,6 +100,16 @@ pub enum ManagedSessionLimitKind {
     ClientIdentitiesTotal,
     ClientIdentitiesPerTunnel,
     ServerAddresses,
+}
+
+impl From<SseLimitKind> for ManagedSessionLimitKind {
+    fn from(kind: SseLimitKind) -> Self {
+        match kind {
+            SseLimitKind::Line => Self::SseLineBytes,
+            SseLimitKind::EventType => Self::SseEventTypeBytes,
+            SseLimitKind::EventData => Self::SseEventDataBytes,
+        }
+    }
 }
 
 impl ManagedSessionLimitKind {

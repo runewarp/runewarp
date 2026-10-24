@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
+- Upgraded transitive `quinn-proto`, `rustls`, `rustls-webpki`, `webpki-roots`, `h2`, `tokio`, and `chacha20` past 12 RustSec advisories, including RUSTSEC-2026-0338 through RUSTSEC-2026-0342 (`quinn-proto`), RUSTSEC-2026-0258 (`h2`), and RUSTSEC-2026-0386 (`tokio`). (#248)
 - Upgraded transitive `event-listener` past RUSTSEC-2026-0221 (`StackSlot` Send/Sync unsoundness). (#236)
 - Bounded the complete routed-stream setup lifecycle: distinct Server pending-`open_bi` and active routed-stream budgets, a 5-second `open_bi` deadline, keyed active Visitor-stream tracking, a Client-instance aggregate stream-handler limit aligned with QUIC bidi credit, and 5-second Client setup deadlines for tunneled ClientHello, backend connect/write, Terminate handshake, and ACME challenge handshake, while leaving established proxies long-lived. (#208)
 - Bounded Managed-session SSE framing, snapshot size, decoded allocation, and role-input cardinalities; moved applied-state reporting off the reconciliation critical path with coalesced latest-revision acknowledgments, bodyless-204 enforcement, and 5-second request/response deadlines. (#207)

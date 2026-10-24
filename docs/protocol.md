@@ -78,14 +78,15 @@ Admission saturation warnings include the active-work count and limit and are li
 
 ## Tunnel connection handshake
 
-Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. Effective **Server addresses** come from `client.server-address`, `client.server-addresses`, repeated runtime `--server-address` flags, or a Control-published Managed assignment. Config validation prepares **Client admission** (static vs managed) once from Control address presence; Client startup wires one **Address controller** from that outcome. The controller owns the complete assigned Server-address lifecycle (one worker per normalized address, maintenance intent, production Retiring / reconnect-vs-exit policy, Assignment convergence, apply acknowledgment, and shutdown) so static fanout and Managed-session assignment changes cannot start duplicate dial loops for the same target. Every worker uses the same production Tunnel-connection-attempt implementation, which owns resolution, per-attempt material reload, QUIC and HTTP/3 establishment, the event-stream gate, typed failure/connection-end classification, and reporting context:
+Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. Effective **Server addresses** come from `client.server-address`, `client.server-addresses`, repeated runtime `--server-address` flags, or a Control-published Managed assignment. Config validation prepares **Client admission** (static vs managed) once from Control address presence; Client startup wires one **Address controller** from that outcome. The controller owns the complete assigned Server-address lifecycle (one worker per normalized address, maintenance intent, production Retiring / reconnect-vs-exit policy, Assignment convergence, apply acknowledgment, and shutdown) so static fanout and Managed-session assignment changes cannot start duplicate dial loops for the same target. Every worker uses the same production Tunnel-connection-attempt implementation, which owns resolution, per-attempt material reload, QUIC and HTTP/3 establishment, the event-stream gate and WebTransport session, typed failure/connection-end classification, and reporting context:
 
 1. Resolve the hostname portion of one effective **Server address**.
 2. Dial the UDP port from that **Server address**, defaulting to `443` when the port is omitted.
 3. Negotiate QUIC with ALPN `h3`.
 4. Validate the Server certificate for that **Server address**'s **Server hostname**, using either system trust or `client.server-trust = "ca-file"` with an exclusive CA bundle.
 5. Present the Client certificate and authenticate one of the Tunnel's pinned `client-identity` values from its public key.
-6. Start ordinary HTTP/3. The Client opens a bodyless `GET /v1/tunnel/events` and waits for the first valid state with a supported protocol version before offering any receive slots. No custom SETTINGS marker is sent or required. An incompatible Server or a failed gate is an ordinary attempt failure under the same retry policy. Static Client readiness and Managed Assignment convergence count only connections that pass this gate.
+6. Start HTTP/3 with Extended CONNECT, WebTransport draft07 and H3 Datagrams enabled in both peers' SETTINGS. The Client opens a bodyless `GET /v1/tunnel/events` and waits for the first valid state with a supported protocol version. No Runewarp-specific SETTINGS marker is sent or required.
+7. After that gate, establish exactly one WebTransport session with Extended CONNECT to `https://<Server hostname>/v1/tunnel/session`. Only then offer receive slots and return a successful connection attempt. A failed gate, negotiation or CONNECT is an ordinary attempt failure under the same retry policy. Static Client readiness and Managed Assignment convergence count only connections with an established session.
 
 Rules:
 
@@ -94,14 +95,24 @@ Rules:
 - reconnect attempts re-resolve the hostname portion of each effective **Server address** every time, including the first jittered retry window
 - every attempt reloads the selected system or exclusive-CA trust roots and the Client certificate/key; exclusive-CA mode never loads or combines system roots
 - QUIC handshakes time out after **10 seconds** on both sides; Server HTTP/3 establishment shares that handshake deadline and admission permit
-- the Client allows **60 seconds** for the first valid event-stream state after HTTP/3 setup
+- the Client allows **60 seconds** for the first valid event-stream state after HTTP/3 setup, then **60 seconds** for WebTransport negotiation and CONNECT
 - idle timeout is **60 seconds**
 - only the Client sends QUIC keepalive pings, every **20 seconds**
 - both peers advertise a **16 KiB decoded HTTP/3 field-section limit**, with **64 MiB connection receive credit** and **1,250,000 bytes of stream receive credit**
 
+## WebTransport session
+
+Both peers pin only WebTransport draft07: the max-sessions SETTINGS identifier is `0xc671706a` with value `1`, the Extended CONNECT token is `webtransport`, and the bidirectional stream signal is `0x41`. A session ID is the full CONNECT stream ID: GET on stream `0` followed by CONNECT on stream `4` creates session `4`, never `1`. Both peers enable Extended CONNECT, WebTransport and H3 Datagrams and enforce the fork's `Limits.sessions = 1`. The connection requires the existing pinned Client-identity mTLS; a session grants no additional identity or Public-hostname authority.
+
+The session CONNECT uses the Server hostname as authority on its HTTPS origin and path `/v1/tunnel/session`. It remains open for the Tunnel connection lifetime. The Server returns bodyless `404` for another session path, `421` for a different authority, and `400` for an unsupported Extended CONNECT protocol or invalid WebTransport request or negotiation. The fork's invalid-request and settings rejections remain bodyless `400`; its exhausted session cap remains bodyless `429`. Rejections create no session and leave ordinary signaling usable. The CONNECT response and admission run under the signaling request deadline.
+
+Visitors still use plain-CONNECT receive slots. The session carries no Visitor streams, and Runewarp sends no datagrams. H3 Datagram SETTINGS reserve the draft-required capability for later Public QUIC work; they do not implement packet forwarding. The Client continues to grant the Server zero bidirectional stream credit. Unexpected session streams are reset without delivering a Visitor.
+
+A close capsule or CONNECT stream end observed by either peer closes the whole Tunnel connection with `H3_NO_ERROR`, even if a peer withholds FIN after a close capsule. The Client's ordinary address worker reconnects; no session is reopened on an existing connection. Connection loss ends the session, and Authorization revocation closes the connection and session immediately. GOAWAY alone leaves the established session alive while already-placed Visitors drain. The session itself does not prolong graceful drain after open Tunnel streams and earlier signaling requests finish.
+
 ## Receive slots and Tunnel events
 
-The Client pre-opens plain `CONNECT` requests to the authenticated **Server hostname** as `:authority`, including a port. The Server binds the normalized host and ignores the authority port. Base signaling does not use extended CONNECT `:protocol`. Each idle slot is one unit of Client-offered availability. The Server never places a Visitor without one; its `200` response assigns exactly one Visitor and immediately carries the internal framing and buffered ClientHello as DATA, without a per-Visitor Client round trip.
+The Client pre-opens plain `CONNECT` requests to the authenticated **Server hostname** as `:authority`, including a port. The Server binds the normalized host and ignores the authority port. Receive slots do not use Extended CONNECT `:protocol`; the separate WebTransport session does. Each idle slot is one unit of Client-offered availability. The Server never places a Visitor without one; its `200` response assigns exactly one Visitor and immediately carries the internal framing and buffered ClientHello as DATA, without a per-Visitor Client round trip.
 
 Each connection keeps at most **32 idle receive slots**. Idle and assigned slots each hold a permit from the same **1,024-slot Client-instance budget**, shared across all connections. The Client replenishes assigned or failed slots as permits become available. With no permit, it waits and emits saturation warnings at most once every **10 seconds**. The next acquired permit emits one recovery line only if a saturation warning was emitted; suppressed warnings do not arm another recovery. The Server admits **1,032 Client-initiated bidirectional request streams**, allowing 1,024 receive slots plus eight signaling streams. The Client admits no Server-initiated bidirectional streams. Each peer permits eight unidirectional streams for HTTP/3 control, QPACK, and reserved-stream headroom.
 
@@ -153,7 +164,7 @@ Every assigned receive slot begins its response DATA with a regenerated PROXY pr
 
 One internal Tunnel-framing module owns this ordering for Server encoding and Client decoding. Backend PROXY emission is separate and independently controlled per Service.
 
-Tunnel connections support only ALPN `h3`. There is no fallback or dual protocol. Old `runewarp/1` and current HTTP/3 binaries are incompatible; upgrade Clients and Servers together.
+Tunnel connections support only ALPN `h3`. There is no fallback or dual protocol. Clients and Servers must both support this mandatory draft07 session. Earlier receive-slot-only HTTP/3 binaries and old `runewarp/1` binaries are incompatible; upgrade Clients and Servers together.
 
 Runewarp uses symmetric close behavior:
 
@@ -172,7 +183,7 @@ For orderly local shutdown that the runtime controls:
 - the **Server** drops **Server readiness** immediately when orderly shutdown begins
 - the **Server** stops accepting new Visitor TCP traffic, new **Tunnel connections**, and new streams on already-open **Tunnel connections** before it closes active **Tunnel connections**
 - **Graceful shutdown** concurrently sends GOAWAY on every Tunnel connection using stock `shutdown(1)`, rejects idle slots, ends the event stream, and lets already-placed Visitors finish within one `server.graceful-shutdown-duration` window
-- GOAWAY carries the first unprocessed Client request-stream ID; Runewarp rejects requests at or above it with `H3_REQUEST_REJECTED`, and the Client opens no new requests afterward
+- GOAWAY carries the fork's first unprocessed Client request-stream ID; Runewarp evicts pending classifiers, allows already-returned request resolvers to finish under their original deadlines, and rejects later requests, including the boundary ID, with `H3_REQUEST_REJECTED`. The Client opens no new requests afterward
 - each drained connection closes with `H3_NO_ERROR` (`0x100`); idle slots never prolong the drain
 - when that graceful deadline expires, the **Server** force-closes remaining active **Tunnel connections**
 - **Fast shutdown** and graceful-to-fast escalation close immediately with `H3_NO_ERROR`
@@ -207,7 +218,7 @@ The 60-second first-snapshot/silence windows and Tunnel reconnect backoff apply 
 ## Runtime invariants
 
 - each **Client instance** has one or more **Tunnel connections** once dialing has succeeded
-- in Static mode, the Client emits one **Client readiness** signal when the first configured **Server address** passes the event-stream gate; Managed mode uses **Assignment convergence** instead (see [`managed.md`](managed.md))
+- in Static mode, the Client emits one **Client readiness** signal when the first configured **Server address** passes the event-stream gate and establishes its session; Managed mode uses **Assignment convergence** instead (see [`managed.md`](managed.md))
 - failure, retry, and recovery stay isolated per effective **Server address**
 - a **Tunnel** may have one or more authenticated live **Tunnel connections** on one **Server** node
 - a **Tunnel** stays available while at least one of those **Tunnel connections** remains live

@@ -13,6 +13,7 @@ use h3::error::{Code, StreamError};
 use h3::server::RequestStream;
 use http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use tokio::sync::{Notify, oneshot, watch};
+use tokio::task::JoinSet;
 use tokio::time::{Instant, interval_at, timeout, timeout_at};
 
 use crate::quic::{HANDSHAKE_TIMEOUT, peer_client_identity, with_handshake_timeout};
@@ -21,20 +22,19 @@ use crate::{ClientIdentity, ServerHostname};
 use super::events::{KEEPALIVE_COMMENT, ServerRuntimeGeneration, TunnelEventState};
 use super::stream::{ServerTunnelStream, TunnelStream};
 use super::{
-    MAX_IDLE_RECEIVE_SLOTS, OwnedTask, TUNNEL_EVENTS_PATH, TunnelH3Error, TunnelH3Timing,
-    close_connection,
+    MAX_IDLE_RECEIVE_SLOTS, OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TunnelH3Error,
+    TunnelH3Timing, close_connection,
 };
 
-type ServerH3Connection = h3::server::Connection<h3_quinn::Connection, Bytes>;
+type ServerH3Connection = h3_webtransport::server::ServerConnection<h3_quinn::Connection, Bytes>;
+type SessionAcceptor = h3_webtransport::server::Acceptor<h3_quinn::Connection, Bytes>;
 type ServerRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
-
-/// Distance between consecutive Client-initiated bidirectional QUIC stream IDs.
-const CLIENT_BIDI_STREAM_ID_STEP: u64 = 4;
 
 /// Server-owned HTTP/3 Tunnel connection.
 ///
 /// Serves the Tunnel event stream, queues Client receive slots, and opens one Tunnel stream per
-/// placed Visitor on a queued slot. Other signaling requests get bodyless statuses. Dropping the
+/// placed Visitor on a queued slot. One detached WebTransport session owns connection lifetime.
+/// Other signaling requests get bodyless statuses. Dropping the
 /// handle closes the connection immediately with `H3_NO_ERROR`.
 pub struct ServerTunnelH3 {
     connection: quinn::Connection,
@@ -79,11 +79,13 @@ struct SlotQueue {
 
 /// State shared by the connection's accept loop and its request handlers.
 struct Shared {
+    connection: quinn::Connection,
+    acceptor: SessionAcceptor,
     server_hostname: ServerHostname,
     state: TunnelEventState,
     timing: TunnelH3Timing,
-    /// First unprocessed request-stream ID once GOAWAY has been sent.
-    goaway_boundary: watch::Sender<Option<u64>>,
+    /// Published once GOAWAY seals request intake.
+    goaway: watch::Sender<bool>,
     /// Incremented by each event-stream subscription; an older subscription ends when it changes.
     subscriptions: watch::Sender<u64>,
     /// Request handlers, idle slots, and Tunnel streams that have not yet finished.
@@ -166,6 +168,11 @@ impl ServerTunnelH3 {
             async {
                 h3::server::builder()
                     .max_field_section_size(super::config::MAX_FIELD_SECTION_SIZE)
+                    .enable_webtransport(true)
+                    .enable_extended_connect(true)
+                    .enable_datagram(true)
+                    .max_webtransport_sessions(1)
+                    .webtransport_drafts([h3::ext::WebTransportDraft::Draft07])
                     .build(h3_quinn::Connection::new(connection.clone()))
                     .await
                     .map_err(TunnelH3Error::Setup)
@@ -175,11 +182,20 @@ impl ServerTunnelH3 {
         )
         .await?;
 
+        let (h3_connection, acceptor) = h3_webtransport::server::new(
+            h3_connection,
+            h3_webtransport::server::Limits {
+                sessions: std::num::NonZeroUsize::MIN,
+                ..Default::default()
+            },
+        );
         let shared = Arc::new(Shared {
+            connection: connection.clone(),
+            acceptor,
             server_hostname,
             state: TunnelEventState::current(server_generation),
             timing,
-            goaway_boundary: watch::Sender::new(None),
+            goaway: watch::Sender::new(false),
             subscriptions: watch::Sender::new(0),
             requests_in_flight: Arc::new(watch::Sender::new(0)),
             #[cfg(test)]
@@ -327,33 +343,41 @@ async fn serve_connection(
     // request handler, and a slow header section cannot block intake on other streams. QUIC
     // request-stream credit bounds these futures; each retains the original request deadline.
     let mut resolving = FuturesUnordered::new();
-    let mut accepted_requests: u64 = 0;
     let mut shutting_down = false;
+    let mut handlers = JoinSet::new();
+    let period = shared.timing.request_deadline;
+    let mut prefix_deadline = interval_at(Instant::now() + period, period);
 
     loop {
         tokio::select! {
             _ = &mut shutdown_requested, if !shutting_down => {
                 shutting_down = true;
-                send_goaway(&mut h3_connection, &shared, accepted_requests).await;
+                h3_connection.evict_pending_streams();
+                send_goaway(&mut h3_connection, &shared).await;
             }
             _ = async { requests_in_flight.wait_for(|count| *count == 0).await.map(|_| ()) },
                 if shutting_down => break,
+            _ = connection.closed() => break,
+            _ = prefix_deadline.tick() => { h3_connection.evict_pending_streams(); }
+            _ = handlers.join_next(), if !handlers.is_empty() => {}
             resolved = resolving.next(), if !resolving.is_empty() => {
-                if let Some(Some((http_request, stream, request, deadline))) = resolved {
+                if let Some(Some((http_request, stream, request, deadline, admitted))) = resolved {
                     #[cfg(test)]
                     shared.handlers_spawned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tokio::spawn(handle_request(http_request, stream, shared.clone(), request, deadline));
+                    handlers.spawn(handle_request(
+                        http_request, stream, shared.clone(), request, deadline, admitted,
+                    ));
                 }
             }
             accepted = h3_connection.accept() => match accepted {
                 Ok(Some(resolver)) => {
-                    accepted_requests += 1;
+                    let admitted = !shutting_down;
                     let request = InFlightRequest::start(&shared.requests_in_flight);
                     let deadline = Instant::now() + shared.timing.request_deadline;
                     resolving.push(async move {
                         let (http_request, stream) =
                             timeout_at(deadline, resolver.resolve_request()).await.ok()?.ok()?;
-                        Some((http_request, stream, request, deadline))
+                        Some((http_request, stream, request, deadline, admitted))
                     });
                 }
                 Ok(None) | Err(_) => break,
@@ -361,30 +385,22 @@ async fn serve_connection(
         }
     }
 
+    h3_connection.evict_pending_streams();
     shared.close_slots();
     close_connection(&connection, Code::H3_NO_ERROR);
 }
 
-/// Send the final GOAWAY and publish its boundary to request handlers.
+/// Seal intake and send the fork's first-unprocessed request ID with stock `shutdown(1)`.
 ///
-/// Client-initiated bidirectional stream IDs are 0, 4, 8, … and Quinn accepts them in ID order,
-/// so after `accepted_requests` accepts the first unprocessed ID is `4 * accepted_requests`. That
-/// is the value stock `shutdown(1)` derives from the last accepted stream. Stock h3 rejects only
-/// IDs above it, so the boundary ID itself is rejected by [`handle_request`].
-async fn send_goaway(
-    h3_connection: &mut ServerH3Connection,
-    shared: &Shared,
-    accepted_requests: u64,
-) {
-    shared
-        .goaway_boundary
-        .send_replace(Some(goaway_boundary(accepted_requests)));
+/// The detached driver accepts and classifies raw streams independently, so returned resolvers
+/// need not be consecutive or ordered. Evict its pending classifiers before shutdown. Resolvers
+/// already returned may finish under their original deadlines; every later resolver is rejected,
+/// including the boundary ID stock h3 otherwise permits. This follows the actual intake boundary
+/// without reconstructing stream IDs from a count of classified requests.
+async fn send_goaway(h3_connection: &mut ServerH3Connection, shared: &Shared) {
+    shared.goaway.send_replace(true);
     shared.close_slots();
     let _ = h3_connection.shutdown(1).await;
-}
-
-fn goaway_boundary(accepted_requests: u64) -> u64 {
-    accepted_requests.saturating_mul(CLIENT_BIDI_STREAM_ID_STEP)
 }
 
 /// Accounting for one accepted request, released when its handler, idle slot, or Tunnel stream
@@ -414,15 +430,11 @@ async fn handle_request(
     shared: Arc<Shared>,
     request: InFlightRequest,
     request_deadline: Instant,
+    admitted: bool,
 ) {
     let shared = shared.as_ref();
 
-    let stream_id = stream.id().into_inner();
-    if shared
-        .goaway_boundary
-        .borrow()
-        .is_some_and(|boundary| stream_id >= boundary)
-    {
+    if !admitted {
         reject_unprocessed(&mut stream);
         return;
     }
@@ -443,6 +455,34 @@ async fn handle_request(
                 Ok(Err(_)) => {}
                 Err(_) => {
                     send_bodyless_status(stream, StatusCode::REQUEST_TIMEOUT, shared.timing).await;
+                }
+            }
+        }
+        Route::Session => {
+            // CONNECT is connection lifetime, not work that prolongs graceful Visitor drain.
+            let session = timeout_at(
+                request_deadline,
+                shared.acceptor.accept(http_request, stream),
+            )
+            .await;
+            drop(request);
+            if let Ok(Ok(session)) = session {
+                loop {
+                    tokio::select! {
+                        _ = session.closed() => break,
+                        stream = session.accept_bi() => match stream {
+                            Some(mut stream) => {
+                                use h3::quic::{RecvStream, SendStream};
+                                stream.reset(Code::H3_REQUEST_REJECTED.value());
+                                stream.stop_sending(Code::H3_REQUEST_REJECTED.value());
+                            }
+                            None => break,
+                        },
+                        _ = shared.connection.closed() => return,
+                    }
+                }
+                if shared.connection.close_reason().is_none() {
+                    close_connection(&shared.connection, Code::H3_NO_ERROR);
                 }
             }
         }
@@ -486,6 +526,7 @@ async fn read_bodyless_request(
 #[derive(Debug, Eq, PartialEq)]
 enum Route {
     Events,
+    Session,
     /// Plain CONNECT to the Server hostname: one unit of Visitor-assignment availability.
     ReceiveSlot,
     Status(StatusCode),
@@ -507,11 +548,18 @@ fn route(request: &Request<()>, server_hostname: &ServerHostname) -> Route {
         return Route::Status(StatusCode::MISDIRECTED_REQUEST);
     }
     if request.method() == Method::CONNECT {
-        // Extended CONNECT is reserved for future extensions; base signaling never uses it.
-        return if request.extensions().get::<h3::ext::Protocol>().is_some() {
-            Route::Status(StatusCode::BAD_REQUEST)
-        } else {
-            Route::ReceiveSlot
+        return match request.extensions().get::<h3::ext::Protocol>() {
+            None => Route::ReceiveSlot,
+            Some(protocol) if *protocol == h3::ext::Protocol::WEB_TRANSPORT => {
+                if uri.scheme_str() != Some("https") {
+                    Route::Status(StatusCode::BAD_REQUEST)
+                } else if uri.path() != TUNNEL_SESSION_PATH {
+                    Route::Status(StatusCode::NOT_FOUND)
+                } else {
+                    Route::Session
+                }
+            }
+            Some(_) => Route::Status(StatusCode::BAD_REQUEST),
         };
     }
     if uri.scheme_str() != Some("https") {
@@ -586,7 +634,7 @@ async fn send_bodyless_status(
 async fn serve_events(mut stream: ServerRequestStream, shared: &Shared) {
     shared.subscriptions.send_modify(|count| *count += 1);
     let mut superseded = shared.subscriptions.subscribe();
-    let mut goaway_boundary = shared.goaway_boundary.subscribe();
+    let mut goaway = shared.goaway.subscribe();
     let timing = shared.timing;
 
     let response = Response::builder()
@@ -608,7 +656,7 @@ async fn serve_events(mut stream: ServerRequestStream, shared: &Shared) {
         let frame = tokio::select! {
             _ = keepalive.tick() => Bytes::from_static(KEEPALIVE_COMMENT),
             _ = superseded.changed() => break,
-            _ = async { goaway_boundary.wait_for(Option::is_some).await.map(|_| ()) } => break,
+            _ = async { goaway.wait_for(|sent| *sent).await.map(|_| ()) } => break,
         };
         if !bounded_write(timing, stream.send_data(frame)).await {
             stream.stop_stream(Code::H3_REQUEST_CANCELLED);
@@ -633,7 +681,7 @@ async fn bounded_write(
 mod tests {
     use http::{Method, Request, StatusCode, header};
 
-    use super::{MalformedContentLength, Route, declared_content_length, goaway_boundary, route};
+    use super::{MalformedContentLength, Route, declared_content_length, route};
     use crate::ServerHostname;
 
     fn server_hostname() -> ServerHostname {
@@ -646,13 +694,6 @@ mod tests {
             .uri(uri)
             .body(())
             .expect("valid request")
-    }
-
-    #[test]
-    fn goaway_boundary_is_the_first_unaccepted_client_request_stream_id() {
-        assert_eq!(goaway_boundary(0), 0);
-        assert_eq!(goaway_boundary(1), 4);
-        assert_eq!(goaway_boundary(2), 8);
     }
 
     #[test]

@@ -783,6 +783,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "h3-datagram"
+version = "0.0.2"
+source = "git+https://github.com/runewarp/h3?rev=df27106fb243baaf867d11441d11cf671ec9da7e#df27106fb243baaf867d11441d11cf671ec9da7e"
+dependencies = [
+ "bytes",
+ "h3",
+]
+
+[[package]]
 name = "h3-quinn"
 version = "0.0.10"
 source = "git+https://github.com/runewarp/h3?rev=df27106fb243baaf867d11441d11cf671ec9da7e#df27106fb243baaf867d11441d11cf671ec9da7e"
@@ -792,6 +801,21 @@ dependencies = [
  "h3",
  "quinn",
  "tokio-util",
+]
+
+[[package]]
+name = "h3-webtransport"
+version = "0.1.2"
+source = "git+https://github.com/runewarp/h3?rev=df27106fb243baaf867d11441d11cf671ec9da7e#df27106fb243baaf867d11441d11cf671ec9da7e"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "h3",
+ "h3-datagram",
+ "http",
+ "pin-project-lite",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1432,6 +1456,7 @@ dependencies = [
  "futures-util",
  "h3",
  "h3-quinn",
+ "h3-webtransport",
  "http",
  "http-body",
  "http-body-util",

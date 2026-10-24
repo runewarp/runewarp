@@ -92,12 +92,7 @@ pub use paths::{
 };
 pub use proxy_protocol::{ProxyProtocolVersion, TrustedNetwork, VisitorTcpAddresses};
 pub use quic::{
-    ClientIdentityAdmission, HANDSHAKE_TIMEOUT, IDLE_TIMEOUT, KEEPALIVE_INTERVAL,
-    MAX_SERVER_OPENED_BIDI_STREAMS, QuicConfigError, RUNEWARP_ALPN, make_client_quic_config,
-    make_client_quic_config_with_client_auth, make_server_quic_config,
-    make_server_quic_config_with_client_admission,
-    make_server_quic_config_with_client_admission_resolver,
-    make_server_quic_config_with_client_auth, make_server_quic_config_with_client_auth_resolver,
+    ClientIdentityAdmission, HANDSHAKE_TIMEOUT, IDLE_TIMEOUT, KEEPALIVE_INTERVAL, QuicConfigError,
 };
 pub use server::{
     AuthorizationSnapshot, QUIC_CLOSE_FLUSH_DURATION, Server, ServerAuthorization,
@@ -120,4 +115,8 @@ pub use startup::{
     ClientInstancePrep, ClientStartupError, PreparedClient, PreparedServer, ServerStartupError,
 };
 pub use trust::ClientServerTrust;
+pub use tunnel_h3::{
+    make_client_tunnel_h3_config, make_server_tunnel_h3_config,
+    make_server_tunnel_h3_config_with_resolver,
+};
 pub use tunnel_id::TunnelId;

@@ -10,7 +10,7 @@ use rustls::pki_types::pem::{Error as PemError, PemObject};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use x509_parser::parse_x509_certificate;
 
-use crate::quic::{QuicConfigError, make_server_quic_config};
+use crate::quic::QuicConfigError;
 
 pub(crate) const SERVER_CERT_FILENAME: &str = "server.crt";
 pub(crate) const SERVER_KEY_FILENAME: &str = "server.key";
@@ -173,7 +173,10 @@ pub(crate) fn validate_server_tls_material(
 ) -> Result<(), TlsMaterialError> {
     let cert_chain = load_certificate_chain(cert_file)?;
     let private_key = load_private_key(key_file)?;
-    make_server_quic_config(cert_chain.clone(), private_key)
+    rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain.clone(), private_key)
+        .map_err(QuicConfigError::from)
         .map_err(TlsMaterialError::InvalidConfiguration)?;
     let ca_certificates = load_certificate_chain(ca_file)?;
     let mut roots = RootCertStore::empty();

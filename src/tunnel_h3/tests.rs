@@ -636,7 +636,7 @@ async fn shutdown_sends_goaway_ends_the_event_stream_and_closes_cleanly() {
     let (_, mut events) = raw_request(&mut send_request, Method::GET, &uri).await;
     assert!(read_event_block(&mut events).await.is_some());
 
-    let shutdown = tokio::spawn(server.shutdown(STEP));
+    let shutdown = tokio::spawn(async move { server.shutdown(STEP).await });
     let mut ended = false;
     for _ in 0..4 {
         if read_event_block(&mut events).await.is_none() {

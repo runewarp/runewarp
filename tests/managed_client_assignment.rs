@@ -31,7 +31,7 @@ use runewarp::{
     ManagedSession, ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PublicHostname,
     QUIC_CLOSE_FLUSH_DURATION, Server, ServerAdmission, ServerAuthorization, ServerBindConfig,
     ServerHostname, ServerTunnelConfig, ServiceConfig, SessionMaterial,
-    client_identity_from_certificate_der, make_server_quic_config_with_client_admission,
+    client_identity_from_certificate_der, make_server_tunnel_h3_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -334,7 +334,7 @@ impl ManagedClientHarness {
             server_hostname: ServerHostname::try_from("localhost").unwrap(),
             authorization: authorization.clone(),
             public_tls_config: None,
-            quic_server_config: make_server_quic_config_with_client_admission(
+            quic_server_config: make_server_tunnel_h3_config(
                 vec![self.server_cert.clone()],
                 private_key_from_der(&self.server_key),
                 Arc::new(authorization),

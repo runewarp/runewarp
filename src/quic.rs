@@ -1,21 +1,17 @@
+#[cfg(test)]
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use quinn::TransportConfig;
-use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::client::danger::HandshakeSignatureValid;
 use rustls::crypto::{
     CryptoProvider, WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::ResolvesServerCert;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::{
-    CertificateError, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
-};
+use rustls::{CertificateError, DigitallySignedStruct, DistinguishedName, SignatureScheme};
 
 use crate::{ClientIdentity, client_identity_from_certificate_der, runtime_log};
 
@@ -24,11 +20,9 @@ pub trait ClientIdentityAdmission: Send + Sync + fmt::Debug {
     fn authorizes_client_identity(&self, identity: &ClientIdentity) -> bool;
 }
 
-pub const RUNEWARP_ALPN: &[u8] = b"runewarp/1";
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-pub const MAX_SERVER_OPENED_BIDI_STREAMS: u32 = 1024;
 const ADMISSION_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
@@ -67,55 +61,6 @@ impl From<quinn::crypto::rustls::NoInitialCipherSuite> for QuicConfigError {
     }
 }
 
-pub fn make_server_quic_config(
-    cert_chain: Vec<CertificateDer<'static>>,
-    private_key: PrivateKeyDer<'static>,
-) -> Result<quinn::ServerConfig, QuicConfigError> {
-    let mut server_crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, private_key)?;
-    server_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
-
-    let mut server_config =
-        quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
-    let transport_config = Arc::get_mut(&mut server_config.transport)
-        .expect("newly created QUIC server configs should expose a unique transport config");
-    configure_server_transport(transport_config);
-
-    Ok(server_config)
-}
-
-pub fn make_server_quic_config_with_client_auth(
-    cert_chain: Vec<CertificateDer<'static>>,
-    private_key: PrivateKeyDer<'static>,
-    trusted_client_identities: &[ClientIdentity],
-) -> Result<quinn::ServerConfig, QuicConfigError> {
-    make_server_quic_config_with_client_admission(
-        cert_chain,
-        private_key,
-        Arc::new(StaticClientIdentityAdmission::from_identities(
-            trusted_client_identities,
-        )),
-    )
-}
-
-pub fn make_server_quic_config_with_client_admission(
-    cert_chain: Vec<CertificateDer<'static>>,
-    private_key: PrivateKeyDer<'static>,
-    admission: Arc<dyn ClientIdentityAdmission>,
-) -> Result<quinn::ServerConfig, QuicConfigError> {
-    let mut server_crypto = pinned_client_auth_server_crypto(cert_chain, private_key, admission)?;
-    server_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
-
-    let mut server_config =
-        quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
-    let transport_config = Arc::get_mut(&mut server_config.transport)
-        .expect("newly created QUIC server configs should expose a unique transport config");
-    configure_server_transport(transport_config);
-
-    Ok(server_config)
-}
-
 /// Server TLS that requires a Client certificate whose pinned identity `admission` authorizes.
 ///
 /// Callers set ALPN and wrap it in their QUIC transport configuration.
@@ -124,13 +69,21 @@ pub(crate) fn pinned_client_auth_server_crypto(
     private_key: PrivateKeyDer<'static>,
     admission: Arc<dyn ClientIdentityAdmission>,
 ) -> Result<rustls::ServerConfig, QuicConfigError> {
+    Ok(pinned_client_auth_server_builder(admission)?.with_single_cert(cert_chain, private_key)?)
+}
+
+pub(crate) fn pinned_client_auth_server_builder(
+    admission: Arc<dyn ClientIdentityAdmission>,
+) -> Result<
+    rustls::ConfigBuilder<rustls::ServerConfig, rustls::server::WantsServerCert>,
+    QuicConfigError,
+> {
     let provider = server_crypto_provider();
     let verifier =
         PinnedClientCertVerifier::new(admission, provider.signature_verification_algorithms);
     Ok(rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
-        .with_client_cert_verifier(Arc::new(verifier))
-        .with_single_cert(cert_chain, private_key)?)
+        .with_client_cert_verifier(Arc::new(verifier)))
 }
 
 /// Pinned Client identity of an authenticated QUIC connection's leaf certificate.
@@ -141,53 +94,14 @@ pub(crate) fn peer_client_identity(connection: &quinn::Connection) -> Option<Cli
     client_identity_from_certificate_der(certificate.as_ref()).ok()
 }
 
-pub fn make_server_quic_config_with_client_auth_resolver(
-    cert_resolver: Arc<dyn ResolvesServerCert>,
-    trusted_client_identities: &[ClientIdentity],
-) -> Result<quinn::ServerConfig, QuicConfigError> {
-    make_server_quic_config_with_client_admission_resolver(
-        cert_resolver,
-        Arc::new(StaticClientIdentityAdmission::from_identities(
-            trusted_client_identities,
-        )),
-    )
-}
-
-pub fn make_server_quic_config_with_client_admission_resolver(
-    cert_resolver: Arc<dyn ResolvesServerCert>,
-    admission: Arc<dyn ClientIdentityAdmission>,
-) -> Result<quinn::ServerConfig, QuicConfigError> {
-    let provider = server_crypto_provider();
-    let verifier =
-        PinnedClientCertVerifier::new(admission, provider.signature_verification_algorithms);
-    let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
-        .with_client_cert_verifier(Arc::new(verifier))
-        .with_cert_resolver(cert_resolver);
-    server_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
-
-    let mut server_config =
-        quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
-    let transport_config = Arc::get_mut(&mut server_config.transport)
-        .expect("newly created QUIC server configs should expose a unique transport config");
-    configure_server_transport(transport_config);
-
-    Ok(server_config)
-}
-
-pub fn make_client_quic_config(
-    roots: RootCertStore,
-) -> Result<quinn::ClientConfig, QuicConfigError> {
-    let mut client_crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    client_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
-
-    let mut client_config =
-        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
-    client_config.transport_config(Arc::new(client_transport_config()));
-
-    Ok(client_config)
+pub(crate) fn is_tls_access_denied(error: &quinn::ConnectionError) -> bool {
+    const TLS_ACCESS_DENIED_ALERT: u8 = 0x31;
+    matches!(
+        error,
+        quinn::ConnectionError::TransportError(error)
+            if error.code == quinn::TransportErrorCode::crypto(TLS_ACCESS_DENIED_ALERT)
+    ) || matches!(error, quinn::ConnectionError::ConnectionClosed(close)
+        if close.error_code == quinn::TransportErrorCode::crypto(TLS_ACCESS_DENIED_ALERT))
 }
 
 pub(crate) async fn with_handshake_timeout<F, T, E>(
@@ -204,58 +118,19 @@ where
     }
 }
 
-pub fn make_client_quic_config_with_client_auth(
-    roots: RootCertStore,
-    cert_chain: Vec<CertificateDer<'static>>,
-    private_key: PrivateKeyDer<'static>,
-) -> Result<quinn::ClientConfig, QuicConfigError> {
-    let mut client_crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_client_auth_cert(cert_chain, private_key)?;
-    client_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
-
-    let mut client_config =
-        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
-    client_config.transport_config(Arc::new(client_transport_config()));
-
-    Ok(client_config)
-}
-
-fn configure_server_transport(transport_config: &mut TransportConfig) {
-    transport_config.max_concurrent_bidi_streams(0_u8.into());
-    transport_config.max_concurrent_uni_streams(0_u8.into());
-    transport_config.max_idle_timeout(Some(
-        IDLE_TIMEOUT
-            .try_into()
-            .expect("the fixed idle timeout should fit quinn's idle timeout type"),
-    ));
-    transport_config.keep_alive_interval(Some(KEEPALIVE_INTERVAL));
-}
-
-fn client_transport_config() -> TransportConfig {
-    let mut transport_config = TransportConfig::default();
-    transport_config.max_concurrent_bidi_streams(MAX_SERVER_OPENED_BIDI_STREAMS.into());
-    transport_config.max_concurrent_uni_streams(0_u8.into());
-    transport_config.max_idle_timeout(Some(
-        IDLE_TIMEOUT
-            .try_into()
-            .expect("the fixed idle timeout should fit quinn's idle timeout type"),
-    ));
-    transport_config.keep_alive_interval(Some(KEEPALIVE_INTERVAL));
-    transport_config
-}
-
 fn server_crypto_provider() -> Arc<CryptoProvider> {
     CryptoProvider::get_default()
         .cloned()
         .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()))
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct StaticClientIdentityAdmission {
     trusted_client_identities: HashSet<ClientIdentity>,
 }
 
+#[cfg(test)]
 impl StaticClientIdentityAdmission {
     pub(crate) fn from_identities(trusted_client_identities: &[ClientIdentity]) -> Self {
         Self {
@@ -264,6 +139,7 @@ impl StaticClientIdentityAdmission {
     }
 }
 
+#[cfg(test)]
 impl ClientIdentityAdmission for StaticClientIdentityAdmission {
     fn authorizes_client_identity(&self, identity: &ClientIdentity) -> bool {
         self.trusted_client_identities.contains(identity)
@@ -370,44 +246,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use rcgen::generate_simple_self_signed;
-    use rustls::RootCertStore;
+    use rustls::pki_types::CertificateDer;
     use rustls::pki_types::pem::{Error as PemError, PemObject};
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::server::danger::ClientCertVerifier;
     use tracing_subscriber::fmt::writer::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
 
-    use super::{
-        PinnedClientCertVerifier, StaticClientIdentityAdmission, make_client_quic_config,
-        make_server_quic_config, with_handshake_timeout,
-    };
+    use super::{PinnedClientCertVerifier, StaticClientIdentityAdmission, with_handshake_timeout};
     use crate::generate_client_identity;
-
-    #[test]
-    fn server_quic_config_uses_runewarp_transport_defaults() {
-        let (certificate, private_key) = make_self_signed_cert("tunnel.example.test");
-        let server_config =
-            make_server_quic_config(vec![certificate], private_key_from_der(&private_key)).unwrap();
-        let debug = format!("{:?}", server_config.transport);
-
-        assert!(debug.contains("max_concurrent_bidi_streams: 0"));
-        assert!(debug.contains("max_concurrent_uni_streams: 0"));
-        assert!(debug.contains("max_idle_timeout: Some(60000)"));
-        assert!(debug.contains("keep_alive_interval: Some(20s)"));
-    }
-
-    #[test]
-    fn client_quic_config_uses_runewarp_transport_defaults() {
-        let (certificate, _) = make_self_signed_cert("tunnel.example.test");
-        let client_config = make_client_quic_config(root_store_with(&certificate)).unwrap();
-        let debug = format!("{client_config:?}");
-
-        assert!(debug.contains("max_concurrent_bidi_streams: 1024"));
-        assert!(debug.contains("max_concurrent_uni_streams: 0"));
-        assert!(debug.contains("max_idle_timeout: Some(60000)"));
-        assert!(debug.contains("keep_alive_interval: Some(20s)"));
-    }
 
     #[tokio::test]
     async fn handshake_timeout_wrapper_returns_the_timeout_error_after_the_deadline() {
@@ -505,24 +351,6 @@ mod tests {
         );
         tracing::subscriber::with_default(subscriber, action);
         buffer.read()
-    }
-
-    fn make_self_signed_cert(server_name: &str) -> (CertificateDer<'static>, Vec<u8>) {
-        let certified_key = generate_simple_self_signed(vec![server_name.to_owned()]).unwrap();
-        (
-            CertificateDer::from(certified_key.cert),
-            certified_key.signing_key.serialize_der(),
-        )
-    }
-
-    fn private_key_from_der(der: &[u8]) -> PrivateKeyDer<'static> {
-        PrivatePkcs8KeyDer::from(der.to_vec()).into()
-    }
-
-    fn root_store_with(certificate: &CertificateDer<'static>) -> RootCertStore {
-        let mut roots = RootCertStore::empty();
-        roots.add(certificate.clone()).unwrap();
-        roots
     }
 
     fn client_leaf_certificate(

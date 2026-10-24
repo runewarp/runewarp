@@ -31,8 +31,8 @@ use crate::{
     ServerCertificateConfig, ServerConfig, ServiceConfig,
     client::TerminationTlsConfigs,
     client::validate_services,
-    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_admission,
-    make_server_quic_config_with_client_admission_resolver,
+    make_client_tunnel_h3_config, make_server_tunnel_h3_config,
+    make_server_tunnel_h3_config_with_resolver,
     shutdown::{OrderlyShutdown, ShutdownMode},
 };
 
@@ -64,12 +64,9 @@ impl PreparedServer {
             ServerCertificateConfig::Manual { directory } => {
                 let cert_chain = load_certificate_chain(&directory.join(SERVER_CERT_FILENAME))?;
                 let private_key = load_private_key(&directory.join(SERVER_KEY_FILENAME))?;
-                let quic_server_config = make_server_quic_config_with_client_admission(
-                    cert_chain,
-                    private_key,
-                    client_admission,
-                )
-                .map_err(ServerStartupError::QuicConfig)?;
+                let quic_server_config =
+                    make_server_tunnel_h3_config(cert_chain, private_key, client_admission)
+                        .map_err(ServerStartupError::QuicConfig)?;
                 (quic_server_config, None)
             }
             ServerCertificateConfig::Acme {
@@ -90,7 +87,7 @@ impl PreparedServer {
                 let acme_state = build_acme_state(config.hostname.as_str(), email, state_directory);
                 let acme_lifecycle =
                     AcmeLifecycle::server(config.hostname.as_str(), state_directory).await;
-                let quic_server_config = make_server_quic_config_with_client_admission_resolver(
+                let quic_server_config = make_server_tunnel_h3_config_with_resolver(
                     acme_state.resolver(),
                     client_admission,
                 )
@@ -425,7 +422,7 @@ impl PreparedClient {
         let loaded_roots = load_root_store(&config.server_trust)?;
         let (cert_chain, private_key) = load_client_identity_material(&config.identity_directory)?;
         let quic_client_config =
-            make_client_quic_config_with_client_auth(loaded_roots.roots, cert_chain, private_key)
+            make_client_tunnel_h3_config(loaded_roots.roots, cert_chain, private_key)
                 .map_err(ClientStartupError::QuicConfig)?;
         let client = Client::connect_with_services(crate::client::RoutedClientConnectConfig {
             local_bind_addr,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use quinn::Connection;
+use crate::tunnel_h3::ServerTunnelH3;
 use tokio::sync::RwLock;
 use tokio::task::AbortHandle;
 
@@ -14,7 +14,7 @@ use super::admission::{
 struct PoolMember {
     member_id: u64,
     client_identity: ClientIdentity,
-    connection: Connection,
+    connection: Arc<ServerTunnelH3>,
     active_streams: Arc<AtomicUsize>,
     close_watcher: AbortHandle,
     _admission_permit: TunnelConnectionPermit,
@@ -24,12 +24,12 @@ struct PoolMember {
 pub(crate) struct SelectedTunnelConnection {
     member_id: u64,
     client_identity: ClientIdentity,
-    connection: Connection,
+    connection: Arc<ServerTunnelH3>,
     active_streams: Arc<AtomicUsize>,
 }
 
 impl SelectedTunnelConnection {
-    pub(crate) fn connection(&self) -> Connection {
+    pub(crate) fn connection(&self) -> Arc<ServerTunnelH3> {
         self.connection.clone()
     }
 
@@ -84,7 +84,7 @@ pub(crate) struct ActiveClientPool {
 /// A pool member detached from its previous Tunnel pool without closing the connection.
 pub(crate) struct TakenPoolMember {
     pub(crate) client_identity: ClientIdentity,
-    connection: Connection,
+    connection: Arc<ServerTunnelH3>,
     active_streams: Arc<AtomicUsize>,
     close_watcher: AbortHandle,
     admission_permit: TunnelConnectionPermit,
@@ -151,7 +151,7 @@ impl ActiveClientPool {
 
     pub(crate) async fn try_register(
         &self,
-        connection: Connection,
+        connection: Arc<ServerTunnelH3>,
         client_identity: ClientIdentity,
     ) -> Result<(), AdmissionRejection> {
         let mut members_guard = self.members.write().await;
@@ -191,10 +191,23 @@ impl ActiveClientPool {
     }
 
     #[cfg(test)]
-    pub(crate) async fn register(&self, connection: Connection, client_identity: ClientIdentity) {
+    pub(crate) async fn register(
+        &self,
+        connection: Arc<ServerTunnelH3>,
+        client_identity: ClientIdentity,
+    ) {
         self.try_register(connection, client_identity)
             .await
             .expect("default test admission limits should accept the connection");
+    }
+
+    pub(crate) async fn connections(&self) -> Vec<Arc<ServerTunnelH3>> {
+        self.members
+            .read()
+            .await
+            .iter()
+            .map(|member| member.connection.clone())
+            .collect()
     }
 
     pub(crate) async fn close_all_connections(&self, reason: &'static [u8]) -> usize {
@@ -206,7 +219,7 @@ impl ActiveClientPool {
             .map(|member| member.connection.clone())
             .collect::<Vec<_>>();
         for connection in &connections {
-            connection.close(0_u32.into(), reason);
+            connection.close(reason);
         }
         connections.len()
     }
@@ -226,7 +239,7 @@ impl ActiveClientPool {
             .collect::<Vec<_>>();
         let mut closed = 0;
         for connection in connections {
-            connection.close(0_u32.into(), reason);
+            connection.close(reason);
             closed += 1;
         }
         closed
@@ -318,12 +331,17 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
 
-    use quinn::{Connection, Endpoint};
+    use crate::tunnel_h3::{
+        ServerTunnelH3,
+        test_support::{ClientPeer, establish_peers, test_server_h3_config},
+    };
+    use quinn::Endpoint;
     use rcgen::generate_simple_self_signed;
     use rustls::RootCertStore;
     use rustls::pki_types::pem::Error as PemError;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use tokio::time::{Duration, timeout};
+    use tracing_subscriber::Layer;
     use tracing_subscriber::fmt::writer::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
 
@@ -332,10 +350,7 @@ mod tests {
         AdmissionLimit, ServerAdmissionLimits, TunnelConnectionAdmission,
     };
     use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
-    use crate::{
-        GeneratedClientIdentity, generate_client_identity,
-        make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
-    };
+    use crate::{GeneratedClientIdentity, generate_client_identity, make_client_tunnel_h3_config};
 
     #[tokio::test(flavor = "current_thread")]
     async fn closes_only_connections_matching_client_identities() -> io::Result<()> {
@@ -474,9 +489,7 @@ mod tests {
         ));
         assert_eq!(pool.connection_count().await, 1);
 
-        first_fixture
-            .server_connection
-            .close(0_u32.into(), b"test churn");
+        first_fixture.server_connection.close(b"test churn");
         timeout(Duration::from_secs(1), async {
             while pool.connection_count().await != 0 {
                 tokio::task::yield_now().await;
@@ -642,7 +655,11 @@ mod tests {
                 .with_writer(buffer.clone())
                 .with_ansi(false)
                 .without_time()
-                .with_target(false),
+                .with_target(false)
+                .with_filter(
+                    tracing_subscriber::filter::Targets::new()
+                        .with_target("runewarp", tracing::Level::DEBUG),
+                ),
         );
         let _guard = tracing::subscriber::set_default(subscriber);
         action(buffer.clone()).await;
@@ -666,15 +683,15 @@ mod tests {
         _server_endpoint: Endpoint,
         _client_endpoint: Endpoint,
         #[allow(dead_code)]
-        client_connection: Connection,
-        server_connection: Connection,
+        client_connection: ClientPeer,
+        server_connection: Arc<ServerTunnelH3>,
     }
 
     impl TunnelConnectionFixture {
         async fn connect(client_identity: &GeneratedClientIdentity) -> io::Result<Self> {
             let (certificate, private_key) = make_self_signed_cert("tunnel.example.test")?;
             let server_endpoint = Endpoint::server(
-                make_server_quic_config_with_client_auth(
+                test_server_h3_config(
                     vec![certificate.clone()],
                     private_key_from_der(&private_key),
                     std::slice::from_ref(&client_identity.client_identity),
@@ -687,7 +704,7 @@ mod tests {
 
             let mut client_endpoint = Endpoint::client(localhost(0)).map_err(io::Error::other)?;
             client_endpoint.set_default_client_config(
-                make_client_quic_config_with_client_auth(
+                make_client_tunnel_h3_config(
                     root_store_with(&certificate)?,
                     client_certificate_chain(client_identity)?,
                     client_private_key(client_identity)?,
@@ -718,6 +735,8 @@ mod tests {
             };
             let (server_connection, client_connection) =
                 tokio::try_join!(accept_connection, connect_client)?;
+            let (server_connection, client_connection) =
+                establish_peers(server_connection, client_connection, 1024).await?;
 
             Ok(Self {
                 _server_endpoint: server_endpoint,

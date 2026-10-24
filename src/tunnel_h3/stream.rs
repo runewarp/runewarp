@@ -310,6 +310,11 @@ impl<R: RecvHalf, S: SendHalf> TunnelStream<R, S> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_split(read: TunnelReadHalf<R>, write: TunnelWriteHalf<S>) -> Self {
+        Self { read, write }
+    }
+
     /// Separate halves for concurrent reading and writing.
     pub fn into_split(self) -> (TunnelReadHalf<R>, TunnelWriteHalf<S>) {
         (self.read, self.write)

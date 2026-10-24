@@ -6,7 +6,7 @@ use quinn::Endpoint;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     Client, ClientConnectConfig, GeneratedClientIdentity, generate_client_identity,
-    make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
+    make_client_tunnel_h3_config, make_server_tunnel_h3_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -41,10 +41,22 @@ async fn complete_authorized_tunnel_handshake(
 ) -> io::Result<()> {
     let (certificate, private_key) = make_self_signed_cert("tunnel.example.test")?;
     let server_endpoint = Endpoint::server(
-        make_server_quic_config_with_client_auth(
+        make_server_tunnel_h3_config(
             vec![certificate.clone()],
             private_key_from_der(&private_key),
-            std::slice::from_ref(&client_identity.client_identity),
+            std::sync::Arc::new(
+                runewarp::ServerAuthorization::from_static_tunnels(
+                    &runewarp::ServerHostname::try_from("tunnel.example.test").unwrap(),
+                    &[runewarp::ServerTunnelConfig {
+                        id: None,
+                        public_hostnames: vec![
+                            runewarp::PublicHostname::try_from("app.example.test").unwrap(),
+                        ],
+                        authorized_client_identities: vec![client_identity.client_identity.clone()],
+                    }],
+                )
+                .unwrap(),
+            ),
         )
         .map_err(io::Error::other)?,
         localhost(0),
@@ -56,7 +68,7 @@ async fn complete_authorized_tunnel_handshake(
         server_addr: server_endpoint.local_addr()?,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: "127.0.0.1:443".to_owned(),
-        quic_client_config: make_client_quic_config_with_client_auth(
+        quic_client_config: make_client_tunnel_h3_config(
             root_store_with(&certificate)?,
             client_certificate_chain(client_identity)?,
             client_private_key(client_identity)?,
@@ -71,10 +83,18 @@ async fn complete_authorized_tunnel_handshake(
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::UnexpectedEof, "server endpoint closed")
             })?;
-        let _connection = timeout(Duration::from_secs(1), incoming)
+        let connection = timeout(Duration::from_secs(1), incoming)
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?
             .map_err(io::Error::other)?;
+        let tunnel = runewarp::tunnel_h3::ServerTunnelH3::establish(
+            connection,
+            runewarp::ServerHostname::try_from("tunnel.example.test").unwrap(),
+            runewarp::tunnel_h3::ServerRuntimeGeneration::generate(),
+        )
+        .await
+        .map_err(io::Error::other)?;
+        let _ = tunnel.closed().await;
         Ok::<(), io::Error>(())
     });
 

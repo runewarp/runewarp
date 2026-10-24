@@ -9,7 +9,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::quic::{
     ClientIdentityAdmission, IDLE_TIMEOUT, KEEPALIVE_INTERVAL, QuicConfigError,
-    pinned_client_auth_server_crypto,
+    pinned_client_auth_server_builder, pinned_client_auth_server_crypto,
 };
 
 use super::TUNNEL_H3_ALPN;
@@ -38,7 +38,21 @@ pub fn make_server_tunnel_h3_config(
     private_key: PrivateKeyDer<'static>,
     admission: Arc<dyn ClientIdentityAdmission>,
 ) -> Result<quinn::ServerConfig, QuicConfigError> {
-    let mut server_crypto = pinned_client_auth_server_crypto(cert_chain, private_key, admission)?;
+    let server_crypto = pinned_client_auth_server_crypto(cert_chain, private_key, admission)?;
+    server_config(server_crypto)
+}
+
+/// Server HTTP/3 configuration with a live certificate resolver, including ACME.
+pub fn make_server_tunnel_h3_config_with_resolver(
+    resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+    admission: Arc<dyn ClientIdentityAdmission>,
+) -> Result<quinn::ServerConfig, QuicConfigError> {
+    server_config(pinned_client_auth_server_builder(admission)?.with_cert_resolver(resolver))
+}
+
+fn server_config(
+    mut server_crypto: rustls::ServerConfig,
+) -> Result<quinn::ServerConfig, QuicConfigError> {
     server_crypto.alpn_protocols = vec![TUNNEL_H3_ALPN.to_vec()];
     server_crypto.max_early_data_size = 0;
 

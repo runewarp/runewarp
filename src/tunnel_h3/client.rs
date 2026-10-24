@@ -10,7 +10,7 @@ use h3::error::{Code, StreamError};
 use http::{HeaderMap, Method, Request, StatusCode, header};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 
 use crate::ServerHostname;
 use crate::quic::{HANDSHAKE_TIMEOUT, with_handshake_timeout};
@@ -71,11 +71,37 @@ impl ClientTunnelH3 {
         .await
     }
 
+    pub(crate) async fn establish_with_budget_observer(
+        connection: quinn::Connection,
+        server_hostname: &ServerHostname,
+        stream_budget: Arc<Semaphore>,
+        observer: Arc<dyn Fn(bool) + Send + Sync>,
+    ) -> Result<Self, TunnelH3Error> {
+        Self::establish_internal(
+            connection,
+            server_hostname,
+            stream_budget,
+            TunnelH3Timing::default(),
+            Some(observer),
+        )
+        .await
+    }
+
     pub(crate) async fn establish_with_timing(
         connection: quinn::Connection,
         server_hostname: &ServerHostname,
         stream_budget: Arc<Semaphore>,
         timing: TunnelH3Timing,
+    ) -> Result<Self, TunnelH3Error> {
+        Self::establish_internal(connection, server_hostname, stream_budget, timing, None).await
+    }
+
+    async fn establish_internal(
+        connection: quinn::Connection,
+        server_hostname: &ServerHostname,
+        stream_budget: Arc<Semaphore>,
+        timing: TunnelH3Timing,
+        budget_observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
     ) -> Result<Self, TunnelH3Error> {
         let (mut driver, mut send_request) = with_handshake_timeout(
             async {
@@ -100,6 +126,9 @@ impl ClientTunnelH3 {
         {
             Ok(Ok(subscribed)) => subscribed,
             Ok(Err(error)) => {
+                if let Some(error) = connection.close_reason() {
+                    return Err(TunnelH3Error::Transport(error));
+                }
                 close_after_failure(&connection, &error);
                 return Err(error);
             }
@@ -114,6 +143,8 @@ impl ClientTunnelH3 {
             send_request: send_request.clone(),
             slot_authority: format!("{server_hostname}:443"),
             stream_budget,
+            budget_observer,
+            connection: connection.clone(),
             assigned: assigned_sender,
             timing,
         }));
@@ -145,7 +176,15 @@ impl ClientTunnelH3 {
     /// `None` once the connection can deliver no more Visitors: it closed, or GOAWAY stopped new
     /// slots and every outstanding slot has resolved.
     pub async fn accept_tunnel_stream(&mut self) -> Option<ClientTunnelStream> {
-        self.assigned.recv().await
+        tokio::select! {
+            stream = self.assigned.recv() => stream,
+            _ = self.connection.closed() => None,
+        }
+    }
+
+    /// Close immediately when the Client runtime stops.
+    pub fn close(&self) {
+        close_connection(&self.connection, Code::H3_NO_ERROR);
     }
 
     /// Runtime generation of the Server this connection reached.
@@ -159,8 +198,9 @@ impl ClientTunnelH3 {
     }
 
     /// Wait until the connection closes for any reason.
-    pub async fn closed(&self) -> quinn::ConnectionError {
-        self.connection.closed().await
+    pub fn closed(&self) -> impl Future<Output = quinn::ConnectionError> + Send + 'static + use<> {
+        let connection = self.connection.clone();
+        async move { connection.closed().await }
     }
 }
 
@@ -387,6 +427,8 @@ struct ReceiveSlotPool {
     /// Authority of every plain CONNECT slot: the Server hostname. The Server ignores the port.
     slot_authority: String,
     stream_budget: Arc<Semaphore>,
+    budget_observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+    connection: quinn::Connection,
     assigned: mpsc::UnboundedSender<ClientTunnelStream>,
     timing: TunnelH3Timing,
 }
@@ -399,10 +441,18 @@ struct ReceiveSlotPool {
 async fn maintain_receive_slots(mut pool: ReceiveSlotPool) {
     let mut waiting: JoinSet<Option<ClientTunnelStream>> = JoinSet::new();
     let mut opening = true;
+    let mut next_open = Instant::now();
 
     while opening || !waiting.is_empty() {
         let may_open = opening && waiting.len() < MAX_IDLE_RECEIVE_SLOTS;
+        if may_open
+            && pool.stream_budget.available_permits() == 0
+            && let Some(observer) = &pool.budget_observer
+        {
+            observer(false);
+        }
         tokio::select! {
+            _ = pool.connection.closed() => break,
             resolved = waiting.join_next(), if !waiting.is_empty() => {
                 match resolved {
                     Some(Ok(Some(stream))) => {
@@ -411,22 +461,28 @@ async fn maintain_receive_slots(mut pool: ReceiveSlotPool) {
                     }
                     Some(Ok(None) | Err(_)) | None => {
                         if opening {
-                            sleep(pool.timing.resubscribe_delay).await;
+                            next_open = Instant::now() + pool.timing.resubscribe_delay;
                         }
                     }
                 }
             }
-            permit = pool.stream_budget.clone().acquire_owned(), if may_open => {
+            permit = async {
+                sleep_until(next_open).await;
+                pool.stream_budget.clone().acquire_owned().await
+            }, if may_open => {
                 let Ok(permit) = permit else {
                     opening = false;
                     continue;
                 };
+                if let Some(observer) = &pool.budget_observer {
+                    observer(true);
+                }
                 match pool.open_slot().await {
                     Ok(stream) => {
                         waiting.spawn(wait_for_assignment(stream, permit));
                     }
                     Err(error) if forbids_new_requests(&error) => opening = false,
-                    Err(_) => sleep(pool.timing.resubscribe_delay).await,
+                    Err(_) => next_open = Instant::now() + pool.timing.resubscribe_delay,
                 }
             }
         }

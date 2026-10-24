@@ -12,10 +12,9 @@ use runewarp::{
     SelectedClientConfig, Server, ServerAddress, ServerAdmission, ServerAuthorization,
     ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, ShutdownMode,
     VisitorTcpAddresses, generate_client_identity, initialize_manual_server_certificate,
-    load_client_config, load_server_config, make_client_quic_config,
-    make_client_quic_config_with_client_auth, make_server_quic_config,
-    make_server_quic_config_with_client_admission,
-    make_server_quic_config_with_client_admission_resolver, resolve_selected_client_config,
+    load_client_config, load_server_config, make_client_tunnel_h3_config,
+    make_server_tunnel_h3_config, make_server_tunnel_h3_config_with_resolver,
+    resolve_selected_client_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -83,11 +82,12 @@ async fn forwards_tls_passthrough_end_to_end() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_authenticated_server_quic_config(
-            &tunnel_cert,
-            &tunnel_key,
-            &authorization,
-        ),
+        quic_server_config: runewarp::tunnel_h3::make_server_tunnel_h3_config(
+            vec![tunnel_cert.clone()],
+            private_key_from_der(&tunnel_key),
+            Arc::new(authorization.clone()),
+        )
+        .unwrap(),
         admission: ServerAdmission::Static,
     })
     .await
@@ -101,7 +101,12 @@ async fn forwards_tls_passthrough_end_to_end() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_address.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &trusted_client),
+        quic_client_config: runewarp::tunnel_h3::make_client_tunnel_h3_config(
+            root_store_with(&tunnel_cert),
+            client_certificate_chain(&trusted_client),
+            client_private_key(&trusted_client),
+        )
+        .unwrap(),
     })
     .await
     .unwrap();
@@ -577,7 +582,7 @@ async fn drops_public_tls_when_no_client_is_connected() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -635,7 +640,7 @@ async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -711,7 +716,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -730,7 +735,7 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_address.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &trusted_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &trusted_client),
     })
     .await
     .unwrap();
@@ -812,7 +817,7 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_admission_resolver(
+        quic_server_config: make_server_tunnel_h3_config_with_resolver(
             resolver.clone(),
             Arc::new(authorization.clone()),
         )
@@ -911,7 +916,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
-        quic_server_config: make_server_quic_config_with_client_admission(
+        quic_server_config: make_server_tunnel_h3_config(
             vec![tunnel_cert.clone()],
             private_key_from_der(&tunnel_key),
             Arc::new(authorization.clone()),
@@ -931,7 +936,7 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend.0.to_string(),
-        quic_client_config: make_client_quic_config(root_store_with(&tunnel_cert)).unwrap(),
+        quic_client_config: unauthenticated_h3_client_config(root_store_with(&tunnel_cert)),
     })
     .await;
 
@@ -974,7 +979,7 @@ async fn library_constructors_expose_addresses_before_running() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -995,7 +1000,7 @@ async fn library_constructors_expose_addresses_before_running() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: available_local_addr().await.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &trusted_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &trusted_client),
     })
     .await
     .unwrap();
@@ -1067,9 +1072,10 @@ async fn server_bind_rejects_empty_configured_tunnels() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config(
+        quic_server_config: make_server_tunnel_h3_config(
             vec![tunnel_cert],
             private_key_from_der(&tunnel_key),
+            Arc::new(authorization.clone()),
         )
         .unwrap(),
         admission: ServerAdmission::Static,
@@ -1117,7 +1123,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -1139,7 +1145,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_one.0.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &shared_client),
     })
     .await
     .expect("client should connect");
@@ -1157,7 +1163,7 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_two.0.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -1204,7 +1210,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -1226,7 +1232,7 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend.0.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &shared_client),
     })
     .await
     .expect("client should connect");
@@ -1274,7 +1280,7 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -1292,7 +1298,7 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend.0.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -1356,7 +1362,7 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -1389,7 +1395,7 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend.0.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &shared_client),
     };
     let client = Client::connect(client_config.clone())
         .await
@@ -1459,7 +1465,7 @@ async fn graceful_server_shutdown_keeps_already_landed_streams_until_they_finish
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -1479,7 +1485,7 @@ async fn graceful_server_shutdown_keeps_already_landed_streams_until_they_finish
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_addr.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -1552,7 +1558,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -1570,7 +1576,7 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: closed_backend_address.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -1623,7 +1629,7 @@ async fn a_busier_tunnel_pool_member_stops_winning_new_stream_placement() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_authenticated_server_quic_config(
+        quic_server_config: make_authenticated_server_h3_config(
             &tunnel_cert,
             &tunnel_key,
             &authorization,
@@ -1641,7 +1647,7 @@ async fn a_busier_tunnel_pool_member_stops_winning_new_stream_placement() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_one_addr.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -1676,7 +1682,7 @@ async fn a_busier_tunnel_pool_member_stops_winning_new_stream_placement() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_two.0.to_string(),
-        quic_client_config: make_authenticated_client_quic_config(&tunnel_cert, &shared_client),
+        quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &shared_client),
     })
     .await
     .unwrap();
@@ -2956,12 +2962,12 @@ fn configured_tunnel(
     }
 }
 
-fn make_authenticated_server_quic_config(
+fn make_authenticated_server_h3_config(
     certificate: &CertificateDer<'static>,
     private_key: &[u8],
     authorization: &ServerAuthorization,
 ) -> quinn::ServerConfig {
-    make_server_quic_config_with_client_admission(
+    make_server_tunnel_h3_config(
         vec![certificate.clone()],
         private_key_from_der(private_key),
         Arc::new(authorization.clone()),
@@ -2969,11 +2975,11 @@ fn make_authenticated_server_quic_config(
     .unwrap()
 }
 
-fn make_authenticated_client_quic_config(
+fn make_authenticated_client_h3_config(
     server_certificate: &CertificateDer<'static>,
     client_identity: &GeneratedClientIdentity,
 ) -> quinn::ClientConfig {
-    make_client_quic_config_with_client_auth(
+    make_client_tunnel_h3_config(
         root_store_with(server_certificate),
         client_certificate_chain(client_identity),
         client_private_key(client_identity),
@@ -3322,4 +3328,120 @@ async fn wait_for_tcp_connect_failure(public_addr: SocketAddr) -> io::Result<()>
     })
     .await
     .map_err(io::Error::other)?
+}
+
+fn unauthenticated_h3_client_config(roots: RootCertStore) -> quinn::ClientConfig {
+    let mut crypto = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    crypto.alpn_protocols = vec![b"h3".to_vec()];
+    quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap(),
+    ))
+}
+
+#[tokio::test]
+async fn server_shutdown_rejects_idle_slots_while_a_placed_visitor_finishes() {
+    timeout(Duration::from_secs(3), async {
+        use runewarp::tunnel_h3::ClientTunnelH3;
+        let (certificate, key) = make_self_signed_cert("tunnel.example.test");
+        let identity = generate_client_identity().unwrap();
+        let authorization = ServerAuthorization::from_static_tunnels(
+            &server_hostname("tunnel.example.test"),
+            &[configured_tunnel(&["app.example.test"], &identity)],
+        )
+        .unwrap();
+        let server = Server::bind(ServerBindConfig {
+            public_bind_addr: localhost(0),
+            tunnel_connection_bind_addr: localhost(0),
+            readiness_bind_addr: None,
+            server_hostname: server_hostname("tunnel.example.test"),
+            authorization: authorization.clone(),
+            public_tls_config: None,
+            quic_server_config: make_authenticated_server_h3_config(
+                &certificate,
+                &key,
+                &authorization,
+            ),
+            admission: ServerAdmission::Static,
+        })
+        .await
+        .unwrap();
+        let public_addr = server.public_addr().unwrap();
+        let tunnel_addr = server.tunnel_addr().unwrap();
+        let shutdown = OrderlyShutdown::new(Duration::from_secs(2), QUIC_CLOSE_FLUSH_DURATION);
+        let trigger = shutdown.clone();
+        let server_task = tokio::spawn(async move { server.run_with_shutdown(&shutdown).await });
+        let mut endpoint = quinn::Endpoint::client(localhost(0)).unwrap();
+        endpoint.set_default_client_config(make_authenticated_client_h3_config(
+            &certificate,
+            &identity,
+        ));
+        let connection = endpoint
+            .connect(tunnel_addr, "tunnel.example.test")
+            .unwrap()
+            .await
+            .unwrap();
+        let mut client = ClientTunnelH3::establish(
+            connection,
+            &server_hostname("tunnel.example.test"),
+            Arc::new(tokio::sync::Semaphore::new(8)),
+        )
+        .await
+        .unwrap();
+
+        let mut visitor = TcpStream::connect(public_addr).await.unwrap();
+        let addresses = VisitorTcpAddresses {
+            source: visitor.local_addr().unwrap(),
+            destination: public_addr,
+        };
+        let tls_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store_with(&certificate))
+                .with_no_client_auth(),
+        );
+        let mut tls = rustls::ClientConnection::new(
+            tls_config,
+            ServerName::try_from("app.example.test").unwrap(),
+        )
+        .unwrap();
+        let mut hello = Vec::new();
+        tls.write_tls(&mut hello).unwrap();
+        visitor.write_all(&hello).await.unwrap();
+        let mut stream = client
+            .accept_tunnel_stream()
+            .await
+            .expect("Visitor assigned");
+        let mut initial = vec![0; addresses.encode_proxy_v2().len() + hello.len()];
+        stream.read_exact(&mut initial).await.unwrap();
+        assert_eq!(&initial[..28], addresses.encode_proxy_v2());
+        assert_eq!(&initial[28..], hello);
+
+        trigger.begin_graceful();
+        assert!(
+            client.accept_tunnel_stream().await.is_none(),
+            "GOAWAY rejects idle slots before closing placed work"
+        );
+        assert!(!server_task.is_finished());
+        stream.write_all(b"finish").await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        visitor.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, b"finish");
+        // A received FIN leaves the opposite direction usable.
+        visitor.write_all(b"tail").await.unwrap();
+        visitor.shutdown().await.unwrap();
+        let mut tail = Vec::new();
+        stream.read_to_end(&mut tail).await.unwrap();
+        assert_eq!(tail, b"tail");
+        drop(stream);
+        server_task.await.unwrap().unwrap();
+        assert!(matches!(
+            client.closed().await,
+            quinn::ConnectionError::ApplicationClosed(close)
+                if close.error_code.into_inner() == 0x100
+        ));
+    })
+    .await
+    .expect("Server shutdown and Visitor completion are bounded");
 }

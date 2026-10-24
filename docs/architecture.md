@@ -10,7 +10,7 @@ Runewarp keeps public ingress simple: the server routes encrypted traffic to a c
 | Visitor addresses | Direct sockets or trusted PROXY v2 ingress become one canonical TCP tuple carried on every Tunnel stream |
 | Routing authority | The **Server** selects the **Tunnel** from the current **Authorization snapshot** |
 | **Client instance behavior** | The **Client instance** selects a **Service** locally and either forwards TLS bytes to a TLS-terminating **Local backend** (**TLS passthrough**) or terminates TLS itself before proxying plaintext to the **Local backend** (**Terminate mode**) |
-| Tunnel transport | One long-lived QUIC/TLS **Tunnel connection** per effective **Server address** |
+| Tunnel transport | One long-lived HTTP/3 over QUIC/TLS **Tunnel connection** per effective **Server address** |
 | Trust model | Server certificate validation plus pinned **Client identity** authentication |
 | Process lifecycle | Separate Client and Server role runtimes own preparation, static/Managed construction, ACME, shutdown, fatal propagation, and teardown |
 
@@ -130,7 +130,11 @@ Steps 1–9 are the same. In step 8, when the matched Service has `tls-mode = "t
 
 The Local backend receives unencrypted bytes directly and does not need to terminate TLS.
 
-The Tunnel-framing module owns the complete internal `runewarp/1` application-stream envelope on both ends. **Backend PROXY emission** remains a distinct per-Service seam and only reuses the PROXY v2 codec internally.
+The Tunnel-framing module owns the internal PROXY v2 envelope carried in each assigned HTTP/3 receive slot on both ends. **Backend PROXY emission** remains a distinct per-Service seam and only reuses the PROXY v2 codec internally.
+
+Every Tunnel connection uses ordinary HTTP/3 with ALPN `h3`, required pinned-identity mTLS, and no application 0-RTT. The Client waits for a valid `GET /v1/tunnel/events` state before opening plain-CONNECT receive slots. The Server places Visitors only on these offered slots. Up to 32 idle slots per connection share the Client-instance 1,024-slot budget with assigned streams. The event stream carries protocol version and Server runtime generation, with no configuration. Static and Managed modes, manual certificates, and ACME use this same transport.
+
+Server graceful shutdown sends GOAWAY concurrently on all connections, rejects idle slots, and lets placed streams finish within the configured deadline. FIN maps to half-close; errors and aborted writes reset streams. No peer depends on received cancellation codes. Old `runewarp/1` binaries are incompatible and both sides must be upgraded together.
 
 ## Trust model
 
@@ -150,11 +154,7 @@ The Client validates the Server certificate through typed system trust or an exc
 
 In **Static mode**, the Server loads one startup-only **Authorization snapshot** and the Client starts one address worker per configured **Server address**. In **Managed mode**, Control replaces the same complete authorization or assignment inputs. Server replacement commits routing and handshake admission together and preserves Tunnel-pool continuity by **Tunnel ID**; Client replacement adds, Retires, or re-adopts address workers without duplicate dialing.
 
-Static and Managed Client address workers cross the same production Tunnel-connection-attempt module. That
-module owns ordered DNS selection, per-attempt trust and Client-identity reload, QUIC establishment,
-typed attempt and connection-end classification, and lifecycle reporting context. DNS is its only
-internal seam: the runtime uses the system resolver and deterministic tests use scripted results.
-The Address worker remains the sole owner of retry jitter, delay reporting, waiting, and reset.
+Static and Managed Client address workers cross the same production Tunnel-connection-attempt module. That module owns ordered DNS selection, per-attempt trust and Client-identity reload, QUIC and HTTP/3 establishment and the event-stream gate, typed attempt and connection-end classification, and lifecycle reporting context. DNS is its only internal seam: the runtime uses the system resolver and deterministic tests use scripted results. The Address worker remains the sole owner of retry jitter, delay reporting, waiting, and reset.
 
 Each Managed runtime maintains one mutually authenticated HTTP/2 **Managed session**. The full apply, readiness, convergence, Retiring, Control-loss, and drain contract is in [`managed.md`](managed.md).
 

@@ -14,13 +14,15 @@
 //! received STOP_SENDING or RESET_STREAM error code: `h3-quinn` can deliver STOP_SENDING with code
 //! 0 (hyperium/h3#361), so any stop or reset only ends that direction or stream.
 //!
-//! The Client and Server runtimes still use `runewarp/1`; this module is not wired into them yet.
+//! Static and Managed runtimes use this module for every Tunnel connection.
 
 mod client;
 mod config;
 mod events;
 mod server;
 mod stream;
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 
@@ -31,7 +33,10 @@ use h3::error::{Code, ConnectionError, StreamError};
 use tokio::task::JoinHandle;
 
 pub use client::ClientTunnelH3;
-pub use config::{make_client_tunnel_h3_config, make_server_tunnel_h3_config};
+pub use config::{
+    make_client_tunnel_h3_config, make_server_tunnel_h3_config,
+    make_server_tunnel_h3_config_with_resolver,
+};
 pub use events::{ServerRuntimeGeneration, TUNNEL_PROTOCOL_VERSION, TunnelEventState};
 pub use server::{OpenTunnelStreamError, ServerTunnelH3};
 pub use stream::{
@@ -86,6 +91,8 @@ impl Default for TunnelH3Timing {
 pub enum TunnelH3Error {
     /// The authenticated connection exposed no pinned Client identity.
     MissingClientIdentity,
+    /// QUIC connection ended during HTTP/3 establishment.
+    Transport(quinn::ConnectionError),
     /// HTTP/3 connection setup failed.
     Setup(ConnectionError),
     /// HTTP/3 connection setup did not finish within the handshake timeout.
@@ -100,11 +107,20 @@ pub enum TunnelH3Error {
     Incompatible(&'static str),
 }
 
+impl TunnelH3Error {
+    pub(crate) fn is_unauthorized_client_identity(&self) -> bool {
+        matches!(self, Self::Transport(error) if crate::quic::is_tls_access_denied(error))
+    }
+}
+
 impl fmt::Display for TunnelH3Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingClientIdentity => {
                 formatter.write_str("tunnel connection has no pinned client identity")
+            }
+            Self::Transport(_) => {
+                formatter.write_str("tunnel connection closed during HTTP/3 establishment")
             }
             Self::Setup(_) => formatter.write_str("HTTP/3 tunnel connection setup failed"),
             Self::SetupTimeout => formatter.write_str("HTTP/3 tunnel connection setup timed out"),
@@ -125,6 +141,7 @@ impl fmt::Display for TunnelH3Error {
 impl std::error::Error for TunnelH3Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Transport(error) => Some(error),
             Self::Setup(error) => Some(error),
             Self::EventStream(error) => Some(error),
             _ => None,

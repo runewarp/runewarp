@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::tunnel_h3::{ServerRuntimeGeneration, ServerTunnelH3};
 use quinn::Endpoint;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::Notify;
@@ -92,6 +93,8 @@ pub struct Server {
     authorization_adapter: ServerAuthorizationAdapter,
     fatal: FatalSignal,
     admission_policy: ServerAdmissionPolicy,
+    server_hostname: ServerHostname,
+    server_generation: ServerRuntimeGeneration,
 }
 
 struct ReadinessProbe {
@@ -312,8 +315,10 @@ impl Server {
         if let Some(gate) = readiness_gate {
             tunnel_registry.set_readiness(gate);
         }
-        let authorization_adapter =
-            ServerAuthorizationAdapter::new(config.server_hostname, tunnel_registry.clone());
+        let authorization_adapter = ServerAuthorizationAdapter::new(
+            config.server_hostname.clone(),
+            tunnel_registry.clone(),
+        );
 
         Ok(Self {
             public_listener,
@@ -324,6 +329,8 @@ impl Server {
             authorization_adapter,
             fatal,
             admission_policy,
+            server_hostname: config.server_hostname,
+            server_generation: ServerRuntimeGeneration::generate(),
         })
     }
 
@@ -381,6 +388,8 @@ impl Server {
             authorization_adapter: _,
             fatal,
             admission_policy,
+            server_hostname,
+            server_generation,
         } = self;
         let mut accept_backoff = AcceptBackoff::default();
         let mut public_accept_not_before = None;
@@ -436,6 +445,8 @@ impl Server {
                         tunnel_registry.clone(),
                         incoming,
                         &mut handshakes,
+                        server_hostname.clone(),
+                        server_generation,
                     );
                 }
             }
@@ -457,7 +468,12 @@ impl Server {
         if mode == ShutdownMode::Graceful && shutdown.graceful_shutdown_duration() > Duration::ZERO
         {
             tokio::select! {
-                _ = tunnel_registry.wait_quiescent() => {}
+                _ = async {
+                    tokio::join!(
+                        tunnel_registry.shutdown_connections(shutdown.graceful_shutdown_duration()),
+                        tunnel_registry.wait_quiescent(),
+                    );
+                } => {}
                 _ = tokio::time::sleep(shutdown.graceful_shutdown_duration()) => {
                     if tunnel_registry.has_outstanding_visitor_work() {
                         runtime_log::server_graceful_shutdown_deadline_expired(
@@ -526,6 +542,8 @@ fn admit_tunnel_handshake(
     tunnel_registry: TunnelRegistry,
     incoming: quinn::Incoming,
     handshakes: &mut JoinSet<()>,
+    server_hostname: ServerHostname,
+    server_generation: ServerRuntimeGeneration,
 ) {
     let handshake_permit = match admission_policy.try_admit_handshake() {
         Ok(permit) => permit,
@@ -543,6 +561,8 @@ fn admit_tunnel_handshake(
             incoming,
             handshake_permit,
             admission_policy,
+            server_hostname,
+            server_generation,
         )
         .await;
     });
@@ -553,6 +573,8 @@ async fn register_tunnel_connection(
     incoming: quinn::Incoming,
     handshake_permit: tokio::sync::OwnedSemaphorePermit,
     admission_policy: ServerAdmissionPolicy,
+    server_hostname: ServerHostname,
+    server_generation: ServerRuntimeGeneration,
 ) {
     let connecting = match incoming.accept() {
         Ok(connecting) => connecting,
@@ -561,9 +583,17 @@ async fn register_tunnel_connection(
             return;
         }
     };
-    let handshake = with_handshake_timeout(connecting, HANDSHAKE_TIMEOUT, || {
-        quinn::ConnectionError::TimedOut
-    })
+    let handshake = with_handshake_timeout(
+        async {
+            let connection = connecting.await.map_err(|error| error.to_string())?;
+            ServerTunnelH3::establish(connection, server_hostname, server_generation)
+                .await
+                .map(Arc::new)
+                .map_err(|error| error.to_string())
+        },
+        HANDSHAKE_TIMEOUT,
+        || "tunnel handshake timed out".to_owned(),
+    )
     .await;
     drop(handshake_permit);
     match handshake {

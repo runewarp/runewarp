@@ -15,9 +15,9 @@ See [architecture](architecture.md), [protocol](protocol.md), and [configuration
 
 ## Protocol evolution — Active
 
-The [HTTP/3 reverse-tunnel issue map](https://github.com/runewarp/runewarp/issues/167) investigates a versioned, extensible Client–Server protocol and graceful Client drain. The work must preserve a simple data path, keep managed configuration on the separate Managed session, and justify any move from the current `runewarp/1` QUIC-stream protocol with research and a measured prototype.
+The [HTTP/3 reverse-tunnel issue map](https://github.com/runewarp/runewarp/issues/167) tracks the remaining signaling and graceful Client-drain work. Client and Server runtimes now use ordinary HTTP/3 on unmodified upstream `h3` + `h3-quinn`, with ALPN `h3`, required mTLS, no application 0-RTT, the Tunnel event-stream gate, receive-slot Visitor carriage, and GOAWAY Server shutdown. This is a lockstep upgrade from `runewarp/1`, without fallback.
 
-A library-level HTTP/3 Tunnel-connection module now exists on unmodified upstream `h3` + `h3-quinn`: ALPN `h3` with required mTLS, no application 0-RTT, the Tunnel event-stream compatibility gate, GOAWAY shutdown, and the receive-slot Visitor carrier. The Client and Server runtimes do not use it yet. A hard cut from `runewarp/1`, with no fallback, comes next.
+Connection-scoped placement withdrawal and graceful Client drain remain follow-up work. Managed configuration stays on the separate Managed session.
 
 Generic private access, mesh, NAT traversal, CONNECT-UDP, and CONNECT-IP remain outside this committed Core track.
 

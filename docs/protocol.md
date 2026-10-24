@@ -97,6 +97,7 @@ Rules:
 - the Client allows **60 seconds** for the first valid event-stream state after HTTP/3 setup
 - idle timeout is **60 seconds**
 - only the Client sends QUIC keepalive pings, every **20 seconds**
+- both peers advertise a **16 KiB decoded HTTP/3 field-section limit**, with **64 MiB connection receive credit** and **1,250,000 bytes of stream receive credit**
 
 ## Receive slots and Tunnel events
 
@@ -116,7 +117,7 @@ data: {"version":1,"generation":"0123456789abcdef0123456789abcdef"}
 
 The Client waits at most **60 seconds** for a subscription's first valid state; keepalive comments do not satisfy that gate. After a stream end, failure, or **60 seconds of silence**, it waits **one second** and resubscribes while the connection remains usable and GOAWAY permits requests. A malformed or unsupported state, unexpected event type, or changed generation on the same connection closes the connection with `H3_GENERAL_PROTOCOL_ERROR`.
 
-Signaling host mismatches receive bodyless `421`; unknown paths receive `404`; another method on the events resource receives `405` with `Allow: GET`. Validly declared positive content, otherwise valid DATA content, or trailers on the bodyless event request receive `400`. Malformed messages use the applicable HTTP/3 error, including `H3_MESSAGE_ERROR` for invalid content length. Bodyless-request intake has a **5-second** deadline and returns `408` on expiry.
+Oversized request header sections receive bodyless `431` before request-handler work is spawned; the connection remains usable. Signaling host mismatches receive bodyless `421`; unknown paths receive `404`; another method on the events resource receives `405` with `Allow: GET`. Validly declared positive content, otherwise valid DATA content, or trailers on the bodyless event request receive `400`. Malformed messages use the applicable HTTP/3 error, including `H3_MESSAGE_ERROR` for invalid content length. Bodyless-request intake has a **5-second** deadline and returns `408` on expiry.
 
 ## Client-side Service selection
 

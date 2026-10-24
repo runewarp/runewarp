@@ -119,7 +119,7 @@ class DistributionChecksTest < Minitest::Test
       end
 
       assert_equal(
-        "error: unexpected git dependencies while crates.io publishing is paused; only h3 and h3-quinn from https://github.com/hyperium/h3 are allowed: quinn 0.11.9 (git+https://github.com/quinn-rs/quinn#abc)",
+        "error: unexpected git dependencies while crates.io publishing is paused; only h3 and h3-quinn and h3-webtransport and h3-datagram from https://github.com/runewarp/h3 are allowed: quinn 0.11.9 (git+https://github.com/quinn-rs/quinn#abc)",
         error.message
       )
     end

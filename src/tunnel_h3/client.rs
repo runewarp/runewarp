@@ -105,7 +105,9 @@ impl ClientTunnelH3 {
     ) -> Result<Self, TunnelH3Error> {
         let (mut driver, mut send_request) = with_handshake_timeout(
             async {
-                h3::client::new(h3_quinn::Connection::new(connection.clone()))
+                h3::client::builder()
+                    .max_field_section_size(super::config::MAX_FIELD_SECTION_SIZE)
+                    .build(h3_quinn::Connection::new(connection.clone()))
                     .await
                     .map_err(TunnelH3Error::Setup)
             },

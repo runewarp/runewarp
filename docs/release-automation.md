@@ -104,11 +104,11 @@ For manual `publish`, the workflow:
 
 ### crates.io publishing pause
 
-`PUBLISHING_PAUSE_REASON` in `scripts/lib/runewarp/crates_io.rb` is the single crates.io pause switch. Publishing is currently paused because Core depends on `h3` and `h3-quinn` through a git pin to upstream `hyperium/h3` until a release includes the fixes Core relies on ([hyperium/h3#369](https://github.com/hyperium/h3/issues/369)); `cargo publish` rejects git dependencies.
+`PUBLISHING_PAUSE_REASON` in `scripts/lib/runewarp/crates_io.rb` is the single crates.io pause switch. Publishing is currently paused because Core depends on `h3` and `h3-quinn` through an exact git pin to the [`runewarp/h3` fork](https://github.com/runewarp/h3), following [#253](https://github.com/runewarp/runewarp/issues/253); `cargo publish` rejects git dependencies.
 
 While the switch holds a reason string:
 
-- `./scripts/check-distribution package-readiness` prints a one-line `skipped:` reason instead of running `cargo publish --dry-run`, then runs `cargo metadata --format-version 1 --locked` and fails if any package has a git source other than the allowlisted `h3` and `h3-quinn` from `https://github.com/hyperium/h3`
+- `./scripts/check-distribution package-readiness` prints a one-line `skipped:` reason instead of running `cargo publish --dry-run`, then runs `cargo metadata --format-version 1 --locked` and fails if any package has a git source other than the allowlisted `h3`, `h3-quinn`, `h3-webtransport`, and `h3-datagram` from `https://github.com/runewarp/h3`; upstream `hyperium/h3` and every other git repository are rejected, even for those crate names
 - the `crate-release` job runs `./scripts/check-crates-io-publishing`, which prints the same reason and writes `paused=true`; the `Publish crate to crates.io` and `Rehearse crate publish` steps are skipped on that output
 - the crates.io existence probe, release metadata, release summary, release notes, Docker promotion, and GitHub Release steps run unchanged
 

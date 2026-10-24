@@ -7,8 +7,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use h3::error::{Code, StreamError};
-use h3::server::{RequestResolver, RequestStream};
+use h3::server::RequestStream;
 use http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::time::{Instant, interval_at, timeout, timeout_at};
@@ -25,7 +27,6 @@ use super::{
 
 type ServerH3Connection = h3::server::Connection<h3_quinn::Connection, Bytes>;
 type ServerRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
-type ServerRequestResolver = RequestResolver<h3_quinn::Connection, Bytes>;
 
 /// Distance between consecutive Client-initiated bidirectional QUIC stream IDs.
 const CLIENT_BIDI_STREAM_ID_STEP: u64 = 4;
@@ -90,6 +91,8 @@ struct Shared {
     /// Shared separately so request accounting, which idle slots carry inside the slot queue,
     /// never owns the queue itself.
     requests_in_flight: Arc<watch::Sender<usize>>,
+    #[cfg(test)]
+    handlers_spawned: std::sync::atomic::AtomicUsize,
     slots: Mutex<SlotQueue>,
     /// Signalled when a receive slot is queued or the queue closes.
     slot_offered: Notify,
@@ -162,6 +165,7 @@ impl ServerTunnelH3 {
         let h3_connection = with_handshake_timeout(
             async {
                 h3::server::builder()
+                    .max_field_section_size(super::config::MAX_FIELD_SECTION_SIZE)
                     .build(h3_quinn::Connection::new(connection.clone()))
                     .await
                     .map_err(TunnelH3Error::Setup)
@@ -178,6 +182,8 @@ impl ServerTunnelH3 {
             goaway_boundary: watch::Sender::new(None),
             subscriptions: watch::Sender::new(0),
             requests_in_flight: Arc::new(watch::Sender::new(0)),
+            #[cfg(test)]
+            handlers_spawned: std::sync::atomic::AtomicUsize::new(0),
             slots: Mutex::new(SlotQueue::default()),
             slot_offered: Notify::new(),
         });
@@ -248,6 +254,14 @@ impl ServerTunnelH3 {
         }
     }
 
+    /// Total request-handler tasks spawned, excluding header resolution.
+    #[cfg(test)]
+    pub(crate) fn handlers_spawned(&self) -> usize {
+        self.shared
+            .handlers_spawned
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Weak reference that upgrades only while connection state is still retained.
     #[cfg(test)]
     pub(crate) fn shared_state_for_test(&self) -> std::sync::Weak<impl Sized + use<>> {
@@ -309,6 +323,10 @@ async fn serve_connection(
     mut shutdown_requested: oneshot::Receiver<()>,
 ) {
     let mut requests_in_flight = shared.requests_in_flight.subscribe();
+    // Resolve headers concurrently in the driver. Invalid or oversized headers never spawn a
+    // request handler, and a slow header section cannot block intake on other streams. QUIC
+    // request-stream credit bounds these futures; each retains the original request deadline.
+    let mut resolving = FuturesUnordered::new();
     let mut accepted_requests: u64 = 0;
     let mut shutting_down = false;
 
@@ -320,11 +338,23 @@ async fn serve_connection(
             }
             _ = async { requests_in_flight.wait_for(|count| *count == 0).await.map(|_| ()) },
                 if shutting_down => break,
+            resolved = resolving.next(), if !resolving.is_empty() => {
+                if let Some(Some((http_request, stream, request, deadline))) = resolved {
+                    #[cfg(test)]
+                    shared.handlers_spawned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tokio::spawn(handle_request(http_request, stream, shared.clone(), request, deadline));
+                }
+            }
             accepted = h3_connection.accept() => match accepted {
                 Ok(Some(resolver)) => {
                     accepted_requests += 1;
                     let request = InFlightRequest::start(&shared.requests_in_flight);
-                    tokio::spawn(handle_request(resolver, shared.clone(), request));
+                    let deadline = Instant::now() + shared.timing.request_deadline;
+                    resolving.push(async move {
+                        let (http_request, stream) =
+                            timeout_at(deadline, resolver.resolve_request()).await.ok()?.ok()?;
+                        Some((http_request, stream, request, deadline))
+                    });
                 }
                 Ok(None) | Err(_) => break,
             },
@@ -379,17 +409,13 @@ impl Drop for InFlightRequest {
 }
 
 async fn handle_request(
-    resolver: ServerRequestResolver,
+    http_request: Request<()>,
+    mut stream: ServerRequestStream,
     shared: Arc<Shared>,
     request: InFlightRequest,
+    request_deadline: Instant,
 ) {
     let shared = shared.as_ref();
-    let request_deadline = Instant::now() + shared.timing.request_deadline;
-    let Ok(Ok((http_request, mut stream))) =
-        timeout_at(request_deadline, resolver.resolve_request()).await
-    else {
-        return;
-    };
 
     let stream_id = stream.id().into_inner();
     if shared

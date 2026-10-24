@@ -17,10 +17,10 @@ rand = "0.9.2"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 rustls-acme = { version = "0.15.3", default-features = false, features = ["ring", "tokio", "tls12", "webpki-roots"] }
 rcgen = { version = "0.14.8", features = ["x509-parser"] }
-# Unmodified upstream hyperium/h3 main, pinned until a release includes the fixes the Tunnel H3
-# module depends on (released 0.0.8 panics in `stop_sending`, hyperium/h3#330).
-h3 = { git = "https://github.com/hyperium/h3", rev = "43745ad87e95b0c035ac9c547aad467303213425" }
-h3-quinn = { git = "https://github.com/hyperium/h3", rev = "43745ad87e95b0c035ac9c547aad467303213425" }
+# Layered runewarp/h3 fork, pinned to one integration commit (runewarp/runewarp#253).
+# Add other h3 crates only when used, at the same revision; receive slots still carry Visitors.
+h3 = { git = "https://github.com/runewarp/h3", rev = "df27106fb243baaf867d11441d11cf671ec9da7e" }
+h3-quinn = { git = "https://github.com/runewarp/h3", rev = "df27106fb243baaf867d11441d11cf671ec9da7e" }
 quinn = { version = "0.11.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23.35", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"

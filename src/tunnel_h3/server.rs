@@ -4,12 +4,12 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use h3::error::{Code, StreamError};
 use h3::server::{RequestResolver, RequestStream};
 use http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use tokio::sync::{oneshot, watch};
-use tokio::time::{Instant, interval_at, timeout};
+use tokio::time::{Instant, interval_at, timeout, timeout_at};
 
 use crate::quic::{HANDSHAKE_TIMEOUT, peer_client_identity, with_handshake_timeout};
 use crate::{ClientIdentity, ServerHostname};
@@ -206,11 +206,9 @@ impl Drop for InFlightRequest {
 
 async fn handle_request(resolver: ServerRequestResolver, request: InFlightRequest) {
     let shared = &request.shared;
-    let Ok(Ok((http_request, mut stream))) = timeout(
-        shared.timing.request_header_deadline,
-        resolver.resolve_request(),
-    )
-    .await
+    let request_deadline = Instant::now() + shared.timing.request_deadline;
+    let Ok(Ok((http_request, mut stream))) =
+        timeout_at(request_deadline, resolver.resolve_request()).await
     else {
         return;
     };
@@ -227,15 +225,66 @@ async fn handle_request(resolver: ServerRequestResolver, request: InFlightReques
     }
 
     match route(&http_request, &shared.server_hostname) {
-        Route::Events => serve_events(stream, shared).await,
+        Route::Events => {
+            let content_length = declared_content_length(http_request.headers())
+                .ok()
+                .flatten();
+            match timeout_at(request_deadline, read_bodyless_request(&mut stream)).await {
+                Ok(Ok(BodylessRequest::Complete)) => serve_events(stream, shared).await,
+                Ok(Ok(BodylessRequest::Content)) if content_length == Some(0) => {
+                    reset_malformed(&mut stream);
+                }
+                Ok(Ok(BodylessRequest::Content | BodylessRequest::Trailers)) => {
+                    send_bodyless_status(stream, StatusCode::BAD_REQUEST, shared.timing).await;
+                }
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    send_bodyless_status(stream, StatusCode::REQUEST_TIMEOUT, shared.timing).await;
+                }
+            }
+        }
         Route::Status(status) => send_bodyless_status(stream, status, shared.timing).await,
+        Route::Malformed => reset_malformed(&mut stream),
     }
+}
+
+/// Malformed HTTP message: a stream error of type `H3_MESSAGE_ERROR`, not an HTTP response.
+fn reset_malformed(stream: &mut ServerRequestStream) {
+    stream.stop_sending(Code::H3_MESSAGE_ERROR);
+    stream.stop_stream(Code::H3_MESSAGE_ERROR);
+}
+
+/// How a request that must be bodyless ended.
+enum BodylessRequest {
+    /// Request FIN with no content or trailers.
+    Complete,
+    /// At least one content byte arrived.
+    Content,
+    /// A trailer section arrived.
+    Trailers,
+}
+
+/// Read request intake to its end; the caller bounds how long this may take.
+async fn read_bodyless_request(
+    stream: &mut ServerRequestStream,
+) -> Result<BodylessRequest, StreamError> {
+    while let Some(chunk) = stream.recv_data().await? {
+        if chunk.has_remaining() {
+            return Ok(BodylessRequest::Content);
+        }
+    }
+    Ok(match stream.recv_trailers().await? {
+        Some(_) => BodylessRequest::Trailers,
+        None => BodylessRequest::Complete,
+    })
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum Route {
     Events,
     Status(StatusCode),
+    /// Malformed message, answered with `H3_MESSAGE_ERROR` instead of a status.
+    Malformed,
 }
 
 /// Map a signaling request to its resource or a bodyless status.
@@ -260,18 +309,37 @@ fn route(request: &Request<()>, server_hostname: &ServerHostname) -> Route {
     if request.method() != Method::GET {
         return Route::Status(StatusCode::METHOD_NOT_ALLOWED);
     }
-    if declares_request_content(request.headers()) {
-        return Route::Status(StatusCode::BAD_REQUEST);
+    match declared_content_length(request.headers()) {
+        Err(MalformedContentLength) => Route::Malformed,
+        Ok(Some(length)) if length > 0 => Route::Status(StatusCode::BAD_REQUEST),
+        Ok(_) => Route::Events,
     }
-    Route::Events
 }
 
-/// Signaling requests are bodyless: only an absent or exactly zero `content-length` is accepted.
-fn declares_request_content(headers: &HeaderMap) -> bool {
-    headers
-        .get_all(header::CONTENT_LENGTH)
-        .iter()
-        .any(|value| value.as_bytes() != b"0")
+#[derive(Debug, Eq, PartialEq)]
+struct MalformedContentLength;
+
+/// Declared `content-length`, if any.
+///
+/// Every field line and comma-separated element must be a decimal length, and all must agree;
+/// anything else makes the message malformed.
+fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, MalformedContentLength> {
+    let mut declared = None;
+    for value in headers.get_all(header::CONTENT_LENGTH) {
+        let value = value.to_str().map_err(|_| MalformedContentLength)?;
+        for element in value.split(',') {
+            let element = element.trim();
+            if element.is_empty() || !element.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(MalformedContentLength);
+            }
+            let length = element.parse::<u64>().map_err(|_| MalformedContentLength)?;
+            if declared.is_some_and(|declared| declared != length) {
+                return Err(MalformedContentLength);
+            }
+            declared = Some(length);
+        }
+    }
+    Ok(declared)
 }
 
 async fn send_bodyless_status(
@@ -351,7 +419,7 @@ async fn bounded_write(
 mod tests {
     use http::{Method, Request, StatusCode, header};
 
-    use super::{Route, goaway_boundary, route};
+    use super::{MalformedContentLength, Route, declared_content_length, goaway_boundary, route};
     use crate::ServerHostname;
 
     fn server_hostname() -> ServerHostname {
@@ -374,6 +442,37 @@ mod tests {
     }
 
     #[test]
+    fn declared_content_length_accepts_agreeing_decimal_values_only() {
+        let parse = |values: &[&str]| {
+            let mut headers = http::HeaderMap::new();
+            for value in values {
+                headers.append(header::CONTENT_LENGTH, value.parse().expect("valid header"));
+            }
+            declared_content_length(&headers)
+        };
+
+        assert_eq!(parse(&[]), Ok(None));
+        assert_eq!(parse(&["0"]), Ok(Some(0)));
+        assert_eq!(parse(&["00"]), Ok(Some(0)));
+        assert_eq!(parse(&["7, 7", "7"]), Ok(Some(7)));
+        for malformed in [
+            &["abc"][..],
+            &["-1"],
+            &["+1"],
+            &[""],
+            &["1,"],
+            &["1", "2"],
+            &["99999999999999999999"],
+        ] {
+            assert_eq!(
+                parse(malformed),
+                Err(MalformedContentLength),
+                "{malformed:?}"
+            );
+        }
+    }
+
+    #[test]
     fn routes_the_event_stream_on_the_server_hostname_with_any_port() {
         for uri in [
             "https://tunnel.example.test/v1/tunnel/events",
@@ -393,6 +492,11 @@ mod tests {
         with_content
             .headers_mut()
             .insert(header::CONTENT_LENGTH, "3".parse().expect("valid header"));
+        let mut malformed_content =
+            request(Method::GET, "https://tunnel.example.test/v1/tunnel/events");
+        malformed_content
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, "abc".parse().expect("valid header"));
         let mut zero_content = request(Method::GET, "https://tunnel.example.test/v1/tunnel/events");
         zero_content
             .headers_mut()
@@ -416,6 +520,7 @@ mod tests {
                 Route::Status(StatusCode::METHOD_NOT_ALLOWED),
             ),
             (with_content, Route::Status(StatusCode::BAD_REQUEST)),
+            (malformed_content, Route::Malformed),
             (zero_content, Route::Events),
         ] {
             let summary = format!("{} {}", request.method(), request.uri());

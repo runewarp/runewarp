@@ -51,8 +51,9 @@ impl ServerRuntimeGeneration {
             return None;
         }
         let mut bytes = [0_u8; GENERATION_BYTES];
-        for (byte, pair) in bytes.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
-            *byte = (lower_hex_value(pair[0])? << 4) | lower_hex_value(pair[1])?;
+        let (pairs, _) = value.as_bytes().as_chunks::<2>();
+        for (byte, [high, low]) in bytes.iter_mut().zip(pairs) {
+            *byte = (lower_hex_value(*high)? << 4) | lower_hex_value(*low)?;
         }
         Some(Self(bytes))
     }

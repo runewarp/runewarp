@@ -38,7 +38,7 @@ type RawClientStream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, By
 
 fn fast_timing() -> TunnelH3Timing {
     TunnelH3Timing {
-        request_header_deadline: Duration::from_secs(1),
+        request_deadline: Duration::from_secs(1),
         keepalive_comment_interval: Duration::from_millis(50),
         blocked_write_deadline: Duration::from_secs(1),
         initial_state_deadline: Duration::from_millis(300),
@@ -648,4 +648,126 @@ async fn dropping_either_handle_closes_the_connection_without_error() {
         application_close_code(&closed),
         Some(Code::H3_NO_ERROR.value())
     );
+}
+
+/// How a raw client sends one event-stream request after its HEADERS.
+struct RequestShape {
+    content_length: Option<&'static str>,
+    data: Option<&'static [u8]>,
+    trailers: bool,
+    finish: bool,
+}
+
+/// The Server's answer: a final status, or a stream reset with its H3 code.
+#[derive(Debug, PartialEq)]
+enum RequestOutcome {
+    Status(StatusCode),
+    Reset(Code),
+}
+
+async fn send_shaped_events_request(
+    send_request: &mut RawSendRequest,
+    shape: &RequestShape,
+) -> RequestOutcome {
+    let mut request = Request::get(format!("https://{SERVER_NAME}{TUNNEL_EVENTS_PATH}"));
+    if let Some(length) = shape.content_length {
+        request = request.header(header::CONTENT_LENGTH, length);
+    }
+    let mut stream = send_request
+        .send_request(request.body(()).expect("valid request"))
+        .await
+        .expect("request opens");
+    if let Some(data) = shape.data {
+        stream
+            .send_data(Bytes::from_static(data))
+            .await
+            .expect("request data sent");
+    }
+    if shape.trailers {
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert("x-trailer", "1".parse().expect("valid header"));
+        stream.send_trailers(trailers).await.expect("trailers sent");
+    }
+    if shape.finish {
+        stream.finish().await.expect("request ends");
+    }
+    match timeout(Duration::from_secs(3), stream.recv_response())
+        .await
+        .expect("the Server answers")
+    {
+        Ok(response) => RequestOutcome::Status(response.status()),
+        Err(h3::error::StreamError::RemoteTerminate { code, .. }) => RequestOutcome::Reset(code),
+        Err(error) => panic!("unexpected stream error: {error:?}"),
+    }
+}
+
+#[tokio::test]
+async fn event_stream_requests_must_be_complete_and_bodyless() {
+    let fixture = Fixture::new().expect("fixture");
+    let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
+    let (server, (mut send_request, _driver)) = tokio::join!(
+        ServerTunnelH3::establish_with_timing(
+            server_connection,
+            server_hostname(),
+            ServerRuntimeGeneration::generate(),
+            fast_timing(),
+        ),
+        raw_client(client_connection),
+    );
+    let _server = server.expect("server establishes");
+    let shape = |content_length, data, trailers, finish| RequestShape {
+        content_length,
+        data,
+        trailers,
+        finish,
+    };
+
+    for (label, request, expected) in [
+        (
+            "zero padded length",
+            shape(Some("00"), None, false, true),
+            RequestOutcome::Status(StatusCode::OK),
+        ),
+        (
+            "content without a length",
+            shape(None, Some(b"body"), false, true),
+            RequestOutcome::Status(StatusCode::BAD_REQUEST),
+        ),
+        (
+            "trailers",
+            shape(None, None, true, true),
+            RequestOutcome::Status(StatusCode::BAD_REQUEST),
+        ),
+        (
+            "positive declared length",
+            shape(Some("4"), Some(b"body"), false, true),
+            RequestOutcome::Status(StatusCode::BAD_REQUEST),
+        ),
+        (
+            "malformed length",
+            shape(Some("abc"), None, false, true),
+            RequestOutcome::Reset(Code::H3_MESSAGE_ERROR),
+        ),
+        (
+            "conflicting length lists",
+            shape(Some("0, 1"), None, false, true),
+            RequestOutcome::Reset(Code::H3_MESSAGE_ERROR),
+        ),
+        (
+            "content beyond a zero length",
+            shape(Some("0"), Some(b"body"), false, true),
+            RequestOutcome::Reset(Code::H3_MESSAGE_ERROR),
+        ),
+        (
+            "request never ends",
+            shape(None, None, false, false),
+            RequestOutcome::Status(StatusCode::REQUEST_TIMEOUT),
+        ),
+    ] {
+        assert_eq!(
+            send_shaped_events_request(&mut send_request, &request).await,
+            expected,
+            "{label}"
+        );
+    }
 }

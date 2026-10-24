@@ -43,8 +43,8 @@ pub const TUNNEL_EVENTS_PATH: &str = "/v1/tunnel/events";
 /// Fixed runtime-owned deadlines for Tunnel HTTP/3 signaling.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TunnelH3Timing {
-    /// Server bound for receiving a signaling request's HEADERS.
-    pub request_header_deadline: Duration,
+    /// Server bound for receiving a complete signaling request: HEADERS through request FIN.
+    pub request_deadline: Duration,
     /// Server interval between comment keepalives on a quiet event stream.
     pub keepalive_comment_interval: Duration,
     /// Server bound for one event-stream write blocked by flow control.
@@ -60,7 +60,7 @@ pub(crate) struct TunnelH3Timing {
 impl Default for TunnelH3Timing {
     fn default() -> Self {
         Self {
-            request_header_deadline: Duration::from_secs(5),
+            request_deadline: Duration::from_secs(5),
             keepalive_comment_interval: Duration::from_secs(20),
             blocked_write_deadline: Duration::from_secs(60),
             initial_state_deadline: Duration::from_secs(60),

@@ -10,7 +10,7 @@ Runewarp treats a stable release as one sequence:
 2. Merge that PR to `main` and wait for the aggregate `CI` check to finish green on the release commit.
 3. Optionally run a **Release rehearsal** through `workflow_dispatch` to prove the candidate release metadata and gates without publishing.
 4. Create and push an SSH-signed `vX.Y.Z` **Release tag** on that green `main` commit.
-5. Let the `Release` workflow run the repo-owned Ruby release helpers from `main`, publish crates.io first, then promote the already-published trusted main-image lineage into the stable Docker tags, then finalize the GitHub Release.
+5. Let the `Release` workflow run the repo-owned Ruby release helpers from `main`, publish crates.io first (skipped while [crates.io publishing is paused](#cratesio-publishing-pause)), then promote the already-published trusted main-image lineage into the stable Docker tags, then finalize the GitHub Release.
 6. If a trusted existing release tag needs a recovery rerun, use manual **Release publish** through `workflow_dispatch` with the same tag; already-published surfaces are skipped instead of being mutated.
 7. Move `main` forward in a follow-up change to the next minor `-dev` version and reopen `CHANGELOG.md` with `Unreleased`.
 
@@ -52,7 +52,7 @@ Use the `Release` workflow's manual form when you want a non-publishing rehearsa
 2. Run the `Release` workflow manually with `mode` set to `rehearsal`.
 3. Set `release_tag` to the stable tag you intend to cut, in `vX.Y.Z` form.
 4. Confirm the workflow summary shows rehearsal mode, the workflow ref, the release source ref, the release commit, the trusted source image lineage, the exact stable Docker tags, and the rendered release notes preview.
-5. Confirm the crates.io existence probe completed as part of the rehearsal run before the dry-run publish step.
+5. Confirm the crates.io existence probe completed as part of the rehearsal run before the dry-run publish step. While crates.io publishing is paused, confirm the dry-run step was skipped and the pause check printed its reason.
 6. Treat any rehearsal failure as a release-prep problem. Fix the candidate on `main`, let `CI` go green again, and rerun the rehearsal.
 
 Rehearsal validates release metadata and gates, runs `cargo publish --dry-run`, and resolves the trusted source image lineage that real publish would promote, but it does not push Docker images, publish the crate, promote Docker tags, sign images, or create the GitHub Release.
@@ -68,7 +68,7 @@ Once the candidate is green, cut the real stable release:
 5. Watch the `Release` workflow until the crates.io publish completes, the Docker tag promotion follows, and all publish jobs finish.
 6. Confirm the public surfaces now agree on the released version:
    - Docker Hub has the released `X.Y.Z`, `X.Y`, `X`, and `latest` tags.
-   - crates.io serves the released `runewarp` version.
+   - crates.io serves the released `runewarp` version, unless crates.io publishing is paused.
    - GitHub shows the release record only after the publish jobs complete successfully.
 
 The pushed stable tag remains the primary publish trigger. Manual dispatch also supports a real `publish` mode for rerunning the current release automation against an existing trusted tag.
@@ -84,6 +84,20 @@ Use manual publish when the tag already exists and you need the current release 
 5. Let the workflow skip an existing crates.io version or Docker release tag, publish any missing artifact, and refresh the GitHub Release title and notes.
 
 Manual publish applies the same signed-tag, trusted-commit, prior-green-`CI`, successful-`Images`, and trusted-image-lineage checks as the normal tag-driven release path. The workflow definition, Ruby release helpers, and release notes come from the current `main`, while crate publication still targets the selected release tag's source tree and Docker promotion still targets that tag's previously published commit-lineage image after re-verifying its baked-in 12-character commit SHA. If the GitHub release already exists, the workflow updates its title and notes to match the current rendered changelog entry for that version.
+
+## crates.io publishing pause
+
+crates.io publishing is currently paused. Core depends on `h3` and `h3-quinn` through a git pin to upstream `hyperium/h3` until a release includes the fixes Core relies on ([hyperium/h3#369](https://github.com/hyperium/h3/issues/369)), and crates.io rejects git dependencies. Stable releases still publish Docker tags and the GitHub Release; the crate is not published. The mechanics are in [crates.io publishing pause](release-automation.md#cratesio-publishing-pause).
+
+While paused, CI package readiness still fails on any git dependency other than the allowlisted `h3` and `h3-quinn`. Do not add other git dependencies to get around it.
+
+To resume publishing:
+
+1. Once `h3` and `h3-quinn` releases include the fixes Core needs, switch both in `Cargo.toml` from the git pin to those crates.io versions and update `Cargo.lock`.
+2. In the same PR, set `PUBLISHING_PAUSE_REASON` in `scripts/lib/runewarp/crates_io.rb` to `nil`.
+3. Remove the README note about crates.io being behind, and record the resumed crates.io releases in `CHANGELOG.md`.
+4. Merge only after `CI` is green; package readiness then runs `cargo publish --dry-run` again.
+5. The next stable release publishes the crate. To catch crates.io up for an existing stable tag whose source has no git dependencies, use [manual publish recovery](#manual-publish-recovery); tags whose source still uses the git pin cannot be published to crates.io.
 
 ## Recovery playbooks
 

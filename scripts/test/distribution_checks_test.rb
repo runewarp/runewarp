@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
+require "json"
 require_relative "support/test_helper"
+require_relative "../lib/runewarp"
 
 class DistributionChecksTest < Minitest::Test
   def write_minimal_binary_crate(repo_root, version:)
@@ -38,23 +40,88 @@ class DistributionChecksTest < Minitest::Test
     end
   end
 
-  def test_package_readiness_mode_uses_the_sparse_crates_io_protocol
+  def write_recording_cargo(fake_bin_dir, commands_file, metadata_json: '{"packages":[]}')
+    FileUtils.mkdir_p(fake_bin_dir)
+    write_executable(
+      File.join(fake_bin_dir, "cargo"),
+      <<~RUBY
+        #!/usr/bin/env ruby
+        File.open(#{commands_file.inspect}, "a", encoding: "utf-8") do |handle|
+          handle.puts("\#{ENV.fetch("CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "")} \#{ARGV.join(" ")}")
+        end
+        puts(#{metadata_json.inspect}) if ARGV.first == "metadata"
+      RUBY
+    )
+  end
+
+  def with_path(path)
+    original_path = ENV["PATH"]
+    ENV["PATH"] = "#{path}:#{original_path}"
+    yield
+  ensure
+    ENV["PATH"] = original_path
+  end
+
+  def test_package_readiness_runs_the_sparse_publish_dry_run_when_publishing_is_enabled
     Dir.mktmpdir do |repo_root|
       write_minimal_binary_crate(repo_root, version: "0.3.1")
       fake_bin_dir = File.join(repo_root, "fake-bin")
-      FileUtils.mkdir_p(fake_bin_dir)
-      observed_protocol = File.join(repo_root, "observed-protocol.txt")
-      write_executable(
-        File.join(fake_bin_dir, "cargo"),
-        <<~RUBY
-          #!/usr/bin/env ruby
-          File.write(#{observed_protocol.inspect}, "\#{ENV.fetch("CARGO_REGISTRIES_CRATES_IO_PROTOCOL", "")}\\n", encoding: "utf-8")
-        RUBY
-      )
+      commands_file = File.join(repo_root, "cargo-commands.txt")
+      write_recording_cargo(fake_bin_dir, commands_file)
 
-      result = run_command(ruby_script("scripts", "check-distribution"), "package-readiness", "--repo-root", repo_root, env: { "PATH" => "#{fake_bin_dir}:#{ENV.fetch('PATH')}" })
-      assert(result.success?, result.stderr)
-      assert_equal("sparse\n", File.read(observed_protocol, encoding: "utf-8"))
+      with_path(fake_bin_dir) do
+        Runewarp::DistributionChecks.validate_package_readiness(repo_root: repo_root, pause_reason: nil)
+      end
+
+      assert_equal(
+        ["sparse publish --dry-run --allow-dirty --locked --manifest-path #{File.join(repo_root, 'Cargo.toml')}"],
+        File.readlines(commands_file, chomp: true, encoding: "utf-8")
+      )
+    end
+  end
+
+  def test_package_readiness_skips_the_publish_dry_run_while_publishing_is_paused
+    Dir.mktmpdir do |repo_root|
+      write_minimal_binary_crate(repo_root, version: "0.3.1")
+      fake_bin_dir = File.join(repo_root, "fake-bin")
+      commands_file = File.join(repo_root, "cargo-commands.txt")
+      write_recording_cargo(fake_bin_dir, commands_file)
+
+      _stdout, stderr = capture_io do
+        with_path(fake_bin_dir) do
+          Runewarp::DistributionChecks.validate_package_readiness(repo_root: repo_root, pause_reason: "waiting for upstream")
+        end
+      end
+
+      assert_equal(
+        ["sparse metadata --format-version 1 --locked --manifest-path #{File.join(repo_root, 'Cargo.toml')}"],
+        File.readlines(commands_file, chomp: true, encoding: "utf-8")
+      )
+      assert_includes(stderr, "skipped: cargo publish --dry-run; crates.io publishing is paused: waiting for upstream\n")
+      assert_includes(stderr, "done: package readiness is valid\n")
+    end
+  end
+
+  def test_package_readiness_rejects_unexpected_git_dependencies_while_publishing_is_paused
+    Dir.mktmpdir do |repo_root|
+      write_minimal_binary_crate(repo_root, version: "0.3.1")
+      fake_bin_dir = File.join(repo_root, "fake-bin")
+      commands_file = File.join(repo_root, "cargo-commands.txt")
+      metadata_json = JSON.generate("packages" => [{ "name" => "quinn", "version" => "0.11.9", "source" => "git+https://github.com/quinn-rs/quinn#abc" }])
+      write_recording_cargo(fake_bin_dir, commands_file, metadata_json: metadata_json)
+
+      error = assert_raises(Runewarp::Error) do
+        capture_io do
+          with_path(fake_bin_dir) do
+            Runewarp::DistributionChecks.validate_package_readiness(repo_root: repo_root, pause_reason: "waiting for upstream")
+          end
+        end
+      end
+
+      assert_equal(
+        "error: unexpected git dependencies while crates.io publishing is paused; only h3 and h3-quinn from https://github.com/hyperium/h3 are allowed: quinn 0.11.9 (git+https://github.com/quinn-rs/quinn#abc)",
+        error.message
+      )
     end
   end
 

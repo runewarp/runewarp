@@ -56,32 +56,48 @@ module Runewarp
       end
     end
 
-    def validate_package_readiness(repo_root:)
+    def validate_package_readiness(repo_root:, pause_reason: CratesIo::PUBLISHING_PAUSE_REASON)
       build_env = {
         "CARGO_REGISTRIES_CRATES_IO_PROTOCOL" => "sparse",
         "CARGO_HTTP_MULTIPLEXING" => "false",
         "CARGO_NET_RETRY" => "5"
       }
       build_env["RUNEWARP_BUILD_COMMIT"] = Core.runewarp_git_commit(repo_root) if Core.runewarp_version(repo_root)&.end_with?("-dev")
+      manifest_path = File.join(repo_root, "Cargo.toml")
 
       Core.require_command("cargo")
 
       Core.section("Checking package readiness")
       Core.note("Repository root: #{repo_root}")
 
-      Shell.run!(
-        "cargo",
-        "publish",
-        "--dry-run",
-        "--allow-dirty",
-        "--locked",
-        "--manifest-path",
-        File.join(repo_root, "Cargo.toml"),
-        env: build_env,
-        out: File::NULL
-      )
+      if pause_reason.nil?
+        Shell.run!(
+          "cargo",
+          "publish",
+          "--dry-run",
+          "--allow-dirty",
+          "--locked",
+          "--manifest-path",
+          manifest_path,
+          env: build_env,
+          out: File::NULL
+        )
+      else
+        Core.skipped("cargo publish --dry-run; #{CratesIo.pause_message(pause_reason)}")
+        validate_no_unexpected_git_dependencies!(manifest_path: manifest_path, env: build_env)
+      end
 
       Core.success("package readiness is valid")
+    end
+
+    # While crates.io publishing is paused, `cargo publish --dry-run` no longer rejects git
+    # dependencies, so fail on any git source outside the allowlist instead.
+    def validate_no_unexpected_git_dependencies!(manifest_path:, env:)
+      metadata_json = Shell.capture!("cargo", "metadata", "--format-version", "1", "--locked", "--manifest-path", manifest_path, env: env)
+      unexpected = CratesIo.unexpected_git_dependencies(metadata_json)
+      return if unexpected.empty?
+
+      Core.die("unexpected git dependencies while crates.io publishing is paused; only #{CratesIo.allowed_git_dependencies_description} are allowed: #{unexpected.join(', ')}")
     end
 
     def validate_registry_install(crate_name:, bin_name:, expected_version:, expected_text:, probe_arg:, retry_attempts:, retry_delay_seconds:)

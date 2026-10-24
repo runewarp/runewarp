@@ -16,7 +16,7 @@ The `CI` workflow is the required aggregate check for normal changes. It current
 - release metadata resolution, Docker Hub lookup, release gates, distribution checks, and workflow contracts through `./scripts/test-automation`
 - Linux Cargo install from source through `./scripts/check-distribution cargo-install`
 - macOS Cargo install from source through the same distribution-check script
-- crate packaging readiness through `./scripts/check-distribution package-readiness`
+- crate packaging readiness through `./scripts/check-distribution package-readiness`, which runs `cargo publish --dry-run` unless [crates.io publishing is paused](#cratesio-publishing-pause)
 - Rust formatting, Clippy, dependency advisory scanning through `./scripts/audit-dependencies`, tests, and docs
 - Docker image build plus `--version` startup through `./scripts/check-distribution docker-image`
 - the end-to-end Docker example smoke test
@@ -66,7 +66,7 @@ For tag pushes and manual `publish`, the workflow:
 4. verifies that the tagged commit already has a successful aggregate `CI` check run
 5. verifies that the tagged commit already has a successful `Images` workflow run, so release cannot promote a lineage whose publish-time smoke failed or never completed
 6. renders the changelog-driven release notes preview
-7. checks whether the crates.io version already exists; if it does, the real publish step is skipped, otherwise it publishes the crate
+7. checks whether crates.io publishing is paused and whether the crates.io version already exists; if either is true, the real publish step is skipped, otherwise it publishes the crate
 8. resolves the immutable bare 12-character commit-tag image lineage for the tagged release commit, verifies that the stable `X.Y.Z` Docker tag does not already exist, verifies that the trusted source lineage exists on Docker Hub, and probes that published image's `--version` output to confirm it still reports the tagged commit's baked-in 12-character SHA
 9. promotes that exact already-published manifest to the public Docker tags `X.Y.Z`, `X.Y`, `X`, and `latest` without rebuilding either architecture
 10. signs a newly promoted Docker manifest list keylessly with Sigstore
@@ -85,7 +85,7 @@ For manual `rehearsal`, the workflow:
 3. validates release metadata and release-notes rendering
 4. checks whether the crates.io version already exists through the same repo-owned probe used by the real publish path
 5. skips signed-tag and protected-tag enforcement because rehearsal happens before the irreversible tag is created
-6. runs `cargo publish --dry-run` against the current `main` release candidate
+6. runs `cargo publish --dry-run` against the current `main` release candidate, unless crates.io publishing is paused
 7. summarizes the workflow ref, release source ref, release commit, source image lineage, exact stable Docker tags, and rendered release notes that the real release would use
 8. skips Docker Hub publication, Sigstore signing, and GitHub Release mutation
 
@@ -102,6 +102,18 @@ For manual `publish`, the workflow:
 5. publishes only the still-missing crate or Docker surfaces for that tag
 6. always refreshes the GitHub Release title and notes from the current workflow checkout on `main`, so release-note fixes can be replayed for an existing tag without rebuilding artifacts from a new commit
 
+### crates.io publishing pause
+
+`PUBLISHING_PAUSE_REASON` in `scripts/lib/runewarp/crates_io.rb` is the single crates.io pause switch. Publishing is currently paused because Core depends on `h3` and `h3-quinn` through a git pin to upstream `hyperium/h3` until a release includes the fixes Core relies on ([hyperium/h3#369](https://github.com/hyperium/h3/issues/369)); `cargo publish` rejects git dependencies.
+
+While the switch holds a reason string:
+
+- `./scripts/check-distribution package-readiness` prints a one-line `skipped:` reason instead of running `cargo publish --dry-run`, then runs `cargo metadata --format-version 1 --locked` and fails if any package has a git source other than the allowlisted `h3` and `h3-quinn` from `https://github.com/hyperium/h3`
+- the `crate-release` job runs `./scripts/check-crates-io-publishing`, which prints the same reason and writes `paused=true`; the `Publish crate to crates.io` and `Rehearse crate publish` steps are skipped on that output
+- the crates.io existence probe, release metadata, release summary, release notes, Docker promotion, and GitHub Release steps run unchanged
+
+When the switch is `nil`, `check-crates-io-publishing` writes `paused=false`, package readiness runs only `cargo publish --dry-run`, and the release publish steps run as described above. The maintainer procedure for resuming is in [the release guide](release-guide.md#cratesio-publishing-pause).
+
 ## Workflow boundaries
 
 The workflow keeps GitHub-specific orchestration and publish-job boundaries in YAML. Repo-owned Ruby entry points keep the rules and reusable adapters:
@@ -110,6 +122,7 @@ The workflow keeps GitHub-specific orchestration and publish-job boundaries in Y
 - `scripts/lib/runewarp/docker_hub.rb` owns Docker Hub tag URL resolution plus HTTP status lookups, `scripts/check-docker-hub-tag` is the workflow adapter for outputs, and `scripts/check-distribution docker-registry-tag-absent` reuses the same lookup seam for local distribution checks
 - `scripts/lib/runewarp/release_docs.rb` owns changelog and version validation plus changelog-driven release-body rendering
 - `scripts/lib/runewarp/release_gates.rb` owns rehearsal/tag gate validation
+- `scripts/lib/runewarp/crates_io.rb` owns the crates.io pause switch and the git-dependency allowlist, `scripts/check-crates-io-publishing` is the workflow adapter for the pause output, and `scripts/check-distribution package-readiness` applies the allowlist while paused
 - `scripts/lib/runewarp/workflow_helpers.rb` owns the GitHub API, crates.io API, Docker manifest promotion, release-summary, and GitHub Release upsert helpers that the workflows shell out to through Ruby entry points
 - native per-architecture Docker publication and the final manifest merge still live in `Images` because runner selection, registry login, smoke ordering, and trusted artifact publication are GitHub-hosted orchestration concerns
 - post-publish distribution-path probes live primarily in `Images`, while `Release` re-probes the source image's version metadata to confirm the promoted lineage still matches the tagged commit
@@ -134,7 +147,7 @@ The trusted `Images` publish job and the real `Release` publish jobs run in the 
 | `DOCKER_USERNAME` | Docker Hub login username for trusted main-image publication and stable-tag promotion |
 | `DOCKER_TOKEN` | Docker Hub access token for trusted main-image publication and stable-tag promotion |
 
-For dress rehearsals, the workflow still rehearses the crate publish path, but it does not push to registries, promote Docker tags, sign images, or mutate the GitHub Release.
+For dress rehearsals, the workflow still rehearses the crate publish path unless crates.io publishing is paused, but it does not push to registries, promote Docker tags, sign images, or mutate the GitHub Release.
 
 Before the first real tag release, the `release` environment should allow rehearsal dispatches, manual publish dispatches, and stable `v*` tags. The repo-owned gate still keeps real publish paths constrained to commits already reachable from `origin/main`.
 

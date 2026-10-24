@@ -24,6 +24,10 @@ module Runewarp
       $stderr.puts("done: #{message}")
     end
 
+    def skipped(message)
+      $stderr.puts("skipped: #{message}")
+    end
+
     def warn(message)
       $stderr.puts("warning: #{message}")
     end

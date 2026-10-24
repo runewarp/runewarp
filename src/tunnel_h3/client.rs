@@ -1,13 +1,15 @@
 //! Client side of an HTTP/3 Tunnel connection.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use bytes::{Buf, Bytes};
 use futures_util::future::poll_fn;
 use h3::client::{RequestStream, SendRequest};
 use h3::error::{Code, StreamError};
-use http::{HeaderMap, Request, StatusCode, header};
-use tokio::sync::watch;
+use http::{HeaderMap, Method, Request, StatusCode, header};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 
 use crate::ServerHostname;
@@ -15,7 +17,11 @@ use crate::quic::{HANDSHAKE_TIMEOUT, with_handshake_timeout};
 use crate::sse::{SseParseItem, SseParser};
 
 use super::events::{ServerRuntimeGeneration, TUNNEL_EVENT_SSE_LIMITS, TunnelEventState};
-use super::{OwnedTask, TUNNEL_EVENTS_PATH, TunnelH3Error, TunnelH3Timing, close_connection};
+use super::stream::{ClientTunnelStream, TunnelStream};
+use super::{
+    MAX_IDLE_RECEIVE_SLOTS, OwnedTask, TUNNEL_EVENTS_PATH, TunnelH3Error, TunnelH3Timing,
+    close_connection,
+};
 
 type ClientSendRequest = SendRequest<h3_quinn::OpenStreams, Bytes>;
 type ClientRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
@@ -28,27 +34,47 @@ type ClientRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 /// remains usable, and stops once GOAWAY forbids new requests. An incompatible event or a changed
 /// generation closes the connection with `H3_GENERAL_PROTOCOL_ERROR`.
 ///
+/// After the gate it keeps up to [`MAX_IDLE_RECEIVE_SLOTS`] receive slots open, each holding one
+/// permit from the Client-instance stream budget, and replenishes a slot whenever one is assigned
+/// or fails. Assigned slots are delivered by [`ClientTunnelH3::accept_tunnel_stream`].
+///
 /// Dropping the handle closes the connection immediately with `H3_NO_ERROR`.
 pub struct ClientTunnelH3 {
     connection: quinn::Connection,
     state: watch::Receiver<TunnelEventState>,
+    assigned: mpsc::UnboundedReceiver<ClientTunnelStream>,
+    /// `h3` closes the connection when its last request sender drops, so the handle keeps one
+    /// for its lifetime; background tasks that stop after GOAWAY must not end placed Visitors.
+    _send_request: ClientSendRequest,
     _driver: OwnedTask,
     _events: OwnedTask,
+    _slots: OwnedTask,
 }
 
 impl ClientTunnelH3 {
-    /// Start HTTP/3 on an authenticated Tunnel connection to `server_hostname` and wait for the
-    /// Server's first valid event-stream state.
+    /// Start HTTP/3 on an authenticated Tunnel connection to `server_hostname`, wait for the
+    /// Server's first valid event-stream state, then start offering receive slots.
+    ///
+    /// `stream_budget` is the Client-instance stream-handler budget shared by every Tunnel
+    /// connection; each idle or assigned slot holds one permit until its Tunnel stream drops.
     pub async fn establish(
         connection: quinn::Connection,
         server_hostname: &ServerHostname,
+        stream_budget: Arc<Semaphore>,
     ) -> Result<Self, TunnelH3Error> {
-        Self::establish_with_timing(connection, server_hostname, TunnelH3Timing::default()).await
+        Self::establish_with_timing(
+            connection,
+            server_hostname,
+            stream_budget,
+            TunnelH3Timing::default(),
+        )
+        .await
     }
 
     pub(crate) async fn establish_with_timing(
         connection: quinn::Connection,
         server_hostname: &ServerHostname,
+        stream_budget: Arc<Semaphore>,
         timing: TunnelH3Timing,
     ) -> Result<Self, TunnelH3Error> {
         let (mut driver, mut send_request) = with_handshake_timeout(
@@ -83,11 +109,19 @@ impl ClientTunnelH3 {
             }
         };
 
+        let (assigned_sender, assigned) = mpsc::unbounded_channel();
+        let slots = OwnedTask::spawn(maintain_receive_slots(ReceiveSlotPool {
+            send_request: send_request.clone(),
+            slot_authority: format!("{server_hostname}:443"),
+            stream_budget,
+            assigned: assigned_sender,
+            timing,
+        }));
         let (state_sender, state) = watch::channel(initial);
         let events = OwnedTask::spawn(follow_events(
             EventFollower {
                 connection: connection.clone(),
-                send_request,
+                send_request: send_request.clone(),
                 events_uri,
                 state: state_sender,
                 timing,
@@ -98,9 +132,20 @@ impl ClientTunnelH3 {
         Ok(Self {
             connection,
             state,
+            assigned,
+            _send_request: send_request,
             _driver: driver,
             _events: events,
+            _slots: slots,
         })
+    }
+
+    /// Wait for the Server to place a Visitor on one of this connection's receive slots.
+    ///
+    /// `None` once the connection can deliver no more Visitors: it closed, or GOAWAY stopped new
+    /// slots and every outstanding slot has resolved.
+    pub async fn accept_tunnel_stream(&mut self) -> Option<ClientTunnelStream> {
+        self.assigned.recv().await
     }
 
     /// Runtime generation of the Server this connection reached.
@@ -334,4 +379,81 @@ fn forbids_new_requests(error: &StreamError) -> bool {
         error,
         StreamError::RemoteClosing { .. } | StreamError::ConnectionError { .. }
     )
+}
+
+/// Receive-slot maintenance for one Tunnel connection.
+struct ReceiveSlotPool {
+    send_request: ClientSendRequest,
+    /// Authority of every plain CONNECT slot: the Server hostname. The Server ignores the port.
+    slot_authority: String,
+    stream_budget: Arc<Semaphore>,
+    assigned: mpsc::UnboundedSender<ClientTunnelStream>,
+    timing: TunnelH3Timing,
+}
+
+/// Keep up to [`MAX_IDLE_RECEIVE_SLOTS`] slots open until GOAWAY or connection loss forbids new
+/// requests, then let outstanding slots resolve.
+///
+/// A slot that ends without assignment, for example one the Server rejected, pauses opening for
+/// the resubscribe delay so a refusing Server cannot drive a busy loop.
+async fn maintain_receive_slots(mut pool: ReceiveSlotPool) {
+    let mut waiting: JoinSet<Option<ClientTunnelStream>> = JoinSet::new();
+    let mut opening = true;
+
+    while opening || !waiting.is_empty() {
+        let may_open = opening && waiting.len() < MAX_IDLE_RECEIVE_SLOTS;
+        tokio::select! {
+            resolved = waiting.join_next(), if !waiting.is_empty() => {
+                match resolved {
+                    Some(Ok(Some(stream))) => {
+                        // A dropped receiver resets the stream through its write half.
+                        let _ = pool.assigned.send(stream);
+                    }
+                    Some(Ok(None) | Err(_)) | None => {
+                        if opening {
+                            sleep(pool.timing.resubscribe_delay).await;
+                        }
+                    }
+                }
+            }
+            permit = pool.stream_budget.clone().acquire_owned(), if may_open => {
+                let Ok(permit) = permit else {
+                    opening = false;
+                    continue;
+                };
+                match pool.open_slot().await {
+                    Ok(stream) => {
+                        waiting.spawn(wait_for_assignment(stream, permit));
+                    }
+                    Err(error) if forbids_new_requests(&error) => opening = false,
+                    Err(_) => sleep(pool.timing.resubscribe_delay).await,
+                }
+            }
+        }
+    }
+}
+
+impl ReceiveSlotPool {
+    /// Send one plain CONNECT request's HEADERS, leaving the stream open for Visitor bytes.
+    async fn open_slot(&mut self) -> Result<ClientRequestStream, StreamError> {
+        let request = Request::builder()
+            .method(Method::CONNECT)
+            .uri(self.slot_authority.as_str())
+            .body(())
+            .expect("a Server hostname and port form a valid CONNECT authority");
+        self.send_request.send_request(request).await
+    }
+}
+
+/// Resolve one slot: a `200` response is the Server's assignment of one Visitor.
+async fn wait_for_assignment(
+    mut stream: ClientRequestStream,
+    permit: OwnedSemaphorePermit,
+) -> Option<ClientTunnelStream> {
+    let response = stream.recv_response().await.ok()?;
+    if response.status() != StatusCode::OK {
+        return None;
+    }
+    let (send, recv) = stream.split();
+    Some(TunnelStream::new(recv, send, Arc::new(permit)))
 }

@@ -14,11 +14,16 @@ use crate::quic::{
 
 use super::TUNNEL_H3_ALPN;
 
-/// Client-initiated request streams the Server admits concurrently on one Tunnel connection.
-///
-/// Covers the event-stream subscription, its replacement during resubscription, and headroom for
+/// Receive slots, idle or assigned, one Tunnel connection may hold: the Client-instance
+/// stream-handler budget, which no single connection can exceed.
+const MAX_RECEIVE_SLOTS: u32 = 1024;
+
+/// Request streams for the event-stream subscription, its replacement during resubscription, and
 /// other bodyless signaling requests.
-pub(crate) const MAX_TUNNEL_REQUEST_STREAMS: u32 = 8;
+const SIGNALING_REQUEST_STREAMS: u32 = 8;
+
+/// Client-initiated request streams the Server admits concurrently on one Tunnel connection.
+pub(crate) const MAX_TUNNEL_REQUEST_STREAMS: u32 = MAX_RECEIVE_SLOTS + SIGNALING_REQUEST_STREAMS;
 
 /// Unidirectional streams each peer admits: the HTTP/3 control stream, both QPACK streams, and
 /// headroom for reserved stream types that peers may send and receivers must ignore.
@@ -101,7 +106,7 @@ mod tests {
         let client = format!("{:?}", client_transport_config());
 
         assert!(
-            server.contains("max_concurrent_bidi_streams: 8"),
+            server.contains("max_concurrent_bidi_streams: 1032"),
             "{server}"
         );
         assert!(server.contains("keep_alive_interval: None"), "{server}");

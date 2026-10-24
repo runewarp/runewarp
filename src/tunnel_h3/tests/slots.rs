@@ -1,5 +1,7 @@
 //! Receive-slot carrier tests: assignment, replenishment, limits, abort, load, and shutdown.
 
+use crate::vendor::h3;
+
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -15,6 +15,8 @@
 //! future always runs to completion before the next write or FIN; cancelling an `h3` write midway
 //! would corrupt the stream (hyperium/h3#360).
 
+use crate::vendor::{h3, h3_quinn};
+
 use std::future::Future;
 use std::io;
 use std::pin::Pin;

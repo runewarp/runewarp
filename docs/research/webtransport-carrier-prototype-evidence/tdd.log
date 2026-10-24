@@ -1,0 +1,100 @@
+red-stream.log
+running 1 test
+prototype client driver: Local error: Application { code: H3_STREAM_CREATION_ERROR, reason: "client received a server-initiated bidirectional stream" }
+
+thread 'prototype_webtransport::experiment::tests::server_opened_stream_delivers_a_visitor' (9983180) panicked at src/prototype_webtransport/experiment.rs:39:102:
+Server-opened Visitor stream: ConnectionError(Local { error: Application { code: H3_STREAM_CREATION_ERROR, reason: "client received a server-initiated bidirectional stream" } })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test prototype_webtransport::experiment::tests::server_opened_stream_delivers_a_visitor ... FAILED
+
+failures:
+
+failures:
+    prototype_webtransport::experiment::tests::server_opened_stream_delivers_a_visitor
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 381 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`
+
+green-stream.log
+running 1 test
+test prototype_webtransport::experiment::tests::server_opened_stream_delivers_a_visitor ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 381 filtered out; finished in 0.01s
+
+
+red-session-id.log
+running 1 test
+test prototype_webtransport::experiment::identity_test::webtransport_uses_the_connect_stream_id_after_the_event_get ... FAILED
+
+failures:
+
+---- prototype_webtransport::experiment::identity_test::webtransport_uses_the_connect_stream_id_after_the_event_get stdout ----
+
+thread 'prototype_webtransport::experiment::identity_test::webtransport_uses_the_connect_stream_id_after_the_event_get' (9993852) panicked at src/prototype_webtransport/experiment.rs:52:9:
+assertion `left == right` failed
+  left: 1
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    prototype_webtransport::experiment::identity_test::webtransport_uses_the_connect_stream_id_after_the_event_get
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 382 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+
+red-datagram.log
+running 1 test
+test prototype_webtransport::experiment::tests::datagrams ... FAILED
+
+failures:
+
+---- prototype_webtransport::experiment::tests::datagrams stdout ----
+
+thread 'prototype_webtransport::experiment::tests::datagrams' (10060262) panicked at src/prototype_webtransport/experiment.rs:288:5:
+datagrams: "prototype datagram exchange not wired"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    prototype_webtransport::experiment::tests::datagrams
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 389 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+
+red-abort-code.log
+running 1 test
+test prototype_webtransport::experiment::tests::resets ... FAILED
+
+failures:
+
+---- prototype_webtransport::experiment::tests::resets stdout ----
+
+thread 'prototype_webtransport::experiment::tests::resets' (10106975) panicked at src/prototype_webtransport/experiment.rs:90:5:
+StreamTerminated { error_code: 268 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    prototype_webtransport::experiment::tests::resets
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 389 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`
+
+lifecycle-final.log
+running 9 tests
+test prototype_webtransport::experiment::tests::reverse_half_close ... ok
+test prototype_webtransport::experiment::tests::rejection ... ok
+test prototype_webtransport::experiment::tests::resets ... ok
+test prototype_webtransport::experiment::tests::connection_drop ... ok
+test prototype_webtransport::experiment::tests::visitor ... ok
+test prototype_webtransport::experiment::tests::datagrams ... ok
+test prototype_webtransport::experiment::tests::authentication_and_negotiation ... ok
+test prototype_webtransport::experiment::tests::close_and_goaway ... ok
+test prototype_webtransport::experiment::tests::credit ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 381 filtered out; finished in 0.15s

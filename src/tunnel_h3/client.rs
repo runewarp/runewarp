@@ -1,5 +1,7 @@
 //! Client side of an HTTP/3 Tunnel connection.
 
+use crate::vendor::{h3, h3_quinn};
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -377,7 +379,7 @@ impl EventFollower {
 fn forbids_new_requests(error: &StreamError) -> bool {
     matches!(
         error,
-        StreamError::RemoteClosing { .. } | StreamError::ConnectionError { .. }
+        StreamError::RemoteClosing | StreamError::ConnectionError { .. }
     )
 }
 

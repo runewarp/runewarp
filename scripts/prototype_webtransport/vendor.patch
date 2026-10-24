@@ -1,0 +1,284 @@
+--- a/src/vendor/h3/client/builder.rs
++++ b/src/vendor/h3/client/builder.rs
+@@ -111,6 +111,13 @@
+         self
+     }
+
++    /// THROWAWAY: advertise WebTransport and one session.
++    pub fn enable_webtransport(&mut self, enabled: bool) -> &mut Self {
++        self.config.settings.enable_webtransport = enabled;
++        self.config.settings.max_webtransport_sessions = u64::from(enabled);
++        self
++    }
++
+     /// Create a new HTTP/3 client from a `quic` connection
+     pub async fn build<C, O, B>(
+         &mut self,
+@@ -139,6 +146,7 @@
+         Ok((
+             Connection {
+                 inner,
++                wt_bi: None,
+                 sent_closing: None,
+                 recv_closing: None,
+             },
+--- a/src/vendor/h3/client/connection.rs
++++ b/src/vendor/h3/client/connection.rs
+@@ -295,6 +295,7 @@
+ /// #    C::SendStream: Send + 'static,
+ /// #    C::RecvStream: Send + 'static,
+ /// #    B: Buf + Send + 'static,
++/// #    C::BidiStream: Send + 'static,
+ /// # {
+ /// // Run the driver on a different task
+ /// tokio::spawn(async move {
+@@ -320,6 +321,7 @@
+ /// #    C::SendStream: Send + 'static,
+ /// #    C::RecvStream: Send + 'static,
+ /// #    B: Buf + Send + 'static,
++/// #    C::BidiStream: Send + 'static,
+ /// # {
+ /// // Prepare a channel to stop the driver thread
+ /// let (shutdown_tx, shutdown_rx) = oneshot::channel();
+@@ -360,6 +362,7 @@
+     pub inner: ConnectionInner<C, B>,
+     // Has a GOAWAY frame been sent? If so, this PushId is the last we are willing to accept.
+     pub(super) sent_closing: Option<PushId>,
++    pub(super) wt_bi: Option<tokio::sync::mpsc::Sender<C::BidiStream>>,
+     // Has a GOAWAY frame been received? If so, this is StreamId the last the remote will accept.
+     pub(super) recv_closing: Option<StreamId>,
+ }
+@@ -379,6 +382,17 @@
+     C: quic::Connection<B>,
+     B: Buf,
+ {
++    /// THROWAWAY: bounded delivery of negotiated WebTransport streams to the in-tree client.
++    /// The receiver must validate the 0x41 signal and the live session ID before delivery.
++    pub fn webtransport_bidi(
++        &mut self,
++        capacity: usize,
++    ) -> tokio::sync::mpsc::Receiver<C::BidiStream> {
++        let (send, recv) = tokio::sync::mpsc::channel(capacity);
++        self.wt_bi = Some(send);
++        recv
++    }
++
+     /// Initiate a graceful shutdown, accepting `max_push` potentially in-flight server pushes
+     #[cfg_attr(any(), instrument(skip_all, level = "trace"))]
+     pub async fn shutdown(&mut self, _max_push: usize) -> Result<(), ConnectionError> {
+@@ -471,12 +485,38 @@
+         //# receipt of a server-initiated bidirectional stream as a connection
+         //# error of type H3_STREAM_CREATION_ERROR unless such an extension has
+         //# been negotiated.
+-        if self.inner.poll_accept_bi(cx).is_ready() {
++        while let Poll::Ready(stream) = self.inner.poll_accept_bi(cx) {
++            let mut stream = match stream {
++                Ok(stream) => stream,
++                Err(error) => return Poll::Ready(error),
++            };
++            let peer = self.settings();
++            let local = &self.inner.config.settings;
++            let negotiated = local.enable_webtransport()
++                && local.enable_datagram()
++                && local.enable_extended_connect()
++                && peer.enable_webtransport()
++                && peer.enable_datagram()
++                && peer.enable_extended_connect();
++            if let Some(sender) = &self.wt_bi {
++                if negotiated {
++                    if let Err(error) = sender.try_send(stream) {
++                        use crate::vendor::h3::quic::{RecvStream, SendStream};
++                        let mut rejected = error.into_inner();
++                        rejected.reset(0x3994bd84);
++                        rejected.stop_sending(0x3994bd84);
++                    }
++                    continue;
++                }
++            }
++            use crate::vendor::h3::quic::{RecvStream, SendStream};
++            stream.reset(Code::H3_STREAM_CREATION_ERROR.value());
++            stream.stop_sending(Code::H3_STREAM_CREATION_ERROR.value());
+             return Poll::Ready(
+                 self.inner
+                     .handle_connection_error(InternalConnectionError::new(
+                         Code::H3_STREAM_CREATION_ERROR,
+-                        "client received a server-initiated bidirectional stream".to_string(),
++                        "unnegotiated server-initiated bidirectional stream".to_string(),
+                     )),
+             );
+         }
+--- a/src/vendor/h3/config.rs
++++ b/src/vendor/h3/config.rs
+@@ -51,7 +51,7 @@
+                 .get(frame::SettingId::MAX_HEADER_LIST_SIZE)
+                 .unwrap_or(defaults.max_field_section_size),
+             enable_webtransport: settings
+-                .get(frame::SettingId::ENABLE_WEBTRANSPORT)
++                .get(frame::SettingId::WEBTRANSPORT_MAX_SESSIONS)
+                 .map(|value| value != 0)
+                 .unwrap_or(defaults.enable_webtransport),
+             max_webtransport_sessions: settings
+@@ -81,7 +81,7 @@
+             settings:
+                 Settings {
+                     max_field_section_size,
+-                    enable_webtransport,
++                    enable_webtransport: _,
+                     enable_extended_connect,
+                     enable_datagram,
+                     max_webtransport_sessions,
+@@ -120,10 +120,6 @@
+             frame::SettingId::ENABLE_CONNECT_PROTOCOL,
+             enable_extended_connect as u64,
+         )?;
+-        settings.insert(
+-            frame::SettingId::ENABLE_WEBTRANSPORT,
+-            enable_webtransport as u64,
+-        )?;
+         settings.insert(frame::SettingId::H3_DATAGRAM, enable_datagram as u64)?;
+         settings.insert(
+             frame::SettingId::WEBTRANSPORT_MAX_SESSIONS,
+@@ -147,6 +143,11 @@
+ }
+
+ impl Settings {
++    /// THROWAWAY: peer-advertised session limit, draft-07 codepoint.
++    pub fn max_webtransport_sessions(&self) -> u64 {
++        self.max_webtransport_sessions
++    }
++
+     /// https://datatracker.ietf.org/doc/html/draft-ietf-webtrans-http3/#section-3.1
+     /// Sets `SETTINGS_ENABLE_WEBTRANSPORT` if enabled
+     pub fn enable_webtransport(&self) -> bool {
+--- a/src/vendor/h3/proto/frame.rs
++++ b/src/vendor/h3/proto/frame.rs
+@@ -454,7 +454,7 @@
+     // https://datatracker.ietf.org/doc/html/draft-ietf-webtrans-http3/#section-8.2
+     H3_SETTING_ENABLE_DATAGRAM_CHROME_SPECIFIC= 0xFFD277,
+
+-    WEBTRANSPORT_MAX_SESSIONS = 0x2b603743,
++    WEBTRANSPORT_MAX_SESSIONS = 0xc671706a,
+ }
+
+ const SETTINGS_LEN: usize = 8;
+--- a/src/vendor/h3/webtransport/session_id.rs
++++ b/src/vendor/h3/webtransport/session_id.rs
+@@ -45,6 +45,6 @@
+
+ impl From<StreamId> for SessionId {
+     fn from(value: StreamId) -> Self {
+-        Self(value.index())
++        Self(value.into_inner())
+     }
+ }
+--- a/src/vendor/h3_webtransport/server.rs
++++ b/src/vendor/h3_webtransport/server.rs
+@@ -123,22 +123,29 @@
+             tracing::warn!("Server does not support CONNECT");
+         }
+
++        if !validate_wt_connect(&request) {
++            stream
++                .send_response(
++                    Response::builder()
++                        .status(StatusCode::BAD_REQUEST)
++                        .body(())
++                        .expect("static response"),
++                )
++                .await?;
++            stream.finish().await?;
++            return Err(StreamError::StreamError {
++                code: Code::H3_MESSAGE_ERROR,
++                reason: "invalid WebTransport CONNECT".into(),
++            });
++        }
++
+         // Respond to the CONNECT request.
+
+         //= https://datatracker.ietf.org/doc/html/draft-ietf-webtrans-http3/#section-3.3
+-        let response = if validate_wt_connect(&request) {
+-            Response::builder()
+-                // This is the only header that chrome cares about.
+-                .header("sec-webtransport-http3-draft", "draft02")
+-                .status(StatusCode::OK)
+-                .body(())
+-                .unwrap()
+-        } else {
+-            Response::builder()
+-                .status(StatusCode::BAD_REQUEST)
+-                .body(())
+-                .unwrap()
+-        };
++        let response = Response::builder()
++            .status(StatusCode::OK)
++            .body(())
++            .expect("static WebTransport response");
+
+         stream.send_response(response).await?;
+
+@@ -153,6 +160,29 @@
+             connect_stream: stream,
+             shared,
+         })
++    }
++
++    /// THROWAWAY: separate the H3 driver, CONNECT stream and WT stream opener.
++    /// The Runewarp prototype owns session lifetime, routing and stream cancellation.
++    #[allow(clippy::type_complexity)]
++    pub fn into_parts(
++        self,
++    ) -> (
++        Connection<C, B>,
++        RequestStream<C::BidiStream, B>,
++        SessionOpener<C, B>,
++    ) {
++        (
++            self.server_conn
++                .into_inner()
++                .expect("prototype connection mutex"),
++            self.connect_stream,
++            SessionOpener {
++                opener: self.opener,
++                shared: self.shared,
++                session_id: self.session_id,
++            },
++        )
+     }
+
+     /// Receive a datagram from the client
+@@ -222,6 +252,27 @@
+     /// Returns the session id
+     pub fn session_id(&self) -> SessionId {
+         self.session_id
++    }
++}
++
++/// THROWAWAY: session stream opening independent of the connection driver.
++pub struct SessionOpener<C: quic::Connection<B>, B: Buf> {
++    opener: Mutex<C::OpenStreams>,
++    shared: Arc<SharedState>,
++    session_id: SessionId,
++}
++
++impl<C: quic::Connection<B>, B: Buf> SessionOpener<C, B> {
++    /// Open a Server stream for this session, with its 0x41 signal and full CONNECT ID.
++    pub fn open_bi(&self) -> OpenBi<'_, C, B> {
++        OpenBi {
++            opener: &self.opener,
++            stream: None,
++            session_id: self.session_id,
++            stream_handler: WTransportStreamHandler {
++                shared: self.shared.clone(),
++            },
++        }
+     }
+ }
+
+--- a/src/vendor/mod.rs
++++ b/src/vendor/mod.rs
+@@ -1,4 +1,5 @@
+ //! THROWAWAY vendored HTTP/3 stack. MIT notices accompany each module.
++#![allow(clippy::collapsible_if)]
+ #![forbid(unsafe_code)]
+ pub mod h3;
+ pub mod h3_datagram;

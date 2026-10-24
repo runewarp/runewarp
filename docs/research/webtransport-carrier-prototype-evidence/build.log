@@ -1,0 +1,17 @@
+git-pin slots
+   Compiling runewarp v0.3.0-dev ($SCRATCH)
+    Finished `release` profile [optimized] target(s) in 5.06s
+real 5.08
+user 23.72
+sys 0.46
+git-pin slots: 5182816 bytes
+vendored WT
+   Compiling runewarp v0.3.0-dev ($WORKTREE)
+    Finished `release` profile [optimized] target(s) in 6.75s
+real 6.77
+user 26.62
+sys 0.56
+vendored WT: 5061984 bytes
+
+CLI baseline: 10143472 bytes; 6.30 s elapsed, 28.47 s user
+CLI vendored: 10141600 bytes; 7.10 s elapsed, 33.71 s user

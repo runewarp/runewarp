@@ -1,7 +1,9 @@
 //! Ordinary-HTTP/3 Tunnel connections.
 //!
-//! This module owns HTTP/3 on one authenticated Tunnel connection, built on unmodified upstream
-//! `h3` + `h3-quinn` over Quinn and rustls:
+//! This module owns HTTP/3 on one authenticated Tunnel connection over Quinn and rustls.
+//! On this throwaway branch, `h3` and `h3-quinn` come from `crate::vendor`; the separate
+//! `prototype_webtransport` module exercises experimental extension patches. This module
+//! retains its receive-slot behavior:
 //!
 //! - ALPN `h3` with a required, pinned Client identity certificate and no application 0-RTT;
 //! - the Tunnel event stream, a Client-opened `GET /v1/tunnel/events` whose first valid `state`
@@ -16,11 +18,13 @@
 //!
 //! The Client and Server runtimes still use `runewarp/1`; this module is not wired into them yet.
 
+use crate::vendor::h3;
+
 mod client;
 mod config;
-mod events;
+pub(crate) mod events;
 mod server;
-mod stream;
+pub(crate) mod stream;
 #[cfg(test)]
 mod tests;
 

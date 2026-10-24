@@ -770,31 +770,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "h3"
-version = "0.0.8"
-source = "git+https://github.com/hyperium/h3?rev=43745ad87e95b0c035ac9c547aad467303213425#43745ad87e95b0c035ac9c547aad467303213425"
-dependencies = [
- "bytes",
- "fastrand",
- "futures-util",
- "http",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
-name = "h3-quinn"
-version = "0.0.10"
-source = "git+https://github.com/hyperium/h3?rev=43745ad87e95b0c035ac9c547aad467303213425#43745ad87e95b0c035ac9c547aad467303213425"
-dependencies = [
- "bytes",
- "futures-util",
- "h3",
- "quinn",
- "tokio-util",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1429,14 +1404,14 @@ dependencies = [
  "assert_cmd",
  "bytes",
  "clap",
+ "fastrand",
  "futures-util",
- "h3",
- "h3-quinn",
  "http",
  "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "pin-project-lite",
  "proptest",
  "quinn",
  "rand 0.9.5",
@@ -1451,6 +1426,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-subscriber",

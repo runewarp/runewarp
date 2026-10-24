@@ -1,0 +1,55 @@
+baseline-publish.log
+    Updating crates.io index
+error: failed to verify manifest at `$WORKTREE/Cargo.toml`
+
+Caused by:
+  all dependencies must have a version requirement specified when publishing.
+  dependency `h3` does not specify a version
+  Note: The published dependency will use the version from crates.io,
+  the `git` specification will be removed from the dependency declaration.
+
+path-publish.log
+    Updating crates.io index
+error: failed to verify manifest at `/private/tmp/runewarp-wt-evidence/path-shape/Cargo.toml`
+
+Caused by:
+  all dependencies must have a version requirement specified when publishing.
+  dependency `prototype-vendor-shape-child` does not specify a version
+  Note: The published dependency will use the version from crates.io,
+  the `path` specification will be removed from the dependency declaration.
+
+path-version-publish.log
+    Updating crates.io index
+warning: manifest has no description, license, license-file, documentation, homepage or repository
+  |
+  = note: see https://doc.rust-lang.org/cargo/reference/manifest.html#package-metadata for more info
+   Packaging prototype-vendor-shape-parent v0.0.0 (/private/tmp/runewarp-wt-evidence/path-shape)
+    Updating crates.io index
+error: failed to prepare local package for uploading
+
+Caused by:
+  no matching package named `prototype-vendor-shape-child` found
+  location searched: crates.io index
+  required by package `prototype-vendor-shape-parent v0.0.0 (/private/tmp/runewarp-wt-evidence/path-shape)`
+
+vendor-publish-final.log
+    Updating crates.io index
+   Packaging runewarp v0.3.0-dev ($WORKTREE)
+    Updating crates.io index
+    Packaged 290 files, 3.0MiB (561.2KiB compressed)
+   Verifying runewarp v0.3.0-dev ($WORKTREE)
+   Compiling runewarp v0.3.0-dev ($WORKTREE/target/package/runewarp-0.3.0-dev)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.92s
+   Uploading runewarp v0.3.0-dev ($WORKTREE)
+warning: aborting upload due to dry run
+
+package-files.log
+docs/research/webtransport-carrier-prototype.md
+src/vendor/h3/LICENSE-MIT
+src/vendor/h3_datagram/LICENSE-MIT
+src/vendor/h3_quinn/LICENSE-MIT
+src/vendor/h3_webtransport/LICENSE-MIT
+src/vendor/mod.rs
+
+Scratch process, no file changed: PUBLISHING_PAUSE_REASON=nil
+done: crates.io publishing is enabled

@@ -3,6 +3,8 @@
 //! Each test runs a real Quinn/rustls connection with required mTLS. Raw `h3` peers stand in for
 //! the other side where a test needs to observe or violate the wire contract.
 
+use crate::vendor::{h3, h3_quinn};
+
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;

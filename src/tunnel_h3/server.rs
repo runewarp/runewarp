@@ -1,5 +1,7 @@
 //! Server side of an HTTP/3 Tunnel connection.
 
+use crate::vendor::{h3, h3_quinn};
+
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;

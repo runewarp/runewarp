@@ -1,0 +1,36 @@
+   Compiling runewarp v0.3.0-dev ($WORKTREE)
+    Finished `release` profile [optimized] target(s) in 7.47s
+     Running `target/release/examples/prototype_webtransport_carrier`
+PASS: GET gate, immediate Visitor bytes, PUT, client CLOSE
+PASS: FIN half-close in both orders
+PASS: reset on abort both directions, connection survives
+PASS: QUIC stream credit blocks excess opens and recovers
+PASS: session CLOSE both ways, active resets, GET/PUT survive; GOAWAY drains
+PASS: connection drop ends active and pending streams
+PASS: session limit and wrong Session ID rejection
+PASS: unauthorized mTLS rejected; unnegotiated bidi closes H3
+PASS: bidirectional H3 Datagrams on Session ID 4 while a Visitor stream is active
+TIMING receive-slots n=1 placement_us_p50=27 p95=27 delivery_us_p50=239 p95=239 burst_us=239
+TIMING webtransport n=1 placement_us_p50=3 p95=3 delivery_us_p50=117 p95=117 burst_us=117
+TIMING receive-slots n=32 placement_us_p50=6 p95=199 delivery_us_p50=11472 p95=11855 burst_us=13175
+TIMING webtransport n=32 placement_us_p50=1 p95=49 delivery_us_p50=238 p95=243 burst_us=319
+TIMING receive-slots n=64 placement_us_p50=1 p95=106 delivery_us_p50=545 p95=771 burst_us=1988
+TIMING webtransport n=64 placement_us_p50=0 p95=40 delivery_us_p50=189 p95=351 burst_us=461
+TIMING receive-slots n=128 placement_us_p50=1 p95=118 delivery_us_p50=680 p95=980 burst_us=3713
+TIMING webtransport n=128 placement_us_p50=0 p95=31 delivery_us_p50=265 p95=364 burst_us=484
+TIMING receive-slots n=1 placement_us_p50=18 p95=18 delivery_us_p50=179 p95=179 burst_us=179
+TIMING webtransport n=1 placement_us_p50=21 p95=21 delivery_us_p50=78 p95=78 burst_us=78
+TIMING receive-slots n=32 placement_us_p50=1 p95=6 delivery_us_p50=308 p95=453 burst_us=580
+TIMING webtransport n=32 placement_us_p50=0 p95=1 delivery_us_p50=78 p95=81 burst_us=121
+TIMING receive-slots n=64 placement_us_p50=1 p95=74 delivery_us_p50=834 p95=1169 burst_us=2277
+TIMING webtransport n=64 placement_us_p50=0 p95=26 delivery_us_p50=170 p95=207 burst_us=298
+TIMING receive-slots n=128 placement_us_p50=1 p95=147 delivery_us_p50=516 p95=908 burst_us=3708
+TIMING webtransport n=128 placement_us_p50=0 p95=26 delivery_us_p50=282 p95=390 burst_us=473
+TIMING receive-slots n=1 placement_us_p50=32 p95=32 delivery_us_p50=228 p95=228 burst_us=228
+TIMING webtransport n=1 placement_us_p50=3 p95=3 delivery_us_p50=95 p95=95 burst_us=95
+TIMING receive-slots n=32 placement_us_p50=4 p95=222 delivery_us_p50=1448 p95=1778 burst_us=2552
+TIMING webtransport n=32 placement_us_p50=2 p95=92 delivery_us_p50=303 p95=493 burst_us=639
+TIMING receive-slots n=64 placement_us_p50=9 p95=254 delivery_us_p50=1239 p95=2830 burst_us=5230
+TIMING webtransport n=64 placement_us_p50=2 p95=65 delivery_us_p50=601 p95=691 burst_us=806
+TIMING receive-slots n=128 placement_us_p50=4 p95=181 delivery_us_p50=1666 p95=3638 burst_us=7903
+TIMING webtransport n=128 placement_us_p50=1 p95=43 delivery_us_p50=739 p95=1019 burst_us=1144

@@ -6,22 +6,22 @@ description = "Runewarp is an ingress tunneling platform for securely exposing l
 readme = "README.md"
 homepage = "https://runewarp.com"
 repository = "https://github.com/runewarp/runewarp"
-license = "Apache-2.0"
+license = "Apache-2.0 AND MIT"
 keywords = ["ingress", "tunnel", "port-forwarding", "tls-passthrough", "nat-traversal"]
 categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
-futures-util = "0.3.32"
+futures-util = { version = "0.3.32", features = ["io"] }
 rand = "0.9.2"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 rustls-acme = { version = "0.15.3", default-features = false, features = ["ring", "tokio", "tls12", "webpki-roots"] }
 rcgen = { version = "0.14.8", features = ["x509-parser"] }
-# Unmodified upstream hyperium/h3 main, pinned until a release includes the fixes the Tunnel H3
-# module depends on (released 0.0.8 panics in `stop_sending`, hyperium/h3#330).
-h3 = { git = "https://github.com/hyperium/h3", rev = "43745ad87e95b0c035ac9c547aad467303213425" }
-h3-quinn = { git = "https://github.com/hyperium/h3", rev = "43745ad87e95b0c035ac9c547aad467303213425" }
-quinn = { version = "0.11.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
+# THROWAWAY: h3, h3-quinn, h3-datagram and h3-webtransport are modules in src/vendor.
+fastrand = "2.4.0"
+pin-project-lite = "0.2.17"
+tokio-util = "0.7.18"
+quinn = { version = "0.11.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring", "futures-io"] }
 rustls = { version = "0.23.35", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -43,7 +43,7 @@ hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto",
 [dev-dependencies]
 assert_cmd = "2.2.2"
 bytes = "1.10"
-futures-util = "0.3.32"
+futures-util = { version = "0.3.32", features = ["io"] }
 http = "1.4.2"
 http-body = "1.0.1"
 http-body-util = "0.1.3"
@@ -56,7 +56,7 @@ sha2 = "0.11.0"
 tempfile = "3.27.0"
 time = "0.3.47"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
-tokio = { version = "1.52.3", features = ["test-util"] }
+tokio = { version = "1.52.3", features = ["test-util", "io-std"] }
 
 [[bin]]
 name = "runewarp"

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod acme;
 mod cert_file_ops;
 mod client;
@@ -12,6 +14,8 @@ mod identity;
 pub mod managed_session;
 mod opaque_control_token;
 mod paths;
+/// THROWAWAY loopback WebTransport carrier experiment.
+pub mod prototype_webtransport;
 mod proxy;
 mod proxy_protocol;
 mod quic;
@@ -31,6 +35,8 @@ mod trust;
 mod tunnel_framing;
 pub mod tunnel_h3;
 mod tunnel_id;
+/// THROWAWAY vendored stack, not a supported Runewarp API.
+pub mod vendor;
 
 pub use client::{
     AddressController, AddressControllerShutdown, AddressControllerView, AddressWorkerBackoff,

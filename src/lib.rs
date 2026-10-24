@@ -24,6 +24,7 @@ mod server_cert;
 mod server_identity;
 mod server_runtime;
 mod shutdown;
+mod sse;
 mod startup;
 mod tls_material;
 mod trust;

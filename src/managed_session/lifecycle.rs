@@ -18,10 +18,10 @@ use super::reconcile::{AppliedRevision, QueuedSnapshot, SnapshotQueue};
 use super::role::ManagedSessionRole;
 use super::session::ManagedSessionEvent;
 use super::snapshot::{SnapshotEnvelope, SnapshotError, parse_snapshot_event};
-use super::sse::{SseParseError, SseParseItem, SseParser};
 use super::timing::{FIRST_SNAPSHOT_DEADLINE, SessionDeadlines};
 use super::tls::ControlTlsMaterial;
 use crate::ControlAddress;
+use crate::sse::{SseParseError, SseParseItem, SseParser};
 
 #[derive(Debug)]
 pub(super) enum ManagedSessionError {
@@ -105,7 +105,7 @@ impl<I> ConnectionLifecycle<I> {
 
         Ok(Self {
             connection,
-            parser: SseParser::new(limits),
+            parser: SseParser::new(limits.sse_limits()),
             deadlines: SessionDeadlines::new(connection_started_at),
             received_valid_snapshot: false,
             queue: SnapshotQueue::new(),
@@ -275,7 +275,7 @@ impl<I> ConnectionLifecycle<I> {
         self.deadlines.note_bytes(now);
         let items = self.parser.push(&bytes).map_err(|error| {
             if let SseParseError::LimitExceeded { limit, value, max } = error {
-                log_limit_exceeded(limit, value, max);
+                log_limit_exceeded(limit.into(), value, max);
             }
             ManagedSessionError::Sse(error)
         })?;

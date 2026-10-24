@@ -20,6 +20,7 @@ mod client;
 mod config;
 mod events;
 mod server;
+mod stream;
 #[cfg(test)]
 mod tests;
 
@@ -32,10 +33,20 @@ use tokio::task::JoinHandle;
 pub use client::ClientTunnelH3;
 pub use config::{make_client_tunnel_h3_config, make_server_tunnel_h3_config};
 pub use events::{ServerRuntimeGeneration, TUNNEL_PROTOCOL_VERSION, TunnelEventState};
-pub use server::ServerTunnelH3;
+pub use server::{OpenTunnelStreamError, ServerTunnelH3};
+pub use stream::{
+    ClientTunnelStream, ServerTunnelStream, TunnelReadHalf, TunnelStream, TunnelWriteHalf,
+};
 
 /// ALPN for HTTP/3 Tunnel connections. There is no fallback to `runewarp/1`.
 pub const TUNNEL_H3_ALPN: &[u8] = b"h3";
+
+/// Idle receive slots one Client keeps open on a Tunnel connection; the Server rejects more.
+///
+/// Each idle slot is one Visitor the Server can place without waiting for the Client, so this
+/// bounds burst capacity per round trip. Idle and assigned slots also hold Client-instance
+/// stream-handler permits.
+pub const MAX_IDLE_RECEIVE_SLOTS: usize = 32;
 
 /// Tunnel event-stream resource on the Server hostname's HTTPS origin.
 pub const TUNNEL_EVENTS_PATH: &str = "/v1/tunnel/events";

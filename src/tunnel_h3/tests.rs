@@ -16,6 +16,7 @@ use quinn::{ConnectionError, Endpoint};
 use rcgen::generate_simple_self_signed;
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
@@ -27,6 +28,8 @@ use super::{
 use crate::quic::StaticClientIdentityAdmission;
 use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
 use crate::{ClientIdentity, ServerHostname, generate_client_identity};
+
+mod slots;
 
 const SERVER_NAME: &str = "tunnel.example.test";
 const STEP: Duration = Duration::from_secs(2);
@@ -45,6 +48,11 @@ fn fast_timing() -> TunnelH3Timing {
         silence_deadline: Duration::from_millis(300),
         resubscribe_delay: Duration::from_millis(20),
     }
+}
+
+/// A Client stream budget with no permits: the Client opens no receive slots.
+fn no_slots() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(0))
 }
 
 fn server_hostname() -> ServerHostname {
@@ -134,6 +142,7 @@ impl Fixture {
 async fn establish_pair(
     fixture: &Fixture,
     generation: ServerRuntimeGeneration,
+    budget: Arc<Semaphore>,
 ) -> (ServerTunnelH3, ClientTunnelH3) {
     let (server_connection, client_connection) =
         fixture.connect().await.expect("authenticated handshake");
@@ -146,7 +155,12 @@ async fn establish_pair(
                 generation,
                 fast_timing(),
             ),
-            ClientTunnelH3::establish_with_timing(client_connection, &hostname, fast_timing()),
+            ClientTunnelH3::establish_with_timing(
+                client_connection,
+                &hostname,
+                budget,
+                fast_timing(),
+            ),
         )
     })
     .await
@@ -250,7 +264,7 @@ async fn client_passes_the_gate_with_the_server_generation() {
     let fixture = Fixture::new().expect("fixture");
     let generation = ServerRuntimeGeneration::generate();
 
-    let (server, client) = establish_pair(&fixture, generation).await;
+    let (server, client) = establish_pair(&fixture, generation, no_slots()).await;
 
     assert_eq!(client.server_generation(), generation);
     assert_eq!(server.client_identity(), &fixture.client_identity);
@@ -312,6 +326,7 @@ async fn client_rejects_an_incompatible_event_stream_and_closes_the_connection()
         let result = ClientTunnelH3::establish_with_timing(
             client_connection,
             &server_hostname(),
+            no_slots(),
             fast_timing(),
         )
         .await;
@@ -366,6 +381,7 @@ async fn client_rejects_a_non_event_stream_response() {
         let result = ClientTunnelH3::establish_with_timing(
             client_connection,
             &server_hostname(),
+            no_slots(),
             fast_timing(),
         )
         .await;
@@ -399,9 +415,13 @@ async fn comment_keepalives_do_not_satisfy_the_gate() {
         }
     });
 
-    let result =
-        ClientTunnelH3::establish_with_timing(client_connection, &server_hostname(), fast_timing())
-            .await;
+    let result = ClientTunnelH3::establish_with_timing(
+        client_connection,
+        &server_hostname(),
+        no_slots(),
+        fast_timing(),
+    )
+    .await;
 
     assert!(
         matches!(result, Err(TunnelH3Error::InitialStateTimeout)),
@@ -432,10 +452,14 @@ async fn client_resubscribes_after_an_end_or_silence_and_keeps_the_connection() 
         (request, connection, second, third)
     });
 
-    let client =
-        ClientTunnelH3::establish_with_timing(client_connection, &server_hostname(), fast_timing())
-            .await
-            .expect("gate passes");
+    let client = ClientTunnelH3::establish_with_timing(
+        client_connection,
+        &server_hostname(),
+        no_slots(),
+        fast_timing(),
+    )
+    .await
+    .expect("gate passes");
 
     let (request, _connection, _second, _third) = timeout(Duration::from_secs(3), fake_server)
         .await
@@ -470,10 +494,14 @@ async fn client_closes_when_the_generation_changes_on_one_connection() {
         closed
     });
 
-    let client =
-        ClientTunnelH3::establish_with_timing(client_connection, &server_hostname(), fast_timing())
-            .await
-            .expect("gate passes");
+    let client = ClientTunnelH3::establish_with_timing(
+        client_connection,
+        &server_hostname(),
+        no_slots(),
+        fast_timing(),
+    )
+    .await
+    .expect("gate passes");
 
     let closed = timeout(STEP, fake_server)
         .await
@@ -637,7 +665,8 @@ async fn shutdown_sends_goaway_ends_the_event_stream_and_closes_cleanly() {
 #[tokio::test]
 async fn dropping_either_handle_closes_the_connection_without_error() {
     let fixture = Fixture::new().expect("fixture");
-    let (server, client) = establish_pair(&fixture, ServerRuntimeGeneration::generate()).await;
+    let (server, client) =
+        establish_pair(&fixture, ServerRuntimeGeneration::generate(), no_slots()).await;
 
     drop(server);
 

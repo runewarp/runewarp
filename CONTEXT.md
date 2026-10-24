@@ -24,6 +24,14 @@ _Avoid_: tunnel UUID, ordinal, tunnel index
 A live session opened by one **Client instance** and accepted under one **Tunnel**.
 _Avoid_: Tunnel, route
 
+**Server runtime generation**:
+An opaque value identifying one running process of a **Server**. A new value is generated at every start; it is not a credential, certificate, or enrollment identity, and only distinguishes one incarnation of the same Server from another.
+_Avoid_: Server version, instance ID, Blue/Green
+
+**Tunnel event stream**:
+The Client-opened HTTP/3 Server-Sent Events subscription on one **Tunnel connection** through which the **Server** sends its full current state: protocol version and **Server runtime generation**. Its first valid state is the compatibility gate; it never carries configuration.
+_Avoid_: control channel, association SSE, Managed session
+
 **Client**:
 The operator-run Runewarp component responsible for forwarding traffic between the **Server** and local backends.
 _Avoid_: Visitor, browser, caller

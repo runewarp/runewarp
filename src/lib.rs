@@ -29,6 +29,7 @@ mod startup;
 mod tls_material;
 mod trust;
 mod tunnel_framing;
+pub mod tunnel_h3;
 mod tunnel_id;
 
 pub use client::{

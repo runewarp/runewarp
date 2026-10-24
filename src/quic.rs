@@ -104,13 +104,7 @@ pub fn make_server_quic_config_with_client_admission(
     private_key: PrivateKeyDer<'static>,
     admission: Arc<dyn ClientIdentityAdmission>,
 ) -> Result<quinn::ServerConfig, QuicConfigError> {
-    let provider = server_crypto_provider();
-    let verifier =
-        PinnedClientCertVerifier::new(admission, provider.signature_verification_algorithms);
-    let mut server_crypto = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
-        .with_client_cert_verifier(Arc::new(verifier))
-        .with_single_cert(cert_chain, private_key)?;
+    let mut server_crypto = pinned_client_auth_server_crypto(cert_chain, private_key, admission)?;
     server_crypto.alpn_protocols = vec![RUNEWARP_ALPN.to_vec()];
 
     let mut server_config =
@@ -120,6 +114,31 @@ pub fn make_server_quic_config_with_client_admission(
     configure_server_transport(transport_config);
 
     Ok(server_config)
+}
+
+/// Server TLS that requires a Client certificate whose pinned identity `admission` authorizes.
+///
+/// Callers set ALPN and wrap it in their QUIC transport configuration.
+pub(crate) fn pinned_client_auth_server_crypto(
+    cert_chain: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+    admission: Arc<dyn ClientIdentityAdmission>,
+) -> Result<rustls::ServerConfig, QuicConfigError> {
+    let provider = server_crypto_provider();
+    let verifier =
+        PinnedClientCertVerifier::new(admission, provider.signature_verification_algorithms);
+    Ok(rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_client_cert_verifier(Arc::new(verifier))
+        .with_single_cert(cert_chain, private_key)?)
+}
+
+/// Pinned Client identity of an authenticated QUIC connection's leaf certificate.
+pub(crate) fn peer_client_identity(connection: &quinn::Connection) -> Option<ClientIdentity> {
+    let identity = connection.peer_identity()?;
+    let certificate_chain = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
+    let certificate = certificate_chain.first()?;
+    client_identity_from_certificate_der(certificate.as_ref()).ok()
 }
 
 pub fn make_server_quic_config_with_client_auth_resolver(
@@ -233,12 +252,12 @@ fn server_crypto_provider() -> Arc<CryptoProvider> {
 }
 
 #[derive(Debug)]
-struct StaticClientIdentityAdmission {
+pub(crate) struct StaticClientIdentityAdmission {
     trusted_client_identities: HashSet<ClientIdentity>,
 }
 
 impl StaticClientIdentityAdmission {
-    fn from_identities(trusted_client_identities: &[ClientIdentity]) -> Self {
+    pub(crate) fn from_identities(trusted_client_identities: &[ClientIdentity]) -> Self {
         Self {
             trusted_client_identities: trusted_client_identities.iter().cloned().collect(),
         }

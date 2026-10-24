@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Changed
 
+- Switched all Tunnel connections to HTTP/3 with ALPN `h3`. This is a breaking lockstep upgrade: old and new Clients/Servers are incompatible; upgrade both together. (#250)
+
 - Paused crates.io releases while Runewarp depends on an unreleased upstream `h3`; Docker images and GitHub Releases continue, and `cargo install --git https://github.com/runewarp/runewarp` installs from source meanwhile. (#248)
 - Deepened production Client Tunnel-connection attempts into one Static, Managed, and integration-test path with ordered per-retry DNS, per-attempt identity/trust reload, typed outcomes, and Address-worker-owned retry/cancellation; public Client config now represents Server trust as `ClientServerTrust` instead of an optional CA path. (#240)
 - Added supported Client and Server role-runtime seams that own process orchestration and await Address workers, readiness, handshakes, Visitor intake, ACME, and Managed-session work during teardown. (#234)
@@ -52,6 +54,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added the runtime-only `runewarp server --hostname <HOSTNAME>` override so one shared Server config can inject the effective Server hostname before validation, Server certificate checks, and Server ACME setup. (#138)
 - Added the narrow `RUNEWARP_SERVER_HOSTNAME` override for `runewarp server`, `runewarp server cert init`, and `runewarp server cert rotate-ca`, with precedence between `--hostname` and `server.hostname`. (#144)
 - Added opt-in `server.readiness-bind-address` TCP readiness probes plus `server.graceful-shutdown-duration` so Server ingress admission and orderly shutdown mode are explicit and operator-configurable. (#148)
+
+### Removed
+
+- Removed the `runewarp/1` Rust configuration builders, `RUNEWARP_ALPN`, and `MAX_SERVER_OPENED_BIDI_STREAMS`; use the `tunnel_h3` configuration and connection APIs. (#250)
 
 ## [0.2.0] - 2026-06-30
 

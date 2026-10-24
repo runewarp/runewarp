@@ -13,6 +13,44 @@ class CratesIoPublishingTest < Minitest::Test
     )
   end
 
+  def with_allowed_git_dependencies(dependencies)
+    original = Runewarp::CratesIo::ALLOWED_GIT_DEPENDENCIES
+    Runewarp::CratesIo.send(:remove_const, :ALLOWED_GIT_DEPENDENCIES)
+    Runewarp::CratesIo.const_set(:ALLOWED_GIT_DEPENDENCIES, dependencies.freeze)
+    yield
+  ensure
+    Runewarp::CratesIo.send(:remove_const, :ALLOWED_GIT_DEPENDENCIES)
+    Runewarp::CratesIo.const_set(:ALLOWED_GIT_DEPENDENCIES, original)
+  end
+
+  def test_allowed_git_dependencies_description_with_one_name
+    with_allowed_git_dependencies("h3" => "https://github.com/runewarp/h3") do
+      assert_equal("h3 from https://github.com/runewarp/h3", Runewarp::CratesIo.allowed_git_dependencies_description)
+    end
+  end
+
+  def test_allowed_git_dependencies_description_with_two_names
+    with_allowed_git_dependencies(
+      "h3" => "https://github.com/runewarp/h3",
+      "h3-quinn" => "https://github.com/runewarp/h3"
+    ) do
+      assert_equal("h3 and h3-quinn from https://github.com/runewarp/h3", Runewarp::CratesIo.allowed_git_dependencies_description)
+    end
+  end
+
+  def test_allowed_git_dependencies_description_groups_names_by_url
+    with_allowed_git_dependencies(
+      "h3" => "https://github.com/runewarp/h3",
+      "quinn" => "https://github.com/quinn-rs/quinn",
+      "h3-quinn" => "https://github.com/runewarp/h3"
+    ) do
+      assert_equal(
+        "h3 and h3-quinn from https://github.com/runewarp/h3, quinn from https://github.com/quinn-rs/quinn",
+        Runewarp::CratesIo.allowed_git_dependencies_description
+      )
+    end
+  end
+
   def test_pause_reason_links_the_fork_decision
     reason = Runewarp::CratesIo::PUBLISHING_PAUSE_REASON
     skip("crates.io publishing is not paused") if reason.nil?

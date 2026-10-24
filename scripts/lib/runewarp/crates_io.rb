@@ -30,7 +30,8 @@ module Runewarp
     def allowed_git_dependencies_description
       ALLOWED_GIT_DEPENDENCIES.group_by { |_name, url| url }.map do |url, entries|
         names = entries.map(&:first)
-        "#{names[0...-1].join(', ')} and #{names.last} from #{url}"
+        list = names.length == 1 ? names.first : "#{names[0...-1].join(', ')} and #{names.last}"
+        "#{list} from #{url}"
       end.join(", ")
     end
 

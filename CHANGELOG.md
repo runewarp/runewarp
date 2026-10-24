@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Changed
 
+- Paused crates.io releases while Runewarp depends on an unreleased upstream `h3`; Docker images and GitHub Releases continue, and `cargo install --git https://github.com/runewarp/runewarp` installs from source meanwhile. (#248)
 - Deepened production Client Tunnel-connection attempts into one Static, Managed, and integration-test path with ordered per-retry DNS, per-attempt identity/trust reload, typed outcomes, and Address-worker-owned retry/cancellation; public Client config now represents Server trust as `ClientServerTrust` instead of an optional CA path. (#240)
 - Added supported Client and Server role-runtime seams that own process orchestration and await Address workers, readiness, handshakes, Visitor intake, ACME, and Managed-session work during teardown. (#234)
 - Deepened the Client **Address controller** so production **Retiring** / reconnect-vs-exit / re-adopt policy lives in the library behind the controller seam (shared by production and tests), collapsed static/managed internals to constructor-matched shapes, and prepared **Client admission** once during Config validation for Address-controller wiring. (#220)

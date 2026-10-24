@@ -55,6 +55,7 @@ class WorkflowContractTest < Minitest::Test
     assert_includes(release_workflow, "run: ./scripts/check-github-check-run")
     assert_includes(release_workflow, "run: ./scripts/render-release-notes --version \"$RELEASE_VERSION\" > /tmp/release-notes.md")
     assert_includes(release_workflow, "run: ./scripts/write-release-summary")
+    assert_includes(release_workflow, "run: ./scripts/check-crates-io-publishing")
     assert_includes(release_workflow, "run: ./scripts/check-crates-io-release")
     assert_includes(release_workflow, "run: ./scripts/check-docker-hub-tag --image-ref \"$PRIMARY_IMAGE_REF\"")
     assert_includes(release_workflow, "run: ./scripts/merge-docker-manifest")
@@ -146,9 +147,18 @@ class WorkflowContractTest < Minitest::Test
     refute_includes(release_workflow, "if: github.event_name != 'workflow_dispatch' || inputs.mode == 'publish'\n        env:\n          CRATE_NAME: runewarp")
   end
 
+  def test_release_workflow_gates_cargo_publish_on_the_crates_io_pause_switch
+    assert_includes(release_workflow, "- name: Check whether crates.io publishing is paused\n        id: crate-publishing\n        run: ./scripts/check-crates-io-publishing")
+    assert_includes(release_workflow, "- name: Publish crate to crates.io\n        if: (github.event_name != 'workflow_dispatch' || inputs.mode == 'publish') && steps.crate-publishing.outputs.paused != 'true' && steps.crate-status.outputs.exists != 'true'")
+    assert_includes(release_workflow, "run: cargo publish --locked --manifest-path release-source/Cargo.toml")
+    assert_includes(release_workflow, "- name: Rehearse crate publish\n        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'rehearsal' && steps.crate-publishing.outputs.paused != 'true'")
+    assert_includes(release_workflow, "run: cargo publish --dry-run --locked --manifest-path release-source/Cargo.toml")
+  end
+
   def test_public_script_entrypoints_are_kebab_case_without_extensions
     expected_entrypoints = %w[
       audit-dependencies
+      check-crates-io-publishing
       check-crates-io-release
       check-distribution
       check-docker-hub-tag

@@ -21,6 +21,9 @@ CLI from [crates.io](https://crates.io/crates/runewarp):
 cargo install runewarp
 ```
 
+> [!NOTE]
+> crates.io releases are temporarily paused and may lag behind the latest release while Runewarp depends on an unreleased `h3` ([hyperium/h3#369](https://github.com/hyperium/h3/issues/369)). Meanwhile, use the Docker image or install from Git with `cargo install --git https://github.com/runewarp/runewarp`.
+
 Container image from [Docker Hub](https://hub.docker.com/r/runewarp/runewarp):
 ```bash
 docker pull runewarp/runewarp

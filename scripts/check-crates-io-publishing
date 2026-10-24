@@ -1,0 +1,16 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "lib/runewarp"
+
+Runewarp::Core.run_cli do
+  paused = Runewarp::CratesIo.publishing_paused?
+
+  if paused
+    Runewarp::Core.skipped(Runewarp::CratesIo.pause_message)
+  else
+    Runewarp::Core.success("crates.io publishing is enabled")
+  end
+
+  Runewarp::Core.write_github_output(ENV["GITHUB_OUTPUT"], "paused", paused ? "true" : "false")
+end

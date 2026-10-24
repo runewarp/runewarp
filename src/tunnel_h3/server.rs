@@ -86,7 +86,10 @@ struct Shared {
     /// Incremented by each event-stream subscription; an older subscription ends when it changes.
     subscriptions: watch::Sender<u64>,
     /// Request handlers, idle slots, and Tunnel streams that have not yet finished.
-    requests_in_flight: watch::Sender<usize>,
+    ///
+    /// Shared separately so request accounting, which idle slots carry inside the slot queue,
+    /// never owns the queue itself.
+    requests_in_flight: Arc<watch::Sender<usize>>,
     slots: Mutex<SlotQueue>,
     /// Signalled when a receive slot is queued or the queue closes.
     slot_offered: Notify,
@@ -174,7 +177,7 @@ impl ServerTunnelH3 {
             timing,
             goaway_boundary: watch::Sender::new(None),
             subscriptions: watch::Sender::new(0),
-            requests_in_flight: watch::Sender::new(0),
+            requests_in_flight: Arc::new(watch::Sender::new(0)),
             slots: Mutex::new(SlotQueue::default()),
             slot_offered: Notify::new(),
         });
@@ -245,6 +248,12 @@ impl ServerTunnelH3 {
         }
     }
 
+    /// Weak reference that upgrades only while connection state is still retained.
+    #[cfg(test)]
+    pub(crate) fn shared_state_for_test(&self) -> std::sync::Weak<impl Sized + use<>> {
+        Arc::downgrade(&self.shared)
+    }
+
     /// Receive slots queued and not yet assigned.
     #[cfg(test)]
     pub(crate) fn idle_receive_slots(&self) -> usize {
@@ -265,6 +274,7 @@ impl ServerTunnelH3 {
 
 impl Drop for ServerTunnelH3 {
     fn drop(&mut self) {
+        self.shared.close_slots();
         close_connection(&self.connection, Code::H3_NO_ERROR);
     }
 }
@@ -290,14 +300,15 @@ async fn serve_connection(
             accepted = h3_connection.accept() => match accepted {
                 Ok(Some(resolver)) => {
                     accepted_requests += 1;
-                    let request = InFlightRequest::start(shared.clone());
-                    tokio::spawn(handle_request(resolver, request));
+                    let request = InFlightRequest::start(&shared.requests_in_flight);
+                    tokio::spawn(handle_request(resolver, shared.clone(), request));
                 }
                 Ok(None) | Err(_) => break,
             },
         }
     }
 
+    shared.close_slots();
     close_connection(&connection, Code::H3_NO_ERROR);
 }
 
@@ -323,28 +334,32 @@ fn goaway_boundary(accepted_requests: u64) -> u64 {
     accepted_requests.saturating_mul(CLIENT_BIDI_STREAM_ID_STEP)
 }
 
-/// Accounting for one accepted request, released when its handler ends.
+/// Accounting for one accepted request, released when its handler, idle slot, or Tunnel stream
+/// ends.
 struct InFlightRequest {
-    shared: Arc<Shared>,
+    count: Arc<watch::Sender<usize>>,
 }
 
 impl InFlightRequest {
-    fn start(shared: Arc<Shared>) -> Self {
-        shared.requests_in_flight.send_modify(|count| *count += 1);
-        Self { shared }
+    fn start(count: &Arc<watch::Sender<usize>>) -> Self {
+        count.send_modify(|count| *count += 1);
+        Self {
+            count: count.clone(),
+        }
     }
 }
 
 impl Drop for InFlightRequest {
     fn drop(&mut self) {
-        self.shared
-            .requests_in_flight
-            .send_modify(|count| *count -= 1);
+        self.count.send_modify(|count| *count -= 1);
     }
 }
 
-async fn handle_request(resolver: ServerRequestResolver, request: InFlightRequest) {
-    let shared = request.shared.clone();
+async fn handle_request(
+    resolver: ServerRequestResolver,
+    shared: Arc<Shared>,
+    request: InFlightRequest,
+) {
     let shared = shared.as_ref();
     let request_deadline = Instant::now() + shared.timing.request_deadline;
     let Ok(Ok((http_request, mut stream))) =

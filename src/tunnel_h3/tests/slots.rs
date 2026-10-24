@@ -361,3 +361,31 @@ async fn a_closed_connection_opens_no_tunnel_streams() {
     .await
     .expect("the Server observes the closed connection");
 }
+
+#[tokio::test]
+async fn idle_slots_are_released_when_the_connection_ends() {
+    // Remote disconnect with the Server handle still held: the queue empties.
+    let (_fixture, server, client) = slot_pair(8).await;
+    wait_for_idle_slots(&server, 8).await;
+    drop(client);
+    timeout(STEP, async {
+        while server.idle_receive_slots() > 0 {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("idle slots are released after a remote disconnect");
+
+    // Dropping the Server handle frees all connection state, queued slots included.
+    let (_fixture, server, _client) = slot_pair(8).await;
+    wait_for_idle_slots(&server, 8).await;
+    let shared = server.shared_state_for_test();
+    drop(server);
+    timeout(STEP, async {
+        while shared.upgrade().is_some() {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("connection state is freed after the handle drops");
+}

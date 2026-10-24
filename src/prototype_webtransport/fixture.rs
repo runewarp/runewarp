@@ -25,6 +25,12 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub fn new(credit: u32, admit: bool) -> Result<Self> {
+        Self::build(credit, admit, None)
+    }
+    pub fn packet_fixture(credit: u32, mtu: u16) -> Result<Self> {
+        Self::build(credit, true, Some(mtu))
+    }
+    fn build(credit: u32, admit: bool, mtu: Option<u16>) -> Result<Self> {
         let certificate = rcgen::generate_simple_self_signed(vec![SERVER.into()])?;
         let key = PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der()).into();
         let cert = CertificateDer::from(certificate.cert);
@@ -36,16 +42,29 @@ impl Fixture {
         } else {
             vec![]
         };
-        let server_config = make_server_tunnel_h3_config(
+        let mut server_config = make_server_tunnel_h3_config(
             vec![cert.clone()],
             key,
             Arc::new(StaticClientIdentityAdmission::from_identities(&identities)),
         )?;
+        if let Some(mtu) = mtu {
+            let mut transport = quinn::TransportConfig::default();
+            transport.max_concurrent_bidi_streams(1032u32.into());
+            transport.max_concurrent_uni_streams(8u32.into());
+            transport.initial_mtu(mtu).mtu_discovery_config(None);
+            transport.datagram_receive_buffer_size(Some(64 * 1024));
+            transport.datagram_send_buffer_size(64 * 1024);
+            server_config.transport_config(Arc::new(transport));
+        }
         let server = Endpoint::server(server_config, SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
         let mut roots = RootCertStore::empty();
         roots.add(cert.clone())?;
         let mut config = make_client_tunnel_h3_config(roots, chain, client_key)?;
         let mut transport = quinn::TransportConfig::default();
+        if let Some(mtu) = mtu {
+            transport.initial_mtu(mtu).mtu_discovery_config(None);
+        }
+        transport.datagram_send_buffer_size(64 * 1024);
         transport.max_concurrent_bidi_streams(credit.into());
         transport.max_concurrent_uni_streams(8u32.into());
         transport.datagram_receive_buffer_size(Some(64 * 1024));
@@ -76,7 +95,15 @@ impl Fixture {
     }
 
     pub async fn connect(&self) -> Result<(quinn::Connection, quinn::Connection)> {
-        let address = self.server.local_addr()?;
+        self.connect_to(self.server.local_addr()?).await
+    }
+    pub async fn connect_to(
+        &self,
+        address: std::net::SocketAddr,
+    ) -> Result<(quinn::Connection, quinn::Connection)> {
+        if !address.ip().is_loopback() {
+            return Err("prototype requires loopback".into());
+        }
         timeout(STEP, async {
             let server = async {
                 Ok::<_, super::Error>(self.server.accept().await.ok_or("endpoint closed")?.await?)

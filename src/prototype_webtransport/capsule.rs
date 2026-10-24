@@ -6,7 +6,7 @@ use bytes::{Buf, Bytes};
 pub(super) fn close() -> Bytes {
     Bytes::from_static(&[0x68, 0x43, 4, 0, 0, 0, 0])
 }
-fn validate(buffer: &[u8]) -> Result<()> {
+pub(super) fn validate(buffer: &[u8]) -> Result<()> {
     if buffer.is_empty() {
         return Ok(());
     } // A bare FIN is normal session close.

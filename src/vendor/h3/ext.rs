@@ -9,6 +9,8 @@ use std::str::FromStr;
 pub struct Protocol(ProtocolInner);
 
 impl Protocol {
+    /// THROWAWAY narrow Public QUIC comparison token.
+    pub const RUNEWARP_PROTOTYPE_UDP: Protocol = Protocol(ProtocolInner::RunewarpPrototypeUdp);
     /// WebTransport protocol
     pub const WEB_TRANSPORT: Protocol = Protocol(ProtocolInner::WebTransport);
     /// RFC 9298 protocol
@@ -22,6 +24,7 @@ impl Protocol {
     #[inline]
     pub fn as_str(&self) -> &str {
         match self.0 {
+            ProtocolInner::RunewarpPrototypeUdp => "runewarp-prototype-udp",
             ProtocolInner::WebTransport => "webtransport",
             ProtocolInner::ConnectUdp => "connect-udp",
             ProtocolInner::ConnectIp => "connect-ip",
@@ -32,6 +35,7 @@ impl Protocol {
 
 #[derive(Copy, PartialEq, Debug, Clone)]
 enum ProtocolInner {
+    RunewarpPrototypeUdp,
     WebTransport,
     ConnectUdp,
     ConnectIp,
@@ -46,6 +50,7 @@ impl FromStr for Protocol {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "runewarp-prototype-udp" => Ok(Self(ProtocolInner::RunewarpPrototypeUdp)),
             "webtransport" => Ok(Self(ProtocolInner::WebTransport)),
             "connect-udp" => Ok(Self(ProtocolInner::ConnectUdp)),
             "connect-ip" => Ok(Self(ProtocolInner::ConnectIp)),

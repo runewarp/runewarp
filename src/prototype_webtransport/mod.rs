@@ -6,6 +6,8 @@ mod client;
 mod experiment;
 mod fixture;
 mod measure;
+/// THROWAWAY multi-association Public QUIC comparison.
+pub mod public_quic;
 mod server;
 
 pub use experiment::run;

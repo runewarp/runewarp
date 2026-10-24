@@ -648,12 +648,27 @@ mod tests {
             use rustls::pki_types::pem::PemObject;
             let directory = tempfile::tempdir().unwrap();
             let identity = crate::generate_client_identity().unwrap();
-            let certificate = rcgen::generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
+            let certificate =
+                rcgen::generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
             std::fs::write(directory.path().join("ca.pem"), certificate.cert.pem()).unwrap();
-            std::fs::write(directory.path().join("client.crt"), &identity.certificate_pem).unwrap();
-            std::fs::write(directory.path().join("client.key"), &identity.private_key_pem).unwrap();
-            std::fs::write(directory.path().join("client-identity.txt"), identity.client_identity.to_string()).unwrap();
-            std::fs::write(directory.path().join("config.toml"), r#"
+            std::fs::write(
+                directory.path().join("client.crt"),
+                &identity.certificate_pem,
+            )
+            .unwrap();
+            std::fs::write(
+                directory.path().join("client.key"),
+                &identity.private_key_pem,
+            )
+            .unwrap();
+            std::fs::write(
+                directory.path().join("client-identity.txt"),
+                identity.client_identity.to_string(),
+            )
+            .unwrap();
+            std::fs::write(
+                directory.path().join("config.toml"),
+                r#"
 [client]
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
@@ -661,33 +676,85 @@ server-ca-file = "ca.pem"
 identity-dir = "."
 [[client.services]]
 backend-address = "127.0.0.1:443"
-"#).unwrap();
-            let settings = Arc::new(crate::load_client_config(&directory.path().join("config.toml")).unwrap());
+"#,
+            )
+            .unwrap();
+            let settings =
+                Arc::new(crate::load_client_config(&directory.path().join("config.toml")).unwrap());
             let endpoint = quinn::Endpoint::server(
                 crate::tunnel_h3::test_support::test_server_h3_config(
                     vec![rustls::pki_types::CertificateDer::from(certificate.cert)],
-                    rustls::pki_types::PrivateKeyDer::from_pem_slice(certificate.signing_key.serialize_pem().as_bytes()).unwrap(),
+                    rustls::pki_types::PrivateKeyDer::from_pem_slice(
+                        certificate.signing_key.serialize_pem().as_bytes(),
+                    )
+                    .unwrap(),
                     &[identity.client_identity],
-                ).unwrap(), "127.0.0.1:0".parse().unwrap(),
-            ).unwrap();
+                )
+                .unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
             let target = endpoint.local_addr().unwrap();
             let peer = tokio::spawn(async move {
                 let connection = endpoint.accept().await.unwrap().await.unwrap();
-                let mut server = h3::server::builder().build::<_, bytes::Bytes>(h3_quinn::Connection::new(connection.clone())).await.unwrap();
-                let (request, mut stream) = server.accept().await.unwrap().unwrap().resolve_request().await.unwrap();
+                let mut server = h3::server::builder()
+                    .build::<_, bytes::Bytes>(h3_quinn::Connection::new(connection.clone()))
+                    .await
+                    .unwrap();
+                let (request, mut stream) = server
+                    .accept()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .resolve_request()
+                    .await
+                    .unwrap();
                 assert_eq!(request.method(), http::Method::GET);
                 assert_eq!(request.uri().path(), "/v1/tunnel/events");
-                stream.send_response(http::Response::builder().header("content-type", "text/event-stream").body(()).unwrap()).await.unwrap();
-                stream.send_data(bytes::Bytes::from_static(b"event: state\ndata: {\"version\":2,\"generation\":\"0123456789abcdef0123456789abcdef\"}\n\n")).await.unwrap();
+                stream
+                    .send_response(
+                        http::Response::builder()
+                            .header("content-type", "text/event-stream")
+                            .body(())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let state = concat!(
+                    "event: state\n",
+                    "data: {\"version\":2,",
+                    "\"generation\":\"0123456789abcdef0123456789abcdef\"}\n\n",
+                );
+                stream
+                    .send_data(bytes::Bytes::from_static(state.as_bytes()))
+                    .await
+                    .unwrap();
                 // The incompatible state must close the connection, without a CONNECT slot.
                 assert!(server.accept().await.unwrap_or(None).is_none());
             });
             let instance = ClientInstancePrep::prepare(&settings).await.unwrap();
-            let dial = ClientTunnelAttempt::with_resolver(settings, instance, "127.0.0.1:0".parse().unwrap(), Arc::new(ScriptedResolver { results: Mutex::new(VecDeque::from([Ok(vec![target])])) }));
-            let outcome = dial.establish(ServerAddress::parse("tunnel.example.test").unwrap()).await;
-            assert!(matches!(outcome, TunnelAttemptOutcome::Retryable(TunnelAttemptFailure { kind: AttemptFailureKind::Transport(_, _), .. })));
+            let dial = ClientTunnelAttempt::with_resolver(
+                settings,
+                instance,
+                "127.0.0.1:0".parse().unwrap(),
+                Arc::new(ScriptedResolver {
+                    results: Mutex::new(VecDeque::from([Ok(vec![target])])),
+                }),
+            );
+            let outcome = dial
+                .establish(ServerAddress::parse("tunnel.example.test").unwrap())
+                .await;
+            assert!(matches!(
+                outcome,
+                TunnelAttemptOutcome::Retryable(TunnelAttemptFailure {
+                    kind: AttemptFailureKind::Transport(_, _),
+                    ..
+                })
+            ));
             peer.await.unwrap();
-        }).await.expect("incompatible attempt finishes promptly");
+        })
+        .await
+        .expect("incompatible attempt finishes promptly");
     }
 
     #[test]

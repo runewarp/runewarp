@@ -3349,7 +3349,8 @@ async fn server_shutdown_rejects_idle_slots_while_a_placed_visitor_finishes() {
         let authorization = ServerAuthorization::from_static_tunnels(
             &server_hostname("tunnel.example.test"),
             &[configured_tunnel(&["app.example.test"], &identity)],
-        ).unwrap();
+        )
+        .unwrap();
         let server = Server::bind(ServerBindConfig {
             public_bind_addr: localhost(0),
             tunnel_connection_bind_addr: localhost(0),
@@ -3357,34 +3358,70 @@ async fn server_shutdown_rejects_idle_slots_while_a_placed_visitor_finishes() {
             server_hostname: server_hostname("tunnel.example.test"),
             authorization: authorization.clone(),
             public_tls_config: None,
-            quic_server_config: make_authenticated_server_h3_config(&certificate, &key, &authorization),
+            quic_server_config: make_authenticated_server_h3_config(
+                &certificate,
+                &key,
+                &authorization,
+            ),
             admission: ServerAdmission::Static,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let public_addr = server.public_addr().unwrap();
         let tunnel_addr = server.tunnel_addr().unwrap();
         let shutdown = OrderlyShutdown::new(Duration::from_secs(2), QUIC_CLOSE_FLUSH_DURATION);
         let trigger = shutdown.clone();
         let server_task = tokio::spawn(async move { server.run_with_shutdown(&shutdown).await });
         let mut endpoint = quinn::Endpoint::client(localhost(0)).unwrap();
-        endpoint.set_default_client_config(make_authenticated_client_h3_config(&certificate, &identity));
-        let connection = endpoint.connect(tunnel_addr, "tunnel.example.test").unwrap().await.unwrap();
-        let mut client = ClientTunnelH3::establish(connection, &server_hostname("tunnel.example.test"), Arc::new(tokio::sync::Semaphore::new(8))).await.unwrap();
+        endpoint.set_default_client_config(make_authenticated_client_h3_config(
+            &certificate,
+            &identity,
+        ));
+        let connection = endpoint
+            .connect(tunnel_addr, "tunnel.example.test")
+            .unwrap()
+            .await
+            .unwrap();
+        let mut client = ClientTunnelH3::establish(
+            connection,
+            &server_hostname("tunnel.example.test"),
+            Arc::new(tokio::sync::Semaphore::new(8)),
+        )
+        .await
+        .unwrap();
 
         let mut visitor = TcpStream::connect(public_addr).await.unwrap();
-        let addresses = VisitorTcpAddresses { source: visitor.local_addr().unwrap(), destination: public_addr };
-        let tls_config = Arc::new(rustls::ClientConfig::builder().with_root_certificates(root_store_with(&certificate)).with_no_client_auth());
-        let mut tls = rustls::ClientConnection::new(tls_config, ServerName::try_from("app.example.test").unwrap()).unwrap();
+        let addresses = VisitorTcpAddresses {
+            source: visitor.local_addr().unwrap(),
+            destination: public_addr,
+        };
+        let tls_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store_with(&certificate))
+                .with_no_client_auth(),
+        );
+        let mut tls = rustls::ClientConnection::new(
+            tls_config,
+            ServerName::try_from("app.example.test").unwrap(),
+        )
+        .unwrap();
         let mut hello = Vec::new();
         tls.write_tls(&mut hello).unwrap();
         visitor.write_all(&hello).await.unwrap();
-        let mut stream = client.accept_tunnel_stream().await.expect("Visitor assigned");
+        let mut stream = client
+            .accept_tunnel_stream()
+            .await
+            .expect("Visitor assigned");
         let mut initial = vec![0; addresses.encode_proxy_v2().len() + hello.len()];
         stream.read_exact(&mut initial).await.unwrap();
         assert_eq!(&initial[..28], addresses.encode_proxy_v2());
         assert_eq!(&initial[28..], hello);
 
         trigger.begin_graceful();
-        assert!(client.accept_tunnel_stream().await.is_none(), "GOAWAY rejects idle slots before closing placed work");
+        assert!(
+            client.accept_tunnel_stream().await.is_none(),
+            "GOAWAY rejects idle slots before closing placed work"
+        );
         assert!(!server_task.is_finished());
         stream.write_all(b"finish").await.unwrap();
         stream.shutdown().await.unwrap();
@@ -3399,6 +3436,12 @@ async fn server_shutdown_rejects_idle_slots_while_a_placed_visitor_finishes() {
         assert_eq!(tail, b"tail");
         drop(stream);
         server_task.await.unwrap().unwrap();
-        assert!(matches!(client.closed().await, quinn::ConnectionError::ApplicationClosed(close) if close.error_code.into_inner() == 0x100));
-    }).await.expect("Server shutdown and Visitor completion are bounded");
+        assert!(matches!(
+            client.closed().await,
+            quinn::ConnectionError::ApplicationClosed(close)
+                if close.error_code.into_inner() == 0x100
+        ));
+    })
+    .await
+    .expect("Server shutdown and Visitor completion are bounded");
 }

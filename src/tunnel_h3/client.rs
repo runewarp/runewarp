@@ -474,7 +474,9 @@ async fn maintain_receive_slots(mut pool: ReceiveSlotPool) {
                     opening = false;
                     continue;
                 };
-                if let Some(observer) = &pool.budget_observer { observer(true); }
+                if let Some(observer) = &pool.budget_observer {
+                    observer(true);
+                }
                 match pool.open_slot().await {
                     Ok(stream) => {
                         waiting.spawn(wait_for_assignment(stream, permit));

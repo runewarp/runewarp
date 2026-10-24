@@ -119,6 +119,50 @@ async fn the_client_budget_bounds_slots_and_released_streams_are_replenished() {
 }
 
 #[tokio::test]
+async fn two_tunnel_connections_share_receive_slot_budget() {
+    timeout(Duration::from_secs(5), async {
+        let fixture = Fixture::new().expect("fixture");
+        let budget = crate::client::ClientStreamBudget::new(crate::client::ClientStreamLimits {
+            max_stream_handlers: 2,
+            ..crate::client::ClientStreamLimits::default()
+        });
+        let (first_server, first_client) = establish_pair(
+            &fixture,
+            ServerRuntimeGeneration::generate(),
+            budget.semaphore(),
+        )
+        .await;
+        wait_for_idle_slots(&first_server, 2).await;
+
+        let (second_server, mut second_client) = establish_pair(
+            &fixture,
+            ServerRuntimeGeneration::generate(),
+            budget.semaphore(),
+        )
+        .await;
+        assert_eq!(
+            second_server
+                .open_tunnel_stream(Duration::from_millis(200))
+                .await
+                .err(),
+            Some(OpenTunnelStreamError::TimedOut),
+            "the first connection holds every permit"
+        );
+        assert_eq!(second_server.idle_receive_slots(), 0);
+
+        drop(first_client);
+        wait_for_idle_slots(&second_server, 2).await;
+        let _server_stream = second_server.open_tunnel_stream(STEP).await.expect("slot");
+        let _client_stream = second_client
+            .accept_tunnel_stream()
+            .await
+            .expect("assigned");
+    })
+    .await
+    .expect("shared budget releases and replenishes promptly");
+}
+
+#[tokio::test]
 async fn the_client_keeps_at_most_the_idle_slot_cap_open() {
     let (_fixture, server, _client) = slot_pair(MAX_IDLE_RECEIVE_SLOTS * 2).await;
 

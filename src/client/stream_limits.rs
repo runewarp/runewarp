@@ -1,8 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 
 use crate::runtime_log;
@@ -75,17 +73,8 @@ impl ClientStreamBudget {
         self.handlers.clone()
     }
 
-    #[cfg(test)]
-    pub(crate) fn try_admit_handler(&self) -> Result<OwnedSemaphorePermit, ()> {
-        self.handlers.clone().try_acquire_owned().map_err(|_| ())
-    }
-
     pub(crate) fn note_saturation(&self) {
         let now = Instant::now();
-        *self
-            .saturated
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         let mut last_logged = self
             .last_saturation_log
             .lock()
@@ -97,6 +86,10 @@ impl ClientStreamBudget {
             return;
         }
         *last_logged = Some(now);
+        *self
+            .saturated
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         runtime_log::client_stream_handler_saturated(
             self.limits.max_stream_handlers,
             self.limits.max_stream_handlers,
@@ -119,8 +112,6 @@ impl ClientStreamBudget {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::{ClientStreamBudget, ClientStreamLimits};
 
     #[test]
@@ -131,36 +122,17 @@ mod tests {
     }
 
     #[test]
-    fn stream_handler_budget_releases_capacity_after_completion() {
-        let budget = ClientStreamBudget::new(ClientStreamLimits {
-            max_stream_handlers: 1,
-            ..ClientStreamLimits::for_test()
-        });
-        let permit = budget
-            .try_admit_handler()
-            .expect("first handler should fit");
-        assert!(budget.try_admit_handler().is_err());
-        drop(permit);
-        assert!(budget.try_admit_handler().is_ok());
-    }
+    fn recovery_is_armed_only_by_an_emitted_saturation_warning() {
+        let budget = ClientStreamBudget::new(ClientStreamLimits::for_test());
+        budget.note_saturation();
+        assert!(*budget.saturated.lock().expect("saturation state"));
+        budget.note_recovery();
+        assert!(!*budget.saturated.lock().expect("saturation state"));
 
-    #[test]
-    fn shared_budget_bounds_handlers_across_multiple_tunnel_connections() {
-        let budget = Arc::new(ClientStreamBudget::new(ClientStreamLimits {
-            max_stream_handlers: 1,
-            ..ClientStreamLimits::for_test()
-        }));
-        let first_connection_budget = Arc::clone(&budget);
-        let second_connection_budget = Arc::clone(&budget);
-
-        let first = first_connection_budget
-            .try_admit_handler()
-            .expect("first connection handler should fit");
-        assert!(
-            second_connection_budget.try_admit_handler().is_err(),
-            "second Tunnel connection must share the Client-instance aggregate"
-        );
-        drop(first);
-        assert!(second_connection_budget.try_admit_handler().is_ok());
+        // A suppressed warning during continued permit churn must not arm another recovery.
+        budget.note_saturation();
+        assert!(!*budget.saturated.lock().expect("saturation state"));
+        budget.note_recovery();
+        assert!(!*budget.saturated.lock().expect("saturation state"));
     }
 }

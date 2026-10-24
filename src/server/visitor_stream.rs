@@ -142,8 +142,13 @@ impl VisitorIntake {
         let parsed_client_hello = tokio::select! {
             parsed = tokio::time::timeout(timeout, async {
                 let addresses = if self.visitor_proxy_protocol.is_some() {
-                    if !self.visitor_proxy_trusted_networks.iter().any(|network| network.contains(peer_ip)) {
-                        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "visitor PROXY protocol peer is not trusted"));
+                    if !self.visitor_proxy_trusted_networks.iter()
+                        .any(|network| network.contains(peer_ip))
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "visitor PROXY protocol peer is not trusted",
+                        ));
                     }
                     read_proxy_v2(&mut visitor_stream).await.map_err(io::Error::other)?
                 } else {
@@ -164,7 +169,10 @@ impl VisitorIntake {
                 Ok::<_, io::Error>(Some((hello, addresses)))
             }) => match parsed {
                 Ok(result) => result,
-                Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "Visitor pre-routing intake timed out")),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Visitor pre-routing intake timed out",
+                )),
             },
             _ = shutdown => return Ok(()),
         };
@@ -1015,7 +1023,10 @@ mod tests {
             .map_err(|_| timeout_error("slot-wait deadline must drop the Visitor"))?;
         assert!(
             matches!(dropped, Ok(0))
-                || matches!(dropped, Err(ref error) if error.kind() == io::ErrorKind::ConnectionReset)
+                || matches!(
+                    dropped,
+                    Err(ref error) if error.kind() == io::ErrorKind::ConnectionReset
+                )
         );
 
         // Pending-open capacity must recover after the deadline rejects the waiter.

@@ -241,20 +241,27 @@ impl TunnelConnectionStreamHandler {
     ) -> io::Result<()> {
         let acceptor = TlsAcceptor::from(challenge_tls_config.clone());
         let tunnel_stream = ReplayedTunnelStream::new(stream, buffered_bytes);
-        match tokio::time::timeout(self.stream_limits.acme_challenge_handshake_timeout, async {
-            let mut tls_stream = acceptor.accept(tunnel_stream).await?;
-            tls_stream.shutdown().await?;
-            // Keep receiving until the Visitor finishes its own close.
-            tokio::io::copy(&mut tls_stream, &mut tokio::io::sink()).await?;
-            Ok::<(), io::Error>(())
-        })
+        match tokio::time::timeout(
+            self.stream_limits.acme_challenge_handshake_timeout,
+            acceptor.accept(tunnel_stream),
+        )
         .await
         {
-            Ok(Ok(())) => {
+            Ok(Ok(mut tls_stream)) => {
                 runtime_log::acme(
                     AcmeRole::Client { public_hostname },
                     AcmeEvent::ChallengeHandled,
                 );
+                // Complete FIN before drop resets the write half, but never turn a successful
+                // challenge into a failure because the validator resets or lingers during close.
+                let _ = tokio::time::timeout(
+                    self.stream_limits.acme_challenge_handshake_timeout,
+                    async {
+                        tls_stream.shutdown().await?;
+                        tokio::io::copy(&mut tls_stream, &mut tokio::io::sink()).await
+                    },
+                )
+                .await;
                 Ok(())
             }
             Ok(Err(error)) => {
@@ -1358,6 +1365,92 @@ mod tests {
         stream_handler_task
             .await
             .map_err(|error| join_error("stream handler task failed", error))??;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acme_challenge_success_survives_a_lingering_validator() -> io::Result<()> {
+        assert_acme_success_after_handshake(false).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acme_challenge_success_survives_a_resetting_validator() -> io::Result<()> {
+        assert_acme_success_after_handshake(true).await
+    }
+
+    async fn assert_acme_success_after_handshake(reset: bool) -> io::Result<()> {
+        let hostname = "app.example.test";
+        let (certificate, key) = make_self_signed_cert(hostname)?;
+        let mut challenge_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.clone()], private_key_from_der(&key))
+            .map_err(io::Error::other)?;
+        challenge_config.alpn_protocols = vec![ACME_TLS_ALPN.to_vec()];
+        let handler = TunnelConnectionStreamHandler::new(
+            vec![ServiceConfig {
+                public_hostnames: Some(vec![public_hostname(hostname)]),
+                backend_address: "127.0.0.1:9".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
+            }],
+            TerminationTlsConfigs::new(
+                HashMap::new(),
+                HashMap::from([(hostname.to_owned(), Arc::new(challenge_config))]),
+            ),
+            ClientStreamLimits {
+                acme_challenge_handshake_timeout: Duration::from_millis(200),
+                ..ClientStreamLimits::default()
+            },
+        );
+        let output =
+            capture_logs_with_wait(LogLevel::Debug, "client acme challenge handled", async {
+                let fixture = TunnelConnectionFixture::connect().await?;
+                let (mut send, recv) = fixture.server_connection.open_stream().await?;
+                send.write_all(&internal_stream_bytes(&[])).await?;
+                send.flush().await?;
+                let client = fixture.client_connection.clone();
+                let task = tokio::spawn(async move {
+                    let (send, recv) = client.accept_stream().await?;
+                    handler.handle(client_stream(send, recv)).await
+                });
+                let mut config = rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store_with(&certificate)?)
+                    .with_no_client_auth();
+                config.alpn_protocols = vec![ACME_TLS_ALPN.to_vec()];
+                let connector = TlsConnector::from(Arc::new(config));
+                let name = ServerName::try_from(hostname.to_owned()).map_err(io::Error::other)?;
+                let mut validator = timeout(
+                    Duration::from_secs(1),
+                    connector.connect(name, TestTunnelStream::new(send, recv)),
+                )
+                .await
+                .map_err(|_| timeout_error("validator completes the handshake"))??;
+                let mut byte = [0];
+                assert_eq!(
+                    timeout(Duration::from_secs(1), validator.read(&mut byte))
+                        .await
+                        .map_err(|_| timeout_error("validator receives close_notify"))??,
+                    0
+                );
+                // Keep a lingering validator open, or reset it without a TLS close_notify.
+                let _validator = if reset {
+                    drop(validator);
+                    None
+                } else {
+                    Some(validator)
+                };
+                let outcome = timeout(Duration::from_secs(1), task)
+                    .await
+                    .map_err(|_| timeout_error("challenge teardown stays bounded"))?
+                    .map_err(io::Error::other)?;
+                assert!(
+                    outcome.is_ok(),
+                    "successful handshake remains successful: {outcome:?}"
+                );
+                Ok(())
+            })
+            .await?;
+        assert!(!output.contains("client acme challenge failed"), "{output}");
         Ok(())
     }
 

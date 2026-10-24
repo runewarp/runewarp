@@ -102,7 +102,7 @@ Rules:
 
 The Client pre-opens plain `CONNECT` requests to the authenticated **Server hostname** as `:authority`, including a port. The Server binds the normalized host and ignores the authority port. Base signaling does not use extended CONNECT `:protocol`. Each idle slot is one unit of Client-offered availability. The Server never places a Visitor without one; its `200` response assigns exactly one Visitor and immediately carries the internal framing and buffered ClientHello as DATA, without a per-Visitor Client round trip.
 
-Each connection keeps at most **32 idle receive slots**. Idle and assigned slots each hold a permit from the same **1,024-slot Client-instance budget**, shared across all connections. The Client replenishes assigned or failed slots as permits become available. With no permit, it waits and emits the existing rate-limited saturation/recovery logs. The Server admits **1,032 Client-initiated bidirectional request streams**, allowing 1,024 receive slots plus eight signaling streams. The Client admits no Server-initiated bidirectional streams. Each peer permits eight unidirectional streams for HTTP/3 control, QPACK, and reserved-stream headroom.
+Each connection keeps at most **32 idle receive slots**. Idle and assigned slots each hold a permit from the same **1,024-slot Client-instance budget**, shared across all connections. The Client replenishes assigned or failed slots as permits become available. With no permit, it waits and emits saturation warnings at most once every **10 seconds**. The next acquired permit emits one recovery line only if a saturation warning was emitted; suppressed warnings do not arm another recovery. The Server admits **1,032 Client-initiated bidirectional request streams**, allowing 1,024 receive slots plus eight signaling streams. The Client admits no Server-initiated bidirectional streams. Each peer permits eight unidirectional streams for HTTP/3 control, QPACK, and reserved-stream headroom.
 
 `GET /v1/tunnel/events` targets the Server hostname's HTTPS origin and ends its request with FIN, without DATA or trailers. The response is `200`, `content-type: text/event-stream`, and `cache-control: no-store`. Its first SSE event has type `state` and JSON data with exactly the currently defined fields:
 
@@ -144,6 +144,7 @@ Notes:
 - the parser must accumulate bytes until the TLS record is complete before attempting to extract SNI
 - `backend-address` must point at a TLS-terminating backend when `tls-mode = "passthrough"`; it receives plaintext when `tls-mode = "terminate"`
 - when `[client.acme]` is configured, `acme-tls/1` challenge connections for **Public hostnames** arrive through the Server's normal Visitor routing path and are handled by the Client's ACME resolver alongside regular TLS connections for those hostnames
+- Client ACME challenge success is logged as soon as the TLS handshake completes. Best-effort shutdown and drain have a separate **5-second** bound; a validator reset or teardown timeout does not change that success.
 
 ## Stream lifecycle
 
@@ -159,6 +160,7 @@ Runewarp uses symmetric close behavior:
 - an HTTP/3 request or response FIN maps to TCP half-close in the same direction
 - errors, aborts, or dropping an unfinished write half reset the stream; connection loss terminates all its streams
 - proxy writes flush before waiting for the peer and finish their write direction after copying to EOF
+- each TCP/Tunnel proxy direction owns its halves and completes independently; a failure in one direction does not cancel copying in the other, and the proxy returns its error after both directions finish
 - no peer depends on a received STOP_SENDING or RESET_STREAM code; any stop or reset ends that direction or stream
 
 When a QUIC connection drops, all streams on that connection are lost. They are not migrated elsewhere.

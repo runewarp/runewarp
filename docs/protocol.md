@@ -86,7 +86,7 @@ Each **Client instance** establishes one long-lived QUIC connection per effectiv
 4. Validate the Server certificate for that **Server address**'s **Server hostname**, using either system trust or `client.server-trust = "ca-file"` with an exclusive CA bundle.
 5. Present the Client certificate and authenticate one of the Tunnel's pinned `client-identity` values from its public key.
 6. Start HTTP/3 with Extended CONNECT, WebTransport draft07 and H3 Datagrams enabled in both peers' SETTINGS. The Client opens a bodyless `GET /v1/tunnel/events` and waits for the first valid state with a supported protocol version. No Runewarp-specific SETTINGS marker is sent or required.
-7. After that gate, establish exactly one WebTransport session with Extended CONNECT to `https://<Server hostname>/v1/tunnel/session`. Only then offer receive slots and return a successful connection attempt. A failed gate, negotiation or CONNECT is an ordinary attempt failure under the same retry policy. Static Client readiness and Managed Assignment convergence count only connections with an established session.
+7. After that gate, establish exactly one WebTransport session with Extended CONNECT to `https://<Server hostname>/v1/tunnel/session`. Only then offer receive slots and return a successful connection attempt. A failed gate, negotiation or CONNECT is an ordinary attempt failure under the same retry policy. Static Client readiness and Managed Assignment convergence count only connections with an established WebTransport session.
 
 Rules:
 
@@ -102,13 +102,13 @@ Rules:
 
 ## WebTransport session
 
-Both peers pin only WebTransport draft07: the max-sessions SETTINGS identifier is `0xc671706a` with value `1`, the Extended CONNECT token is `webtransport`, and the bidirectional stream signal is `0x41`. A session ID is the full CONNECT stream ID: GET on stream `0` followed by CONNECT on stream `4` creates session `4`, never `1`. Both peers enable Extended CONNECT, WebTransport and H3 Datagrams and enforce the fork's `Limits.sessions = 1`. The connection requires the existing pinned Client-identity mTLS; a session grants no additional identity or Public-hostname authority.
+Both peers pin only WebTransport draft07: the max-sessions SETTINGS identifier is `0xc671706a` with value `1`, the Extended CONNECT token is `webtransport`, and the bidirectional stream signal is `0x41`. A WebTransport session ID is the full CONNECT stream ID: GET on stream `0` followed by CONNECT on stream `4` creates WebTransport session `4`, never `1`. Both peers enable Extended CONNECT, WebTransport and H3 Datagrams and enforce the fork's `Limits.sessions = 1`. The connection requires the existing pinned Client-identity mTLS; a WebTransport session grants no additional identity or Public-hostname authority.
 
-The session CONNECT uses the Server hostname as authority on its HTTPS origin and path `/v1/tunnel/session`. It remains open for the Tunnel connection lifetime. The Server returns bodyless `404` for another session path, `421` for a different authority, and `400` for an unsupported Extended CONNECT protocol or invalid WebTransport request or negotiation. The fork's invalid-request and settings rejections remain bodyless `400`; its exhausted session cap remains bodyless `429`. Rejections create no session and leave ordinary signaling usable. The CONNECT response and admission run under the signaling request deadline.
+The WebTransport session CONNECT uses the Server hostname as authority on its HTTPS origin and path `/v1/tunnel/session`. It remains open for the Tunnel connection lifetime. The Server returns bodyless `404` for another WebTransport session path, `421` for a different authority, and `400` for an unsupported Extended CONNECT protocol or invalid WebTransport request or negotiation. The fork's invalid-request and settings rejections remain bodyless `400`; its exhausted WebTransport session cap remains bodyless `429`. Rejections create no WebTransport session and leave ordinary signaling usable. The WebTransport CONNECT response and admission run under the signaling request deadline.
 
-Visitors still use plain-CONNECT receive slots. The session carries no Visitor streams, and Runewarp sends no datagrams. H3 Datagram SETTINGS reserve the draft-required capability for later Public QUIC work; they do not implement packet forwarding. The Client continues to grant the Server zero bidirectional stream credit. Unexpected session streams are reset without delivering a Visitor.
+Visitors still use plain-CONNECT receive slots. The WebTransport session carries no Visitor streams, and Runewarp sends no datagrams. H3 Datagram SETTINGS reserve the draft-required capability for later Public QUIC work; they do not implement packet forwarding. The Client continues to grant the Server zero bidirectional stream credit. Unexpected WebTransport session streams are reset without delivering a Visitor.
 
-A close capsule or CONNECT stream end observed by either peer closes the whole Tunnel connection with `H3_NO_ERROR`, even if a peer withholds FIN after a close capsule. The Client's ordinary address worker reconnects; no session is reopened on an existing connection. Connection loss ends the session, and Authorization revocation closes the connection and session immediately. GOAWAY alone leaves the established session alive while already-placed Visitors drain. The session itself does not prolong graceful drain after open Tunnel streams and earlier signaling requests finish.
+A close capsule or CONNECT stream end observed by either peer closes the whole Tunnel connection with `H3_NO_ERROR`, even if a peer withholds FIN after a close capsule. The Client's ordinary address worker reconnects; no WebTransport session is reopened on an existing connection. Connection loss ends the WebTransport session, and Authorization revocation closes the connection and WebTransport session immediately. GOAWAY alone leaves the established WebTransport session alive while already-placed Visitors drain. The WebTransport session itself does not prolong graceful drain after open Tunnel streams and earlier signaling requests finish.
 
 ## Receive slots and Tunnel events
 
@@ -164,7 +164,7 @@ Every assigned receive slot begins its response DATA with a regenerated PROXY pr
 
 One internal Tunnel-framing module owns this ordering for Server encoding and Client decoding. Backend PROXY emission is separate and independently controlled per Service.
 
-Tunnel connections support only ALPN `h3`. There is no fallback or dual protocol. Clients and Servers must both support this mandatory draft07 session. Earlier receive-slot-only HTTP/3 binaries and old `runewarp/1` binaries are incompatible; upgrade Clients and Servers together.
+Tunnel connections support only ALPN `h3`. There is no fallback or dual protocol. The Client requires a draft07 WebTransport session and fails establishment against an older receive-slot-only Server. The Server still accepts an older slot-only Client without a WebTransport session. Operators must upgrade Clients and Servers together. Old `runewarp/1` binaries are incompatible in both directions.
 
 Runewarp uses symmetric close behavior:
 
@@ -218,7 +218,7 @@ The 60-second first-snapshot/silence windows and Tunnel reconnect backoff apply 
 ## Runtime invariants
 
 - each **Client instance** has one or more **Tunnel connections** once dialing has succeeded
-- in Static mode, the Client emits one **Client readiness** signal when the first configured **Server address** passes the event-stream gate and establishes its session; Managed mode uses **Assignment convergence** instead (see [`managed.md`](managed.md))
+- in Static mode, the Client emits one **Client readiness** signal when the first configured **Server address** passes the event-stream gate and establishes its WebTransport session; Managed mode uses **Assignment convergence** instead (see [`managed.md`](managed.md))
 - failure, retry, and recovery stay isolated per effective **Server address**
 - a **Tunnel** may have one or more authenticated live **Tunnel connections** on one **Server** node
 - a **Tunnel** stays available while at least one of those **Tunnel connections** remains live

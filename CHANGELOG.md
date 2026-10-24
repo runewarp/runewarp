@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Changed
 
-- Require one WebTransport draft07 session on every Tunnel connection, closing the whole connection when its session ends while receive slots continue carrying Visitors. This is a breaking lockstep Tunnel protocol upgrade; Clients and Servers must upgrade together. (#264)
+- Required Clients to establish one WebTransport draft07 session on every Tunnel connection, closing the whole connection when its WebTransport session ends while receive slots continue carrying Visitors. This is a breaking lockstep Tunnel protocol upgrade; Clients and Servers must upgrade together. (#264)
 - Switched all Tunnel connections to HTTP/3 with ALPN `h3`. This is a breaking lockstep upgrade: old and new Clients/Servers are incompatible; upgrade both together. (#250)
 
 - Paused crates.io releases while Runewarp depends on an unreleased upstream `h3`; Docker images and GitHub Releases continue, and `cargo install --git https://github.com/runewarp/runewarp` installs from source meanwhile. (#248)

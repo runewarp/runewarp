@@ -27,15 +27,16 @@ type ClientRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
 /// Client-owned HTTP/3 Tunnel connection whose Server passed the event-stream gate.
 ///
-/// Establishment returns only after the Server's first valid state and session CONNECT, so a caller may offer
-/// availability as soon as it holds this handle. The subscription is then followed for the
+/// Establishment waits for the Server's first valid state and WebTransport session CONNECT, so a
+/// caller may offer availability as soon as it holds this handle. The subscription follows the
 /// connection lifetime: it resubscribes after an end, failure, or silence while the connection
 /// remains usable, and stops once GOAWAY forbids new requests. An incompatible event or a changed
 /// generation closes the connection with `H3_GENERAL_PROTOCOL_ERROR`.
 ///
-/// After the gate and session establishment it keeps up to [`MAX_IDLE_RECEIVE_SLOTS`] receive slots open, each holding one
-/// permit from the Client-instance stream budget, and replenishes a slot whenever one is assigned
-/// or fails. Assigned slots are delivered by [`ClientTunnelH3::accept_tunnel_stream`].
+/// After the gate and WebTransport session establishment it keeps up to [`MAX_IDLE_RECEIVE_SLOTS`]
+/// receive slots open, each holding one permit from the Client-instance stream budget, and
+/// replenishes a slot whenever one is assigned or fails. Assigned slots are delivered by
+/// [`ClientTunnelH3::accept_tunnel_stream`].
 ///
 /// Dropping the handle closes the connection immediately with `H3_NO_ERROR`.
 pub struct ClientTunnelH3 {
@@ -124,6 +125,7 @@ impl ClientTunnelH3 {
             driver,
             send_request,
             h3_webtransport::client::Limits {
+                // Keep the WebTransport session limit at one regardless of fork defaults.
                 sessions: std::num::NonZeroUsize::MIN,
                 ..Default::default()
             },
@@ -158,10 +160,14 @@ impl ClientTunnelH3 {
             .method(Method::CONNECT)
             .uri(format!("https://{server_hostname}{TUNNEL_SESSION_PATH}"))
             .body(())
-            .expect("a Server hostname forms a valid session URI");
+            .expect("a Server hostname forms a valid WebTransport session URI");
+        // Apply the same duration policy separately to the event gate and WebTransport CONNECT.
         let session = match timeout(timing.initial_state_deadline, client.connect(request)).await {
             Ok(Ok(session)) => session,
             Ok(Err(error)) => {
+                if let Some(error) = connection.close_reason() {
+                    return Err(TunnelH3Error::Transport(error));
+                }
                 close_connection(&connection, Code::H3_NO_ERROR);
                 return Err(TunnelH3Error::SessionConnect(error));
             }
@@ -176,7 +182,7 @@ impl ClientTunnelH3 {
                 tokio::select! {
                     _ = session.closed() => break,
                     stream = session.accept_bi() => match stream {
-                        // Visitor streams are not carried on this session yet.
+                        // Visitors use receive slots; reject WebTransport session streams.
                         Some(mut stream) => {
                             use h3::quic::{RecvStream, SendStream};
                             stream.reset(Code::H3_REQUEST_REJECTED.value());
@@ -257,6 +263,14 @@ impl ClientTunnelH3 {
     pub fn closed(&self) -> impl Future<Output = quinn::ConnectionError> + Send + 'static + use<> {
         let connection = self.connection.clone();
         async move { connection.closed().await }
+    }
+
+    /// Observe task completion while retaining the handle, without aborting the observer on drop.
+    #[cfg(test)]
+    pub(crate) async fn session_observer_stopped_for_test(&mut self) {
+        (&mut self._session.0)
+            .await
+            .expect("WebTransport session observer task");
     }
 }
 

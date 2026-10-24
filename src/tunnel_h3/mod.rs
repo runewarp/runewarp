@@ -103,9 +103,9 @@ pub enum TunnelH3Error {
     SetupTimeout,
     /// The event-stream request or response stream failed.
     EventStream(StreamError),
-    /// WebTransport negotiation or the session CONNECT failed after the event-stream gate.
+    /// WebTransport negotiation or CONNECT failed after the event-stream gate.
     SessionConnect(h3_webtransport::client::ConnectError),
-    /// The session CONNECT did not finish within the establishment deadline.
+    /// The WebTransport session CONNECT did not finish within the establishment deadline.
     SessionConnectTimeout,
     /// The event stream ended before delivering its first state.
     EventStreamEnded,

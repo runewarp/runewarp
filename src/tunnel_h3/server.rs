@@ -185,6 +185,7 @@ impl ServerTunnelH3 {
         let (h3_connection, acceptor) = h3_webtransport::server::new(
             h3_connection,
             h3_webtransport::server::Limits {
+                // Keep the WebTransport session limit at one regardless of fork defaults.
                 sessions: std::num::NonZeroUsize::MIN,
                 ..Default::default()
             },
@@ -459,7 +460,7 @@ async fn handle_request(
             }
         }
         Route::Session => {
-            // CONNECT is connection lifetime, not work that prolongs graceful Visitor drain.
+            // WebTransport CONNECT owns connection lifetime and does not prolong Visitor drain.
             let session = timeout_at(
                 request_deadline,
                 shared.acceptor.accept(http_request, stream),
@@ -476,6 +477,7 @@ async fn handle_request(
                                 stream.reset(Code::H3_REQUEST_REJECTED.value());
                                 stream.stop_sending(Code::H3_REQUEST_REJECTED.value());
                             }
+                            // Unlike closed(), this also observes a close capsule without peer FIN.
                             None => break,
                         },
                         _ = shared.connection.closed() => return,

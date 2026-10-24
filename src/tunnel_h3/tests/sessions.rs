@@ -600,8 +600,9 @@ async fn connection_loss_ends_the_session_on_both_runewarp_peers() {
     )
     .await
     .expect("Server");
-    let (_sender, session, driver) = session_client(client_connection).await;
-    server_connection.close(0x100_u32.into(), b"connection loss");
+    let (_sender, session, driver) = session_client(client_connection.clone()).await;
+    let shared = server.shared_state_for_test();
+    client_connection.close(0x100_u32.into(), b"connection loss");
     timeout(STEP, server.closed())
         .await
         .expect("Server connection ends");
@@ -611,17 +612,25 @@ async fn connection_loss_ends_the_session_on_both_runewarp_peers() {
             .expect("Client session ends")
             .is_err()
     );
+    timeout(STEP, async {
+        // The retained handle is the sole owner once the driver and session handler exit.
+        while shared.strong_count() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Server driver and WebTransport session observer release connection state");
     driver.abort();
 
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let hostname = server_hostname();
     let (session, client) = tokio::join!(
-        session_server(server_connection),
+        session_server(server_connection.clone()),
         ClientTunnelH3::establish(client_connection.clone(), &hostname, no_slots()),
     );
     let (session, driver) = session;
-    let client = client.expect("Client");
-    client_connection.close(0x100_u32.into(), b"connection loss");
+    let mut client = client.expect("Client");
+    server_connection.close(0x100_u32.into(), b"connection loss");
     timeout(STEP, client.closed())
         .await
         .expect("Client connection ends");
@@ -631,6 +640,9 @@ async fn connection_loss_ends_the_session_on_both_runewarp_peers() {
             .expect("Server session ends")
             .is_err()
     );
+    timeout(STEP, client.session_observer_stopped_for_test())
+        .await
+        .expect("Client WebTransport session observer exits while its handle is retained");
     driver.abort();
 }
 
@@ -815,6 +827,43 @@ async fn rejected_session_fails_establishment_without_offering_receive_slots() {
         server.accept().await.unwrap_or(None).is_none(),
         "failed establishment offers no slot"
     );
+}
+
+#[tokio::test]
+async fn transport_close_during_session_connect_preserves_the_peer_reason() {
+    let fixture = Fixture::new().expect("fixture");
+    let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
+    let mut server = raw_server(server_connection.clone()).await;
+    let client = tokio::spawn(async move {
+        ClientTunnelH3::establish_with_timing(
+            client_connection,
+            &server_hostname(),
+            no_slots(),
+            fast_timing(),
+        )
+        .await
+    });
+    let (_, mut events) = accept_raw_request(&mut server).await;
+    respond_events(
+        &mut events,
+        &TunnelEventState::current(ServerRuntimeGeneration::generate()).encode_sse(),
+    )
+    .await;
+    let (request, _session) = accept_raw_request(&mut server).await;
+    assert_eq!(request.uri().path(), "/v1/tunnel/session");
+    server_connection.close(0x1234_u32.into(), b"peer transport close during CONNECT");
+    let result = timeout(STEP, client)
+        .await
+        .expect("attempt ends")
+        .expect("task");
+    match result {
+        Err(TunnelH3Error::Transport(ConnectionError::ApplicationClosed(close))) => {
+            assert_eq!(close.error_code.into_inner(), 0x1234);
+            assert_eq!(&close.reason[..], b"peer transport close during CONNECT");
+        }
+        Err(error) => panic!("expected the original transport close, got {error:?}"),
+        Ok(_) => panic!("transport close must fail establishment"),
+    }
 }
 
 #[tokio::test]

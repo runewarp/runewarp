@@ -1,9 +1,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+#[cfg(test)]
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 
-use crate::MAX_SERVER_OPENED_BIDI_STREAMS;
 use crate::runtime_log;
 
 const SATURATION_LOG_INTERVAL: Duration = Duration::from_secs(10);
@@ -22,8 +23,8 @@ pub(crate) struct ClientStreamLimits {
 impl Default for ClientStreamLimits {
     fn default() -> Self {
         Self {
-            // Per-connection QUIC credit must not exceed this aggregate Client bound.
-            max_stream_handlers: MAX_SERVER_OPENED_BIDI_STREAMS as usize,
+            // Idle and assigned receive slots share this Client-instance bound.
+            max_stream_handlers: 1024,
             client_hello_timeout: Duration::from_secs(5),
             backend_connect_timeout: Duration::from_secs(5),
             initial_backend_write_timeout: Duration::from_secs(5),
@@ -70,20 +71,16 @@ impl ClientStreamBudget {
         self.limits
     }
 
-    pub(crate) fn try_admit_handler(&self) -> Result<OwnedSemaphorePermit, ()> {
-        match self.handlers.clone().try_acquire_owned() {
-            Ok(permit) => {
-                self.note_recovery();
-                Ok(permit)
-            }
-            Err(_) => {
-                self.note_saturation();
-                Err(())
-            }
-        }
+    pub(crate) fn semaphore(&self) -> Arc<Semaphore> {
+        self.handlers.clone()
     }
 
-    fn note_saturation(&self) {
+    #[cfg(test)]
+    pub(crate) fn try_admit_handler(&self) -> Result<OwnedSemaphorePermit, ()> {
+        self.handlers.clone().try_acquire_owned().map_err(|_| ())
+    }
+
+    pub(crate) fn note_saturation(&self) {
         let now = Instant::now();
         *self
             .saturated
@@ -106,7 +103,7 @@ impl ClientStreamBudget {
         );
     }
 
-    fn note_recovery(&self) {
+    pub(crate) fn note_recovery(&self) {
         let was_saturated = std::mem::replace(
             &mut *self
                 .saturated
@@ -125,17 +122,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::{ClientStreamBudget, ClientStreamLimits};
-    use crate::MAX_SERVER_OPENED_BIDI_STREAMS;
 
     #[test]
-    fn production_limits_keep_quic_credit_within_handler_capacity() {
+    fn production_limits_bound_idle_and_assigned_receive_slots() {
         let limits = ClientStreamLimits::default();
-        assert_eq!(
-            limits.max_stream_handlers,
-            MAX_SERVER_OPENED_BIDI_STREAMS as usize
-        );
+        assert_eq!(limits.max_stream_handlers, 1024);
         assert!(u32::try_from(limits.max_stream_handlers).is_ok());
-        assert!(MAX_SERVER_OPENED_BIDI_STREAMS <= limits.max_stream_handlers as u32);
     }
 
     #[test]

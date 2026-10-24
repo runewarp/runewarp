@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted for the PROXY v2 boundary; its transport and ALPN statements are superseded by [ADR 0006](0006-http3-tunnel-connections.md).
 
 ## Context
 

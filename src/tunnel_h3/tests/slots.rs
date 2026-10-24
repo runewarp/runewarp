@@ -313,7 +313,7 @@ async fn shutdown_rejects_idle_slots_and_lets_open_tunnel_streams_finish() {
     let mut server_stream = server.open_tunnel_stream(STEP).await.expect("slot");
     let mut client_stream = client.accept_tunnel_stream().await.expect("stream");
 
-    let shutdown = tokio::spawn(server.shutdown(STEP));
+    let shutdown = tokio::spawn(async move { server.shutdown(STEP).await });
 
     // No further Visitors arrive once GOAWAY rejects the idle slots.
     assert!(

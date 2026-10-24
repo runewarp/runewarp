@@ -15,7 +15,7 @@ const SATURATION_LOG_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ServerAdmissionLimits {
     pub(crate) client_hello_timeout: Duration,
-    pub(crate) open_bi_timeout: Duration,
+    pub(crate) slot_wait_timeout: Duration,
     pub(crate) max_pending_visitors: usize,
     pub(crate) max_pending_visitors_per_source: usize,
     pub(crate) max_pending_handshakes: usize,
@@ -30,7 +30,7 @@ impl Default for ServerAdmissionLimits {
     fn default() -> Self {
         Self {
             client_hello_timeout: Duration::from_secs(5),
-            open_bi_timeout: Duration::from_secs(5),
+            slot_wait_timeout: Duration::from_secs(5),
             max_pending_visitors: 4_096,
             max_pending_visitors_per_source: 256,
             max_pending_handshakes: 256,
@@ -48,7 +48,7 @@ impl ServerAdmissionLimits {
     pub(crate) fn for_test() -> Self {
         Self {
             client_hello_timeout: Duration::from_millis(50),
-            open_bi_timeout: Duration::from_millis(50),
+            slot_wait_timeout: Duration::from_millis(50),
             ..Self::default()
         }
     }
@@ -498,7 +498,7 @@ mod tests {
         let limits = ServerAdmissionLimits::default();
 
         assert_eq!(limits.client_hello_timeout, Duration::from_secs(5));
-        assert_eq!(limits.open_bi_timeout, Duration::from_secs(5));
+        assert_eq!(limits.slot_wait_timeout, Duration::from_secs(5));
         assert_eq!(limits.max_pending_visitors, 4_096);
         assert_eq!(limits.max_pending_visitors_per_source, 256);
         assert_eq!(limits.max_pending_handshakes, 256);

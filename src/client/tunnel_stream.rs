@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use quinn::{RecvStream, SendStream};
+use crate::tunnel_h3::ClientTunnelStream;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
@@ -15,9 +15,7 @@ use crate::client_hello::ParsedClientHello;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
 use crate::tunnel_framing::read_tunnel_stream;
-use crate::{
-    ClientTlsMode, ServiceConfig, proxy::proxy_stream_error_code, proxy::proxy_tcp_over_quic,
-};
+use crate::{ClientTlsMode, ServiceConfig, proxy::proxy_tcp_over_tunnel};
 
 #[derive(Clone)]
 pub(crate) struct TunnelConnectionStreamHandler {
@@ -39,9 +37,9 @@ impl TunnelConnectionStreamHandler {
         }
     }
 
-    pub(crate) async fn handle(&self, send: SendStream, mut recv: RecvStream) -> io::Result<()> {
+    pub(crate) async fn handle(&self, mut stream: ClientTunnelStream) -> io::Result<()> {
         let intake = tokio::time::timeout(self.stream_limits.client_hello_timeout, async {
-            let decoded = read_tunnel_stream(&mut recv).await?;
+            let decoded = read_tunnel_stream(&mut stream).await?;
             Ok::<_, io::Error>((decoded.addresses, decoded.client_hello))
         })
         .await;
@@ -53,12 +51,12 @@ impl TunnelConnectionStreamHandler {
                     self.stream_limits.client_hello_timeout
                 );
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
-                reject_stream(send, recv);
+                drop(stream);
                 return Err(io::Error::new(io::ErrorKind::TimedOut, error));
             }
             Ok(Err(error)) => {
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
-                reject_stream(send, recv);
+                drop(stream);
                 return Err(error);
             }
         };
@@ -68,13 +66,13 @@ impl TunnelConnectionStreamHandler {
                 public_hostname.as_str(),
                 ClientRouteOutcome::RejectedNoMatchingService,
             );
-            reject_stream(send, recv);
+            drop(stream);
             return Ok(());
         };
 
         if service.tls_mode == ClientTlsMode::Terminate {
             return self
-                .handle_terminate(send, recv, parsed_client_hello, service, addresses)
+                .handle_terminate(stream, parsed_client_hello, service, addresses)
                 .await;
         }
 
@@ -94,7 +92,7 @@ impl TunnelConnectionStreamHandler {
                         backend_address: service.backend_address.as_str(),
                     },
                 );
-                reject_stream(send, recv);
+                drop(stream);
                 return Err(error);
             }
         };
@@ -116,7 +114,7 @@ impl TunnelConnectionStreamHandler {
                     backend_address: service.backend_address.as_str(),
                 },
             );
-            reject_stream(send, recv);
+            drop(stream);
             return Err(error);
         }
         runtime_log::client_route(
@@ -126,13 +124,13 @@ impl TunnelConnectionStreamHandler {
             },
         );
 
-        proxy_tcp_over_quic(backend_stream, Vec::new(), send, recv).await
+        let (recv, send) = stream.into_split();
+        proxy_tcp_over_tunnel(backend_stream, Vec::new(), send, recv).await
     }
 
     async fn handle_terminate(
         &self,
-        send: SendStream,
-        recv: RecvStream,
+        stream: ClientTunnelStream,
         parsed_client_hello: ParsedClientHello,
         service: &ServiceConfig,
         addresses: crate::VisitorTcpAddresses,
@@ -145,8 +143,7 @@ impl TunnelConnectionStreamHandler {
         {
             return self
                 .handle_acme_tls_alpn_challenge(
-                    send,
-                    recv,
+                    stream,
                     public_hostname.as_str(),
                     parsed_client_hello.into_buffered_bytes(),
                     challenge_tls_config,
@@ -162,10 +159,7 @@ impl TunnelConnectionStreamHandler {
                 public_hostname.as_str(),
                 ClientRouteOutcome::MissingTlsConfig,
             );
-            let mut s = send;
-            let mut r = recv;
-            let _ = s.reset(proxy_stream_error_code());
-            let _ = r.stop(proxy_stream_error_code());
+            drop(stream);
             return Err(io::Error::other(format!(
                 "no TLS config for {public_hostname}"
             )));
@@ -174,11 +168,11 @@ impl TunnelConnectionStreamHandler {
         let acceptor = TlsAcceptor::from(tls_config.clone());
         // Replay the buffered ClientHello bytes back into the stream so TlsAcceptor can
         // complete the handshake from the beginning of the TLS record stream.
-        let quic_stream =
-            ReplayedQuicBiStream::new(send, recv, parsed_client_hello.into_buffered_bytes());
+        let tunnel_stream =
+            ReplayedTunnelStream::new(stream, parsed_client_hello.into_buffered_bytes());
         let mut tls_stream = match tokio::time::timeout(
             self.stream_limits.terminate_handshake_timeout,
-            acceptor.accept(quic_stream),
+            acceptor.accept(tunnel_stream),
         )
         .await
         {
@@ -240,21 +234,23 @@ impl TunnelConnectionStreamHandler {
 
     async fn handle_acme_tls_alpn_challenge(
         &self,
-        send: SendStream,
-        recv: RecvStream,
+        stream: ClientTunnelStream,
         public_hostname: &str,
         buffered_bytes: Vec<u8>,
         challenge_tls_config: &Arc<rustls::ServerConfig>,
     ) -> io::Result<()> {
         let acceptor = TlsAcceptor::from(challenge_tls_config.clone());
-        let quic_stream = ReplayedQuicBiStream::new(send, recv, buffered_bytes);
-        match tokio::time::timeout(
-            self.stream_limits.acme_challenge_handshake_timeout,
-            acceptor.accept(quic_stream),
-        )
+        let tunnel_stream = ReplayedTunnelStream::new(stream, buffered_bytes);
+        match tokio::time::timeout(self.stream_limits.acme_challenge_handshake_timeout, async {
+            let mut tls_stream = acceptor.accept(tunnel_stream).await?;
+            tls_stream.shutdown().await?;
+            // Keep receiving until the Visitor finishes its own close.
+            tokio::io::copy(&mut tls_stream, &mut tokio::io::sink()).await?;
+            Ok::<(), io::Error>(())
+        })
         .await
         {
-            Ok(Ok(_)) => {
+            Ok(Ok(())) => {
                 runtime_log::acme(
                     AcmeRole::Client { public_hostname },
                     AcmeEvent::ChallengeHandled,
@@ -316,33 +312,25 @@ async fn write_backend_with_timeout(
     }
 }
 
-/// Reset an accepted Tunnel stream that the Client cannot service (e.g. handler saturation).
-pub(crate) fn reject_stream(mut send: SendStream, mut recv: RecvStream) {
-    let _ = send.reset(proxy_stream_error_code());
-    let _ = recv.stop(proxy_stream_error_code());
-}
-
-/// A bidirectional QUIC stream that replays `buffered_bytes` before reading from `recv`.
+/// Replay buffered ClientHello bytes before reading further Tunnel data.
 /// Used to feed back a partially-consumed TLS ClientHello to `TlsAcceptor`.
-struct ReplayedQuicBiStream {
-    send: SendStream,
-    recv: RecvStream,
+struct ReplayedTunnelStream {
+    inner: ClientTunnelStream,
     buffered_bytes: Vec<u8>,
     replay_offset: usize,
 }
 
-impl ReplayedQuicBiStream {
-    fn new(send: SendStream, recv: RecvStream, buffered_bytes: Vec<u8>) -> Self {
+impl ReplayedTunnelStream {
+    fn new(stream: ClientTunnelStream, buffered_bytes: Vec<u8>) -> Self {
         Self {
-            send,
-            recv,
+            inner: stream,
             buffered_bytes,
             replay_offset: 0,
         }
     }
 }
 
-impl AsyncRead for ReplayedQuicBiStream {
+impl AsyncRead for ReplayedTunnelStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -355,29 +343,29 @@ impl AsyncRead for ReplayedQuicBiStream {
             self.replay_offset += to_copy;
             return Poll::Ready(Ok(()));
         }
-        Pin::new(&mut self.recv).poll_read(cx, buf)
+        Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
 
-impl AsyncWrite for ReplayedQuicBiStream {
+impl AsyncWrite for ReplayedTunnelStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.send)
+        Pin::new(&mut self.inner)
             .poll_write(cx, buf)
             .map(|result| result.map_err(io::Error::other))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.send)
+        Pin::new(&mut self.inner)
             .poll_flush(cx)
             .map(|result| result.map_err(io::Error::other))
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.send)
+        Pin::new(&mut self.inner)
             .poll_shutdown(cx)
             .map(|result| result.map_err(io::Error::other))
     }
@@ -393,7 +381,14 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
-    use quinn::{Connection, Endpoint, RecvStream, SendStream};
+    use crate::tunnel_h3::{
+        ServerTunnelH3,
+        test_support::{
+            ClientPeer, ServerRead as RecvStream, ServerStreams, ServerWrite as SendStream,
+            client_stream, establish_peers, read_to_end, test_server_h3_config,
+        },
+    };
+    use quinn::Endpoint;
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
     use rustls::{ClientConnection, RootCertStore};
@@ -411,7 +406,7 @@ mod tests {
     use crate::client::ClientStreamLimits;
     use crate::{
         ClientTlsMode, LogLevel, PublicHostname, ServiceConfig, client::TerminationTlsConfigs,
-        make_client_quic_config, make_server_quic_config,
+        generate_client_identity, make_client_tunnel_h3_config,
     };
 
     fn internal_stream_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -469,23 +464,25 @@ mod tests {
         );
         let fixture = TunnelConnectionFixture::connect().await?;
         let client_connection = fixture.client_connection.clone();
-        let (mut send, _recv) =
-            timeout(Duration::from_secs(1), fixture.server_connection.open_bi())
-                .await
-                .map_err(|_| timeout_error("server should open a stream"))?
-                .map_err(io::Error::other)?;
+        let (mut send, _recv) = timeout(
+            Duration::from_secs(1),
+            fixture.server_connection.open_stream(),
+        )
+        .await
+        .map_err(|_| timeout_error("server should open a stream"))?
+        .map_err(io::Error::other)?;
         let client_hello = build_client_hello("app.example.test")?;
         send.write_all(&internal_stream_bytes(&client_hello))
-            .await
-            .map_err(io::Error::other)?;
-        send.finish().map_err(io::Error::other)?;
+            .await?;
+        send.flush().await?;
+        send.shutdown().await?;
 
         let handle = tokio::spawn(async move {
             let (send, recv) = client_connection
-                .accept_bi()
+                .accept_stream()
                 .await
                 .map_err(io::Error::other)?;
-            stream_handler.handle(send, recv).await
+            stream_handler.handle(client_stream(send, recv)).await
         });
         let result = timeout(Duration::from_secs(1), handle)
             .await
@@ -513,19 +510,22 @@ mod tests {
         );
         let fixture = TunnelConnectionFixture::connect().await?;
         let client_connection = fixture.client_connection.clone();
-        let (mut send, _recv) =
-            timeout(Duration::from_secs(1), fixture.server_connection.open_bi())
-                .await
-                .map_err(|_| timeout_error("server should open a stream"))?
-                .map_err(io::Error::other)?;
+        let (mut send, _recv) = timeout(
+            Duration::from_secs(1),
+            fixture.server_connection.open_stream(),
+        )
+        .await
+        .map_err(|_| timeout_error("server should open a stream"))?
+        .map_err(io::Error::other)?;
 
         send.write_all(&internal_stream_bytes(&[])).await?;
+        send.flush().await?;
         let handle = tokio::spawn(async move {
             let (send, recv) = client_connection
-                .accept_bi()
+                .accept_stream()
                 .await
                 .map_err(io::Error::other)?;
-            stream_handler.handle(send, recv).await
+            stream_handler.handle(client_stream(send, recv)).await
         });
         let result = timeout(Duration::from_secs(1), handle)
             .await
@@ -551,16 +551,21 @@ mod tests {
         let client_connection = fixture.client_connection.clone();
         let (mut tunnel_send, _tunnel_recv) = fixture
             .server_connection
-            .open_bi()
+            .open_stream()
             .await
             .map_err(io::Error::other)?;
         tunnel_send.write_all(&[0_u8; 16]).await?;
         let (send, recv) = client_connection
-            .accept_bi()
+            .accept_stream()
             .await
             .map_err(io::Error::other)?;
 
-        assert!(stream_handler.handle(send, recv).await.is_err());
+        assert!(
+            stream_handler
+                .handle(client_stream(send, recv))
+                .await
+                .is_err()
+        );
         Ok(())
     }
 
@@ -767,11 +772,11 @@ mod tests {
         let client_connection = fixture.client_connection.clone();
 
         let handle_stream = async {
-            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_bi())
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_stream())
                 .await
                 .map_err(|_| timeout_error("handler should accept a tunnel stream"))?
                 .map_err(io::Error::other)?;
-            stream_handler.handle(send, recv).await
+            stream_handler.handle(client_stream(send, recv)).await
         };
         let request_stream =
             request_tls_response_over_tunnel(server_connection, &backend_cert, requested_hostname);
@@ -800,25 +805,25 @@ mod tests {
         let client_hello = build_client_hello(requested_hostname)?;
 
         let handle_stream = async {
-            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_bi())
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_stream())
                 .await
                 .map_err(|_| timeout_error("handler should accept a tunnel stream"))?
                 .map_err(io::Error::other)?;
-            stream_handler.handle(send, recv).await
+            stream_handler.handle(client_stream(send, recv)).await
         };
         let drive_rejected_stream = async {
             let (mut tunnel_send, mut tunnel_recv) =
-                timeout(Duration::from_secs(1), server_connection.open_bi())
+                timeout(Duration::from_secs(1), server_connection.open_stream())
                     .await
                     .map_err(|_| timeout_error("test should open a tunnel stream"))?
                     .map_err(io::Error::other)?;
             tunnel_send
                 .write_all(&internal_stream_bytes(&client_hello))
                 .await?;
-            tunnel_send.finish().map_err(io::Error::other)?;
+            tunnel_send.shutdown().await?;
 
             if let Ok(Ok(response)) =
-                timeout(Duration::from_secs(1), tunnel_recv.read_to_end(1)).await
+                timeout(Duration::from_secs(1), read_to_end(&mut tunnel_recv, 1)).await
             {
                 assert!(response.is_empty());
             }
@@ -858,11 +863,11 @@ mod tests {
         let client_connection = fixture.client_connection.clone();
 
         let stream_handler_task = tokio::spawn(async move {
-            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_bi())
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_stream())
                 .await
                 .map_err(|_| timeout_error("handler should accept a tunnel stream"))?
                 .map_err(io::Error::other)?;
-            stream_handler.handle(send, recv).await
+            stream_handler.handle(client_stream(send, recv)).await
         });
 
         let response =
@@ -895,25 +900,26 @@ mod tests {
         let client_hello = build_client_hello(requested_hostname)?;
 
         let stream_handler_task = tokio::spawn(async move {
-            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_bi())
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_stream())
                 .await
                 .map_err(|_| timeout_error("handler should accept a tunnel stream"))?
                 .map_err(io::Error::other)?;
-            assert_handler_result(stream_handler.handle(send, recv).await);
+            assert_handler_result(stream_handler.handle(client_stream(send, recv)).await);
             Ok::<(), io::Error>(())
         });
 
         let (mut tunnel_send, mut tunnel_recv) =
-            timeout(Duration::from_secs(1), server_connection.open_bi())
+            timeout(Duration::from_secs(1), server_connection.open_stream())
                 .await
                 .map_err(|_| timeout_error("test should open a tunnel stream"))?
                 .map_err(io::Error::other)?;
         tunnel_send
             .write_all(&internal_stream_bytes(&client_hello))
             .await?;
-        tunnel_send.finish().map_err(io::Error::other)?;
+        tunnel_send.shutdown().await?;
 
-        if let Ok(Ok(response)) = timeout(Duration::from_secs(1), tunnel_recv.read_to_end(1)).await
+        if let Ok(Ok(response)) =
+            timeout(Duration::from_secs(1), read_to_end(&mut tunnel_recv, 1)).await
         {
             assert!(response.is_empty());
         }
@@ -964,16 +970,17 @@ mod tests {
     }
 
     async fn request_tls_response_over_tunnel(
-        server_connection: Connection,
+        server_connection: Arc<ServerTunnelH3>,
         backend_cert: &CertificateDer<'static>,
         requested_hostname: &str,
     ) -> io::Result<[u8; 4]> {
-        let (mut send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
+        let (mut send, recv) = timeout(Duration::from_secs(1), server_connection.open_stream())
             .await
             .map_err(|_| timeout_error("test should open a tunnel stream"))?
             .map_err(io::Error::other)?;
         let framing = internal_stream_bytes(&[]);
         send.write_all(&framing).await?;
+        send.flush().await?;
         let connector = TlsConnector::from(Arc::new(
             rustls::ClientConfig::builder()
                 .with_root_certificates(root_store_with(backend_cert)?)
@@ -983,7 +990,7 @@ mod tests {
             ServerName::try_from(requested_hostname.to_owned()).map_err(io::Error::other)?;
         let mut tls_stream = timeout(
             Duration::from_secs(1),
-            connector.connect(server_name, QuicBiStream::new(send, recv)),
+            connector.connect(server_name, TestTunnelStream::new(send, recv)),
         )
         .await
         .map_err(|_| timeout_error("TLS handshake over the tunnel should complete"))?
@@ -1006,17 +1013,19 @@ mod tests {
     struct TunnelConnectionFixture {
         _server_endpoint: Endpoint,
         _client_endpoint: Endpoint,
-        server_connection: Connection,
-        client_connection: Connection,
+        server_connection: Arc<ServerTunnelH3>,
+        client_connection: ClientPeer,
     }
 
     impl TunnelConnectionFixture {
         async fn connect() -> io::Result<Self> {
             let (certificate, private_key) = make_self_signed_cert("tunnel.example.test")?;
+            let identity = generate_client_identity().map_err(io::Error::other)?;
             let server_endpoint = Endpoint::server(
-                make_server_quic_config(
+                test_server_h3_config(
                     vec![certificate.clone()],
                     private_key_from_der(&private_key),
+                    std::slice::from_ref(&identity.client_identity),
                 )
                 .map_err(io::Error::other)?,
                 localhost(0),
@@ -1026,8 +1035,16 @@ mod tests {
 
             let mut client_endpoint = Endpoint::client(localhost(0)).map_err(io::Error::other)?;
             client_endpoint.set_default_client_config(
-                make_client_quic_config(root_store_with(&certificate)?)
+                make_client_tunnel_h3_config(
+                    root_store_with(&certificate)?,
+                    crate::tls_material::certificate_chain_from_pem(
+                        identity.certificate_pem.as_bytes(),
+                    )
                     .map_err(io::Error::other)?,
+                    crate::tls_material::private_key_from_pem(identity.private_key_pem.as_bytes())
+                        .map_err(io::Error::other)?,
+                )
+                .map_err(io::Error::other)?,
             );
 
             let accept_connection = async {
@@ -1053,6 +1070,8 @@ mod tests {
             };
             let (server_connection, client_connection) =
                 tokio::try_join!(accept_connection, connect_client)?;
+            let (server_connection, client_connection) =
+                establish_peers(server_connection, client_connection, 1024).await?;
 
             Ok(Self {
                 _server_endpoint: server_endpoint,
@@ -1206,18 +1225,18 @@ mod tests {
         io::Error::other(format!("{context}: {error}"))
     }
 
-    struct QuicBiStream {
+    struct TestTunnelStream {
         send: SendStream,
         recv: RecvStream,
     }
 
-    impl QuicBiStream {
+    impl TestTunnelStream {
         fn new(send: SendStream, recv: RecvStream) -> Self {
             Self { send, recv }
         }
     }
 
-    impl AsyncRead for QuicBiStream {
+    impl AsyncRead for TestTunnelStream {
         fn poll_read(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -1227,7 +1246,7 @@ mod tests {
         }
     }
 
-    impl AsyncWrite for QuicBiStream {
+    impl AsyncWrite for TestTunnelStream {
         fn poll_write(
             mut self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -1317,11 +1336,11 @@ mod tests {
         let client_connection = fixture.client_connection.clone();
 
         let stream_handler_task = tokio::spawn(async move {
-            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_bi())
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_stream())
                 .await
                 .map_err(|_| timeout_error("handler should accept a tunnel stream"))?
                 .map_err(io::Error::other)?;
-            stream_handler.handle(send, recv).await
+            stream_handler.handle(client_stream(send, recv)).await
         });
 
         // The tunnel sends a real TLS connection using the Public hostname CA
@@ -1412,13 +1431,16 @@ mod tests {
                 let stream_handler_task = tokio::spawn(async move {
                     for _ in 0..2 {
                         let (send, recv) =
-                            timeout(Duration::from_secs(1), client_connection.accept_bi())
+                            timeout(Duration::from_secs(1), client_connection.accept_stream())
                                 .await
                                 .map_err(|_| {
                                     timeout_error("handler should accept a tunnel stream")
                                 })?
                                 .map_err(io::Error::other)?;
-                        stream_handler.clone().handle(send, recv).await?;
+                        stream_handler
+                            .clone()
+                            .handle(client_stream(send, recv))
+                            .await?;
                     }
                     Ok::<(), io::Error>(())
                 });
@@ -1431,11 +1453,13 @@ mod tests {
                 .await?;
                 assert_eq!(response, *b"pong");
 
-                let (mut send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
-                    .await
-                    .map_err(|_| timeout_error("test should open a tunnel stream"))?
-                    .map_err(io::Error::other)?;
+                let (mut send, recv) =
+                    timeout(Duration::from_secs(1), server_connection.open_stream())
+                        .await
+                        .map_err(|_| timeout_error("test should open a tunnel stream"))?
+                        .map_err(io::Error::other)?;
                 send.write_all(&internal_stream_bytes(&[])).await?;
+                send.flush().await?;
                 let mut client_tls_config = rustls::ClientConfig::builder()
                     .with_root_certificates(root_store_with(&public_cert)?)
                     .with_no_client_auth();
@@ -1445,11 +1469,20 @@ mod tests {
                     ServerName::try_from(hostname.to_owned()).map_err(io::Error::other)?;
                 let mut tls_stream = timeout(
                     Duration::from_secs(1),
-                    connector.connect(server_name, QuicBiStream::new(send, recv)),
+                    connector.connect(server_name, TestTunnelStream::new(send, recv)),
                 )
                 .await
                 .map_err(|_| timeout_error("ACME challenge handshake should complete"))?
                 .map_err(io::Error::other)?;
+                let mut byte = [0_u8; 1];
+                assert_eq!(
+                    timeout(Duration::from_secs(1), tls_stream.read(&mut byte))
+                        .await
+                        .map_err(|_| timeout_error(
+                            "successful ACME challenge should end cleanly"
+                        ))??,
+                    0
+                );
                 timeout(Duration::from_secs(1), tls_stream.shutdown())
                     .await
                     .map_err(|_| timeout_error("ACME challenge client should close cleanly"))??;
@@ -1483,15 +1516,16 @@ mod tests {
     /// Makes a TLS connection over the QUIC tunnel stream, talks to a plain-TCP backend
     /// (because the Client terminates TLS and forwards plaintext).
     async fn request_plaintext_response_over_terminated_tunnel(
-        server_connection: Connection,
+        server_connection: Arc<ServerTunnelH3>,
         public_cert: &CertificateDer<'static>,
         hostname: &str,
     ) -> io::Result<[u8; 4]> {
-        let (mut send, recv) = timeout(Duration::from_secs(1), server_connection.open_bi())
+        let (mut send, recv) = timeout(Duration::from_secs(1), server_connection.open_stream())
             .await
             .map_err(|_| timeout_error("test should open a tunnel stream"))?
             .map_err(io::Error::other)?;
         send.write_all(&internal_stream_bytes(&[])).await?;
+        send.flush().await?;
         let connector = TlsConnector::from(Arc::new(
             rustls::ClientConfig::builder()
                 .with_root_certificates(root_store_with(public_cert)?)
@@ -1500,7 +1534,7 @@ mod tests {
         let server_name = ServerName::try_from(hostname.to_owned()).map_err(io::Error::other)?;
         let mut tls_stream = timeout(
             Duration::from_secs(1),
-            connector.connect(server_name, QuicBiStream::new(send, recv)),
+            connector.connect(server_name, TestTunnelStream::new(send, recv)),
         )
         .await
         .map_err(|_| timeout_error("TLS handshake over the tunnel should complete"))?
@@ -1599,21 +1633,25 @@ mod tests {
         let handler_for_first_stream = stream_handler.clone();
         let handler_for_second_stream = stream_handler.clone();
         let first_stream_task = tokio::spawn(async move {
-            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_bi())
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection.accept_stream())
                 .await
                 .map_err(|_| timeout_error("handler should accept first tunnel stream"))?
                 .map_err(io::Error::other)?;
-            handler_for_first_stream.handle(send, recv).await
+            handler_for_first_stream
+                .handle(client_stream(send, recv))
+                .await
         });
         let fixture2 = TunnelConnectionFixture::connect().await?;
         let client_connection2 = fixture2.client_connection.clone();
         let server_conn_for_pass2 = fixture2.server_connection.clone();
         let second_stream_task = tokio::spawn(async move {
-            let (send, recv) = timeout(Duration::from_secs(1), client_connection2.accept_bi())
+            let (send, recv) = timeout(Duration::from_secs(1), client_connection2.accept_stream())
                 .await
                 .map_err(|_| timeout_error("handler should accept second tunnel stream"))?
                 .map_err(io::Error::other)?;
-            handler_for_second_stream.handle(send, recv).await
+            handler_for_second_stream
+                .handle(client_stream(send, recv))
+                .await
         });
 
         // Terminating stream: Visitor sends TLS → Client decrypts → backend gets plaintext

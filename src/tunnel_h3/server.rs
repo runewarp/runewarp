@@ -39,8 +39,8 @@ pub struct ServerTunnelH3 {
     connection: quinn::Connection,
     client_identity: ClientIdentity,
     shared: Arc<Shared>,
-    begin_shutdown: Option<oneshot::Sender<()>>,
-    task: OwnedTask,
+    begin_shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    _task: OwnedTask,
 }
 
 /// Why no Tunnel stream could be opened on a connection.
@@ -193,8 +193,8 @@ impl ServerTunnelH3 {
             connection,
             client_identity,
             shared,
-            begin_shutdown: Some(begin_shutdown),
-            task,
+            begin_shutdown: Mutex::new(Some(begin_shutdown)),
+            _task: task,
         })
     }
 
@@ -264,11 +264,34 @@ impl ServerTunnelH3 {
     /// requests at or above it and every idle receive slot with `H3_REQUEST_REJECTED`, end the
     /// event stream, and close with `H3_NO_ERROR` once open Tunnel streams and earlier requests
     /// finish. Closes immediately when `deadline` expires.
-    pub async fn shutdown(mut self, deadline: Duration) {
-        if let Some(begin_shutdown) = self.begin_shutdown.take() {
-            let _ = begin_shutdown.send(());
+    pub async fn shutdown(&self, deadline: Duration) {
+        let signal = self
+            .begin_shutdown
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(signal) = signal {
+            let _ = signal.send(());
         }
-        let _ = timeout(deadline, &mut self.task.0).await;
+        let _ = timeout(deadline, self.connection.closed()).await;
+        self.close(b"server shutdown");
+    }
+
+    /// Close immediately, including revocation and fast shutdown.
+    pub fn close(&self, reason: &[u8]) {
+        self.shared.close_slots();
+        self.connection
+            .close(quinn::VarInt::from_u32(0x100), reason);
+    }
+
+    /// Wait for the underlying connection to end.
+    pub async fn closed(&self) -> quinn::ConnectionError {
+        self.connection.closed().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remote_address(&self) -> std::net::SocketAddr {
+        self.connection.remote_address()
     }
 }
 

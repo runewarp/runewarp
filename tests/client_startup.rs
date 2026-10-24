@@ -3,8 +3,7 @@ use runewarp::{
     ClientConfig, ClientInstancePrep, ClientPublicCertConfig, ClientTlsMode, LogLevel,
     PreparedClient, PublicHostname, Server, ServerAddress, ServerAdmission, ServerAuthorization,
     ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, generate_client_identity,
-    initialize_manual_client_public_cert, load_client_config,
-    make_server_quic_config_with_client_admission,
+    initialize_manual_client_public_cert, load_client_config, make_server_tunnel_h3_config,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::fs;
@@ -49,7 +48,7 @@ async fn prepared_client_connects_from_validated_settings() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_admission(
+        quic_server_config: make_server_tunnel_h3_config(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
             Arc::new(authorization.clone()),
@@ -131,7 +130,7 @@ async fn prepared_client_uses_the_configured_server_address_port() {
         server_hostname: server_hostname("localhost"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_admission(
+        quic_server_config: make_server_tunnel_h3_config(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
             Arc::new(authorization.clone()),
@@ -223,7 +222,7 @@ async fn prepared_client_rejects_settings_without_services() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_admission(
+        quic_server_config: make_server_tunnel_h3_config(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
             Arc::new(authorization.clone()),
@@ -495,7 +494,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_admission(
+        quic_server_config: make_server_tunnel_h3_config(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
             Arc::new(authorization.clone()),
@@ -617,7 +616,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_admission(
+        quic_server_config: make_server_tunnel_h3_config(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
             Arc::new(authorization.clone()),
@@ -722,7 +721,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_admission(
+        quic_server_config: make_server_tunnel_h3_config(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
             Arc::new(authorization.clone()),
@@ -828,7 +827,7 @@ async fn shared_client_instance_prep_survives_reconnect_style_redials() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_admission(
+        quic_server_config: make_server_tunnel_h3_config(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
             Arc::new(authorization.clone()),
@@ -965,7 +964,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: make_server_quic_config_with_client_admission(
+        quic_server_config: make_server_tunnel_h3_config(
             vec![server_cert.clone()],
             private_key_from_der(&server_key),
             Arc::new(authorization.clone()),

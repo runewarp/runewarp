@@ -13,7 +13,7 @@ use super::tunnel_registry::{TunnelRegistry, TunnelRouteOutcome, VisitorRoute};
 use crate::acme::ACME_TLS_ALPN;
 use crate::client_hello::ParsedClientHello;
 use crate::client_hello::read_client_hello;
-use crate::proxy::{proxy_stream_error_code, proxy_tcp_over_quic};
+use crate::proxy::proxy_tcp_over_tunnel;
 use crate::proxy_protocol::read_proxy_v2;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ServerRouteOutcome};
@@ -284,12 +284,13 @@ impl VisitorIntake {
         self.admission_policy
             .report_recovery(&[AdmissionLimit::PendingStreamOpens]);
 
-        let open_bi_timeout = self.admission_policy.limits().open_bi_timeout;
-        let open_result =
-            tokio::time::timeout(open_bi_timeout, tunnel_connection.connection().open_bi()).await;
-        let (mut send, mut recv) = match open_result {
-            Ok(Ok(stream)) => stream,
-            Ok(Err(_)) | Err(_) => {
+        let open_result = tunnel_connection
+            .connection()
+            .open_tunnel_stream(self.admission_policy.limits().slot_wait_timeout)
+            .await;
+        let stream = match open_result {
+            Ok(stream) => stream,
+            Err(_) => {
                 drop(pending_open_permit);
                 runtime_log::server_route(
                     public_hostname.as_str(),
@@ -303,8 +304,7 @@ impl VisitorIntake {
             Ok(permit) => permit,
             Err(rejection) => {
                 drop(pending_open_permit);
-                let _ = send.reset(proxy_stream_error_code());
-                let _ = recv.stop(proxy_stream_error_code());
+                drop(stream);
                 self.admission_policy.report_saturation(rejection);
                 return Ok(());
             }
@@ -323,8 +323,7 @@ impl VisitorIntake {
         ) {
             Some(work) => work,
             None => {
-                let _ = send.reset(proxy_stream_error_code());
-                let _ = recv.stop(proxy_stream_error_code());
+                drop(stream);
                 return Ok(());
             }
         };
@@ -332,7 +331,8 @@ impl VisitorIntake {
         match work
             .run(async move {
                 let initial_bytes = encode_tunnel_stream(addresses, &buffered_bytes);
-                proxy_tcp_over_quic(visitor_stream, initial_bytes, send, recv).await
+                let (recv, send) = stream.into_split();
+                proxy_tcp_over_tunnel(visitor_stream, initial_bytes, send, recv).await
             })
             .await
         {
@@ -412,7 +412,13 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use quinn::{Connection, Endpoint};
+    use crate::tunnel_h3::{
+        ServerTunnelH3,
+        test_support::{
+            ClientPeer, ServerStreams, establish_peers, read_to_end, test_server_h3_config,
+        },
+    };
+    use quinn::Endpoint;
     use rcgen::generate_simple_self_signed;
     use rustls::pki_types::pem::Error as PemError;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
@@ -433,8 +439,7 @@ mod tests {
     use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
     use crate::{
         CLIENT_HELLO_BUFFER_LIMIT, GeneratedClientIdentity, PublicHostname, ServerHostname,
-        ServerTunnelConfig, generate_client_identity, make_client_quic_config_with_client_auth,
-        make_server_quic_config_with_client_auth,
+        ServerTunnelConfig, generate_client_identity, make_client_tunnel_h3_config,
     };
 
     fn public_hostname(hostname: &str) -> PublicHostname {
@@ -565,7 +570,7 @@ mod tests {
 
         let (mut tunnel_send, mut tunnel_recv) = timeout(
             Duration::from_secs(1),
-            fixture.client_connection.accept_bi(),
+            fixture.client_connection.accept_stream(),
         )
         .await
         .map_err(|_| timeout_error("intake should open a tunnel stream"))?
@@ -575,10 +580,10 @@ mod tests {
             .map_err(io::Error::other)?;
         assert_eq!(addresses.source, visitor_source);
         assert_eq!(addresses.destination, visitor_addr);
-        tunnel_send.finish().map_err(io::Error::other)?;
+        tunnel_send.shutdown().await?;
         let forwarded = timeout(
             Duration::from_secs(1),
-            tunnel_recv.read_to_end(client_hello.len() + 1),
+            read_to_end(&mut tunnel_recv, client_hello.len() + 1),
         )
         .await
         .map_err(|_| timeout_error("tunnel should receive forwarded bytes"))?
@@ -616,7 +621,7 @@ mod tests {
         visitor.write_all(&ingress).await?;
         visitor.shutdown().await?;
 
-        let (_send, mut recv) = timeout(Duration::from_secs(1), tunnel_connection.accept_bi())
+        let (_send, mut recv) = timeout(Duration::from_secs(1), tunnel_connection.accept_stream())
             .await
             .map_err(|_| timeout_error("strict PROXY Visitor should reach the Tunnel"))?
             .map_err(io::Error::other)?;
@@ -626,7 +631,7 @@ mod tests {
         assert_eq!(forwarded_addresses, addresses);
         let forwarded_tls = timeout(
             Duration::from_secs(1),
-            recv.read_to_end(client_hello.len() + 1),
+            read_to_end(&mut recv, client_hello.len() + 1),
         )
         .await
         .map_err(|_| timeout_error("Tunnel should receive the Visitor ClientHello"))?
@@ -656,7 +661,7 @@ mod tests {
         visitor
             .write_all(&build_client_hello("app.example.test")?)
             .await?;
-        let (send, recv) = timeout(Duration::from_secs(1), tunnel_connection.accept_bi())
+        let (send, recv) = timeout(Duration::from_secs(1), tunnel_connection.accept_stream())
             .await
             .map_err(|_| timeout_error("visitor should reach the Tunnel connection"))?
             .map_err(io::Error::other)?;
@@ -761,7 +766,7 @@ mod tests {
 
         let (mut tunnel_send, mut tunnel_recv) = timeout(
             Duration::from_secs(1),
-            fixture.client_connection.accept_bi(),
+            fixture.client_connection.accept_stream(),
         )
         .await
         .map_err(|_| timeout_error("established visitor should open a tunnel stream"))?
@@ -820,7 +825,7 @@ mod tests {
         recovered.shutdown().await?;
         let (_send, mut recv) = timeout(
             Duration::from_secs(1),
-            fixture.client_connection.accept_bi(),
+            fixture.client_connection.accept_stream(),
         )
         .await
         .map_err(|_| timeout_error("recovery visitor should open a tunnel stream"))?
@@ -830,7 +835,7 @@ mod tests {
             .map_err(io::Error::other)?;
         let recovered_bytes = timeout(
             Duration::from_secs(1),
-            recv.read_to_end(client_hello.len() + 1),
+            read_to_end(&mut recv, client_hello.len() + 1),
         )
         .await
         .map_err(|_| timeout_error("recovery stream should receive ClientHello"))?
@@ -879,7 +884,7 @@ mod tests {
 
         match timeout(
             Duration::from_millis(200),
-            fixture.client_connection.accept_bi(),
+            fixture.client_connection.accept_stream(),
         )
         .await
         {
@@ -941,7 +946,7 @@ mod tests {
 
         let _ = timeout(
             Duration::from_millis(200),
-            fixture.client_connection.accept_bi(),
+            fixture.client_connection.accept_stream(),
         )
         .await;
 
@@ -956,8 +961,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_bi_deadline_releases_pending_capacity_when_stream_credit_is_exhausted()
-    -> io::Result<()> {
+    async fn slot_wait_deadline_drops_visitor_and_releases_pending_capacity() -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
             &server_hostname("Tunnel.Example.Test."),
@@ -968,10 +972,10 @@ mod tests {
             }],
         )?;
         let fixture =
-            TunnelConnectionFixture::connect_with_bidi_credit(&client_identity, 1).await?;
+            TunnelConnectionFixture::connect_with_slot_budget(&client_identity, 1).await?;
         registry.register(fixture.server_connection.clone()).await;
         let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
-            open_bi_timeout: Duration::from_millis(50),
+            slot_wait_timeout: Duration::from_millis(50),
             max_pending_stream_opens: 1,
             ..ServerAdmissionLimits::for_test()
         });
@@ -982,12 +986,14 @@ mod tests {
             policy.clone(),
         )?;
 
-        // Consume the only advertised stream credit and leave it open.
-        let (_held_send, _held_recv) =
-            timeout(Duration::from_secs(1), fixture.server_connection.open_bi())
-                .await
-                .map_err(|_| timeout_error("first open_bi should succeed"))?
-                .map_err(io::Error::other)?;
+        // Assign the only receive slot and leave its permit held.
+        let (_held_send, _held_recv) = timeout(
+            Duration::from_secs(1),
+            fixture.server_connection.open_stream(),
+        )
+        .await
+        .map_err(|_| timeout_error("first slot assignment should succeed"))?
+        .map_err(io::Error::other)?;
 
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
@@ -1003,6 +1009,15 @@ mod tests {
             .await
             .map_err(|error| join_error("intake task failed", error))??;
 
+        let mut byte = [0_u8; 1];
+        let dropped = timeout(Duration::from_secs(1), visitor.read(&mut byte))
+            .await
+            .map_err(|_| timeout_error("slot-wait deadline must drop the Visitor"))?;
+        assert!(
+            matches!(dropped, Ok(0))
+                || matches!(dropped, Err(ref error) if error.kind() == io::ErrorKind::ConnectionReset)
+        );
+
         // Pending-open capacity must recover after the deadline rejects the waiter.
         let recovered = timeout(Duration::from_secs(1), async {
             loop {
@@ -1015,7 +1030,7 @@ mod tests {
         .await;
         assert!(
             recovered.is_ok(),
-            "open_bi timeout must release pending-open capacity"
+            "slot wait timeout must release pending-open capacity"
         );
         Ok(())
     }
@@ -1378,7 +1393,7 @@ mod tests {
         registry.register(fixture.server_connection.clone()).await;
         fixture
             .server_connection
-            .close(0_u32.into(), b"closed before visitor handling");
+            .close(b"closed before visitor handling");
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry,
@@ -1395,13 +1410,13 @@ mod tests {
     }
 
     async fn configured_intake_with_active_tunnel_connection()
-    -> io::Result<(VisitorIntake, Connection)> {
+    -> io::Result<(VisitorIntake, ClientPeer)> {
         configured_intake_with_active_tunnel_connection_and_policy(test_admission_policy()).await
     }
 
     async fn configured_intake_with_active_tunnel_connection_and_policy(
         policy: ServerAdmissionPolicy,
-    ) -> io::Result<(VisitorIntake, Connection)> {
+    ) -> io::Result<(VisitorIntake, ClientPeer)> {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
             &server_hostname("Tunnel.Example.Test."),
@@ -1425,7 +1440,7 @@ mod tests {
 
     async fn configured_proxy_intake_with_active_tunnel_connection(
         trusted_network: &str,
-    ) -> io::Result<(VisitorIntake, Connection)> {
+    ) -> io::Result<(VisitorIntake, ClientPeer)> {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
             &server_hostname("Tunnel.Example.Test."),
@@ -1452,7 +1467,7 @@ mod tests {
     async fn assert_admitted_drop_without_opening_a_tunnel_stream(
         intake: VisitorIntake,
         visitor_bytes: Vec<u8>,
-        tunnel_connection: Connection,
+        tunnel_connection: ClientPeer,
     ) -> io::Result<()> {
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
@@ -1462,7 +1477,12 @@ mod tests {
         visitor.write_all(&visitor_bytes).await?;
         visitor.shutdown().await?;
 
-        match timeout(Duration::from_millis(100), tunnel_connection.accept_bi()).await {
+        match timeout(
+            Duration::from_millis(100),
+            tunnel_connection.accept_stream(),
+        )
+        .await
+        {
             Err(_) | Ok(Err(_)) => {}
             Ok(Ok(_)) => panic!("intake unexpectedly opened a tunnel stream"),
         }
@@ -1481,7 +1501,7 @@ mod tests {
     async fn assert_drop_without_opening_a_tunnel_stream(
         intake: VisitorIntake,
         visitor_bytes: Vec<u8>,
-        tunnel_connection: Option<Connection>,
+        tunnel_connection: Option<ClientPeer>,
     ) -> io::Result<()> {
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
@@ -1492,7 +1512,12 @@ mod tests {
         visitor.shutdown().await?;
 
         if let Some(tunnel_connection) = tunnel_connection {
-            match timeout(Duration::from_millis(200), tunnel_connection.accept_bi()).await {
+            match timeout(
+                Duration::from_millis(200),
+                tunnel_connection.accept_stream(),
+            )
+            .await
+            {
                 Err(_) | Ok(Err(_)) => {}
                 Ok(Ok(_)) => panic!("intake unexpectedly opened a tunnel stream"),
             }
@@ -1527,23 +1552,22 @@ mod tests {
     struct TunnelConnectionFixture {
         _server_endpoint: Endpoint,
         _client_endpoint: Endpoint,
-        client_connection: Connection,
-        server_connection: Connection,
+        client_connection: ClientPeer,
+        server_connection: Arc<ServerTunnelH3>,
     }
 
     impl TunnelConnectionFixture {
         async fn connect(client_identity: &GeneratedClientIdentity) -> io::Result<Self> {
-            Self::connect_with_bidi_credit(client_identity, crate::MAX_SERVER_OPENED_BIDI_STREAMS)
-                .await
+            Self::connect_with_slot_budget(client_identity, 1024).await
         }
 
-        async fn connect_with_bidi_credit(
+        async fn connect_with_slot_budget(
             client_identity: &GeneratedClientIdentity,
-            max_bidi_streams: u32,
+            slot_budget: u32,
         ) -> io::Result<Self> {
             let (certificate, private_key) = make_self_signed_cert("tunnel.example.test")?;
             let server_endpoint = Endpoint::server(
-                make_server_quic_config_with_client_auth(
+                test_server_h3_config(
                     vec![certificate.clone()],
                     private_key_from_der(&private_key),
                     std::slice::from_ref(&client_identity.client_identity),
@@ -1555,16 +1579,12 @@ mod tests {
             let server_addr = server_endpoint.local_addr()?;
 
             let mut client_endpoint = Endpoint::client(localhost(0)).map_err(io::Error::other)?;
-            let mut client_config = make_client_quic_config_with_client_auth(
+            let client_config = make_client_tunnel_h3_config(
                 root_store_with(&certificate)?,
                 client_certificate_chain(client_identity)?,
                 client_private_key(client_identity)?,
             )
             .map_err(io::Error::other)?;
-            let mut transport = quinn::TransportConfig::default();
-            transport.max_concurrent_bidi_streams(max_bidi_streams.into());
-            transport.max_concurrent_uni_streams(0_u8.into());
-            client_config.transport_config(Arc::new(transport));
             client_endpoint.set_default_client_config(client_config);
 
             let accept_connection = async {
@@ -1590,6 +1610,8 @@ mod tests {
             };
             let (server_connection, client_connection) =
                 tokio::try_join!(accept_connection, connect_client)?;
+            let (server_connection, client_connection) =
+                establish_peers(server_connection, client_connection, slot_budget as usize).await?;
 
             Ok(Self {
                 _server_endpoint: server_endpoint,

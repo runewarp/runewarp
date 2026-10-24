@@ -259,8 +259,7 @@ mod tests {
         CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientAdmission,
         ClientConfig, ClientTlsMode, LogLevel, PublicHostname, Server, ServerAddress,
         ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname, ServerTunnelConfig,
-        ServiceConfig, ShutdownMode, generate_client_identity,
-        make_server_quic_config_with_client_admission,
+        ServiceConfig, ShutdownMode, generate_client_identity, make_server_tunnel_h3_config,
     };
 
     use super::{ClientRuntime, ClientSessionCompletion, coordinate_managed_client};
@@ -367,7 +366,7 @@ mod tests {
             server_hostname: server_hostname("localhost"),
             authorization: authorization.clone(),
             public_tls_config: None,
-            quic_server_config: make_server_quic_config_with_client_admission(
+            quic_server_config: make_server_tunnel_h3_config(
                 vec![server_cert.clone()],
                 private_key_from_der(&server_key),
                 Arc::new(authorization.clone()),

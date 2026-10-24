@@ -32,7 +32,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use quinn::{Connection, Endpoint};
+use crate::tunnel_h3::{ClientTunnelH3, ClientTunnelStream, TunnelH3Error};
+use quinn::Endpoint;
 
 pub(crate) use self::stream_limits::{ClientStreamBudget, ClientStreamLimits};
 pub(crate) use self::termination_tls::TerminationTlsConfigs;
@@ -83,9 +84,8 @@ enum ClientRouteMode {
 
 pub struct Client {
     endpoint: Endpoint,
-    connection: Connection,
+    connection: ClientTunnelH3,
     tunnel_stream_handler: TunnelConnectionStreamHandler,
-    stream_budget: Arc<ClientStreamBudget>,
 }
 
 #[derive(Debug)]
@@ -93,6 +93,7 @@ pub enum ClientConnectError {
     Bind(io::Error),
     Connect(quinn::ConnectError),
     Handshake(quinn::ConnectionError),
+    Tunnel(TunnelH3Error),
 }
 
 impl fmt::Display for ClientConnectError {
@@ -101,6 +102,7 @@ impl fmt::Display for ClientConnectError {
             Self::Bind(_) => formatter.write_str("failed to bind the client endpoint"),
             Self::Connect(_) => formatter.write_str("failed to start the client connection"),
             Self::Handshake(_) => formatter.write_str("client QUIC handshake failed"),
+            Self::Tunnel(error) => error.fmt(formatter),
         }
     }
 }
@@ -111,24 +113,22 @@ impl std::error::Error for ClientConnectError {
             Self::Bind(error) => Some(error),
             Self::Connect(error) => Some(error),
             Self::Handshake(error) => Some(error),
+            Self::Tunnel(error) => Some(error),
         }
     }
 }
 
 impl ClientConnectError {
     pub fn is_unauthorized_client_identity(&self) -> bool {
-        matches!(self, Self::Handshake(error) if is_tls_access_denied(error))
+        match self {
+            Self::Handshake(error) => is_tls_access_denied(error),
+            Self::Tunnel(error) => error.is_unauthorized_client_identity(),
+            _ => false,
+        }
     }
 }
 
-pub(crate) fn is_tls_access_denied(error: &quinn::ConnectionError) -> bool {
-    const TLS_ACCESS_DENIED_ALERT: u8 = 0x31;
-    matches!(
-        error,
-        quinn::ConnectionError::TransportError(error)
-            if error.code == quinn::TransportErrorCode::crypto(TLS_ACCESS_DENIED_ALERT)
-    )
-}
+pub(crate) use crate::quic::is_tls_access_denied;
 
 impl Client {
     pub async fn connect(config: ClientConnectConfig) -> Result<Self, ClientConnectError> {
@@ -168,6 +168,9 @@ impl Client {
         quic_client_config: quinn::ClientConfig,
         route_mode: ClientRouteMode,
     ) -> Result<Self, ClientConnectError> {
+        let hostname = crate::ServerHostname::try_from(server_name.as_str()).map_err(|_| {
+            ClientConnectError::Connect(quinn::ConnectError::InvalidServerName(server_name.clone()))
+        })?;
         let mut endpoint = Endpoint::client(local_bind_addr).map_err(ClientConnectError::Bind)?;
         endpoint.set_default_client_config(quic_client_config);
 
@@ -182,6 +185,23 @@ impl Client {
         .map_err(ClientConnectError::Handshake)?;
         let (services, termination_tls_configs, stream_budget) =
             services_and_configs_for_route_mode(route_mode);
+        let connection = ClientTunnelH3::establish_with_budget_observer(
+            connection,
+            &hostname,
+            stream_budget.semaphore(),
+            {
+                let stream_budget = stream_budget.clone();
+                Arc::new(move |available| {
+                    if available {
+                        stream_budget.note_recovery();
+                    } else {
+                        stream_budget.note_saturation();
+                    }
+                })
+            },
+        )
+        .await
+        .map_err(ClientConnectError::Tunnel)?;
         let tunnel_stream_handler = TunnelConnectionStreamHandler::new(
             services,
             termination_tls_configs,
@@ -192,7 +212,6 @@ impl Client {
             endpoint,
             connection,
             tunnel_stream_handler,
-            stream_budget,
         })
     }
 
@@ -200,16 +219,11 @@ impl Client {
         self.endpoint.local_addr()
     }
 
-    pub async fn run(self) -> Result<(), quinn::ConnectionError> {
-        loop {
-            match self.connection.accept_bi().await {
-                Ok((send, recv)) => {
-                    self.spawn_stream_handler(send, recv);
-                }
-                Err(quinn::ConnectionError::LocallyClosed) => return Ok(()),
-                Err(error) => return Err(error),
-            }
+    pub async fn run(mut self) -> Result<(), quinn::ConnectionError> {
+        while let Some(stream) = self.connection.accept_tunnel_stream().await {
+            self.spawn_stream_handler(stream);
         }
+        Err(self.connection.closed().await)
     }
 
     pub async fn run_until_shutdown<Shutdown>(
@@ -238,37 +252,33 @@ impl Client {
     }
 
     pub(crate) async fn run_with_shutdown(
-        self,
+        mut self,
         shutdown: &OrderlyShutdown,
     ) -> Result<(), quinn::ConnectionError> {
+        let closed = self.connection.closed();
+        tokio::pin!(closed);
+        let mut accepting = true;
         loop {
             tokio::select! {
                 _ = shutdown.wait_started() => {
                     crate::runtime_log::client_graceful_shutdown_closing_tunnel_connection();
-                    self.connection.close(0_u32.into(), b"graceful shutdown");
+                    self.connection.close();
                     tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
                     return Ok(());
                 }
-                accept_result = self.connection.accept_bi() => match accept_result {
-                    Ok((send, recv)) => {
-                        self.spawn_stream_handler(send, recv);
-                    }
-                    Err(quinn::ConnectionError::LocallyClosed) => return Ok(()),
-                    Err(error) => return Err(error),
+                error = &mut closed => return Err(error),
+                stream = self.connection.accept_tunnel_stream(), if accepting => match stream {
+                    Some(stream) => self.spawn_stream_handler(stream),
+                    None => accepting = false,
                 }
             }
         }
     }
 
-    fn spawn_stream_handler(&self, send: quinn::SendStream, recv: quinn::RecvStream) {
-        let Ok(permit) = self.stream_budget.try_admit_handler() else {
-            crate::client::tunnel_stream::reject_stream(send, recv);
-            return;
-        };
+    fn spawn_stream_handler(&self, stream: ClientTunnelStream) {
         let tunnel_stream_handler = self.tunnel_stream_handler.clone();
         tokio::spawn(async move {
-            let _permit = permit;
-            let _ = tunnel_stream_handler.handle(send, recv).await;
+            let _ = tunnel_stream_handler.handle(stream).await;
         });
     }
 }
@@ -314,10 +324,8 @@ mod tests {
 
     use super::{Client, ClientConnectConfig, ClientConnectError};
     use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
-    use crate::{
-        GeneratedClientIdentity, generate_client_identity,
-        make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
-    };
+    use crate::tunnel_h3::test_support::test_server_h3_config;
+    use crate::{GeneratedClientIdentity, generate_client_identity, make_client_tunnel_h3_config};
 
     #[test]
     fn client_connect_error_display_omits_nested_transport_detail() {
@@ -337,7 +345,7 @@ mod tests {
         let unauthorized_client_identity = generate_test_client_identity()?;
         let (certificate, private_key) = make_self_signed_cert("tunnel.example.test")?;
         let server_endpoint = Endpoint::server(
-            make_server_quic_config_with_client_auth(
+            test_server_h3_config(
                 vec![certificate.clone()],
                 private_key_from_der(&private_key),
                 std::slice::from_ref(&authorized_client_identity.client_identity),
@@ -352,7 +360,7 @@ mod tests {
             server_addr: server_endpoint.local_addr()?,
             server_name: "tunnel.example.test".to_owned(),
             backend_address: "127.0.0.1:443".to_owned(),
-            quic_client_config: make_client_quic_config_with_client_auth(
+            quic_client_config: make_client_tunnel_h3_config(
                 root_store_with(&certificate)?,
                 client_certificate_chain(&unauthorized_client_identity)?,
                 client_private_key(&unauthorized_client_identity)?,
@@ -375,7 +383,7 @@ mod tests {
 
         match Client::connect(client_config).await {
             Err(error) => {
-                assert!(error.is_unauthorized_client_identity());
+                assert!(error.is_unauthorized_client_identity(), "{error:?}");
             }
             Ok(client) => {
                 let run_error = timeout(Duration::from_secs(1), client.run())

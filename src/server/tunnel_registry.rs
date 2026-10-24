@@ -6,8 +6,8 @@ use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::tunnel_h3::ServerTunnelH3;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable, Aborted};
-use quinn::Connection;
 use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock};
 
 use crate::{ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig};
@@ -86,7 +86,7 @@ pub(crate) struct VisitorRoute {
 }
 
 impl VisitorRoute {
-    pub(crate) fn connection(&self) -> Connection {
+    pub(crate) fn connection(&self) -> Arc<ServerTunnelH3> {
         self.connection.connection()
     }
 
@@ -441,27 +441,30 @@ impl TunnelRegistry {
         })
     }
 
-    pub(crate) async fn register(&self, connection: Connection) -> TunnelRegistrationOutcome {
+    pub(crate) async fn register(
+        &self,
+        connection: Arc<ServerTunnelH3>,
+    ) -> TunnelRegistrationOutcome {
         if !self.accepting_tunnel_connections.load(Ordering::SeqCst) {
-            connection.close(0_u32.into(), b"server shutting down");
+            connection.close(b"server shutting down");
             return TunnelRegistrationOutcome::Closed;
         }
         // Same pools-before-authorization lock order as route_tunnel_connection.
         let pools = self.tunnel_pools.read().await;
         let Some((tunnel_index, client_identity)) = self.tunnel_registration_context(&connection)
         else {
-            connection.close(0_u32.into(), b"unmapped client identity");
+            connection.close(b"unmapped client identity");
             return TunnelRegistrationOutcome::Closed;
         };
         let Some(pool) = pools.get(tunnel_index).cloned() else {
-            connection.close(0_u32.into(), b"unmapped client identity");
+            connection.close(b"unmapped client identity");
             return TunnelRegistrationOutcome::Closed;
         };
         drop(pools);
         match pool.try_register(connection.clone(), client_identity).await {
             Ok(()) => TunnelRegistrationOutcome::Registered,
             Err(rejection) => {
-                connection.close(0_u32.into(), b"server tunnel admission saturated");
+                connection.close(b"server tunnel admission saturated");
                 TunnelRegistrationOutcome::Rejected(rejection)
             }
         }
@@ -474,6 +477,17 @@ impl TunnelRegistry {
             closed += pool.close_all_connections(reason).await;
         }
         closed
+    }
+
+    pub(crate) async fn shutdown_connections(&self, deadline: std::time::Duration) {
+        let pools = self.tunnel_pools.read().await.clone();
+        let mut shutdowns = tokio::task::JoinSet::new();
+        for pool in pools {
+            for connection in pool.connections().await {
+                shutdowns.spawn(async move { connection.shutdown(deadline).await });
+            }
+        }
+        while shutdowns.join_next().await.is_some() {}
     }
 
     pub(crate) fn register_active_visitor_work(
@@ -688,9 +702,9 @@ impl TunnelRegistry {
 
     fn tunnel_registration_context(
         &self,
-        connection: &Connection,
+        connection: &ServerTunnelH3,
     ) -> Option<(usize, ClientIdentity)> {
-        let identity = crate::quic::peer_client_identity(connection)?;
+        let identity = connection.client_identity().clone();
         let tunnel_index = self
             .authorization
             .current()
@@ -735,7 +749,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use quinn::{Connection, Endpoint};
+    use crate::tunnel_h3::{
+        ServerTunnelH3,
+        test_support::{ClientPeer, establish_peers, test_server_h3_config},
+    };
+    use quinn::Endpoint;
     use rcgen::generate_simple_self_signed;
     use rustls::RootCertStore;
     use rustls::pki_types::pem::Error as PemError;
@@ -750,8 +768,7 @@ mod tests {
     use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
     use crate::{
         GeneratedClientIdentity, PublicHostname, ServerAuthorization, ServerHostname,
-        ServerTunnelConfig, TunnelId, generate_client_identity,
-        make_client_quic_config_with_client_auth, make_server_quic_config_with_client_auth,
+        ServerTunnelConfig, TunnelId, generate_client_identity, make_client_tunnel_h3_config,
     };
 
     fn public_hostname(hostname: &str) -> PublicHostname {
@@ -2071,15 +2088,15 @@ mod tests {
     struct TunnelConnectionFixture {
         _server_endpoint: Endpoint,
         _client_endpoint: Endpoint,
-        _client_connection: Connection,
-        server_connection: Connection,
+        _client_connection: ClientPeer,
+        server_connection: Arc<ServerTunnelH3>,
     }
 
     impl TunnelConnectionFixture {
         async fn connect(client_identity: &GeneratedClientIdentity) -> io::Result<Self> {
             let (certificate, private_key) = make_self_signed_cert("tunnel.example.test")?;
             let server_endpoint = Endpoint::server(
-                make_server_quic_config_with_client_auth(
+                test_server_h3_config(
                     vec![certificate.clone()],
                     private_key_from_der(&private_key),
                     std::slice::from_ref(&client_identity.client_identity),
@@ -2092,7 +2109,7 @@ mod tests {
 
             let mut client_endpoint = Endpoint::client(localhost(0)).map_err(io::Error::other)?;
             client_endpoint.set_default_client_config(
-                make_client_quic_config_with_client_auth(
+                make_client_tunnel_h3_config(
                     root_store_with(&certificate)?,
                     client_certificate_chain(client_identity)?,
                     client_private_key(client_identity)?,
@@ -2121,6 +2138,8 @@ mod tests {
             };
             let (server_connection, client_connection) =
                 tokio::try_join!(accept_connection, connect_client)?;
+            let (server_connection, client_connection) =
+                establish_peers(server_connection, client_connection, 1024).await?;
 
             Ok(Self {
                 _server_endpoint: server_endpoint,

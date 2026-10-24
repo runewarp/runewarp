@@ -69,6 +69,12 @@ Runtime diagnostics follow the same boundary.
 - **Local backends** must terminate TLS when `tls-mode = "passthrough"` (default)
 - the **Client** terminates TLS when `tls-mode = "terminate"`; the Local backend receives plaintext
 
+## Tunnel HTTP/3 boundary
+
+Tunnel connections require ALPN `h3`, Server certificate validation, and pinned Client-identity mTLS. Application 0-RTT is disabled in both certificate and resolver configurations. Session resumption does not bypass a fresh handshake or the Client's event-stream gate. The Client offers no receive slots until the Server sends a valid supported state; the Server places no Visitors without offered availability. HTTP/3 establishment stays under Server handshake admission, and idle plus assigned receive slots share the bounded Client-instance budget.
+
+The Tunnel event stream contains only protocol version and opaque Server runtime generation. Configuration remains on the separate Managed session. Invalid stream framing affects that stream; incompatible event state closes the Tunnel connection. Runewarp never relies on received STOP_SENDING or RESET_STREAM codes, including transports that deliver a zero cancellation code. Authorization revocation still closes affected connections or resets affected Visitors immediately, including during graceful shutdown.
+
 ## Admission and overload protection
 
 The Server and Client bound work at each public or authenticated trust boundary before it can consume unbounded runtime resources:

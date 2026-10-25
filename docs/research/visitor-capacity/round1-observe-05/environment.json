@@ -1,0 +1,26 @@
+{
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "cpu_count": 10,
+  "memory_bytes": 17179869184,
+  "nofile": [
+    1048575,
+    9223372036854775807
+  ],
+  "psutil": "7.2.2",
+  "sampling_interval_seconds": 0.25,
+  "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: aarch64-apple-darwin\nrelease: 1.96.0\nLLVM version: 22.1.2\n",
+  "git_head": "09a09b84e676e9ae63bc11278f386430afd82e0f",
+  "tracked_source_dirty": true,
+  "product_diff_sha256": "8ea44fed402f2be10c2c2bb4e073e0f84e857181d987f48266169dcf70eeca51",
+  "command": [
+    "python3",
+    "scripts/benchmark-visitor-capacity",
+    "--output",
+    "<output-directory>",
+    "--scenarios",
+    "burst",
+    "hold-two"
+  ],
+  "test_binary_sha256": "06a1267f1ed6cf4cdd52953a67331975df035e4df53a8f6b3baf9b8c0c82197b"
+}

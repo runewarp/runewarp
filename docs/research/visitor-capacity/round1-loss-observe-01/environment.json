@@ -1,0 +1,30 @@
+{
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "cpu_count": 10,
+  "memory_bytes": 17179869184,
+  "nofile": [
+    1048575,
+    9223372036854775807
+  ],
+  "psutil": "7.2.2",
+  "sampling_interval_seconds": 0.25,
+  "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: aarch64-apple-darwin\nrelease: 1.96.0\nLLVM version: 22.1.2\n",
+  "git_head": "09a09b84e676e9ae63bc11278f386430afd82e0f",
+  "tracked_source_dirty": false,
+  "product_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "command": [
+    "python3",
+    "scripts/benchmark-visitor-capacity",
+    "--output",
+    "<output-directory>",
+    "--scenarios",
+    "burst"
+  ],
+  "test_binary_sha256": "57efa8ee53155af0d80fd736102514ababdea8e73488888a78918c61579f6ba8",
+  "instrumentation_patch_sha256": "d12c7f3f77097700a482fc19c77bd230f34a9b1640ba122999a399bbb1c6ac69",
+  "instrumentation": "bounded test-only stage counters on source archive",
+  "requested_source_head": "285552ebba415547ae9b93cb5c566ac21b822e7a",
+  "instrumentation_applied": false,
+  "capture_validation_error": "shared Cargo target reused the original PR binary; identity verified by matching binary SHA-256"
+}

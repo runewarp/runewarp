@@ -97,7 +97,7 @@ The failure is inherited from the parent, but progress is required for #262. Qui
 
 A private dependency probe changes only quinn-proto 0.11.19's advertisement condition from `diff > concurrency / 8` to `diff > 0`. All five single-release transport probes and the real Visitor-257 recovery pass, the runtime probe in 0.45 seconds, with byte/FIN and zero-guard assertions. The override and its sources stay under `target/`; Cargo pins and lockfile are unchanged in the delivered tree. This establishes the missing boundary without shipping the experimental dependency change or a timer approximation.
 
-The minimal prerequisite is a Quinn API that disables bidirectional stream-credit batching for future frees, while retaining the configured concurrency target, for example a per-direction immediate-credit mode. It must queue any already allocated difference when enabled and apply the same zero threshold when FIN or RESET acknowledgments and receive EOF later free streams. An event or future that reliably reports full transport freedom, including RESET acknowledgment, would also let the controller flush after free, but requires more lifecycle state. The current pinned public APIs offer neither. Recovery remains an explicit acceptance blocker; passing held-load benchmarks and the ordinary suites do not clear it.
+A general free-boundary solution would be a Quinn API that disables bidirectional stream-credit batching for future frees while retaining the configured concurrency target, or a reliable full-free notification. A smaller normal-FIN H3 series is proposed below, with abort/RESET-ACK recovery left as an explicit gate. No new Quinn fork is authorized or proposed. An immediate-credit mode must queue any already allocated difference when enabled and apply the same zero threshold when FIN or RESET acknowledgments and receive EOF later free streams. An event or future that reliably reports full transport freedom, including RESET acknowledgment, would also let the controller flush after free, but requires more lifecycle state. The current pinned public APIs offer neither. Recovery remains an explicit acceptance blocker; passing held-load benchmarks and the ordinary suites do not clear it.
 
 ## Corrected before and after captures
 
@@ -320,3 +320,185 @@ The after captures were run with the capacity implementation still uncommitted a
 Final implementation validation ran `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`, `cargo test --all-features`, `./scripts/test-automation` and `./scripts/audit-dependencies`. The first final automation run exposed the public-script allowlist missing `benchmark-visitor-capacity`; that failure is preserved as `final-automation.log` and the allowlist was updated to include the new entry point. No workflow file or release mechanic changed.
 
 The final pre-publication Rust suites each passed 757 tests with two ignored. Strict all-target/all-feature Clippy and fmt passed. Automation passed 85 runs and 562 assertions after adding the benchmark entry point to its allowlist. The dependency audit passed with 251 resolved crate packages. Logs are `commit-full-test.log`, `commit-all-features.log`, `commit-clippy.log`, `commit-automation.log` and `commit-audit.log` under `target/visitor-capacity-logs/`. Independent review and remote CI belong to the parent and are not claimed here.
+
+## Round 1 committed-source captures
+
+Product source for all `round1-clean-*` captures is commit `285552ebba415547ae9b93cb5c566ac21b822e7a`. Every environment records tracked source clean and the SHA-256 of an empty product diff, plus a binary SHA-256. The later harness-only commit `51eb5b6593e4a5a69c51b5d1271ee2796d500aaa` adds compiled-source verification and freezes the measured executable; its separate final capture appears below. The evidence commit changes only documentation/data. Visitor runtime source remains unchanged after `285552e`. These captures include the placement/privacy fixes and the unchanged pinned-Quinn recovery defect. They are not full #262 acceptance.
+
+The first capture runs every original scenario. Nine additional captures repeat the unchanged 2,000 burst and 10,000 two-connection workloads, giving ten committed-source runs of each. Two additional throughput controls quantify variation. IPv4 Visitor/IPv6 backend separation, four workers per role, 32-second cooldown, original pacing, five-second holds, byte validation and no retry remain unchanged. All failed Visitors and process samples are retained.
+
+Early `round1-observe-*` captures are diagnostics above the original head with uncommitted observability/placement work, not clean-source acceptance. Their original generator did not record a product-diff hash, so their source cannot be reconstructed from HEAD metadata alone. `round1-fixed-diagnostic` records its actual product-diff hash. The first `round1-loss-observe-01` diagnostic reused the pre-fix binary through a shared Cargo target; its binary SHA-256 matches the original-head control, so its provenance is corrected to that original head and it is not treated as instrumented fixed-source evidence. The v2 attempt was rejected by an explicit stage-counter check before load. The valid v3 diagnostics use a separate build directory and verify stage fields before load. Early diagnostic open-error counts observe the session opener only; complete failed-open counts and backend-connect counters are available in the committed-source captures. Unrecorded backend counters are marked unavailable, never inferred as zero. Build-only failures `round1-observe-01`, `round1-observe-08` and `round1-placement-fixed-diagnostic` produced no valid load capture; their raw build failure logs remain private. No failed workload is excluded from the tables below.
+
+| Capture | Scenario | Established / attempted | Working or slow probes | Launch failures | Route selection | Open errors | Guards | Open timeouts | Admission | Backend connect | TTFB p50 / p99 ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| [round1-observe-02](visitor-capacity/round1-observe-02/) | burst | 1,944 / 2,000 | 1,944 | 56 | 0 | 0 | 0 | 0 | 0 | unavailable | 108.865 / 150.712 |
+| [round1-observe-02](visitor-capacity/round1-observe-02/) | hold-two | 9,998 / 10,000 | 9,998 | 2 | 2 | 0 | 0 | 0 | 0 | unavailable | 3.973 / 17.628 |
+| [round1-observe-03](visitor-capacity/round1-observe-03/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | unavailable | 116.700 / 161.368 |
+| [round1-observe-03](visitor-capacity/round1-observe-03/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | unavailable | 3.941 / 18.460 |
+| [round1-observe-04](visitor-capacity/round1-observe-04/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | unavailable | 109.126 / 155.281 |
+| [round1-observe-04](visitor-capacity/round1-observe-04/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | unavailable | 4.053 / 13.647 |
+| [round1-observe-05](visitor-capacity/round1-observe-05/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | unavailable | 114.051 / 156.046 |
+| [round1-observe-05](visitor-capacity/round1-observe-05/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | unavailable | 3.883 / 14.913 |
+| [round1-observe-06](visitor-capacity/round1-observe-06/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | unavailable | 106.930 / 151.258 |
+| [round1-observe-06](visitor-capacity/round1-observe-06/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | unavailable | 4.098 / 10.904 |
+| [round1-observe-07](visitor-capacity/round1-observe-07/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | unavailable | 106.541 / 153.684 |
+| [round1-observe-07](visitor-capacity/round1-observe-07/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | unavailable | 3.947 / 15.899 |
+| [round1-fixed-diagnostic](visitor-capacity/round1-fixed-diagnostic/) | burst | 1,883 / 2,000 | 1,883 | 117 | 0 | 0 | 0 | 0 | 117 | 0 | 100.651 / 141.648 |
+| [round1-fixed-diagnostic](visitor-capacity/round1-fixed-diagnostic/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4.109 / 16.191 |
+| [round1-clean-01](visitor-capacity/round1-clean-01/) | burst | 1,998 / 2,000 | 1,998 | 2 | 0 | 0 | 0 | 0 | 2 | 0 | 106.645 / 155.497 |
+| [round1-clean-01](visitor-capacity/round1-clean-01/) | hold-one | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3.893 / 17.937 |
+| [round1-clean-01](visitor-capacity/round1-clean-01/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4.004 / 14.865 |
+| [round1-clean-01](visitor-capacity/round1-clean-01/) | slow-reader | 128 / 128 | 0 | 0 | 0 | 32 | 0 | 32 | 0 | 0 | 3.113 / 4.112 |
+| [round1-clean-01](visitor-capacity/round1-clean-01/) | subcapacity | 256 / 256 | 256 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3.556 / 4.863 |
+| [round1-clean-01](visitor-capacity/round1-clean-01/) | throughput | 256 / 256 | 256 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3.122 / 4.605 |
+| [round1-clean-02](visitor-capacity/round1-clean-02/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 111.684 / 157.600 |
+| [round1-clean-02](visitor-capacity/round1-clean-02/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4.070 / 16.916 |
+| [round1-clean-03](visitor-capacity/round1-clean-03/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 103.790 / 149.871 |
+| [round1-clean-03](visitor-capacity/round1-clean-03/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3.847 / 16.727 |
+| [round1-clean-04](visitor-capacity/round1-clean-04/) | burst | 1,988 / 2,000 | 1,988 | 12 | 0 | 0 | 0 | 0 | 12 | 0 | 112.554 / 159.900 |
+| [round1-clean-04](visitor-capacity/round1-clean-04/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4.479 / 17.852 |
+| [round1-clean-05](visitor-capacity/round1-clean-05/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 113.611 / 162.937 |
+| [round1-clean-05](visitor-capacity/round1-clean-05/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4.079 / 9.631 |
+| [round1-clean-06](visitor-capacity/round1-clean-06/) | burst | 1,796 / 2,000 | 1,796 | 204 | 0 | 0 | 0 | 0 | 176 | 0 | 89.815 / 134.440 |
+| [round1-clean-06](visitor-capacity/round1-clean-06/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4.249 / 14.796 |
+| [round1-clean-07](visitor-capacity/round1-clean-07/) | burst | 1,935 / 2,000 | 1,935 | 65 | 0 | 0 | 0 | 0 | 7 | 0 | 105.457 / 145.134 |
+| [round1-clean-07](visitor-capacity/round1-clean-07/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3.768 / 11.814 |
+| [round1-clean-08](visitor-capacity/round1-clean-08/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 96.620 / 140.608 |
+| [round1-clean-08](visitor-capacity/round1-clean-08/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3.969 / 13.181 |
+| [round1-clean-09](visitor-capacity/round1-clean-09/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 111.601 / 154.996 |
+| [round1-clean-09](visitor-capacity/round1-clean-09/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4.311 / 14.759 |
+| [round1-clean-10](visitor-capacity/round1-clean-10/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 121.721 / 167.780 |
+| [round1-clean-10](visitor-capacity/round1-clean-10/) | hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 4.354 / 16.820 |
+| [round1-clean-throughput-01](visitor-capacity/round1-clean-throughput-01/) | throughput | 256 / 256 | 256 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3.863 / 5.213 |
+| [round1-clean-throughput-02](visitor-capacity/round1-clean-throughput-02/) | throughput | 256 / 256 | 256 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 3.098 / 4.582 |
+| [round1-original-throughput-01](visitor-capacity/round1-original-throughput-01/) | throughput | 256 / 256 | 256 | 0 | 0 | unavailable | 0 | 0 | 0 | unavailable | 3.862 / 5.499 |
+| [round1-original-throughput-02](visitor-capacity/round1-original-throughput-02/) | throughput | 256 / 256 | 256 | 0 | 0 | unavailable | 0 | 0 | 0 | unavailable | 2.703 / 5.212 |
+| [round1-loss-observe-01](visitor-capacity/round1-loss-observe-01/) | burst | 1,999 / 2,000 | 1,999 | 1 | 1 | unavailable | 0 | 0 | 0 | unavailable | 109.172 / 162.945 |
+| [round1-loss-observe-v3-01](visitor-capacity/round1-loss-observe-v3-01/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 107.323 / 148.614 |
+| [round1-loss-observe-v3-02](visitor-capacity/round1-loss-observe-v3-02/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 104.459 / 151.309 |
+| [round1-loss-observe-v3-03](visitor-capacity/round1-loss-observe-v3-03/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 113.933 / 158.235 |
+| [round1-loss-observe-v3-04](visitor-capacity/round1-loss-observe-v3-04/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 110.082 / 156.955 |
+| [round1-loss-observe-v3-05](visitor-capacity/round1-loss-observe-v3-05/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 107.373 / 152.787 |
+| [round1-loss-pressure-01](visitor-capacity/round1-loss-pressure-01/) | burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 82.960 / 126.541 |
+
+The `round1-original-throughput-*` controls use a source archive of the original PR head `09a09b84e676e9ae63bc11278f386430afd82e0f`, with no Rust changes and the committed coordinator copied in for portable metadata/manual output. Their source HEAD is an explicit archive-source override, not the surrounding worktree HEAD. The valid `round1-loss-observe-v3-*` and `round1-loss-pressure-*` captures use an archive of the fixed product source with bounded test-only stage counters, whose exact patch SHA-256 is recorded. They are diagnostic instrumentation and do not replace the ten clean-source repetitions.
+
+Every capture directory contains environment metadata, complete summaries with failure classes and bounded first-error details, and per-role process histories with sampled peak RSS/fds, CPU, sample counts and cleanup outcomes. The following table summarizes every role in the first committed-source capture. The other process histories remain in their adjacent `*-processes.json` files.
+
+| Scenario | Process | Peak RSS MiB | Peak fds | Last sampled CPU seconds | Samples |
+| --- | --- | ---: | ---: | ---: | ---: |
+| burst | setup-0 | unavailable | unavailable | unavailable | 0 |
+| burst | backend-0 | 24.95 | 2008 | 0.2031 | 23 |
+| burst | server-0 | 68.27 | 2009 | 0.5404 | 23 |
+| burst | client-0 | 76.47 | 2010 | 0.4641 | 23 |
+| burst | load-0 | 14.53 | 2009 | 0.1763 | 20 |
+| hold-one | setup-0 | unavailable | unavailable | unavailable | 0 |
+| hold-one | backend-0 | 92.67 | 10010 | 1.0632 | 41 |
+| hold-one | server-0 | 280.47 | 10011 | 2.2810 | 41 |
+| hold-one | client-0 | 323.03 | 10012 | 2.9517 | 41 |
+| hold-one | load-0 | 26.00 | 10009 | 1.3594 | 38 |
+| hold-two | setup-0 | unavailable | unavailable | unavailable | 0 |
+| hold-two | backend-0 | 92.62 | 10010 | 1.0430 | 41 |
+| hold-two | server-0 | 147.00 | 5011 | 1.2839 | 41 |
+| hold-two | server-1 | 146.86 | 5011 | 1.2957 | 40 |
+| hold-two | client-0 | 323.91 | 10013 | 2.8483 | 41 |
+| hold-two | load-0 | 26.05 | 10009 | 1.3432 | 38 |
+| slow-reader | setup-0 | unavailable | unavailable | unavailable | 0 |
+| slow-reader | backend-0 | 9.14 | 138 | 1.1145 | 61 |
+| slow-reader | server-0 | 113.70 | 171 | 4.3402 | 61 |
+| slow-reader | client-0 | 113.91 | 140 | 5.3963 | 61 |
+| slow-reader | load-0 | 523.14 | 169 | 0.3552 | 59 |
+| subcapacity | setup-0 | 0.03 | 3 | 0.0011 | 1 |
+| subcapacity | backend-0 | 10.03 | 266 | 0.0316 | 23 |
+| subcapacity | server-0 | 20.19 | 267 | 0.0664 | 22 |
+| subcapacity | client-0 | 21.84 | 268 | 0.1768 | 23 |
+| subcapacity | load-0 | 8.98 | 265 | 0.0417 | 20 |
+| throughput | setup-0 | unavailable | unavailable | unavailable | 0 |
+| throughput | backend-0 | 10.22 | 266 | 1.6660 | 34 |
+| throughput | server-0 | 35.64 | 267 | 5.3230 | 34 |
+| throughput | client-0 | 42.84 | 268 | 5.3416 | 33 |
+| throughput | load-0 | 501.36 | 265 | 1.9177 | 31 |
+
+The round1-clean-01 throughput control validated 268,435,456 bytes in 2.971369 seconds, 86.16 MiB/s.
+
+The round1-clean-throughput-01 throughput control validated 268,435,456 bytes in 2.495986 seconds, 102.56 MiB/s.
+
+The round1-clean-throughput-02 throughput control validated 268,435,456 bytes in 2.562931 seconds, 99.89 MiB/s.
+
+The round1-original-throughput-01 throughput control validated 268,435,456 bytes in 2.759128 seconds, 92.78 MiB/s.
+
+The round1-original-throughput-02 throughput control validated 268,435,456 bytes in 2.599112 seconds, 98.50 MiB/s.
+
+
+## Round 1 conclusions and dependency replan
+
+The one-pass selector fixes the demonstrated live-pool race, and the ten committed-source two-connection repetitions revalidate all 100,000 attempted Visitors with zero route-selection failures, failed opens, guards or open timeouts. The one-connection case also revalidates all 10,000. The ten bursts revalidate 19,717 of 20,000; all 283 failures remain in the record. Per-source admission counters account for 197, while 86 losses in two captures remain unaccounted for by the captured counters. This is an additional unresolved acceptance boundary, not evidence that the placement fix cleared all possible Visitor loss.
+
+Five instrumented repeats add bounded test-only counters at TCP acceptance, successful Server open, Client handoff and handler start. All five complete 2,000/2,000 with matching counts at every stage. One additional diagnostic adds four external CPU workers for at most 0.8 seconds each around launch; it also completes with matching counts. That diagnostic is explicitly separate from performance/acceptance measurements. These successful diagnostics do not explain the earlier 86 losses or justify attributing them to H3, the TCP listener, or the echo fixture. The exact instrumentation patch and raw system-stat snapshots remain private with the diagnostic sources and logs. No counter, cap, pacing, retry or assertion was adjusted to manufacture acceptance.
+
+The fixed-source 256 MiB controls take 2.971369, 2.495986 and 2.562931 seconds. Adjacent original-head controls take 2.759128 and 2.599112 seconds, using an archive of the original Rust source and the portable coordinator. The distributions overlap, so this evidence establishes neither a consistent fix-related throughput regression nor an improvement. The first slower fixed-source result remains included. The slow-reader observation still times out all 32 unrelated probes at the actual open deadline, at sampled Server/Client RSS of 113.7/113.9 MiB. No receive window or capacity was raised, and no fairness or whole-process memory bound is claimed.
+
+The maintainer permits a necessary, upstreamable H3 change but requires replanning on top of the existing Runewarp fork before any fork or pin mutation. The verified integration base is `runewarp/h3` branch `runewarp/webtransport` at `df27106fb243baaf867d11441d11cf671ec9da7e`, the current Runewarp pin. A proposed minimal series exposes optional native `h3-quinn::SendStream::stopped()` observation without changing ordinary `poll_finish`, then adds read-only backend access through H3's buffered stream and the WebTransport send wrapper. Runewarp could lower the target at final application Drop, retain a clean Visitor lease in one connection-owned queue until FIN acknowledgment plus receive EOF, then return and re-offer its permit. That queue must be bounded by permits, canceled with its owner and included in bounded DRAIN completion. Simply awaiting ACK in poll_finish while retaining the old target can widen the early-credit guard window and is not the recommended prototype. Its allocation/CPU cost and all abort paths require measurement and review. No patch should promise that peer STOP means full transport freedom: delayed RESET acknowledgment and aborted-Drop recovery at 8/256 are explicit acceptance gates. The backend currently exposes no verified all-abort free notification. A new Quinn fork is not authorized or proposed.
+
+After parent coordination and medium review, any fork series must integrate above that existing pin and update all three direct Git revisions together, with all four fork packages resolving to the same integration SHA in Cargo.lock. Ordinary H3, delayed FIN acknowledgment, peer STOP, connection loss, observer cancellation, session guard/teardown, 8/256 single-release recovery, real Visitor 257, abort/RESET-ACK, concurrent Drop, guard, GOAWAY and DRAIN/CLOSE tests remain required. This is a proposal and test gate, not implemented behavior. No fork, dependency or pin changed in this return.
+
+The tree-level privacy repair removes the private hostname and absolute machine paths from committed evidence, preserves all historical metrics/failures, and adds portable metadata generation with a focused absolute-output/binary-path regression. Old non-secret metadata remains in historical Git objects; no history rewrite is claimed. The source/failure boundary remains explicit: passing ordinary suites and successful workload repeats do not clear the Quinn recovery blocker or the 86 unexplained burst losses.
+
+## Final verified-binary capture
+
+Commit `51eb5b6593e4a5a69c51b5d1271ee2796d500aaa` changes only the benchmark harness/coordinator after the tested Visitor runtime fixes. The runner now rejects stale binaries, verifies a compiler-tracked Rust-source fingerprint and freezes the executable before starting measured roles. See [the provenance contract](visitor-capacity-provenance.md). Its real stale-binary regression rejects an original-head executable before any scenario starts. The public [compiled proof](visitor-capacity/round1-verified-final/build-provenance.json) matches the [environment fingerprint](visitor-capacity/round1-verified-final/environment.json); source is committed and clean, with an empty product diff. This capture reruns every scenario, including all three required workloads, without changing runtime limits, windows, pacing, holds or byte checks.
+
+The ten earlier committed-source repetitions remain the failure-rate sample. This final successful capture does not erase their 86 unexplained losses or clear the single-release recovery blocker. Preflight provenance checking happens before measured role startup; its private log/executable stay under target.
+
+| Scenario | Established / attempted | Working or slow probes | Launch failures | Route selection | Open errors | Guards | Open timeouts | Admission | TTFB p50 / p99 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| burst | 2,000 / 2,000 | 2,000 | 0 | 0 | 0 | 0 | 0 | 0 | 106.592 / 152.291 |
+| hold-one | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 3.843 / 16.031 |
+| hold-two | 10,000 / 10,000 | 10,000 | 0 | 0 | 0 | 0 | 0 | 0 | 4.208 / 14.838 |
+| slow-reader | 128 / 128 | 0 | 0 | 0 | 32 | 0 | 32 | 0 | 3.533 / 5.385 |
+| subcapacity | 256 / 256 | 256 | 0 | 0 | 0 | 0 | 0 | 0 | 3.802 / 5.695 |
+| throughput | 256 / 256 | 256 | 0 | 0 | 0 | 0 | 0 | 0 | 3.887 / 5.887 |
+
+| Scenario | Process | Peak RSS MiB | Peak fds | Last sampled CPU seconds | Samples |
+| --- | --- | ---: | ---: | ---: | ---: |
+| burst | setup-0 | unavailable | unavailable | unavailable | 0 |
+| burst | backend-0 | 24.94 | 2010 | 0.2012 | 23 |
+| burst | server-0 | 68.00 | 2011 | 0.5091 | 23 |
+| burst | client-0 | 76.67 | 2012 | 0.4502 | 22 |
+| burst | load-0 | 14.36 | 2009 | 0.1750 | 20 |
+| hold-one | setup-0 | unavailable | unavailable | unavailable | 0 |
+| hold-one | backend-0 | 92.62 | 10010 | 1.1206 | 41 |
+| hold-one | server-0 | 280.48 | 10011 | 2.4374 | 41 |
+| hold-one | client-0 | 323.39 | 10012 | 3.0628 | 41 |
+| hold-one | load-0 | 25.97 | 10009 | 1.3735 | 38 |
+| hold-two | setup-0 | unavailable | unavailable | unavailable | 0 |
+| hold-two | backend-0 | 92.56 | 10010 | 1.1589 | 42 |
+| hold-two | server-0 | 147.12 | 5011 | 1.4220 | 42 |
+| hold-two | server-1 | 147.06 | 5011 | 1.4486 | 42 |
+| hold-two | client-0 | 323.58 | 10013 | 3.1413 | 41 |
+| hold-two | load-0 | 25.98 | 10009 | 1.4873 | 38 |
+| slow-reader | setup-0 | unavailable | unavailable | unavailable | 0 |
+| slow-reader | backend-0 | 9.12 | 138 | 1.1255 | 61 |
+| slow-reader | server-0 | 113.44 | 171 | 4.4695 | 61 |
+| slow-reader | client-0 | 120.94 | 140 | 5.5030 | 61 |
+| slow-reader | load-0 | 523.12 | 169 | 0.3194 | 59 |
+| subcapacity | setup-0 | unavailable | unavailable | unavailable | 0 |
+| subcapacity | backend-0 | 10.17 | 266 | 0.0555 | 23 |
+| subcapacity | server-0 | 20.39 | 267 | 0.1139 | 23 |
+| subcapacity | client-0 | 21.62 | 268 | 0.1812 | 22 |
+| subcapacity | load-0 | 8.94 | 265 | 0.0401 | 20 |
+| throughput | setup-0 | unavailable | unavailable | unavailable | 0 |
+| throughput | backend-0 | 10.19 | 266 | 2.5224 | 34 |
+| throughput | server-0 | 36.36 | 267 | 5.3659 | 34 |
+| throughput | client-0 | 37.78 | 268 | 5.7137 | 34 |
+| throughput | load-0 | 493.61 | 265 | 1.5871 | 31 |
+
+The final transfer validates 268,435,456 bytes in 2.915130 seconds. This is another overlapping-host control, not evidence that the harness-only provenance change alters Visitor throughput. All 32 slow-reader probes still time out; those expected limitation results remain distinct from the required held-load scenarios.
+
+## Final validation
+
+Before each implementation/harness commit and again before the evidence commit, both full Rust suites pass. The final runs cover 760 parent test cases plus the isolated guard-test child run, with two ignored tests. Strict all-target/all-feature Clippy, fmt, automation with 87 tests and 569 assertions, the 251-package dependency audit and git diff checking pass. Five bounded serial carrier-suite repetitions also pass 22 tests each. These scopes retain the existing full-budget, guard, concurrent completion, drop, loss and drain tests and do not certify the blocked single-release behavior.
+
+The final source audit also reruns stronger private transport regressions at budgets 8 and 256. They assert exact request/echo bytes, FIN/EOF, actual zero guards, a waiting excess open, two-second single-completion recovery and replacement echo/FIN. Both fail on the pin at active/idle 7/1 and 255/1, and pass in 0.09 seconds under only the private zero-batching dependency experiment. The isolated real-runtime 256/257 case fails on the pin and passes in 0.44 seconds under that same experiment. Initial compilation mistakes in preparing those probes are retained separately and are not treated as behavior failures. No dependency override is shipped, and no red acceptance test is ignored or weakened to manufacture a passing suite.
+
+Privacy checking scans 204 research files and finds zero private hostname or absolute machine-path matches. All 62 historical JSON measurements still match the original PR head after comparing around only the two sanitized path-metadata fields. The final evidence adds 55 workload summaries with every role's sampled histories, including failed workloads and the corrected stale-binary capture. Source revisions, dirty/diff provenance, binary hashes, sampling limits, known starvation, unresolved losses and the recovery prerequisite remain explicit. Remote CI and the final independent review belong to the parent and are not claimed here.

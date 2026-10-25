@@ -120,3 +120,6 @@ pub use tunnel_h3::{
     make_server_tunnel_h3_config_with_resolver,
 };
 pub use tunnel_id::TunnelId;
+
+#[cfg(test)]
+mod capacity_benchmark;

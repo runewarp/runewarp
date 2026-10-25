@@ -205,6 +205,9 @@ impl ServerAdmissionPolicy {
     }
 
     pub(crate) fn report_saturation(&self, rejection: AdmissionRejection) {
+        #[cfg(test)]
+        crate::capacity_benchmark::ADMISSION_REJECTIONS
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(limit_value) = self.limit_value(rejection.limit)
             && self.should_log_saturation(rejection.limit)
         {

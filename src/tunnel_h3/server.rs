@@ -211,7 +211,11 @@ impl ServerTunnelH3 {
             Ok(TunnelStream::new(recv, send, Arc::new(request)))
         };
         tokio::select! {
-            result = timeout(deadline, opening) => result.map_err(|_| OpenTunnelStreamError::TimedOut)?,
+            result = timeout(deadline, opening) => result.map_err(|_| {
+                #[cfg(test)]
+                crate::capacity_benchmark::OPEN_TIMEOUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                OpenTunnelStreamError::TimedOut
+            })?,
             _ = self.connection.closed() => Err(OpenTunnelStreamError::Closed),
             _ = async { goaway.wait_for(|closed| *closed).await.ok(); } => Err(OpenTunnelStreamError::Closed),
         }

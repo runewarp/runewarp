@@ -227,10 +227,14 @@ async fn accept_readiness_connections(listener: TcpListener) {
 }
 
 impl Server {
+    /// Bind a Server and prepare process descriptor capacity. On Unix this may raise the
+    /// process-wide soft RLIMIT_NOFILE to the hard limit, then clamp Visitor admission to fit.
+    /// Embedders must account for other socket/file owners in the same process.
     pub async fn bind(config: ServerBindConfig) -> io::Result<Self> {
         Self::bind_with_proxy(config, None, Vec::new()).await
     }
 
+    /// Like `bind`, including its process-wide Unix fd-limit preparation, with trusted PROXY ingress.
     pub async fn bind_with_proxy(
         config: ServerBindConfig,
         visitor_proxy_protocol: Option<crate::ProxyProtocolVersion>,

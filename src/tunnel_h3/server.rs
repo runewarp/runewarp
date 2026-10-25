@@ -64,6 +64,42 @@ impl fmt::Display for OpenTunnelStreamError {
 
 impl std::error::Error for OpenTunnelStreamError {}
 
+/// Only fixed classifications and numeric protocol codes cross the diagnostic boundary.
+/// Peer-provided reason strings and opaque transport errors can contain private data.
+struct OpenFailure {
+    outcome: OpenTunnelStreamError,
+    reason: &'static str,
+    code: Option<u64>,
+}
+impl OpenFailure {
+    fn closed(reason: &'static str) -> Self {
+        Self {
+            outcome: OpenTunnelStreamError::Closed,
+            reason,
+            code: None,
+        }
+    }
+    fn session(error: h3::error::StreamError) -> Self {
+        use h3::error::StreamError;
+        let (reason, code) = match error {
+            StreamError::StreamError { code, .. } => ("session-stream-error", Some(code.value())),
+            StreamError::RemoteTerminate { code, .. } => {
+                ("session-remote-terminate", Some(code.value()))
+            }
+            StreamError::ConnectionError(_) => ("session-connection-error", None),
+            StreamError::HeaderTooBig { .. } => ("session-header-too-big", None),
+            StreamError::RemoteClosing => ("session-remote-closing", None),
+            StreamError::Undefined(_) => ("session-transport-error", None),
+            _ => ("session-other-error", None),
+        };
+        Self {
+            outcome: OpenTunnelStreamError::Closed,
+            reason,
+            code,
+        }
+    }
+}
+
 /// State shared by the connection's accept loop and its request handlers.
 struct Shared {
     connection: quinn::Connection,
@@ -181,10 +217,29 @@ impl ServerTunnelH3 {
         &self,
         deadline: Duration,
     ) -> Result<ServerTunnelStream, OpenTunnelStreamError> {
+        let result = self.open_visitor_stream(deadline).await;
+        match result {
+            Ok(stream) => Ok(stream),
+            Err(failure) => {
+                crate::runtime_log::server_tunnel_stream_open_failed(failure.reason, failure.code);
+                #[cfg(test)]
+                crate::capacity_benchmark::record_open_error(format!(
+                    "reason={} code={:?}",
+                    failure.reason, failure.code
+                ));
+                Err(failure.outcome)
+            }
+        }
+    }
+
+    async fn open_visitor_stream(
+        &self,
+        deadline: Duration,
+    ) -> Result<ServerTunnelStream, OpenFailure> {
         use h3::quic::{BidiStream, RecvStream, SendStream};
         let mut goaway = self.shared.goaway.subscribe();
         if *goaway.borrow() || self.connection.close_reason().is_some() {
-            return Err(OpenTunnelStreamError::Closed);
+            return Err(OpenFailure::closed("connection-not-accepting"));
         }
         // Pending opens count toward graceful drain, including those awaiting session readiness.
         let request = InFlightRequest::start(&self.shared.requests_in_flight);
@@ -193,21 +248,19 @@ impl ServerTunnelH3 {
             let opener = session
                 .wait_for(|opener| opener.is_some())
                 .await
-                .map_err(|_| OpenTunnelStreamError::Closed)?
+                .map_err(|_| OpenFailure::closed("session-unavailable"))?
                 .as_ref()
                 .expect("wait_for observed an established session")
                 .clone();
-            let mut stream = opener.opener().open_bi().await.map_err(|error| {
-                #[cfg(test)]
-                crate::capacity_benchmark::record_open_error(format!("{error:?}"));
-                #[cfg(not(test))]
-                let _ = error;
-                OpenTunnelStreamError::Closed
-            })?;
+            let mut stream = opener
+                .opener()
+                .open_bi()
+                .await
+                .map_err(OpenFailure::session)?;
             if *self.shared.goaway.borrow() {
                 stream.reset(Code::H3_REQUEST_REJECTED.value());
                 stream.stop_sending(Code::H3_REQUEST_REJECTED.value());
-                return Err(OpenTunnelStreamError::Closed);
+                return Err(OpenFailure::closed("goaway-after-open"));
             }
             let (send, recv) = stream.split();
             Ok(TunnelStream::new(recv, send, Arc::new(request)))
@@ -216,10 +269,10 @@ impl ServerTunnelH3 {
             result = timeout(deadline, opening) => result.map_err(|_| {
                 #[cfg(test)]
                 crate::capacity_benchmark::OPEN_TIMEOUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                OpenTunnelStreamError::TimedOut
+                OpenFailure { outcome: OpenTunnelStreamError::TimedOut, reason: "stream-open-timeout", code: None }
             })?,
-            _ = self.connection.closed() => Err(OpenTunnelStreamError::Closed),
-            _ = async { goaway.wait_for(|closed| *closed).await.ok(); } => Err(OpenTunnelStreamError::Closed),
+            _ = self.connection.closed() => Err(OpenFailure::closed("connection-closed")),
+            _ = async { goaway.wait_for(|closed| *closed).await.ok(); } => Err(OpenFailure::closed("goaway")),
         }
     }
 
@@ -738,5 +791,14 @@ mod tests {
             let summary = format!("{} {}", request.method(), request.uri());
             assert_eq!(route(&request, &server_hostname()), expected, "{summary}");
         }
+    }
+    #[test]
+    fn opaque_open_errors_do_not_expose_their_payload() {
+        let error = h3::error::StreamError::Undefined(Box::new(std::io::Error::other(
+            "private peer details",
+        )));
+        let failure = super::OpenFailure::session(error);
+        assert_eq!(failure.reason, "session-transport-error");
+        assert_eq!(failure.code, None);
     }
 }

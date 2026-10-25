@@ -296,13 +296,18 @@ impl TunnelConnectionStreamHandler {
 }
 
 async fn connect_backend(backend_address: &str, timeout: Duration) -> io::Result<TcpStream> {
-    match tokio::time::timeout(timeout, TcpStream::connect(backend_address)).await {
+    let result = match tokio::time::timeout(timeout, TcpStream::connect(backend_address)).await {
         Ok(result) => result,
         Err(_) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             format!("backend connect timed out for {backend_address} after {timeout:?}"),
         )),
+    };
+    #[cfg(test)]
+    if let Err(error) = &result {
+        crate::capacity_benchmark::record_backend_error(error);
     }
+    result
 }
 
 async fn write_backend_with_timeout(

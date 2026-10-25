@@ -17,16 +17,12 @@ use super::TUNNEL_H3_ALPN;
 /// Maximum decoded HTTP/3 field-section size on either peer, limiting QPACK expansion.
 pub(super) const MAX_FIELD_SECTION_SIZE: u64 = 16 * 1024;
 
-/// Connection-wide receive credit, retained after #262's real-runtime 10,000-Visitor benchmark.
-/// In its 128-slow-reader workload, Server/Client RSS peaked around 114/118 MiB while unrelated
-/// Visitors stalled. More shared credit would permit more buffering without establishing isolation.
-/// This bounds unread transport bytes, not whole-process memory. See the capacity research record.
+/// Shared unread transport-byte bound, not a whole-process memory bound. More credit permits
+/// more buffering without isolating stalled Visitors. See docs/research/visitor-capacity-benchmark.md.
 const CONNECTION_RECEIVE_WINDOW: u32 = 64 * 1024 * 1024;
 
-/// Per-stream receive credit, retaining Quinn's 1.25 MB default. #262's 256 MiB echo transfers
-/// took 2.44 to 2.74 seconds across old/new-limit controls, with no consistent throughput regression
-/// attributable to capacity. Keep the existing window rather than add per-stream buffering; shared
-/// window starvation remains. See docs/research/visitor-capacity-benchmark.md.
+/// Per-stream unread transport-byte bound. Retaining this window avoids adding buffering while
+/// shared-window starvation remains. See docs/research/visitor-capacity-benchmark.md.
 const STREAM_RECEIVE_WINDOW: u32 = 1_250_000;
 
 /// Request streams for the event-stream subscription, its replacement during resubscription, and

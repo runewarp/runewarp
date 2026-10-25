@@ -124,3 +124,8 @@ pub use tunnel_id::TunnelId;
 
 #[cfg(test)]
 mod capacity_benchmark;
+
+#[cfg(test)]
+mod runtime_capacity_tests;
+
+mod visitor_capacity;

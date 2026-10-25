@@ -968,3 +968,18 @@ async fn connection_loss_releases_idle_and_active_permits_across_shared_connecti
     assert_eq!(client.guard_rejections(), 0);
     assert_eq!(other_client.guard_rejections(), 0);
 }
+
+#[tokio::test]
+async fn zero_effective_budget_establishes_signaling_without_visitor_credit() {
+    let (_fixture, server, client) = stream_pair(0).await;
+    assert_eq!(client.visitor_credit_counts(), (0, 0));
+    assert_eq!(
+        server
+            .open_tunnel_stream(Duration::from_millis(50))
+            .await
+            .err(),
+        Some(OpenTunnelStreamError::TimedOut)
+    );
+    assert_eq!(client.visitor_credit_counts(), (0, 0));
+    assert_eq!(client.guard_rejections(), 0);
+}

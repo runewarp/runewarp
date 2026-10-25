@@ -22,7 +22,7 @@ impl Default for ClientStreamLimits {
     fn default() -> Self {
         Self {
             // Idle Visitor credits and active streams share this Client-instance bound.
-            max_stream_handlers: 16_384,
+            max_stream_handlers: crate::visitor_capacity::DEFAULT_VISITOR_CAPACITY,
             client_hello_timeout: Duration::from_secs(5),
             backend_connect_timeout: Duration::from_secs(5),
             initial_backend_write_timeout: Duration::from_secs(5),

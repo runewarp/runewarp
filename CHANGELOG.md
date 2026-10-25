@@ -37,6 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Prevented intermittent Visitor rejection while a live Tunnel pool's active counts change during least-active placement. (#266)
+
 - Preserved response tails when the opposite proxy direction fails, kept successful Client ACME challenges successful during teardown, and suppressed repeated Client stream-handler recovery logs under saturation. (#250)
 - Fixed the Managed-session first-snapshot deadline so connection opening and first valid snapshot receipt share one absolute 60-second window, including simultaneous timer and snapshot readiness. (#235)
 - Fixed Client Tunnel reconnect logs so `next-retry-delay` reports the same jittered delay the **Address worker** actually awaits after a Connected session ends. (#229)

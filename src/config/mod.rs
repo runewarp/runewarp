@@ -655,8 +655,9 @@ pub(crate) fn validate_prepared_client_config(
     let mut messages = unknown_field_messages;
     messages.extend(control.unknown_field_messages);
 
-    if !(256..=1_048_576).contains(&max_visitor_streams) {
-        messages.push("client.max-visitor-streams must be between 256 and 1048576".to_owned());
+    use crate::visitor_capacity::{MAX_VISITOR_CAPACITY, MIN_VISITOR_CAPACITY};
+    if !(MIN_VISITOR_CAPACITY..=MAX_VISITOR_CAPACITY).contains(&max_visitor_streams) {
+        messages.push(format!("client.max-visitor-streams must be between {MIN_VISITOR_CAPACITY} and {MAX_VISITOR_CAPACITY}"));
     }
 
     let managed = control.address.is_some();

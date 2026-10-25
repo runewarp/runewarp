@@ -179,6 +179,11 @@ pub fn emit(level: EventLevel, message: &str) {
     }
 }
 
+/// Stream-open diagnostics exclude peer-provided reason strings and transport internals.
+pub fn server_tunnel_stream_open_failed(reason: &'static str, code: Option<u64>) {
+    tracing::debug!(reason, code, "server Visitor stream open failed");
+}
+
 pub fn server_route(public_hostname: &str, outcome: ServerRouteOutcome) {
     let (level, message) = server_route_event(public_hostname, outcome);
     emit(level, &message);

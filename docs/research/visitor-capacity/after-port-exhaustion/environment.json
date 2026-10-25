@@ -14,7 +14,7 @@
   "command": [
     "scripts/benchmark-visitor-capacity",
     "--output",
-    "target/capacity-after"
+    "<output-directory>"
   ],
-  "test_binary": "/Users/xeno/.t3/worktrees/runewarp/t3-9e4f9cc3/target/release/deps/runewarp-17f350870100dade"
+  "test_binary": "target/release/deps/runewarp-17f350870100dade"
 }

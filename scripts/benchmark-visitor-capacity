@@ -6,6 +6,7 @@ python3 -m venv target/visitor-capacity-venv
  target/visitor-capacity-venv/bin/python scripts/benchmark-visitor-capacity --output target/capacity-baseline
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,14 +16,18 @@ import socket
 import subprocess
 import threading
 import time
+import sys
 import psutil
+sys.dont_write_bytecode = True
+from lib.visitor_capacity_metadata import portable_invocation
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output', type=Path, required=True)
 parser.add_argument('--cooldown-seconds', type=float, default=32)
-parser.add_argument('--scenarios', nargs='+', default=['subcapacity', 'hold-one', 'burst', 'hold-two', 'throughput', 'slow-reader'])
+parser.add_argument('--scenarios', nargs='+', choices=['subcapacity', 'hold-one', 'burst', 'hold-two', 'throughput', 'slow-reader'], default=['subcapacity', 'hold-one', 'burst', 'hold-two', 'throughput', 'slow-reader'])
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=False)
+print('Build\nBuilding release benchmark roles', flush=True)
 loopback = socket.getaddrinfo("localhost", 0, type=socket.SOCK_DGRAM)[0][4][0]
 tunnel_bind = f"[{loopback}]:0" if ":" in loopback else f"{loopback}:0"
 build = subprocess.run(['cargo', 'test', '--release', '--lib', '--no-run', '--message-format=json'], capture_output=True, text=True)
@@ -35,7 +40,9 @@ environment = {'platform': platform.platform(), 'machine': platform.machine(), '
                'psutil': psutil.__version__, 'sampling_interval_seconds': 0.25,
                'rustc': subprocess.check_output(['rustc', '-Vv'], text=True),
                'git_head': os.environ.get('RUNEWARP_BENCH_SOURCE_HEAD') or subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-               'command': os.sys.argv, 'test_binary': binary}
+               'tracked_source_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], text=True)),
+               'product_diff_sha256': hashlib.sha256(subprocess.check_output(['git', 'diff', 'HEAD', '--', 'src', 'Cargo.toml', 'Cargo.lock'])).hexdigest(),
+               **portable_invocation(os.sys.argv, binary)}
 (args.output / 'environment.json').write_text(json.dumps(environment, indent=2))
 
 
@@ -143,11 +150,14 @@ backend-address = "{backend_address}"
     result = json.loads((directory / 'load.result.json').read_text())
     result['role_counts'] = {p.name: json.loads(p.read_text()) for p in directory.glob('*.counts.json')}
     (directory / 'summary.json').write_text(json.dumps(result, indent=2))
-    print(name, json.dumps(result), flush=True)
+    print(f'Results: {name}', flush=True)
+    print(f"Established: {result['established_and_byte_validated']}/{result['attempted']}; working after hold: {result['still_working_after_hold']}", flush=True)
+    print(f"TTFB p50/p99 ms: {result['ttfb_p50_ms']}/{result['ttfb_p99_ms']}; failures: {sum(result['failures'].values())}", flush=True)
+    print(f"Artifacts: {name}/summary.json and {name}/process-metrics.json", flush=True)
 
 scenarios = {'subcapacity': (256, 32, 1), 'hold-one': (10000, 32, 1), 'burst': (2000, 2000, 1),
              'hold-two': (10000, 32, 2), 'throughput': (256, 32, 1, False, True), 'slow-reader': (128, 32, 1, True)}
 for name in args.scenarios:
-    print(f'{name}: cooldown {args.cooldown_seconds}s before fresh role processes', flush=True)
+    print(f'\nScenario: {name}\nCooldown {args.cooldown_seconds}s before fresh role processes', flush=True)
     time.sleep(args.cooldown_seconds)
     scenario(name, *scenarios[name])

@@ -103,6 +103,21 @@ impl TakenPoolMember {
     }
 }
 
+/// Choose a member from concurrent active-load observations, preserving round-robin ties.
+fn least_active_index(
+    len: usize,
+    start: usize,
+    mut load: impl FnMut(usize) -> usize,
+) -> Option<usize> {
+    // Read each live member once. A second pass can observe different counts and fail to
+    // find the old minimum, incorrectly treating a live Tunnel as unavailable.
+    (0..len)
+        .map(|offset| (start + offset) % len)
+        .map(|index| (index, load(index)))
+        .min_by_key(|&(_, active)| active)
+        .map(|(index, _)| index)
+}
+
 impl ActiveClientPool {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
@@ -127,26 +142,17 @@ impl ActiveClientPool {
             return None;
         }
 
-        let lowest_active_streams = members
-            .iter()
-            .map(|member| member.active_streams.load(Ordering::Relaxed))
-            .min()
-            .expect("members length checked above");
         let start = (self.next_round_robin_offset.fetch_add(1, Ordering::Relaxed) as usize) % len;
-
-        (0..len)
-            .map(|offset| (start + offset) % len)
-            .find_map(|index| {
-                let member = &members[index];
-                (member.active_streams.load(Ordering::Relaxed) == lowest_active_streams).then(
-                    || SelectedTunnelConnection {
-                        member_id: member.member_id,
-                        client_identity: member.client_identity.clone(),
-                        connection: member.connection.clone(),
-                        active_streams: member.active_streams.clone(),
-                    },
-                )
-            })
+        let index = least_active_index(len, start, |index| {
+            members[index].active_streams.load(Ordering::Relaxed)
+        })?;
+        let member = &members[index];
+        Some(SelectedTunnelConnection {
+            member_id: member.member_id,
+            client_identity: member.client_identity.clone(),
+            connection: member.connection.clone(),
+            active_streams: member.active_streams.clone(),
+        })
     }
 
     pub(crate) async fn try_register(
@@ -346,6 +352,7 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     use super::ActiveClientPool;
+
     use crate::server::admission::{
         AdmissionLimit, ServerAdmissionLimits, TunnelConnectionAdmission,
     };
@@ -792,5 +799,15 @@ mod tests {
         let mut roots = RootCertStore::empty();
         roots.add(certificate.clone()).map_err(io::Error::other)?;
         Ok(roots)
+    }
+    #[test]
+    fn changing_active_load_cannot_hide_a_nonempty_pool() {
+        let mut observations = 0;
+        let selected = super::least_active_index(1, 0, |_| {
+            observations += 1;
+            // Another Visitor registers after the first observation, while the member stays live.
+            observations - 1
+        });
+        assert_eq!(selected, Some(0));
     }
 }

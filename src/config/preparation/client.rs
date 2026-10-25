@@ -348,7 +348,9 @@ fn prepare_raw_client_config_with_defaults(
         .any(|service| service.tls_mode.as_deref() == Some("terminate"));
 
     PreparedClientConfig {
-        max_visitor_streams: raw.max_visitor_streams.unwrap_or(16_384),
+        max_visitor_streams: raw
+            .max_visitor_streams
+            .unwrap_or(crate::visitor_capacity::DEFAULT_VISITOR_CAPACITY),
         selected_path,
         server_address: raw.server_address,
         server_addresses: raw.server_addresses,

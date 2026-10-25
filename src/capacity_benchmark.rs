@@ -1,16 +1,4 @@
 //! Explicit release-only, multi-process benchmark entry point. See scripts/benchmark-visitor-capacity.
-#[test]
-fn benchmark_client_hello_is_valid_passthrough_input() {
-    let hello = client_hello().expect("construct ClientHello");
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    runtime.block_on(async {
-        let parsed = crate::read_client_hello(&mut hello.as_slice())
-            .await
-            .expect("valid ClientHello");
-        assert_eq!(parsed.into_parts().0.as_str(), "app.example.test");
-    });
-}
-
 use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -26,9 +14,13 @@ pub(crate) static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ADMISSION_REJECTIONS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ADMISSION_BY_LIMIT: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
 pub(crate) static NO_ACTIVE_ROUTE: AtomicUsize = AtomicUsize::new(0);
+static BACKEND_ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
+static BACKEND_ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static OPEN_ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
 static OPEN_ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 pub(crate) fn record_open_error(error: String) {
     if std::env::var_os("RUNEWARP_BENCH_DIR").is_some() {
+        OPEN_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
         let mut errors = OPEN_ERRORS
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -38,7 +30,23 @@ pub(crate) fn record_open_error(error: String) {
     }
 }
 
-fn client_hello() -> Result<Vec<u8>, Box<dyn Error>> {
+pub(crate) fn record_backend_error(error: &std::io::Error) {
+    if std::env::var_os("RUNEWARP_BENCH_DIR").is_some() {
+        BACKEND_ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+        let mut errors = BACKEND_ERRORS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if errors.len() < 16 {
+            errors.push(format!(
+                "kind={:?} os-code={:?}",
+                error.kind(),
+                error.raw_os_error()
+            ));
+        }
+    }
+}
+
+pub(crate) fn client_hello() -> Result<Vec<u8>, Box<dyn Error>> {
     let config = rustls::ClientConfig::builder()
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
@@ -51,7 +59,7 @@ fn client_hello() -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(hello)
 }
 
-fn address(port: u16) -> SocketAddr {
+pub(crate) fn address(port: u16) -> SocketAddr {
     (Ipv4Addr::LOCALHOST, port).into()
 }
 fn write_json(path: &Path, value: serde_json::Value) -> Result<(), Box<dyn Error>> {
@@ -70,6 +78,9 @@ fn counts() -> serde_json::Value {
     serde_json::json!({
         "actual_guard_resets": GUARD_RESETS.load(Ordering::Relaxed),
         "no_active_route": NO_ACTIVE_ROUTE.load(Ordering::Relaxed),
+        "open_errors": OPEN_ERROR_COUNT.load(Ordering::Relaxed),
+        "backend_connect_errors": BACKEND_ERROR_COUNT.load(Ordering::Relaxed),
+        "first_16_backend_errors": BACKEND_ERRORS.lock().unwrap_or_else(|error| error.into_inner()).clone(),
         "first_16_open_errors": OPEN_ERRORS.lock().unwrap_or_else(|error| error.into_inner()).clone(),
         "server_open_timeouts": OPEN_TIMEOUTS.load(Ordering::Relaxed),
         "established_tunnel_connections": CONNECTIONS.load(Ordering::Relaxed),
@@ -78,7 +89,7 @@ fn counts() -> serde_json::Value {
     })
 }
 
-fn setup(directory: &Path) -> Result<(), Box<dyn Error>> {
+pub(crate) fn setup(directory: &Path) -> Result<(), Box<dyn Error>> {
     crate::initialize_manual_server_certificate(&directory.join("cert"), "localhost")?;
     let identity = crate::generate_client_identity()?;
     std::fs::create_dir(directory.join("identity"))?;
@@ -182,7 +193,7 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
     })
 }
 
-async fn connect_visitor(
+pub(crate) async fn connect_visitor(
     target: SocketAddr,
     hello: Vec<u8>,
     index: usize,
@@ -326,121 +337,14 @@ async fn load(directory: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn configured_budget_waits_for_credit_through_real_runtimes() -> Result<(), Box<dyn Error>> {
-    let directory = tempfile::tempdir()?;
-    setup(directory.path())?;
-    let listener = TcpListener::bind("[::1]:0").await?;
-    let backend_address = listener.local_addr()?;
-    let backend = tokio::spawn(async move {
-        let mut tasks = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                accepted = listener.accept() => {
-                    let (mut socket, _) = accepted.expect("backend accept");
-                    tasks.spawn(async move {
-                        let (mut read, mut write) = socket.split();
-                        let _ = tokio::io::copy(&mut read, &mut write).await;
-                    });
-                }
-                _ = tasks.join_next(), if !tasks.is_empty() => {}
-            }
-        }
-    });
-    let tunnel_bind = tokio::net::lookup_host(("localhost", 0))
-        .await?
-        .next()
-        .ok_or("localhost has no address")?;
-    let server_settings = crate::load_server_config(&directory.path().join("server.toml"))?;
-    let server = crate::ServerRuntime::prepare(&server_settings, address(0), tunnel_bind).await?;
-    let public = server.public_addr()?;
-    let port = server.tunnel_addr()?.port();
-    let shutdown = server.shutdown();
-    let server = tokio::spawn(server.run());
-    let config_path = directory.path().join("client.toml");
-    std::fs::write(
-        &config_path,
-        format!(
-            "[client]\nserver-address = \"localhost:{port}\"\nmax-visitor-streams = 256\nserver-trust = \"ca-file\"\nserver-ca-file = \"cert/server-ca.crt\"\nidentity-dir = \"identity\"\n[[client.services]]\nbackend-address = \"{backend_address}\"\n"
-        ),
-    )?;
-    let settings = crate::load_client_config(&config_path)?;
-    let runtime = crate::ClientRuntime::prepare(&settings, tunnel_bind).await?;
-    let (stop, stopped) = tokio::sync::oneshot::channel();
-    let client = runtime.run(async {
-        let _ = stopped.await;
-        Ok(crate::ShutdownMode::Fast)
-    });
-    tokio::pin!(client);
-    let work = async {
-        let mut sockets = Vec::new();
-        // The first successful full echo is readiness, not a guessed sleep or an attempted socket.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Ok(Ok((socket, _, _))) = tokio::time::timeout(
-                Duration::from_millis(500),
-                connect_visitor(public, client_hello()?, 0),
-            )
+#[test]
+fn benchmark_client_hello_is_valid_passthrough_input() {
+    let hello = client_hello().expect("construct ClientHello");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let parsed = crate::read_client_hello(&mut hello.as_slice())
             .await
-            {
-                sockets.push(socket);
-                break;
-            }
-            if Instant::now() > deadline {
-                return Err::<(), Box<dyn Error>>("runtime readiness deadline".into());
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        for index in 1..256 {
-            sockets.push(
-                tokio::time::timeout(
-                    Duration::from_secs(5),
-                    connect_visitor(public, client_hello()?, index),
-                )
-                .await??
-                .0,
-            );
-        }
-        let pending = connect_visitor(public, client_hello()?, 256);
-        tokio::pin!(pending);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut pending)
-                .await
-                .is_err(),
-            "257th Visitor must wait at configured capacity"
-        );
-        // Keep every admitted Visitor held. The Server's real five-second deadline, rather
-        // than the Client reset guard, rejects the excess Visitor. Recovery after completion
-        // has separate transport tests; this regression checks configured runtime admission.
-        let elapsed = Instant::now();
-        let excess = tokio::time::timeout(Duration::from_secs(6), pending).await?;
-        assert!(
-            excess.is_err(),
-            "excess Visitor must reach the open deadline"
-        );
-        assert!(
-            elapsed.elapsed() >= Duration::from_secs(4),
-            "Server must wait for credit, not reset immediately"
-        );
-        let mut first = sockets.pop().expect("256 byte-validated Visitors");
-        first.write_all(b"still working").await?;
-        let mut bytes = [0; 13];
-        first.read_exact(&mut bytes).await?;
-        assert_eq!(&bytes, b"still working");
-        Ok(())
-    };
-    tokio::pin!(work);
-    let (work, client_finished) = tokio::select! {
-        result = &mut work => (result, false),
-        result = &mut client => (Err(format!("Client exited early: {result:?}").into()), true),
-    };
-    let _ = stop.send(());
-    shutdown.begin_fast();
-    if !client_finished {
-        tokio::time::timeout(Duration::from_secs(5), client).await??;
-    }
-    tokio::time::timeout(Duration::from_secs(5), server).await???;
-    backend.abort();
-    let _ = backend.await;
-    work
+            .expect("valid ClientHello");
+        assert_eq!(parsed.into_parts().0.as_str(), "app.example.test");
+    });
 }

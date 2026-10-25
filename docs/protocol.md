@@ -53,15 +53,15 @@ Runtime tunnel failures keep full detail at debug level while operator-facing wa
 
 ## Server admission and overload
 
-Server admission uses fixed production limits; these are runtime safety policy, not operator configuration.
+Server admission uses fixed production maxima; these are runtime safety policy, not operator configuration. Unix startup can lower pending Visitor, pending-open and active routed-stream capacities to fit the fd allowance, as documented in [configuration](configuration.md#file-descriptor-capacity).
 
 | Work | Limit | Saturation behavior |
 | --- | ---: | --- |
 | Visitor pre-routing work | **4,096** globally | Close the newest accepted socket before spawning its handler |
 | Visitor pre-routing work from one canonical source IP | **256** | Close the newest socket from that source after direct/proxied tuple resolution |
 | Concurrent Server-side QUIC handshakes | **256** | Refuse the newest QUIC `Incoming` before spawning handshake work |
-| Pending Server Visitor stream opens | **1,024** | Drop the newest Visitor before waiting for Visitor stream credit |
-| Active routed Visitor streams | **4,096** | Drop and reset the newest assigned Tunnel stream before proxying |
+| Pending Server Visitor stream opens | **4,096** | Drop the newest Visitor before waiting for Visitor stream credit |
+| Active routed Visitor streams | **65,536** | Drop and reset the newest assigned Tunnel stream before proxying |
 | Active Tunnel connections | **4,096** globally | Complete authentication, then close the newest connection |
 | Active Tunnel connections in one Tunnel pool | **256** | Close the newest connection; keep existing pool members |
 | Active Tunnel connections for one Client identity | **64** globally | Close the newest connection; keep existing connections for that identity |
@@ -112,7 +112,7 @@ A close capsule or CONNECT stream end observed by either peer closes the whole T
 
 ## Visitor streams and credit
 
-The Client grants the Server zero bidirectional credit during the QUIC handshake. After its WebTransport session is established, one connection task acquires permits from the Client-instance budget to maintain up to **T = 256 idle Visitor credits**, named `MAX_IDLE_VISITOR_CREDIT`. Every idle credit and active Visitor holds one permit from the same **1,024-permit budget**, shared across every connection of that Client instance. An arrival transfers an idle permit into its `TunnelStream`; a background acquisition replenishes idle credit when a permit becomes available. The accept task delivers streams without awaiting handler work. Active concurrency can exceed T and reach the entire budget on one connection. A quiet connection can reserve up to T permits, reducing capacity available to its peers. T bounds the initial burst per connection per credit round trip, about 12,800 arrivals per second at a 20 ms RTT before other costs.
+The Client grants the Server zero bidirectional credit during the QUIC handshake. After its WebTransport session is established, one connection task acquires permits from the Client-instance budget to maintain up to **T = 256 idle Visitor credits**, named `MAX_IDLE_VISITOR_CREDIT`. Every idle credit and active Visitor holds one permit from the same configured budget, **16,384 permits by default before Unix fd sizing**, shared across every connection of that Client instance. An arrival transfers an idle permit into its `TunnelStream`; a background acquisition replenishes idle credit when a permit becomes available. The accept task delivers streams without awaiting handler work. Active concurrency can exceed T and reach the entire budget on one connection. A quiet connection can reserve up to T permits, reducing capacity available to its peers. T bounds the initial burst per connection per credit round trip, about 12,800 arrivals per second at a 20 ms RTT before other costs.
 
 All credit updates serialize under the connection controller's state mutex. After each update, the configured Quinn target equals active plus idle held permits. The update sets that held target, temporarily sets zero, then restores the held target before returning. It never sets a target above held permits. Quinn 0.11.11 with quinn-proto 0.11.19 otherwise batches increments of at most configured concurrency / 8, which can withhold the last reserved credit indefinitely. The temporary zero target queues already-allocated unsent credit with a zero batching threshold. This dependency on the pinned Quinn setter and batching behavior is covered by the raw eight-to-nine regression and full-budget tests; see [ADR 0007](adr/0007-webtransport-visitor-streams.md) and the [approved amendment](https://github.com/runewarp/runewarp/issues/256#issuecomment-6392362183).
 

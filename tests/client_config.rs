@@ -1349,3 +1349,42 @@ backend-address = "localhost:8443"
     let control = settings.control.expect("managed client control config");
     assert_eq!(control.address.to_string(), "control.example.test");
 }
+
+fn capacity_config(extra: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempdir().unwrap();
+    fs::create_dir(directory.path().join("identity")).unwrap();
+    for name in ["client.crt", "client.key", "client-identity.txt"] {
+        fs::write(directory.path().join("identity").join(name), "placeholder").unwrap();
+    }
+    let path = directory.path().join("config.toml");
+    fs::write(&path, format!("[client]\nserver-address = \"tunnel.example.test\"\nidentity-dir = \"identity\"\n{extra}\n[[client.services]]\nbackend-address = \"localhost:8443\"\n")).unwrap();
+    (directory, path)
+}
+
+#[test]
+fn client_visitor_capacity_defaults_to_16384() {
+    let (_directory, path) = capacity_config("");
+    assert_eq!(
+        load_client_config(&path).unwrap().max_visitor_streams,
+        16_384
+    );
+}
+
+#[test]
+fn client_visitor_capacity_accepts_minimum_and_ceiling() {
+    for value in [256, 512, 1_048_576] {
+        let (_directory, path) = capacity_config(&format!("max-visitor-streams = {value}"));
+        assert_eq!(
+            load_client_config(&path).unwrap().max_visitor_streams,
+            value
+        );
+    }
+}
+
+#[test]
+fn client_visitor_capacity_rejects_out_of_bounds_and_non_integers() {
+    for value in ["0", "1", "255", "1048577", "-1", "1.5", "\"512\"", "true"] {
+        let (_directory, path) = capacity_config(&format!("max-visitor-streams = {value}"));
+        assert!(load_client_config(&path).is_err(), "accepted {value}");
+    }
+}

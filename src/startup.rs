@@ -249,7 +249,16 @@ enum ClientAcmeDrive {
 impl ClientInstancePrep {
     /// Validates Services and builds Terminate-mode TLS / Client ACME state once.
     pub async fn prepare(config: &ClientConfig) -> Result<Arc<Self>, ClientStartupError> {
-        Self::prepare_with_stream_limits(config, crate::client::ClientStreamLimits::default()).await
+        let effective = crate::fd_capacity::client(config);
+        crate::runtime_log::client_visitor_capacity(config.max_visitor_streams, effective);
+        Self::prepare_with_stream_limits(
+            config,
+            crate::client::ClientStreamLimits {
+                max_stream_handlers: effective,
+                ..crate::client::ClientStreamLimits::default()
+            },
+        )
+        .await
     }
 
     pub(crate) async fn prepare_with_stream_limits(
@@ -1352,6 +1361,7 @@ mod tests {
     async fn client_acme_builds_one_runtime_per_terminating_hostname() {
         let tempdir = tempfile::tempdir().unwrap();
         let settings = ClientConfig {
+            max_visitor_streams: 16_384,
             server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
@@ -1397,6 +1407,7 @@ mod tests {
 
     fn acme_client_settings(tempdir: &tempfile::TempDir, hostname: &str) -> ClientConfig {
         ClientConfig {
+            max_visitor_streams: 16_384,
             server_addresses: vec![
                 server_address("tunnel-a.example.test"),
                 server_address("tunnel-b.example.test"),
@@ -1499,6 +1510,7 @@ mod tests {
         let tempdir = tempfile::tempdir()?;
         let state_directory = tempdir.path().join("client/acme");
         let settings = ClientConfig {
+            max_visitor_streams: 16_384,
             server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
@@ -1577,6 +1589,7 @@ mod tests {
         fs::write(&blocked_parent, "not a directory")?;
         let state_directory = blocked_parent.join("acme");
         let settings = ClientConfig {
+            max_visitor_streams: 16_384,
             server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
@@ -1699,6 +1712,7 @@ mod tests {
     #[tokio::test]
     async fn prepared_client_connect_rejects_empty_server_addresses_without_panicking() {
         let settings = ClientConfig {
+            max_visitor_streams: 16_384,
             server_addresses: Vec::new(),
             server_hostname: server_hostname("unassigned.invalid"),
             server_port: 443,

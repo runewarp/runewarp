@@ -236,9 +236,20 @@ impl Server {
         visitor_proxy_protocol: Option<crate::ProxyProtocolVersion>,
         visitor_proxy_trusted_networks: Vec<crate::TrustedNetwork>,
     ) -> io::Result<Self> {
+        let mut limits = ServerAdmissionLimits::default();
+        let effective = crate::fd_capacity::server([
+            limits.max_pending_visitors,
+            limits.max_pending_stream_opens,
+            limits.max_active_routed_streams,
+        ]);
+        [
+            limits.max_pending_visitors,
+            limits.max_pending_stream_opens,
+            limits.max_active_routed_streams,
+        ] = effective;
         Self::bind_with_admission_limits_and_proxy(
             config,
-            ServerAdmissionLimits::default(),
+            limits,
             visitor_proxy_protocol,
             visitor_proxy_trusted_networks,
         )

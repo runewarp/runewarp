@@ -19,6 +19,7 @@ import psutil
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output', type=Path, required=True)
+parser.add_argument('--cooldown-seconds', type=float, default=32)
 parser.add_argument('--scenarios', nargs='+', default=['subcapacity', 'hold-one', 'burst', 'hold-two', 'throughput', 'slow-reader'])
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=False)
@@ -33,7 +34,7 @@ environment = {'platform': platform.platform(), 'machine': platform.machine(), '
                'memory_bytes': psutil.virtual_memory().total, 'nofile': resource.getrlimit(resource.RLIMIT_NOFILE),
                'psutil': psutil.__version__, 'sampling_interval_seconds': 0.25,
                'rustc': subprocess.check_output(['rustc', '-Vv'], text=True),
-               'git_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+               'git_head': os.environ.get('RUNEWARP_BENCH_SOURCE_HEAD') or subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                'command': os.sys.argv, 'test_binary': binary}
 (args.output / 'environment.json').write_text(json.dumps(environment, indent=2))
 
@@ -50,8 +51,8 @@ def scenario(name, count, batch, connections, slow=False, transfer=False):
         log = open(directory / f'{label}.log', 'w')
         env = dict(os.environ, RUNEWARP_BENCH_DIR=str(directory), RUNEWARP_BENCH_ROLE=role, RUNEWARP_BENCH_ID=id, RUNEWARP_BENCH_TUNNEL_BIND=tunnel_bind, **extra)
         child = subprocess.Popen([binary, '--ignored', '--exact', 'capacity_benchmark::visitor_capacity_role', '--nocapture'], env=env, stdout=log, stderr=subprocess.STDOUT)
-        children.append((label, child, log))
         samples[label] = {'pid': child.pid, 'peak_rss_bytes_sampled': 0, 'peak_open_fds_sampled': 0, 'cpu_seconds_sampled': 0, 'samples': 0, 'sampling_errors': 0, 'history': []}
+        children.append((label, child, log))
         return child
 
     def wait_json(file, predicate=lambda value: True, seconds=30):
@@ -147,4 +148,6 @@ backend-address = "{backend_address}"
 scenarios = {'subcapacity': (256, 32, 1), 'hold-one': (10000, 32, 1), 'burst': (2000, 2000, 1),
              'hold-two': (10000, 32, 2), 'throughput': (256, 32, 1, False, True), 'slow-reader': (128, 32, 1, True)}
 for name in args.scenarios:
+    print(f'{name}: cooldown {args.cooldown_seconds}s before fresh role processes', flush=True)
+    time.sleep(args.cooldown_seconds)
     scenario(name, *scenarios[name])

@@ -246,6 +246,7 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 
 | Key | Required | Notes |
 | --- | --- | --- |
+| `client.max-visitor-streams` | no | Integer, default `16384`. Shared idle-credit and active-Visitor budget for the Client instance, across all connections; valid range `256..=1048576`, reduced at Unix startup when the fd limit cannot support it |
 | `client.server-address` | runtime or config | Ergonomic single-target **Server address** shortcut, written as `hostname[:port]`. Mutually exclusive with `client.server-addresses`. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, one `--server-address` may supply or replace this value before validation. |
 | `client.server-addresses` | static runtime or config | One or more explicit **Server addresses** for static fanout. Mutually exclusive with `client.server-address`. Each entry uses the same `hostname[:port]` rules as the singular field. Repeated `--server-address` flags replace this list before validation. |
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
@@ -388,3 +389,15 @@ Runewarp does not validate cross-side hostname coverage at runtime:
 
 - under **Hostname mirroring**, repeating the explicit hostname set on both sides is an operator responsibility
 - when the Client uses a **Catch-all Service**, the Server carries the explicit hostname set while the Client intentionally does not
+
+## File descriptor capacity
+
+On Unix, Client and Server startup use the safe `rlimit` wrapper to raise soft `RLIMIT_NOFILE` toward hard. On macOS, its helper also respects `kern.maxfilesperproc`, which can be lower than a reported unlimited hard limit. A failed increase keeps the readable current soft limit and warns instead of failing startup. If the limit cannot be read, startup warns and retains configured capacities. Other platforms skip this adjustment.
+
+Capacity planning reserves 512 descriptors for runtime polling, QUIC, configuration and certificates, logs, ACME and transient accepts. The Client additionally reserves one UDP endpoint per configured Server address, or 256 endpoints for the Managed snapshot address cap. Each idle credit or active Visitor occupies one budget permit; only active Visitors normally need a Local backend socket. Reserving one descriptor for every permit is conservative. Static and Managed Clients use the same effective instance budget and report it at startup. Quiet connections still reserve up to 256 idle permits each.
+
+The Server accounts for three distinct Visitor socket owners: pending ClientHello intake, pending stream opens after intake releases its permit, and active routed proxies. Their fixed maxima are 4,096, 4,096 and 65,536. If their sum plus the reserve exceeds the fd limit, startup proportionally reduces all three and assigns integer-rounding leftovers to active proxies first. Per-source intake remains capped at 256 and handshakes at 256. Neither role increases a smaller configured or fixed capacity just because more descriptors are available. One warning per role startup reports configured and effective values and the fd allowance. Startup does not reject a valid Client configuration because OS sizing takes the effective budget below 256 or even to zero; such a Client offers fewer idle credits or none. Extremely small limits can leave no useful Visitor admission. Existing OS errors opening mandatory listeners or material still propagate normally.
+
+The reserve is capacity planning headroom, not a hard bound on every descriptor in the process. Arbitrary files opened by library callers, large ACME fanout, and Managed address workers retained while assignments retire can consume additional descriptors. Monitor actual usage and leave headroom for those workloads. Server stream-open permits own sockets and must not be omitted from sizing or counted as part of pre-routing permits, which have already been released.
+
+For systemd services, set `LimitNOFILE=131072` in a service override, run `systemctl daemon-reload`, and restart the service. For containers, set both soft and hard nofile limits, for example `docker run --ulimit nofile=131072:131072 ...` or Compose `ulimits: { nofile: { soft: 131072, hard: 131072 } }`. Set limits independently for Client and Server processes. `ulimit -n` shows the shell soft limit; `ulimit -Hn` shows hard. Raising only the configured Visitor budget cannot overcome a lower hard or kernel limit.

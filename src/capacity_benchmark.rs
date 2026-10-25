@@ -14,8 +14,8 @@ fn benchmark_client_hello_is_valid_passthrough_input() {
 use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -24,6 +24,19 @@ pub(crate) static GUARD_RESETS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static OPEN_TIMEOUTS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ADMISSION_REJECTIONS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static ADMISSION_BY_LIMIT: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+pub(crate) static NO_ACTIVE_ROUTE: AtomicUsize = AtomicUsize::new(0);
+static OPEN_ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+pub(crate) fn record_open_error(error: String) {
+    if std::env::var_os("RUNEWARP_BENCH_DIR").is_some() {
+        let mut errors = OPEN_ERRORS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if errors.len() < 16 {
+            errors.push(error);
+        }
+    }
+}
 
 fn client_hello() -> Result<Vec<u8>, Box<dyn Error>> {
     let config = rustls::ClientConfig::builder()
@@ -56,10 +69,45 @@ async fn stopping(directory: &Path) {
 fn counts() -> serde_json::Value {
     serde_json::json!({
         "actual_guard_resets": GUARD_RESETS.load(Ordering::Relaxed),
+        "no_active_route": NO_ACTIVE_ROUTE.load(Ordering::Relaxed),
+        "first_16_open_errors": OPEN_ERRORS.lock().unwrap_or_else(|error| error.into_inner()).clone(),
         "server_open_timeouts": OPEN_TIMEOUTS.load(Ordering::Relaxed),
         "established_tunnel_connections": CONNECTIONS.load(Ordering::Relaxed),
         "admission_rejections": ADMISSION_REJECTIONS.load(Ordering::Relaxed),
+        "admission_by_limit": ADMISSION_BY_LIMIT.each_ref().map(|v| v.load(Ordering::Relaxed)),
     })
+}
+
+fn setup(directory: &Path) -> Result<(), Box<dyn Error>> {
+    crate::initialize_manual_server_certificate(&directory.join("cert"), "localhost")?;
+    let identity = crate::generate_client_identity()?;
+    std::fs::create_dir(directory.join("identity"))?;
+    std::fs::write(
+        directory
+            .join("identity")
+            .join(crate::CLIENT_IDENTITY_FILENAME),
+        identity.client_identity.to_string(),
+    )?;
+    for (file, bytes) in [
+        (
+            crate::CLIENT_CERT_FILENAME,
+            identity.certificate_pem.as_bytes(),
+        ),
+        (
+            crate::CLIENT_KEY_FILENAME,
+            identity.private_key_pem.as_bytes(),
+        ),
+    ] {
+        std::fs::write(directory.join("identity").join(file), bytes)?;
+    }
+    std::fs::write(
+        directory.join("server.toml"),
+        format!(
+            "[server]\nhostname = \"localhost\"\ncert-dir = \"cert\"\n[[server.tunnels]]\npublic-hostnames = [\"app.example.test\"]\nclient-identity = \"{}\"\n",
+            identity.client_identity
+        ),
+    )?;
+    Ok(())
 }
 
 #[test]
@@ -75,21 +123,10 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
     runtime.block_on(async {
         match role.as_str() {
             "setup" => {
-                crate::initialize_manual_server_certificate(&directory.join("cert"), "localhost")?;
-                let identity = crate::generate_client_identity()?;
-                std::fs::create_dir(directory.join("identity"))?;
-                std::fs::write(directory.join("identity").join(crate::CLIENT_IDENTITY_FILENAME), identity.client_identity.to_string())?;
-                for (file, bytes) in [
-                    (crate::CLIENT_CERT_FILENAME, identity.certificate_pem.as_bytes()),
-                    (crate::CLIENT_KEY_FILENAME, identity.private_key_pem.as_bytes()),
-                ] {
-                    std::fs::write(directory.join("identity").join(file), bytes)?;
-                }
-                std::fs::write(directory.join("server.toml"), format!(
-                    "[server]\nhostname = \"localhost\"\ncert-dir = \"cert\"\n[[server.tunnels]]\npublic-hostnames = [\"app.example.test\"]\nclient-identity = \"{}\"\n", identity.client_identity
-                ))?;
+                setup(&directory)?;
             }
             "server" => {
+                crate::runtime_log::install(crate::LogLevel::Info)?;
                 let id = std::env::var("RUNEWARP_BENCH_ID")?;
                 let config = crate::load_server_config(&directory.join("server.toml"))?;
                 let server = crate::ServerRuntime::prepare(&config, address(0), tunnel_bind).await?;
@@ -104,6 +141,7 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
                 write_json(&directory.join(format!("server-{id}.counts.json")), counts())?;
             }
             "client" => {
+                crate::runtime_log::install(crate::LogLevel::Info)?;
                 let config = crate::load_client_config(&directory.join("client.toml"))?;
                 let client = crate::ClientRuntime::prepare(&config, tunnel_bind).await?;
                 let announce = async {
@@ -119,7 +157,7 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
                 write_json(&directory.join("client.counts.json"), counts())?;
             }
             "backend" => {
-                let listener = TcpListener::bind(address(0)).await?;
+                let listener = TcpListener::bind("[::1]:0").await?;
                 write_json(&directory.join("backend.ready"), serde_json::json!({"address":listener.local_addr()?.to_string()}))?;
                 let mut tasks = tokio::task::JoinSet::new();
                 loop {
@@ -286,4 +324,123 @@ async fn load(directory: &Path) -> Result<(), Box<dyn Error>> {
         }),
     )?;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_budget_waits_for_credit_through_real_runtimes() -> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    setup(directory.path())?;
+    let listener = TcpListener::bind("[::1]:0").await?;
+    let backend_address = listener.local_addr()?;
+    let backend = tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (mut socket, _) = accepted.expect("backend accept");
+                    tasks.spawn(async move {
+                        let (mut read, mut write) = socket.split();
+                        let _ = tokio::io::copy(&mut read, &mut write).await;
+                    });
+                }
+                _ = tasks.join_next(), if !tasks.is_empty() => {}
+            }
+        }
+    });
+    let tunnel_bind = tokio::net::lookup_host(("localhost", 0))
+        .await?
+        .next()
+        .ok_or("localhost has no address")?;
+    let server_settings = crate::load_server_config(&directory.path().join("server.toml"))?;
+    let server = crate::ServerRuntime::prepare(&server_settings, address(0), tunnel_bind).await?;
+    let public = server.public_addr()?;
+    let port = server.tunnel_addr()?.port();
+    let shutdown = server.shutdown();
+    let server = tokio::spawn(server.run());
+    let config_path = directory.path().join("client.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[client]\nserver-address = \"localhost:{port}\"\nmax-visitor-streams = 256\nserver-trust = \"ca-file\"\nserver-ca-file = \"cert/server-ca.crt\"\nidentity-dir = \"identity\"\n[[client.services]]\nbackend-address = \"{backend_address}\"\n"
+        ),
+    )?;
+    let settings = crate::load_client_config(&config_path)?;
+    let runtime = crate::ClientRuntime::prepare(&settings, tunnel_bind).await?;
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let client = runtime.run(async {
+        let _ = stopped.await;
+        Ok(crate::ShutdownMode::Fast)
+    });
+    tokio::pin!(client);
+    let work = async {
+        let mut sockets = Vec::new();
+        // The first successful full echo is readiness, not a guessed sleep or an attempted socket.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(Ok((socket, _, _))) = tokio::time::timeout(
+                Duration::from_millis(500),
+                connect_visitor(public, client_hello()?, 0),
+            )
+            .await
+            {
+                sockets.push(socket);
+                break;
+            }
+            if Instant::now() > deadline {
+                return Err::<(), Box<dyn Error>>("runtime readiness deadline".into());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        for index in 1..256 {
+            sockets.push(
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    connect_visitor(public, client_hello()?, index),
+                )
+                .await??
+                .0,
+            );
+        }
+        let pending = connect_visitor(public, client_hello()?, 256);
+        tokio::pin!(pending);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut pending)
+                .await
+                .is_err(),
+            "257th Visitor must wait at configured capacity"
+        );
+        // Keep every admitted Visitor held. The Server's real five-second deadline, rather
+        // than the Client reset guard, rejects the excess Visitor. Recovery after completion
+        // has separate transport tests; this regression checks configured runtime admission.
+        let elapsed = Instant::now();
+        let excess = tokio::time::timeout(Duration::from_secs(6), pending).await?;
+        assert!(
+            excess.is_err(),
+            "excess Visitor must reach the open deadline"
+        );
+        assert!(
+            elapsed.elapsed() >= Duration::from_secs(4),
+            "Server must wait for credit, not reset immediately"
+        );
+        let mut first = sockets.pop().expect("256 byte-validated Visitors");
+        first.write_all(b"still working").await?;
+        let mut bytes = [0; 13];
+        first.read_exact(&mut bytes).await?;
+        assert_eq!(&bytes, b"still working");
+        Ok(())
+    };
+    tokio::pin!(work);
+    let (work, client_finished) = tokio::select! {
+        result = &mut work => (result, false),
+        result = &mut client => (Err(format!("Client exited early: {result:?}").into()), true),
+    };
+    let _ = stop.send(());
+    shutdown.begin_fast();
+    if !client_finished {
+        tokio::time::timeout(Duration::from_secs(5), client).await??;
+    }
+    tokio::time::timeout(Duration::from_secs(5), server).await???;
+    backend.abort();
+    let _ = backend.await;
+    work
 }

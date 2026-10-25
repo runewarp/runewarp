@@ -282,6 +282,15 @@ pub fn server_public_listener_accept_recovered() {
     emit(EventLevel::Info, "server public listener accept recovered");
 }
 
+pub(crate) fn client_visitor_capacity(configured: usize, effective: usize) {
+    emit(
+        EventLevel::Info,
+        &format!(
+            "client Visitor capacity: max-visitor-streams={effective} configured={configured}"
+        ),
+    );
+}
+
 pub fn warning(role: &str, message: &str) {
     emit(EventLevel::Warn, &warning_line(role, message));
 }

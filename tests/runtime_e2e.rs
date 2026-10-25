@@ -2199,6 +2199,7 @@ client-identity = "{}"
     let server_task = tokio::spawn(server.run());
 
     let client_settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -2369,6 +2370,7 @@ client-identity = "{}"
     let server_task = tokio::spawn(server.run());
 
     let client_settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -2524,6 +2526,7 @@ client-identity = "{}"
     let server_task = tokio::spawn(server.run());
 
     let client_settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![
             server_address("tunnel.example.test:1"),
             server_address("tunnel.example.test:2"),
@@ -2720,6 +2723,7 @@ client-identity = "{}"
     let server_task = tokio::spawn(server.run());
 
     let client_settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -2862,6 +2866,7 @@ client-identity = "{}"
     let server_task = tokio::spawn(server.run());
 
     let client_settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,

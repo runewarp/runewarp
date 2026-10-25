@@ -1447,6 +1447,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rlimit"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "runewarp"
 version = "0.3.0-dev"
 dependencies = [
@@ -1466,6 +1475,7 @@ dependencies = [
  "quinn",
  "rand 0.9.5",
  "rcgen 0.14.8",
+ "rlimit",
  "rustls",
  "rustls-acme",
  "rustls-native-certs",

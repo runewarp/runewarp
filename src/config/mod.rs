@@ -112,6 +112,8 @@ pub enum ServerCertificateConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientConfig {
+    /// Aggregate idle-credit and active-Visitor capacity across this Client instance.
+    pub max_visitor_streams: usize,
     pub server_addresses: Vec<ServerAddress>,
     pub server_hostname: ServerHostname,
     pub server_port: u16,
@@ -635,6 +637,7 @@ pub(crate) fn validate_prepared_client_config(
     prepared: PreparedClientConfig,
 ) -> Result<ClientConfig, ConfigFileError> {
     let PreparedClientConfig {
+        max_visitor_streams,
         server_address,
         server_addresses,
         log_level,
@@ -651,6 +654,10 @@ pub(crate) fn validate_prepared_client_config(
     } = prepared;
     let mut messages = unknown_field_messages;
     messages.extend(control.unknown_field_messages);
+
+    if !(256..=1_048_576).contains(&max_visitor_streams) {
+        messages.push("client.max-visitor-streams must be between 256 and 1048576".to_owned());
+    }
 
     let managed = control.address.is_some();
     if control.section_present && control.address.is_none() {
@@ -892,6 +899,7 @@ pub(crate) fn validate_prepared_client_config(
             }
         };
         Ok(ClientConfig {
+            max_visitor_streams,
             server_addresses: validated_server_addresses,
             server_hostname,
             server_port,
@@ -1655,6 +1663,7 @@ pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value)
     push_unknown_table_fields(
         client,
         &[
+            "max-visitor-streams",
             "server-address",
             "server-addresses",
             "server-trust",
@@ -1746,6 +1755,7 @@ pub(crate) struct RawServerTunnelConfig {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct RawClientConfig {
+    pub(crate) max_visitor_streams: Option<usize>,
     pub(crate) server_address: Option<String>,
     pub(crate) server_addresses: Option<Vec<String>>,
     pub(crate) server_trust: Option<String>,

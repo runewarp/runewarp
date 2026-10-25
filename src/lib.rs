@@ -7,6 +7,7 @@ mod client_public_cert;
 mod client_runtime;
 pub mod config;
 mod control_address;
+mod fd_capacity;
 mod hostname;
 mod identity;
 pub mod managed_session;

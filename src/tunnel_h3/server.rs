@@ -197,11 +197,13 @@ impl ServerTunnelH3 {
                 .as_ref()
                 .expect("wait_for observed an established session")
                 .clone();
-            let mut stream = opener
-                .opener()
-                .open_bi()
-                .await
-                .map_err(|_| OpenTunnelStreamError::Closed)?;
+            let mut stream = opener.opener().open_bi().await.map_err(|error| {
+                #[cfg(test)]
+                crate::capacity_benchmark::record_open_error(format!("{error:?}"));
+                #[cfg(not(test))]
+                let _ = error;
+                OpenTunnelStreamError::Closed
+            })?;
             if *self.shared.goaway.borrow() {
                 stream.reset(Code::H3_REQUEST_REJECTED.value());
                 stream.stop_sending(Code::H3_REQUEST_REJECTED.value());

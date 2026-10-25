@@ -34,8 +34,8 @@ impl Default for ServerAdmissionLimits {
             max_pending_visitors: 4_096,
             max_pending_visitors_per_source: 256,
             max_pending_handshakes: 256,
-            max_pending_stream_opens: 1_024,
-            max_active_routed_streams: 4_096,
+            max_pending_stream_opens: 4_096,
+            max_active_routed_streams: 65_536,
             max_tunnel_connections: 4_096,
             max_tunnel_connections_per_tunnel: 256,
             max_tunnel_connections_per_identity: 64,
@@ -205,6 +205,9 @@ impl ServerAdmissionPolicy {
     }
 
     pub(crate) fn report_saturation(&self, rejection: AdmissionRejection) {
+        #[cfg(test)]
+        crate::capacity_benchmark::ADMISSION_BY_LIMIT[rejection.limit as usize]
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         #[cfg(test)]
         crate::capacity_benchmark::ADMISSION_REJECTIONS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -505,8 +508,8 @@ mod tests {
         assert_eq!(limits.max_pending_visitors, 4_096);
         assert_eq!(limits.max_pending_visitors_per_source, 256);
         assert_eq!(limits.max_pending_handshakes, 256);
-        assert_eq!(limits.max_pending_stream_opens, 1_024);
-        assert_eq!(limits.max_active_routed_streams, 4_096);
+        assert_eq!(limits.max_pending_stream_opens, 4_096);
+        assert_eq!(limits.max_active_routed_streams, 65_536);
         assert_eq!(limits.max_tunnel_connections, 4_096);
         assert_eq!(limits.max_tunnel_connections_per_tunnel, 256);
         assert_eq!(limits.max_tunnel_connections_per_identity, 64);

@@ -133,6 +133,11 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
         .build()?;
     runtime.block_on(async {
         match role.as_str() {
+            "provenance" => {
+                write_json(&directory.join("build-provenance.json"), serde_json::json!({
+                    "rust_source_sha256": option_env!("RUNEWARP_BENCH_SOURCE_SHA256")
+                }))?;
+            }
             "setup" => {
                 setup(&directory)?;
             }

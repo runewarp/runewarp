@@ -25,3 +25,36 @@ class BenchmarkVisitorCapacityTest < Minitest::Test
     end
   end
 end
+
+class BenchmarkVisitorCapacityProvenanceTest < Minitest::Test
+  def test_stale_binary_provenance_is_rejected_and_rust_changes_change_the_key
+    Dir.mktmpdir do |directory|
+      FileUtils.mkdir_p(File.join(directory, "src"))
+      File.write(File.join(directory, "Cargo.toml"), "[package]\n")
+      File.write(File.join(directory, "Cargo.lock"), "version = 4\n")
+      File.write(File.join(directory, "src", "lib.rs"), "const BUDGET: usize = 8;\n")
+      python = <<~PYTHON
+        import json, sys
+        from pathlib import Path
+        sys.path.insert(0, 'scripts')
+        from lib.visitor_capacity_metadata import rust_source_sha256, verify_binary_provenance
+        root = Path(sys.argv[1])
+        old = rust_source_sha256(root)
+        (root / 'build-provenance.json').write_text(json.dumps({'rust_source_sha256': old}))
+        verify_binary_provenance(root, old)
+        (root / 'src/lib.rs').write_text('const BUDGET: usize = 256;\\n')
+        current = rust_source_sha256(root)
+        assert old != current
+        try:
+            verify_binary_provenance(root, current)
+        except ValueError:
+            print('stale binary rejected')
+        else:
+            raise AssertionError('stale binary was accepted')
+      PYTHON
+      result = run_command("python3", "-B", "-c", python, directory)
+      assert(result.success?, result.stderr)
+      assert_equal("stale binary rejected\n", result.stdout)
+    end
+  end
+end

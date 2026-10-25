@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import platform
 import resource
+import shutil
 import socket
 import subprocess
 import threading
@@ -19,7 +20,7 @@ import time
 import sys
 import psutil
 sys.dont_write_bytecode = True
-from lib.visitor_capacity_metadata import portable_invocation
+from lib.visitor_capacity_metadata import portable_invocation, rust_source_sha256, verify_binary_provenance
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output', type=Path, required=True)
@@ -30,14 +31,32 @@ args.output.mkdir(parents=True, exist_ok=False)
 print('Build\nBuilding release benchmark roles', flush=True)
 loopback = socket.getaddrinfo("localhost", 0, type=socket.SOCK_DGRAM)[0][4][0]
 tunnel_bind = f"[{loopback}]:0" if ":" in loopback else f"{loopback}:0"
-build = subprocess.run(['cargo', 'test', '--release', '--lib', '--no-run', '--message-format=json'], capture_output=True, text=True)
+source_key = rust_source_sha256(Path.cwd())
+build_env = dict(os.environ, RUNEWARP_BENCH_SOURCE_SHA256=source_key)
+build = subprocess.run(['cargo', 'test', '--release', '--lib', '--no-run', '--message-format=json'], env=build_env, capture_output=True, text=True)
 (args.output / 'build.log').write_text(build.stderr)
 build.check_returncode()
 artifacts = [json.loads(line) for line in build.stdout.splitlines() if line.startswith('{')]
 binary = next(a['executable'] for a in artifacts if a.get('executable') and a.get('profile', {}).get('test') and a['target']['name'] == 'runewarp')
+if rust_source_sha256(Path.cwd()) != source_key:
+    raise RuntimeError('Rust sources changed during benchmark build')
+# Freeze the verified bytes so another build cannot replace role executables mid-capture.
+frozen_binary = args.output.resolve() / 'benchmark-role'
+shutil.copy2(binary, frozen_binary)
+binary = str(frozen_binary)
+print('Verify\nChecking the compiled Rust source fingerprint', flush=True)
+proof = subprocess.run([binary, '--ignored', '--exact', 'capacity_benchmark::visitor_capacity_role', '--nocapture'],
+                       env=dict(os.environ, RUNEWARP_BENCH_ROLE='provenance', RUNEWARP_BENCH_DIR=str(args.output.resolve()), RUNEWARP_BENCH_TUNNEL_BIND=tunnel_bind),
+                       capture_output=True, text=True)
+(args.output / 'provenance.log').write_text(proof.stdout + proof.stderr)
+if proof.returncode:
+    raise RuntimeError('benchmark provenance unavailable; see provenance.log and rebuild with a separate CARGO_TARGET_DIR')
+verify_binary_provenance(args.output, source_key)
+
 environment = {'platform': platform.platform(), 'machine': platform.machine(), 'cpu_count': os.cpu_count(),
                'memory_bytes': psutil.virtual_memory().total, 'nofile': resource.getrlimit(resource.RLIMIT_NOFILE),
                'psutil': psutil.__version__, 'sampling_interval_seconds': 0.25,
+               'rust_source_sha256': source_key,
                'rustc': subprocess.check_output(['rustc', '-Vv'], text=True),
                'git_head': os.environ.get('RUNEWARP_BENCH_SOURCE_HEAD') or subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                'tracked_source_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], text=True)),

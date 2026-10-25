@@ -5,14 +5,16 @@ require "json"
 module Runewarp
   module CratesIo
     # The crates.io pause switch. While this is a reason string, CI package readiness and the
-    # Release workflow skip `cargo publish`. To resume, switch `h3` / `h3-quinn` to crates.io
+    # Release workflow skip `cargo publish`. To resume, switch every h3 crate to crates.io
     # versions in `Cargo.toml`, then set this to nil.
-    PUBLISHING_PAUSE_REASON = "Core depends on a git-pinned h3 until upstream releases its fixes (https://github.com/hyperium/h3/issues/369)"
+    PUBLISHING_PAUSE_REASON = "Core depends on the git-pinned https://github.com/runewarp/h3 fork (https://github.com/runewarp/runewarp/issues/253)"
 
     # Git dependencies tolerated while publishing is paused, keyed by package name.
     ALLOWED_GIT_DEPENDENCIES = {
-      "h3" => "https://github.com/hyperium/h3",
-      "h3-quinn" => "https://github.com/hyperium/h3"
+      "h3" => "https://github.com/runewarp/h3",
+      "h3-quinn" => "https://github.com/runewarp/h3",
+      "h3-webtransport" => "https://github.com/runewarp/h3",
+      "h3-datagram" => "https://github.com/runewarp/h3"
     }.freeze
 
     module_function
@@ -27,7 +29,9 @@ module Runewarp
 
     def allowed_git_dependencies_description
       ALLOWED_GIT_DEPENDENCIES.group_by { |_name, url| url }.map do |url, entries|
-        "#{entries.map(&:first).join(' and ')} from #{url}"
+        names = entries.map(&:first)
+        list = names.length == 1 ? names.first : "#{names[0...-1].join(', ')} and #{names.last}"
+        "#{list} from #{url}"
       end.join(", ")
     end
 

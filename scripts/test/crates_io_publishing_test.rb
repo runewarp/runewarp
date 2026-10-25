@@ -5,7 +5,7 @@ require_relative "support/test_helper"
 require_relative "../lib/runewarp"
 
 class CratesIoPublishingTest < Minitest::Test
-  H3_SOURCE = "git+https://github.com/hyperium/h3?rev=43745ad87e95b0c035ac9c547aad467303213425#43745ad87e95b0c035ac9c547aad467303213425"
+  H3_SOURCE = "git+https://github.com/runewarp/h3?rev=df27106fb243baaf867d11441d11cf671ec9da7e#df27106fb243baaf867d11441d11cf671ec9da7e"
 
   def metadata_json(*packages)
     JSON.generate(
@@ -13,11 +13,50 @@ class CratesIoPublishingTest < Minitest::Test
     )
   end
 
-  def test_pause_reason_links_the_upstream_h3_release_request
+  def with_allowed_git_dependencies(dependencies)
+    original = Runewarp::CratesIo::ALLOWED_GIT_DEPENDENCIES
+    Runewarp::CratesIo.send(:remove_const, :ALLOWED_GIT_DEPENDENCIES)
+    Runewarp::CratesIo.const_set(:ALLOWED_GIT_DEPENDENCIES, dependencies.freeze)
+    yield
+  ensure
+    Runewarp::CratesIo.send(:remove_const, :ALLOWED_GIT_DEPENDENCIES)
+    Runewarp::CratesIo.const_set(:ALLOWED_GIT_DEPENDENCIES, original)
+  end
+
+  def test_allowed_git_dependencies_description_with_one_name
+    with_allowed_git_dependencies("h3" => "https://github.com/runewarp/h3") do
+      assert_equal("h3 from https://github.com/runewarp/h3", Runewarp::CratesIo.allowed_git_dependencies_description)
+    end
+  end
+
+  def test_allowed_git_dependencies_description_with_two_names
+    with_allowed_git_dependencies(
+      "h3" => "https://github.com/runewarp/h3",
+      "h3-quinn" => "https://github.com/runewarp/h3"
+    ) do
+      assert_equal("h3 and h3-quinn from https://github.com/runewarp/h3", Runewarp::CratesIo.allowed_git_dependencies_description)
+    end
+  end
+
+  def test_allowed_git_dependencies_description_groups_names_by_url
+    with_allowed_git_dependencies(
+      "h3" => "https://github.com/runewarp/h3",
+      "quinn" => "https://github.com/quinn-rs/quinn",
+      "h3-quinn" => "https://github.com/runewarp/h3"
+    ) do
+      assert_equal(
+        "h3 and h3-quinn from https://github.com/runewarp/h3, quinn from https://github.com/quinn-rs/quinn",
+        Runewarp::CratesIo.allowed_git_dependencies_description
+      )
+    end
+  end
+
+  def test_pause_reason_links_the_fork_decision
     reason = Runewarp::CratesIo::PUBLISHING_PAUSE_REASON
     skip("crates.io publishing is not paused") if reason.nil?
 
-    assert_includes(reason, "https://github.com/hyperium/h3/issues/369")
+    assert_includes(reason, "https://github.com/runewarp/h3")
+    assert_includes(reason, "https://github.com/runewarp/runewarp/issues/253")
   end
 
   def test_registry_and_path_dependencies_are_not_reported
@@ -31,23 +70,30 @@ class CratesIoPublishingTest < Minitest::Test
   end
 
   def test_allowlisted_h3_git_dependencies_are_accepted
-    metadata = metadata_json(["h3", "0.0.8", H3_SOURCE], ["h3-quinn", "0.0.10", H3_SOURCE])
+    metadata = metadata_json(*%w[h3 h3-quinn h3-webtransport h3-datagram].map { |name| [name, "0.0.8", H3_SOURCE] })
 
     assert_empty(Runewarp::CratesIo.unexpected_git_dependencies(metadata))
+  end
+
+  def test_all_h3_crates_reject_upstream_and_other_git_repositories
+    %w[h3 h3-quinn h3-webtransport h3-datagram].each do |name|
+      %w[https://github.com/hyperium/h3 https://github.com/someone/h3-fork https://github.com/runewarp/h3-other].each do |repository|
+        source = "git+#{repository}?rev=abc#abc"
+        assert_equal(["#{name} 0.0.8 (#{source})"], Runewarp::CratesIo.unexpected_git_dependencies(metadata_json([name, "0.0.8", source])))
+      end
+    end
   end
 
   def test_other_git_dependencies_are_reported
     metadata = metadata_json(
       ["h3", "0.0.8", H3_SOURCE],
       ["quinn", "0.11.9", "git+https://github.com/quinn-rs/quinn?branch=main#abc123"],
-      ["h3-datagram", "0.0.2", H3_SOURCE],
       ["h3", "0.0.8", "git+https://github.com/someone/h3-fork?rev=abc#abc"]
     )
 
     assert_equal(
       [
         "quinn 0.11.9 (git+https://github.com/quinn-rs/quinn?branch=main#abc123)",
-        "h3-datagram 0.0.2 (#{H3_SOURCE})",
         "h3 0.0.8 (git+https://github.com/someone/h3-fork?rev=abc#abc)"
       ],
       Runewarp::CratesIo.unexpected_git_dependencies(metadata)

@@ -14,6 +14,15 @@ use crate::quic::{
 
 use super::TUNNEL_H3_ALPN;
 
+/// Maximum decoded HTTP/3 field-section size on either peer, limiting QPACK expansion.
+pub(super) const MAX_FIELD_SECTION_SIZE: u64 = 16 * 1024;
+
+/// Connection-wide QUIC receive credit on either peer, bounding unread transport data across streams.
+const CONNECTION_RECEIVE_WINDOW: u32 = 64 * 1024 * 1024;
+
+/// Per-stream QUIC receive credit on either peer, retaining Quinn's 1.25 MB default.
+const STREAM_RECEIVE_WINDOW: u32 = 1_250_000;
+
 /// Receive slots, idle or assigned, one Tunnel connection may hold: the Client-instance
 /// stream-handler budget, which no single connection can exceed.
 const MAX_RECEIVE_SLOTS: u32 = 1024;
@@ -102,6 +111,8 @@ fn client_transport_config() -> TransportConfig {
 fn base_transport_config() -> TransportConfig {
     let mut transport_config = TransportConfig::default();
     transport_config.max_concurrent_uni_streams(MAX_H3_UNI_STREAMS.into());
+    transport_config.receive_window(CONNECTION_RECEIVE_WINDOW.into());
+    transport_config.stream_receive_window(STREAM_RECEIVE_WINDOW.into());
     transport_config.max_idle_timeout(Some(
         IDLE_TIMEOUT
             .try_into()
@@ -113,6 +124,18 @@ fn base_transport_config() -> TransportConfig {
 #[cfg(test)]
 mod tests {
     use super::{client_transport_config, server_transport_config};
+
+    #[test]
+    fn both_peers_bound_connection_and_stream_receive_windows() {
+        for config in [server_transport_config(), client_transport_config()] {
+            let config = format!("{config:?}");
+            assert!(config.contains("receive_window: 67108864"), "{config}");
+            assert!(
+                config.contains("stream_receive_window: 1250000"),
+                "{config}"
+            );
+        }
+    }
 
     #[test]
     fn transport_admits_client_requests_only_and_keeps_alive_from_the_client() {

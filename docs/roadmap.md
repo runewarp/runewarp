@@ -15,7 +15,7 @@ See [architecture](architecture.md), [protocol](protocol.md), and [configuration
 
 ## Protocol evolution — Active
 
-The [HTTP/3 reverse-tunnel issue map](https://github.com/runewarp/runewarp/issues/167) tracks the remaining signaling and graceful Client-drain work. Client and Server runtimes now use ordinary HTTP/3 on unmodified upstream `h3` + `h3-quinn`, with ALPN `h3`, required mTLS, no application 0-RTT, the Tunnel event-stream gate, receive-slot Visitor carriage, and GOAWAY Server shutdown. This is a lockstep upgrade from `runewarp/1`, without fallback.
+The [HTTP/3 reverse-tunnel issue map](https://github.com/runewarp/runewarp/issues/167) tracks the remaining signaling and graceful Client-drain work. Client and Server runtimes now use ordinary HTTP/3 on the git-pinned `runewarp/h3` fork's `h3` + `h3-quinn`, with ALPN `h3`, required mTLS, no application 0-RTT, the Tunnel event-stream gate, receive-slot Visitor carriage, and GOAWAY Server shutdown. This is a lockstep upgrade from `runewarp/1`, without fallback.
 
 Connection-scoped placement withdrawal and graceful Client drain remain follow-up work. Managed configuration stays on the separate Managed session.
 

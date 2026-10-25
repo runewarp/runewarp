@@ -772,7 +772,7 @@ dependencies = [
 [[package]]
 name = "h3"
 version = "0.0.8"
-source = "git+https://github.com/hyperium/h3?rev=43745ad87e95b0c035ac9c547aad467303213425#43745ad87e95b0c035ac9c547aad467303213425"
+source = "git+https://github.com/runewarp/h3?rev=df27106fb243baaf867d11441d11cf671ec9da7e#df27106fb243baaf867d11441d11cf671ec9da7e"
 dependencies = [
  "bytes",
  "fastrand",
@@ -785,7 +785,7 @@ dependencies = [
 [[package]]
 name = "h3-quinn"
 version = "0.0.10"
-source = "git+https://github.com/hyperium/h3?rev=43745ad87e95b0c035ac9c547aad467303213425#43745ad87e95b0c035ac9c547aad467303213425"
+source = "git+https://github.com/runewarp/h3?rev=df27106fb243baaf867d11441d11cf671ec9da7e#df27106fb243baaf867d11441d11cf671ec9da7e"
 dependencies = [
  "bytes",
  "futures-util",

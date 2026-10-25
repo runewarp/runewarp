@@ -87,13 +87,13 @@ Manual publish applies the same signed-tag, trusted-commit, prior-green-`CI`, su
 
 ## crates.io publishing pause
 
-crates.io publishing is currently paused. Core depends on `h3` and `h3-quinn` through a git pin to upstream `hyperium/h3` until a release includes the fixes Core relies on ([hyperium/h3#369](https://github.com/hyperium/h3/issues/369)), and crates.io rejects git dependencies. Stable releases still publish Docker tags and the GitHub Release; the crate is not published. The mechanics are in [crates.io publishing pause](release-automation.md#cratesio-publishing-pause).
+crates.io publishing is currently paused. Core depends on `h3` and `h3-quinn` through an exact git pin to the [`runewarp/h3` fork](https://github.com/runewarp/h3), following [#253](https://github.com/runewarp/runewarp/issues/253), and crates.io rejects git dependencies. Stable releases still publish Docker tags and the GitHub Release; the crate is not published. The mechanics are in [crates.io publishing pause](release-automation.md#cratesio-publishing-pause).
 
-While paused, CI package readiness still fails on any git dependency other than the allowlisted `h3` and `h3-quinn`. Do not add other git dependencies to get around it.
+While paused, CI package readiness still fails on any git dependency other than `h3`, `h3-quinn`, `h3-webtransport`, and `h3-datagram` from `https://github.com/runewarp/h3`. Do not add other git dependencies to get around it.
 
 To resume publishing:
 
-1. Once `h3` and `h3-quinn` releases include the fixes Core needs, switch both in `Cargo.toml` from the git pin to those crates.io versions and update `Cargo.lock`.
+1. Once published h3 crates include all fork behavior Core uses, switch every h3 dependency in `Cargo.toml` from the git pin to those crates.io versions and update `Cargo.lock`.
 2. In the same PR, set `PUBLISHING_PAUSE_REASON` in `scripts/lib/runewarp/crates_io.rb` to `nil`.
 3. Remove the README note about crates.io being behind, and record the resumed crates.io releases in `CHANGELOG.md`.
 4. Merge only after `CI` is green; package readiness then runs `cargo publish --dry-run` again.

@@ -800,3 +800,163 @@ async fn event_stream_requests_must_be_complete_and_bodyless() {
         );
     }
 }
+
+/// Read a QUIC varint without pulling bytes from the next HTTP/3 field.
+async fn read_varint(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> u64 {
+    use tokio::io::AsyncReadExt;
+    let mut first = [0];
+    stream.read_exact(&mut first).await.expect("varint starts");
+    let width = 1_usize << (first[0] >> 6);
+    let mut value = u64::from(first[0] & 0x3f);
+    for _ in 1..width {
+        let mut byte = [0];
+        stream.read_exact(&mut byte).await.expect("varint ends");
+        value = (value << 8) | u64::from(byte[0]);
+    }
+    value
+}
+
+async fn advertised_header_bound(connection: &quinn::Connection) -> u64 {
+    timeout(STEP, async {
+        loop {
+            let mut stream = connection.accept_uni().await.expect("H3 uni stream");
+            if read_varint(&mut stream).await != 0 {
+                continue;
+            }
+            assert_eq!(read_varint(&mut stream).await, 4, "SETTINGS is first");
+            let length = read_varint(&mut stream).await;
+            assert!(length <= 1024, "bounded test SETTINGS payload");
+            let mut payload = vec![0; usize::try_from(length).expect("small length")];
+            stream
+                .read_exact(&mut payload)
+                .await
+                .expect("SETTINGS payload");
+            let mut payload = payload.as_slice();
+            while !payload.is_empty() {
+                let id = read_varint(&mut payload).await;
+                let value = read_varint(&mut payload).await;
+                if id == 6 {
+                    return value;
+                }
+            }
+            panic!("SETTINGS_MAX_FIELD_SECTION_SIZE is required");
+        }
+    })
+    .await
+    .expect("SETTINGS arrive")
+}
+
+#[tokio::test]
+async fn both_peers_advertise_a_16_kib_header_section_bound() {
+    let fixture = Fixture::new().expect("fixture");
+    let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
+    let server = ServerTunnelH3::establish(
+        server_connection,
+        server_hostname(),
+        ServerRuntimeGeneration::generate(),
+    )
+    .await
+    .expect("Server establishes");
+    assert_eq!(advertised_header_bound(&client_connection).await, 16_384);
+    drop(server);
+
+    let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
+    let client = tokio::spawn(async move {
+        ClientTunnelH3::establish(client_connection, &server_hostname(), no_slots()).await
+    });
+    assert_eq!(advertised_header_bound(&server_connection).await, 16_384);
+    client.abort();
+}
+
+#[tokio::test]
+async fn oversized_request_headers_are_bodyless_rejections_before_handler_spawn_and_allow_reuse() {
+    let fixture = Fixture::new().expect("fixture");
+    let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
+    let server = ServerTunnelH3::establish(
+        server_connection,
+        server_hostname(),
+        ServerRuntimeGeneration::generate(),
+    )
+    .await
+    .expect("Server establishes");
+    // Send before polling the raw Client driver, so its cached SETTINGS cannot prevent this
+    // deliberately over-limit request from reaching the Server.
+    let (mut driver, mut sender) = h3::client::new(h3_quinn::Connection::new(client_connection))
+        .await
+        .expect("raw Client");
+    let request = Request::get(format!("https://{SERVER_NAME}{TUNNEL_EVENTS_PATH}"))
+        .header("x-padding", "a".repeat(16_384))
+        .body(())
+        .expect("valid request");
+    let mut stream = timeout(STEP, sender.send_request(request))
+        .await
+        .expect("request opens promptly")
+        .expect("raw Client has not received SETTINGS");
+    stream.finish().await.expect("request FIN");
+    let driver = tokio::spawn(async move {
+        let _ = poll_fn(|context| driver.poll_close(context)).await;
+    });
+    let response = timeout(STEP, stream.recv_response())
+        .await
+        .expect("rejection arrives")
+        .expect("bodyless rejection response");
+    assert_eq!(
+        response.status(),
+        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+    );
+    assert!(
+        timeout(STEP, stream.recv_data())
+            .await
+            .expect("response ends")
+            .expect("valid body")
+            .is_none()
+    );
+    assert_eq!(server.handlers_spawned(), 0);
+    assert_eq!(server.idle_receive_slots(), 0);
+
+    let (response, mut events) = raw_request(
+        &mut sender,
+        Method::GET,
+        &format!("https://{SERVER_NAME}{TUNNEL_EVENTS_PATH}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        read_event_block(&mut events)
+            .await
+            .expect("state event")
+            .contains("event: state")
+    );
+    assert_eq!(server.handlers_spawned(), 1);
+    driver.abort();
+}
+
+#[tokio::test]
+async fn a_stalled_header_section_does_not_block_other_requests() {
+    let fixture = Fixture::new().expect("fixture");
+    let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
+    let server = ServerTunnelH3::establish(
+        server_connection,
+        server_hostname(),
+        ServerRuntimeGeneration::generate(),
+    )
+    .await
+    .expect("Server establishes");
+    let (mut stalled_send, _stalled_recv) = client_connection.open_bi().await.expect("raw stream");
+    // HEADERS type with no length or payload, kept open beyond the valid request's deadline.
+    stalled_send.write_all(&[1]).await.expect("partial HEADERS");
+    let (mut sender, driver) = raw_client(client_connection).await;
+    let (response, _) = timeout(
+        STEP,
+        raw_request(
+            &mut sender,
+            Method::GET,
+            &format!("https://{SERVER_NAME}/unknown"),
+        ),
+    )
+    .await
+    .expect("valid request finishes before the stalled header's five-second deadline");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(server.handlers_spawned(), 1);
+    driver.abort();
+}

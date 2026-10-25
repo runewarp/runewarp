@@ -1,7 +1,7 @@
 //! Ordinary-HTTP/3 Tunnel connections.
 //!
-//! This module owns HTTP/3 on one authenticated Tunnel connection, built on unmodified upstream
-//! `h3` + `h3-quinn` over Quinn and rustls:
+//! This module owns HTTP/3 on one authenticated Tunnel connection, built on the git-pinned
+//! `runewarp/h3` fork's `h3` + `h3-quinn` over Quinn and rustls:
 //!
 //! - ALPN `h3` with a required, pinned Client identity certificate and no application 0-RTT;
 //! - the Tunnel event stream, a Client-opened `GET /v1/tunnel/events` whose first valid `state`

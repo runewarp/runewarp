@@ -11,6 +11,7 @@ struct State {
     idle: Vec<OwnedSemaphorePermit>,
     /// Active handler permits plus idle permits. All Quinn limit changes use this mutex.
     held: usize,
+    maintaining: bool,
     closed: bool,
 }
 
@@ -36,6 +37,7 @@ impl VisitorCredits {
             state: Mutex::new(State {
                 idle: Vec::new(),
                 held: 0,
+                maintaining: true,
                 closed: false,
             }),
             active: watch::Sender::new(0),
@@ -68,7 +70,7 @@ impl VisitorCredits {
 
     pub(super) fn needs_idle(&self) -> bool {
         let state = self.state();
-        !state.closed && state.idle.len() < MAX_IDLE_VISITOR_CREDIT
+        state.maintaining && state.idle.len() < MAX_IDLE_VISITOR_CREDIT
     }
 
     pub(super) fn budget(&self) -> Arc<Semaphore> {
@@ -83,7 +85,7 @@ impl VisitorCredits {
 
     pub(super) fn offer(&self, permit: OwnedSemaphorePermit) {
         let mut state = self.state();
-        if state.closed {
+        if !state.maintaining {
             return;
         }
         state.idle.push(permit);
@@ -135,12 +137,24 @@ impl VisitorCredits {
             .await;
     }
 
+    /// DRAIN ends idle maintenance while retaining intake and active/queued Visitor leases.
+    /// GOAWAY alone cannot do this: a committed stream can still need its reserved permit.
+    pub(super) fn stop_idle(&self) {
+        self.release_idle(&mut self.state());
+    }
+
+    fn release_idle(&self, state: &mut State) {
+        state.maintaining = false;
+        state.held -= state.idle.len();
+        // Lower the target before releasing actual capacity to another connection.
+        self.set_limit(state);
+        state.idle.clear();
+    }
+
     pub(super) fn close(&self) {
         let mut state = self.state();
         state.closed = true;
-        state.held -= state.idle.len();
-        self.set_limit(&state);
-        state.idle.clear();
+        self.release_idle(&mut state);
     }
 
     #[cfg(test)]

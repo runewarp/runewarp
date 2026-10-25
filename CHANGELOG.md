@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Changed
 
-- Replaced HTTP/3 receive slots with Server-opened WebTransport Visitor streams, with 256 permit-backed idle credits per connection and a shared 1,024-Visitor Client budget. Graceful Server shutdown now waits for Client Visitor completion before ending the session. This is a breaking lockstep Tunnel protocol upgrade; Clients and Servers must upgrade together. (#265)
+- Replaced HTTP/3 receive slots with Server-opened WebTransport Visitor streams, with 256 permit-backed idle credits per connection and a shared 1,024-Visitor Client budget. Graceful Server shutdown now releases idle credits on WebTransport DRAIN and waits for Client Visitor completion before ending the session. This is a breaking lockstep Tunnel protocol upgrade; Clients and Servers must upgrade together. (#265)
 - Required Clients to establish one WebTransport draft07 session on every Tunnel connection, closing the whole connection when its WebTransport session ends while receive slots continue carrying Visitors. This is a breaking lockstep Tunnel protocol upgrade; Clients and Servers must upgrade together. (#264)
 - Switched all Tunnel connections to HTTP/3 with ALPN `h3`. This is a breaking lockstep upgrade: old and new Clients/Servers are incompatible; upgrade both together. (#250)
 

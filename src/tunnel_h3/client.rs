@@ -35,7 +35,8 @@ type ClientRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 ///
 /// After the gate and WebTransport session establishment it keeps up to [`MAX_IDLE_VISITOR_CREDIT`]
 /// idle credits reserved, each holding one permit from the Client-instance stream budget, and
-/// replenishes credit as permits become available. Visitor streams are delivered by
+/// replenishes credit as permits become available until WebTransport DRAIN releases idle capacity.
+/// GOAWAY alone preserves reservations for committed Visitors. Visitor streams are delivered by
 /// [`ClientTunnelH3::accept_tunnel_stream`].
 ///
 /// Dropping the handle closes the connection immediately with `H3_NO_ERROR`.
@@ -122,18 +123,17 @@ impl ClientTunnelH3 {
             || TunnelH3Error::SetupTimeout,
         )
         .await?;
+        let visitor_queue_limit =
+            std::num::NonZeroUsize::new(MAX_IDLE_VISITOR_CREDIT).expect("nonzero idle credit");
         let (mut driver, mut client) = h3_webtransport::client::new(
             driver,
             send_request,
             h3_webtransport::client::Limits {
                 // Keep the WebTransport session limit at one regardless of fork defaults.
                 sessions: std::num::NonZeroUsize::MIN,
-                incoming: std::num::NonZeroUsize::new(MAX_IDLE_VISITOR_CREDIT)
-                    .expect("nonzero idle credit"),
-                pending_prefixes: std::num::NonZeroUsize::new(MAX_IDLE_VISITOR_CREDIT)
-                    .expect("nonzero idle credit"),
-                streams_per_session: std::num::NonZeroUsize::new(MAX_IDLE_VISITOR_CREDIT)
-                    .expect("nonzero idle credit"),
+                incoming: visitor_queue_limit,
+                pending_prefixes: visitor_queue_limit,
+                streams_per_session: visitor_queue_limit,
             },
         );
         let mut send_request = client.send_request();
@@ -194,7 +194,7 @@ impl ClientTunnelH3 {
             // between connections. Session intake never waits for a handler or budget permit.
             let credits = &maintenance.0;
             let mut draining = false;
-            let acquisition = credits.budget().acquire_owned();
+            let acquisition = Some(credits.budget().acquire_owned());
             tokio::pin!(acquisition);
             loop {
                 let needs_idle = credits.needs_idle();
@@ -204,7 +204,16 @@ impl ClientTunnelH3 {
                 let stream = tokio::select! {
                     _ = session.closed() => break,
                     stream = session.accept_bi() => stream,
-                    _ = session.draining(), if !draining => { draining = true; continue; }
+                    _ = session.draining(), if !draining => {
+                        draining = true;
+                        // Drop even a pending acquisition so it retains no semaphore queue
+                        // position or reserved permit while this connection finishes Visitors.
+                        acquisition.set(None);
+                        credits.stop_idle();
+                        // draining() can also mean termination. Keep polling intake/closed
+                        // below so CLOSE without peer FIN still terminates immediately.
+                        continue;
+                    }
                     _ = credits.drained(), if draining => {
                         // draining() also wakes on termination. closed() can observe CLOSE but
                         // remain pending awaiting FIN. Check intake after those CONNECT polls:
@@ -219,12 +228,15 @@ impl ClientTunnelH3 {
                             }
                         }
                     },
-                    permit = &mut acquisition, if needs_idle => {
+                    permit = async {
+                        acquisition.as_mut().as_pin_mut()
+                            .expect("idle maintenance owns an acquisition").await
+                    }, if needs_idle => {
                         match permit {
                             Ok(permit) => credits.offer(permit),
                             Err(_) => break,
                         }
-                        acquisition.set(credits.budget().acquire_owned());
+                        acquisition.set(Some(credits.budget().acquire_owned()));
                         continue;
                     }
                     _ = session_connection.closed() => break,

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
@@ -308,6 +309,123 @@ async fn graceful_shutdown_retains_visitors_queued_for_application_acceptance() 
     timeout(STEP, shutdown)
         .await
         .expect("queue drains without prolonging shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drain_releases_idle_credit_for_a_sibling_before_the_client_finishes_its_tail() {
+    use crate::tunnel_h3::MAX_IDLE_VISITOR_CREDIT;
+
+    timeout(Duration::from_secs(15), async {
+        // Cover a full idle reserve, a pending refill, and a refill released during shutdown.
+        for (total, race_refill) in [
+            (MAX_IDLE_VISITOR_CREDIT + 1, false),
+            (MAX_IDLE_VISITOR_CREDIT, false),
+            (MAX_IDLE_VISITOR_CREDIT + 1, true),
+        ] {
+            let fixture = Fixture::new().expect("fixture");
+            let permits = budget(total);
+            let refill =
+                race_refill.then(|| permits.clone().try_acquire_owned().expect("held refill"));
+            let (server, mut client) = establish_pair(
+                &fixture,
+                ServerRuntimeGeneration::generate(),
+                permits.clone(),
+            )
+            .await;
+            wait_for_credit(&client, 0, MAX_IDLE_VISITOR_CREDIT).await;
+            let mut remote = server.open_tunnel_stream(STEP).await.expect("Visitor");
+            let mut local = client.accept_tunnel_stream().await.expect("handoff");
+            wait_for_credit(&client, 1, total - 1 - usize::from(race_refill)).await;
+            assert_eq!(permits.available_permits(), 0);
+            local.shutdown().await.expect("Client FIN");
+            remote
+                .read_to_end(&mut Vec::new())
+                .await
+                .expect("Server EOF");
+            remote.write_all(b"final tail").await.expect("tail");
+            remote.shutdown().await.expect("Server FIN enqueued");
+            drop(remote);
+
+            let server = Arc::new(server);
+            let shutdown = tokio::spawn({
+                let server = server.clone();
+                async move { server.shutdown(STEP).await }
+            });
+            // Make the pending refill ready while shutdown and the DRAIN exchange run on other threads.
+            drop(refill);
+            // A retained Client lease keeps the session alive while DRAIN releases only idle credit.
+            wait_for_credit(&client, 1, 0).await;
+            // This exact count also detects an uncancelled refill reserving a released permit.
+            assert_eq!(permits.available_permits(), total - 1);
+            assert!(!shutdown.is_finished());
+            assert!(client.closed().now_or_never().is_none());
+
+            let (sibling_server, mut sibling_client) = establish_pair(
+                &fixture,
+                ServerRuntimeGeneration::generate(),
+                permits.clone(),
+            )
+            .await;
+            wait_for_credit(&sibling_client, 0, total - 1).await;
+            let mut sibling_remote = sibling_server
+                .open_tunnel_stream(STEP)
+                .await
+                .expect("reclaimed credit");
+            sibling_remote
+                .write_all(b"sibling")
+                .await
+                .expect("sibling bytes");
+            sibling_remote.shutdown().await.expect("sibling FIN");
+            let mut sibling_local = sibling_client
+                .accept_tunnel_stream()
+                .await
+                .expect("sibling Visitor");
+            let mut bytes = Vec::new();
+            sibling_local
+                .read_to_end(&mut bytes)
+                .await
+                .expect("sibling EOF");
+            assert_eq!(bytes, b"sibling");
+            assert_eq!(
+                client.visitor_credit_counts(),
+                (1, 0),
+                "drained connection never refills"
+            );
+
+            let mut tail = Vec::new();
+            local
+                .read_to_end(&mut tail)
+                .await
+                .expect("original tail and FIN survive DRAIN");
+            assert_eq!(tail, b"final tail");
+            let (read, write) = local.into_split();
+            drop(read);
+            assert_eq!(
+                client.visitor_credit_counts(),
+                (1, 0),
+                "last half retains the active lease"
+            );
+            drop(write);
+            timeout(STEP, shutdown)
+                .await
+                .expect("completion ack closes Tunnel")
+                .expect("shutdown task");
+            wait_for_credit(&client, 0, 0).await;
+            sibling_client.close();
+            drop((sibling_local, sibling_remote));
+            timeout(STEP, async {
+                while permits.available_permits() != total {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("all permits recover with both Client handles retained");
+            assert_eq!(client.guard_rejections(), 0);
+            assert_eq!(sibling_client.guard_rejections(), 0);
+        }
+    })
+    .await
+    .expect("bounded idle-credit reclamation and final-tail completion");
 }
 
 #[tokio::test]

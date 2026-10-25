@@ -260,6 +260,8 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `client.services[].tls-mode` | no | `passthrough` or `terminate`. Defaults to `passthrough`. Catch-all Services must use `passthrough`. |
 | `client.services[].proxy-protocol` | no | `"v2"` emits a regenerated PROXY v2 header to this Local backend. Omission preserves the existing byte stream. |
 
+`client.max-visitor-streams` bounds reserved and active capacity; it does not guarantee prompt replacement credit at saturation. After one Visitor completes or aborts, another can still reach the Server's five-second open deadline and lose its connection. This known alpha availability limitation is tracked in [#267](https://github.com/runewarp/runewarp/issues/267). Raising the budget postpones saturation rather than fixing it.
+
 Client reconnect behavior is runtime-owned. There is no `client.reconnect-interval` setting or CLI flag; both config-driven and CLI-only startup use the same built-in jittered backoff described in `docs/protocol.md`.
 
 ## Certificates and trust

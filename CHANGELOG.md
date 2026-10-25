@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Changed
 
-- Raised the default shared Client Visitor budget to 16,384 and Server maxima to 65,536 active routed streams and 4,096 pending opens. Unix Client and Server startup raise the soft fd limit where possible and reduce effective Visitor capacities with one warning when descriptors are insufficient. (#266)
+- Raised the default shared Client Visitor budget to 16,384 and Server maxima to 65,536 active routed streams and 4,096 pending opens. Unix Client and Server startup raise the soft fd limit where possible and reduce effective Visitor capacities with one warning when descriptors are insufficient. Single-release recovery at saturation remains a known alpha availability limitation tracked in #267. (#266)
 - Replaced HTTP/3 receive slots with Server-opened WebTransport Visitor streams, with 256 permit-backed idle credits per connection and a shared 1,024-Visitor Client budget. Graceful Server shutdown now releases idle credits on WebTransport DRAIN and waits for Client Visitor completion before ending the session. This is a breaking lockstep Tunnel protocol upgrade; Clients and Servers must upgrade together. (#265)
 - Required Clients to establish one WebTransport draft07 session on every Tunnel connection, closing the whole connection when its WebTransport session ends while receive slots continue carrying Visitors. This is a breaking lockstep Tunnel protocol upgrade; Clients and Servers must upgrade together. (#264)
 - Switched all Tunnel connections to HTTP/3 with ALPN `h3`. This is a breaking lockstep upgrade: old and new Clients/Servers are incompatible; upgrade both together. (#250)
@@ -37,7 +37,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Prevented intermittent Visitor rejection while a live Tunnel pool's active counts change during least-active placement. (#266)
+- Fixed a two-pass least-active placement race that could reject a Visitor despite a live Tunnel pool. (#266)
 
 - Preserved response tails when the opposite proxy direction fails, kept successful Client ACME challenges successful during teardown, and suppressed repeated Client stream-handler recovery logs under saturation. (#250)
 - Fixed the Managed-session first-snapshot deadline so connection opening and first valid snapshot receipt share one absolute 60-second window, including simultaneous timer and snapshot readiness. (#235)

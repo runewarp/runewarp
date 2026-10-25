@@ -113,8 +113,8 @@ async fn configured_budget() -> Result<(), Box<dyn Error>> {
             "257th Visitor must wait at configured capacity"
         );
         // Keep all admitted Visitors held through the Server's real five-second open deadline.
-        // This covers configured admission and the actual guard. Single-release recovery is a
-        // separately reproduced blocker under the pinned Quinn API, documented in the research.
+        // This checks admission, continued forwarding and the actual guard counter.
+        // Single-release saturation recovery is not guaranteed; see runewarp/runewarp#267.
         let elapsed = Instant::now();
         let excess = tokio::time::timeout(Duration::from_secs(6), pending).await?;
         assert!(excess.is_err(), "excess Visitor reaches the open deadline");

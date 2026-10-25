@@ -3341,7 +3341,7 @@ fn unauthenticated_h3_client_config(roots: RootCertStore) -> quinn::ClientConfig
 }
 
 #[tokio::test]
-async fn server_shutdown_rejects_idle_slots_while_a_placed_visitor_finishes() {
+async fn server_shutdown_seals_placement_while_a_placed_visitor_finishes() {
     timeout(Duration::from_secs(3), async {
         use runewarp::tunnel_h3::ClientTunnelH3;
         let (certificate, key) = make_self_signed_cert("tunnel.example.test");
@@ -3418,10 +3418,6 @@ async fn server_shutdown_rejects_idle_slots_while_a_placed_visitor_finishes() {
         assert_eq!(&initial[28..], hello);
 
         trigger.begin_graceful();
-        assert!(
-            client.accept_tunnel_stream().await.is_none(),
-            "GOAWAY rejects idle slots before closing placed work"
-        );
         assert!(!server_task.is_finished());
         stream.write_all(b"finish").await.unwrap();
         stream.shutdown().await.unwrap();

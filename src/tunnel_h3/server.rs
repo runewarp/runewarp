@@ -1,9 +1,8 @@
 //! Server side of an HTTP/3 Tunnel connection.
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
@@ -12,7 +11,7 @@ use futures_util::stream::FuturesUnordered;
 use h3::error::{Code, StreamError};
 use h3::server::RequestStream;
 use http::{HeaderMap, Method, Request, Response, StatusCode, header};
-use tokio::sync::{Notify, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, interval_at, timeout, timeout_at};
 
@@ -22,18 +21,19 @@ use crate::{ClientIdentity, ServerHostname};
 use super::events::{KEEPALIVE_COMMENT, ServerRuntimeGeneration, TunnelEventState};
 use super::stream::{ServerTunnelStream, TunnelStream};
 use super::{
-    MAX_IDLE_RECEIVE_SLOTS, OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TunnelH3Error,
-    TunnelH3Timing, close_connection,
+    OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TunnelH3Error, TunnelH3Timing,
+    close_connection,
 };
 
 type ServerH3Connection = h3_webtransport::server::ServerConnection<h3_quinn::Connection, Bytes>;
 type SessionAcceptor = h3_webtransport::server::Acceptor<h3_quinn::Connection, Bytes>;
+type ServerSession = h3_webtransport::server::Session<h3_quinn::Connection, Bytes>;
 type ServerRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
 /// Server-owned HTTP/3 Tunnel connection.
 ///
-/// Serves the Tunnel event stream, queues Client receive slots, and opens one Tunnel stream per
-/// placed Visitor on a queued slot. One detached WebTransport session owns connection lifetime.
+/// Serves the Tunnel event stream and opens one WebTransport stream per placed Visitor using
+/// permit-backed QUIC credit. One detached WebTransport session owns connection lifetime.
 /// Other signaling requests get bodyless statuses. Dropping the
 /// handle closes the connection immediately with `H3_NO_ERROR`.
 pub struct ServerTunnelH3 {
@@ -47,7 +47,7 @@ pub struct ServerTunnelH3 {
 /// Why no Tunnel stream could be opened on a connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenTunnelStreamError {
-    /// No usable receive slot arrived before the deadline.
+    /// No WebTransport stream credit arrived before the deadline.
     TimedOut,
     /// GOAWAY was sent or the connection ended; it accepts no new Visitors.
     Closed,
@@ -56,26 +56,13 @@ pub enum OpenTunnelStreamError {
 impl fmt::Display for OpenTunnelStreamError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::TimedOut => "no receive slot became available before the deadline",
+            Self::TimedOut => "no Visitor stream credit became available before the deadline",
             Self::Closed => "tunnel connection accepts no new visitors",
         })
     }
 }
 
 impl std::error::Error for OpenTunnelStreamError {}
-
-/// One idle receive slot: a Client-opened CONNECT whose response has not started.
-struct IdleSlot {
-    stream: ServerRequestStream,
-    request: InFlightRequest,
-}
-
-#[derive(Default)]
-struct SlotQueue {
-    idle: VecDeque<IdleSlot>,
-    /// Set once GOAWAY is sent; later slots are rejected.
-    closed: bool,
-}
 
 /// State shared by the connection's accept loop and its request handlers.
 struct Shared {
@@ -88,50 +75,12 @@ struct Shared {
     goaway: watch::Sender<bool>,
     /// Incremented by each event-stream subscription; an older subscription ends when it changes.
     subscriptions: watch::Sender<u64>,
-    /// Request handlers, idle slots, and Tunnel streams that have not yet finished.
-    ///
-    /// Shared separately so request accounting, which idle slots carry inside the slot queue,
-    /// never owns the queue itself.
+    /// Ordinary request handlers, pending Visitor opens and active Tunnel streams. The session
+    /// itself does not prolong graceful drain.
     requests_in_flight: Arc<watch::Sender<usize>>,
     #[cfg(test)]
     handlers_spawned: std::sync::atomic::AtomicUsize,
-    slots: Mutex<SlotQueue>,
-    /// Signalled when a receive slot is queued or the queue closes.
-    slot_offered: Notify,
-}
-
-impl Shared {
-    fn slots(&self) -> MutexGuard<'_, SlotQueue> {
-        self.slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Queue a receive slot, or reject it once closed or over the idle cap.
-    fn offer_slot(&self, mut slot: IdleSlot) {
-        let mut slots = self.slots();
-        if slots.closed || slots.idle.len() >= MAX_IDLE_RECEIVE_SLOTS {
-            drop(slots);
-            reject_unprocessed(&mut slot.stream);
-            return;
-        }
-        slots.idle.push_back(slot);
-        drop(slots);
-        self.slot_offered.notify_one();
-    }
-
-    /// Stop accepting slots and reject every idle one.
-    fn close_slots(&self) {
-        let idle = {
-            let mut slots = self.slots();
-            slots.closed = true;
-            std::mem::take(&mut slots.idle)
-        };
-        for mut slot in idle {
-            reject_unprocessed(&mut slot.stream);
-        }
-        self.slot_offered.notify_waiters();
-    }
+    session: watch::Sender<Option<Arc<ServerSession>>>,
 }
 
 fn reject_unprocessed(stream: &mut ServerRequestStream) {
@@ -201,8 +150,7 @@ impl ServerTunnelH3 {
             requests_in_flight: Arc::new(watch::Sender::new(0)),
             #[cfg(test)]
             handlers_spawned: std::sync::atomic::AtomicUsize::new(0),
-            slots: Mutex::new(SlotQueue::default()),
-            slot_offered: Notify::new(),
+            session: watch::Sender::new(None),
         });
         let (begin_shutdown, shutdown_requested) = oneshot::channel();
         let task = OwnedTask::spawn(serve_connection(
@@ -226,48 +174,46 @@ impl ServerTunnelH3 {
         &self.client_identity
     }
 
-    /// Open a Tunnel stream for one placed Visitor on the oldest queued receive slot.
-    ///
-    /// Completes the slot's response immediately; the caller then writes the Tunnel framing and
-    /// buffered ClientHello as the first DATA, so assignment needs no Client round trip. Waits up
-    /// to `deadline` for a slot. A slot the Client already abandoned fails its response and the
-    /// next one is tried, because a peer STOP_SENDING is only observed on write.
+    /// Open one Server-assigned Visitor stream, waiting for permit-backed QUIC credit until
+    /// `deadline`. The session opener writes its prefix immediately. Callers then write the
+    /// PROXY v2 envelope and buffered ClientHello without a per-Visitor acceptance exchange.
     pub async fn open_tunnel_stream(
         &self,
         deadline: Duration,
     ) -> Result<ServerTunnelStream, OpenTunnelStreamError> {
-        let deadline = Instant::now() + deadline;
-        loop {
-            let offered = self.shared.slot_offered.notified();
-            tokio::pin!(offered);
-            offered.as_mut().enable();
-
-            let slot = {
-                let mut slots = self.shared.slots();
-                if slots.closed || self.connection.close_reason().is_some() {
-                    return Err(OpenTunnelStreamError::Closed);
-                }
-                slots.idle.pop_front()
-            };
-            let Some(mut slot) = slot else {
-                timeout_at(deadline, offered)
-                    .await
-                    .map_err(|_| OpenTunnelStreamError::TimedOut)?;
-                continue;
-            };
-
-            let response = Response::builder()
-                .status(StatusCode::OK)
-                .body(())
-                .expect("a bare 200 response is valid");
-            match timeout_at(deadline, slot.stream.send_response(response)).await {
-                Ok(Ok(())) => {
-                    let (send, recv) = slot.stream.split();
-                    return Ok(TunnelStream::new(recv, send, Arc::new(slot.request)));
-                }
-                Ok(Err(_)) => {}
-                Err(_) => return Err(OpenTunnelStreamError::TimedOut),
+        use h3::quic::{BidiStream, RecvStream, SendStream};
+        let mut goaway = self.shared.goaway.subscribe();
+        if *goaway.borrow() || self.connection.close_reason().is_some() {
+            return Err(OpenTunnelStreamError::Closed);
+        }
+        // Pending opens count toward graceful drain, including those awaiting session readiness.
+        let request = InFlightRequest::start(&self.shared.requests_in_flight);
+        let opening = async {
+            let mut session = self.shared.session.subscribe();
+            let opener = session
+                .wait_for(|opener| opener.is_some())
+                .await
+                .map_err(|_| OpenTunnelStreamError::Closed)?
+                .as_ref()
+                .expect("wait_for observed an established session")
+                .clone();
+            let mut stream = opener
+                .opener()
+                .open_bi()
+                .await
+                .map_err(|_| OpenTunnelStreamError::Closed)?;
+            if *self.shared.goaway.borrow() {
+                stream.reset(Code::H3_REQUEST_REJECTED.value());
+                stream.stop_sending(Code::H3_REQUEST_REJECTED.value());
+                return Err(OpenTunnelStreamError::Closed);
             }
+            let (send, recv) = stream.split();
+            Ok(TunnelStream::new(recv, send, Arc::new(request)))
+        };
+        tokio::select! {
+            result = timeout(deadline, opening) => result.map_err(|_| OpenTunnelStreamError::TimedOut)?,
+            _ = self.connection.closed() => Err(OpenTunnelStreamError::Closed),
+            _ = async { goaway.wait_for(|closed| *closed).await.ok(); } => Err(OpenTunnelStreamError::Closed),
         }
     }
 
@@ -285,16 +231,11 @@ impl ServerTunnelH3 {
         Arc::downgrade(&self.shared)
     }
 
-    /// Receive slots queued and not yet assigned.
-    #[cfg(test)]
-    pub(crate) fn idle_receive_slots(&self) -> usize {
-        self.shared.slots().idle.len()
-    }
-
     /// Orderly shutdown: send GOAWAY carrying the first unprocessed request-stream ID, reject
-    /// requests at or above it and every idle receive slot with `H3_REQUEST_REJECTED`, end the
-    /// event stream, and close with `H3_NO_ERROR` once open Tunnel streams and earlier requests
-    /// finish. Closes immediately when `deadline` expires.
+    /// requests at or above it with `H3_REQUEST_REJECTED`, seal new Visitor opens, end the
+    /// event stream, then ask the Client to drain once local Visitors and earlier requests finish.
+    /// The Client releases its Visitors and sends CLOSE before the whole Tunnel ends with
+    /// `H3_NO_ERROR`. Closes immediately when `deadline` expires.
     pub async fn shutdown(&self, deadline: Duration) {
         let signal = self
             .begin_shutdown
@@ -310,7 +251,6 @@ impl ServerTunnelH3 {
 
     /// Close immediately, including revocation and fast shutdown.
     pub fn close(&self, reason: &[u8]) {
-        self.shared.close_slots();
         self.connection
             .close(quinn::VarInt::from_u32(0x100), reason);
     }
@@ -328,7 +268,6 @@ impl ServerTunnelH3 {
 
 impl Drop for ServerTunnelH3 {
     fn drop(&mut self) {
-        self.shared.close_slots();
         close_connection(&self.connection, Code::H3_NO_ERROR);
     }
 }
@@ -345,6 +284,7 @@ async fn serve_connection(
     // request-stream credit bounds these futures; each retains the original request deadline.
     let mut resolving = FuturesUnordered::new();
     let mut shutting_down = false;
+    let mut drain_sent = false;
     let mut handlers = JoinSet::new();
     let period = shared.timing.request_deadline;
     let mut prefix_deadline = interval_at(Instant::now() + period, period);
@@ -357,7 +297,17 @@ async fn serve_connection(
                 send_goaway(&mut h3_connection, &shared).await;
             }
             _ = async { requests_in_flight.wait_for(|count| *count == 0).await.map(|_| ()) },
-                if shutting_down => break,
+                if shutting_down && !drain_sent => {
+                    drain_sent = true;
+                    let session = shared.session.borrow().clone();
+                    if let Some(session) = session {
+                        // FIN only queues bytes. Keep the session live until the Client releases
+                        // its Visitors, including any final bytes it has not consumed yet.
+                        if session.drain().await.is_err() { break; }
+                    } else {
+                        break;
+                    }
+                },
             _ = connection.closed() => break,
             _ = prefix_deadline.tick() => { h3_connection.evict_pending_streams(); }
             _ = handlers.join_next(), if !handlers.is_empty() => {}
@@ -387,7 +337,6 @@ async fn serve_connection(
     }
 
     h3_connection.evict_pending_streams();
-    shared.close_slots();
     close_connection(&connection, Code::H3_NO_ERROR);
 }
 
@@ -400,12 +349,11 @@ async fn serve_connection(
 /// without reconstructing stream IDs from a count of classified requests.
 async fn send_goaway(h3_connection: &mut ServerH3Connection, shared: &Shared) {
     shared.goaway.send_replace(true);
-    shared.close_slots();
     let _ = h3_connection.shutdown(1).await;
 }
 
-/// Accounting for one accepted request, released when its handler, idle slot, or Tunnel stream
-/// ends.
+/// Accounting for one ordinary request or Visitor open, retained through its handler or both
+/// active Tunnel stream halves.
 struct InFlightRequest {
     count: Arc<watch::Sender<usize>>,
 }
@@ -418,6 +366,8 @@ impl InFlightRequest {
         }
     }
 }
+
+impl super::stream::StreamResource for InFlightRequest {}
 
 impl Drop for InFlightRequest {
     fn drop(&mut self) {
@@ -468,6 +418,8 @@ async fn handle_request(
             .await;
             drop(request);
             if let Ok(Ok(session)) = session {
+                let session = Arc::new(session);
+                shared.session.send_replace(Some(session.clone()));
                 loop {
                     tokio::select! {
                         _ = session.closed() => break,
@@ -488,7 +440,6 @@ async fn handle_request(
                 }
             }
         }
-        Route::ReceiveSlot => shared.offer_slot(IdleSlot { stream, request }),
         Route::Status(status) => send_bodyless_status(stream, status, shared.timing).await,
         Route::Malformed => reset_malformed(&mut stream),
     }
@@ -529,8 +480,6 @@ async fn read_bodyless_request(
 enum Route {
     Events,
     Session,
-    /// Plain CONNECT to the Server hostname: one unit of Visitor-assignment availability.
-    ReceiveSlot,
     Status(StatusCode),
     /// Malformed message, answered with `H3_MESSAGE_ERROR` instead of a status.
     Malformed,
@@ -551,7 +500,7 @@ fn route(request: &Request<()>, server_hostname: &ServerHostname) -> Route {
     }
     if request.method() == Method::CONNECT {
         return match request.extensions().get::<h3::ext::Protocol>() {
-            None => Route::ReceiveSlot,
+            None => Route::Status(StatusCode::BAD_REQUEST),
             Some(protocol) if *protocol == h3::ext::Protocol::WEB_TRANSPORT => {
                 if uri.scheme_str() != Some("https") {
                     Route::Status(StatusCode::BAD_REQUEST)

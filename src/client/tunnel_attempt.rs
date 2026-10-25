@@ -643,7 +643,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incompatible_h3_peer_fails_the_attempt_without_offering_slots() {
+    async fn incompatible_h3_peer_fails_the_attempt_without_offering_visitor_credit() {
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             use rustls::pki_types::pem::PemObject;
             let directory = tempfile::tempdir().unwrap();
@@ -729,7 +729,7 @@ backend-address = "127.0.0.1:443"
                     .send_data(bytes::Bytes::from_static(state.as_bytes()))
                     .await
                     .unwrap();
-                // The incompatible state must close the connection, without a CONNECT slot.
+                // The incompatible state must close the connection, before session establishment or Visitor credit.
                 assert!(server.accept().await.unwrap_or(None).is_none());
             });
             let instance = ClientInstancePrep::prepare(&settings).await.unwrap();

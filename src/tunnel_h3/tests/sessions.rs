@@ -1,4 +1,4 @@
-//! WebTransport lifecycle alongside ordinary signaling and receive slots.
+//! WebTransport lifecycle alongside ordinary signaling and Visitor streams.
 
 use super::*;
 
@@ -11,7 +11,7 @@ async fn session_opens_only_after_the_gate_and_establishment_waits_for_connect()
         ClientTunnelH3::establish_with_timing(
             client_connection,
             &server_hostname(),
-            no_slots(),
+            no_credit(),
             fast_timing(),
         )
         .await
@@ -182,7 +182,7 @@ async fn server_session_close_capsule_closes_tunnel_even_if_fin_is_withheld() {
         ClientTunnelH3::establish_with_timing(
             client_connection,
             &server_hostname(),
-            no_slots(),
+            no_credit(),
             fast_timing(),
         )
         .await
@@ -210,107 +210,6 @@ async fn server_session_close_capsule_closes_tunnel_even_if_fin_is_withheld() {
         application_close_code(&error),
         Some(Code::H3_NO_ERROR.value())
     );
-}
-
-#[tokio::test]
-async fn goaway_keeps_the_session_and_active_receive_slot_until_drain_finishes() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let fixture = Fixture::new().expect("fixture");
-    let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let server = Arc::new(
-        ServerTunnelH3::establish_with_timing(
-            server_connection,
-            server_hostname(),
-            ServerRuntimeGeneration::generate(),
-            fast_timing(),
-        )
-        .await
-        .expect("Server"),
-    );
-    let (mut sender, driver) = raw_client(client_connection.clone()).await;
-    let (_, mut events) = raw_request(
-        &mut sender,
-        Method::GET,
-        &format!("https://{SERVER_NAME}{TUNNEL_EVENTS_PATH}"),
-    )
-    .await;
-    read_event_block(&mut events).await.expect("gate");
-    let mut session = session_request(&mut sender, "/v1/tunnel/session").await;
-    assert_eq!(
-        session.recv_response().await.expect("accepted").status(),
-        StatusCode::OK
-    );
-    let request = Request::builder()
-        .method(Method::CONNECT)
-        .uri(format!("{SERVER_NAME}:443"))
-        .body(())
-        .expect("slot");
-    let mut slot = sender.send_request(request).await.expect("offer slot");
-    let mut visitor = server
-        .open_tunnel_stream(STEP)
-        .await
-        .expect("assign Visitor");
-    assert_eq!(
-        slot.recv_response().await.expect("assignment").status(),
-        StatusCode::OK
-    );
-    let shutdown = tokio::spawn({
-        let server = server.clone();
-        async move { server.shutdown(STEP).await }
-    });
-    timeout(STEP, async {
-        while events.recv_data().await.expect("events").is_some() {}
-    })
-    .await
-    .expect("events end on GOAWAY");
-    // GOAWAY forbids new signaling without terminating the existing CONNECT.
-    assert!(matches!(
-        sender
-            .send_request(
-                Request::get(format!("https://{SERVER_NAME}{TUNNEL_EVENTS_PATH}"))
-                    .body(())
-                    .expect("GET")
-            )
-            .await,
-        Err(h3::error::StreamError::RemoteClosing)
-    ));
-    assert!(
-        timeout(Duration::from_millis(50), session.recv_data())
-            .await
-            .is_err()
-    );
-    assert!(client_connection.close_reason().is_none());
-    slot.send_data(Bytes::from_static(b"draining"))
-        .await
-        .expect("Client data during drain");
-    slot.finish().await.expect("Client FIN");
-    let mut bytes = Vec::new();
-    visitor.read_to_end(&mut bytes).await.expect("Visitor data");
-    assert_eq!(bytes, b"draining");
-    visitor
-        .write_all(b"done")
-        .await
-        .expect("Server data during drain");
-    visitor.shutdown().await.expect("Server FIN");
-    let mut data = slot
-        .recv_data()
-        .await
-        .expect("response data")
-        .expect("bytes");
-    assert_eq!(&data.copy_to_bytes(data.remaining())[..], b"done");
-    drop(visitor);
-    let error = timeout(STEP, client_connection.closed())
-        .await
-        .expect("drained connection closes");
-    assert_eq!(
-        application_close_code(&error),
-        Some(Code::H3_NO_ERROR.value())
-    );
-    timeout(STEP, shutdown)
-        .await
-        .expect("shutdown")
-        .expect("task");
-    driver.abort();
 }
 
 #[tokio::test]
@@ -369,17 +268,13 @@ async fn a_request_below_goaway_can_finish_headers_after_a_classifier_gap() {
         .expect("Server"),
     );
     let (mut sender, driver) = raw_client(client_connection.clone()).await;
-    let request = Request::builder()
-        .method(Method::CONNECT)
-        .uri(format!("{SERVER_NAME}:443"))
-        .body(())
-        .expect("slot");
-    let mut slot = sender.send_request(request).await.expect("slot zero");
-    let visitor = server
-        .open_tunnel_stream(STEP)
-        .await
-        .expect("active Visitor");
-    slot.recv_response().await.expect("assigned");
+    let (response, _) = raw_request(
+        &mut sender,
+        Method::GET,
+        &format!("https://{SERVER_NAME}/unknown"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let (mut stalled, _stalled_recv) = client_connection.open_bi().await.expect("stream four");
     stalled
         .write_all(&[0x40])
@@ -437,7 +332,6 @@ async fn a_request_below_goaway_can_finish_headers_after_a_classifier_gap() {
             .expect("accepted request gets response HEADERS"),
         1
     );
-    drop(visitor);
     shutdown.await.expect("shutdown");
     driver.abort();
 }
@@ -626,7 +520,7 @@ async fn connection_loss_ends_the_session_on_both_runewarp_peers() {
     let hostname = server_hostname();
     let (session, client) = tokio::join!(
         session_server(server_connection.clone()),
-        ClientTunnelH3::establish(client_connection.clone(), &hostname, no_slots()),
+        ClientTunnelH3::establish(client_connection.clone(), &hostname, no_credit()),
     );
     let (session, driver) = session;
     let mut client = client.expect("Client");
@@ -729,10 +623,13 @@ backend-address = "127.0.0.1:443"
             )
             .await;
             let mut session = accept_raw_session(&mut core).await;
-            // Availability proves production establishment completed before the close.
-            let (request, _slot) = accept_raw_request(&mut core).await;
-            assert_eq!(request.method(), Method::CONNECT);
-            assert!(request.extensions().get::<h3::ext::Protocol>().is_none());
+            // Server bidi credit is granted only after production session establishment.
+            let (mut visitor_send, mut visitor_recv) =
+                connection.open_bi().await.expect("Visitor credit");
+            visitor_send
+                .write_all(&[0x40, 0x41, 4])
+                .await
+                .expect("session four prefix");
             if capsule {
                 session
                     .send_data(Bytes::from_static(CLOSE_CAPSULE))
@@ -745,6 +642,10 @@ backend-address = "127.0.0.1:443"
             assert_eq!(
                 application_close_code(&error),
                 Some(Code::H3_NO_ERROR.value())
+            );
+            assert!(
+                visitor_recv.read_chunk(1, false).await.is_err(),
+                "session close resets active Visitor"
             );
             let replacement = endpoint
                 .accept()
@@ -762,7 +663,7 @@ backend-address = "127.0.0.1:443"
             let _visitor = replacement
                 .open_tunnel_stream(STEP)
                 .await
-                .expect("replacement session establishes and offers receive slots");
+                .expect("replacement session establishes and offers Visitor credit");
             controller.request_shutdown();
             controller
                 .run_until_idle()
@@ -775,7 +676,7 @@ backend-address = "127.0.0.1:443"
 }
 
 #[tokio::test]
-async fn rejected_session_fails_establishment_without_offering_receive_slots() {
+async fn rejected_session_fails_establishment_without_offering_visitor_credit() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let mut server = raw_server(server_connection.clone()).await;
@@ -825,7 +726,7 @@ async fn rejected_session_fails_establishment_without_offering_receive_slots() {
     );
     assert!(
         server.accept().await.unwrap_or(None).is_none(),
-        "failed establishment offers no slot"
+        "failed establishment offers no Visitor credit"
     );
 }
 
@@ -838,7 +739,7 @@ async fn transport_close_during_session_connect_preserves_the_peer_reason() {
         ClientTunnelH3::establish_with_timing(
             client_connection,
             &server_hostname(),
-            no_slots(),
+            no_credit(),
             fast_timing(),
         )
         .await
@@ -892,7 +793,7 @@ async fn both_peers_advertise_only_draft07_and_one_session() {
     drop(server);
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let client = tokio::spawn(async move {
-        ClientTunnelH3::establish(client_connection, &server_hostname(), no_slots()).await
+        ClientTunnelH3::establish(client_connection, &server_hostname(), no_credit()).await
     });
     assert_profile(advertised_settings(&server_connection).await);
     client.abort();
@@ -984,6 +885,54 @@ async fn client_connect_fin_closes_the_whole_tunnel_without_error() {
     assert_eq!(
         application_close_code(&error),
         Some(Code::H3_NO_ERROR.value())
+    );
+    driver.abort();
+}
+
+#[tokio::test]
+async fn client_session_close_resets_an_active_visitor_and_closes_the_tunnel() {
+    use h3::quic::{BidiStream, RecvStream};
+    use tokio::io::AsyncReadExt;
+    let fixture = Fixture::new().expect("fixture");
+    let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
+    let server = ServerTunnelH3::establish(
+        server_connection,
+        server_hostname(),
+        ServerRuntimeGeneration::generate(),
+    )
+    .await
+    .expect("Server");
+    let (_sender, session, driver) = session_client(client_connection.clone()).await;
+    client_connection.set_max_concurrent_bi_streams(1_u8.into());
+    let mut visitor = server
+        .open_tunnel_stream(STEP)
+        .await
+        .expect("active Visitor");
+    let stream = timeout(STEP, session.accept_bi())
+        .await
+        .expect("Visitor delivered")
+        .expect("session live");
+    let (_send, mut recv) = stream.split();
+    session
+        .close(0, "test")
+        .await
+        .expect("Client closes session");
+    let error = timeout(STEP, client_connection.closed())
+        .await
+        .expect("Server closes Tunnel");
+    assert_eq!(
+        application_close_code(&error),
+        Some(Code::H3_NO_ERROR.value())
+    );
+    assert!(
+        timeout(STEP, visitor.read_u8())
+            .await
+            .expect("Server Visitor resets")
+            .is_err()
+    );
+    assert!(
+        std::future::poll_fn(|cx| recv.poll_data(cx)).await.is_err(),
+        "Client Visitor terminates"
     );
     driver.abort();
 }

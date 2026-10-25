@@ -294,7 +294,7 @@ impl VisitorIntake {
 
         let open_result = tunnel_connection
             .connection()
-            .open_tunnel_stream(self.admission_policy.limits().slot_wait_timeout)
+            .open_tunnel_stream(self.admission_policy.limits().stream_open_timeout)
             .await;
         let stream = match open_result {
             Ok(stream) => stream,
@@ -969,7 +969,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slot_wait_deadline_drops_visitor_and_releases_pending_capacity() -> io::Result<()> {
+    async fn stream_open_deadline_drops_visitor_and_releases_pending_capacity() -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let registry = TunnelRegistry::configured(
             &server_hostname("Tunnel.Example.Test."),
@@ -980,10 +980,10 @@ mod tests {
             }],
         )?;
         let fixture =
-            TunnelConnectionFixture::connect_with_slot_budget(&client_identity, 1).await?;
+            TunnelConnectionFixture::connect_with_stream_budget(&client_identity, 1).await?;
         registry.register(fixture.server_connection.clone()).await;
         let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
-            slot_wait_timeout: Duration::from_millis(50),
+            stream_open_timeout: Duration::from_millis(50),
             max_pending_stream_opens: 1,
             ..ServerAdmissionLimits::for_test()
         });
@@ -994,13 +994,13 @@ mod tests {
             policy.clone(),
         )?;
 
-        // Assign the only receive slot and leave its permit held.
+        // Open the only Visitor credit and leave its permit held.
         let (_held_send, _held_recv) = timeout(
             Duration::from_secs(1),
             fixture.server_connection.open_stream(),
         )
         .await
-        .map_err(|_| timeout_error("first slot assignment should succeed"))?
+        .map_err(|_| timeout_error("first stream open should succeed"))?
         .map_err(io::Error::other)?;
 
         let listener = TcpListener::bind(localhost(0)).await?;
@@ -1020,7 +1020,7 @@ mod tests {
         let mut byte = [0_u8; 1];
         let dropped = timeout(Duration::from_secs(1), visitor.read(&mut byte))
             .await
-            .map_err(|_| timeout_error("slot-wait deadline must drop the Visitor"))?;
+            .map_err(|_| timeout_error("stream-open deadline must drop the Visitor"))?;
         assert!(
             matches!(dropped, Ok(0))
                 || matches!(
@@ -1041,7 +1041,7 @@ mod tests {
         .await;
         assert!(
             recovered.is_ok(),
-            "slot wait timeout must release pending-open capacity"
+            "stream open timeout must release pending-open capacity"
         );
         Ok(())
     }
@@ -1569,12 +1569,12 @@ mod tests {
 
     impl TunnelConnectionFixture {
         async fn connect(client_identity: &GeneratedClientIdentity) -> io::Result<Self> {
-            Self::connect_with_slot_budget(client_identity, 1024).await
+            Self::connect_with_stream_budget(client_identity, 1024).await
         }
 
-        async fn connect_with_slot_budget(
+        async fn connect_with_stream_budget(
             client_identity: &GeneratedClientIdentity,
-            slot_budget: u32,
+            stream_budget: u32,
         ) -> io::Result<Self> {
             let (certificate, private_key) = make_self_signed_cert("tunnel.example.test")?;
             let server_endpoint = Endpoint::server(
@@ -1622,7 +1622,8 @@ mod tests {
             let (server_connection, client_connection) =
                 tokio::try_join!(accept_connection, connect_client)?;
             let (server_connection, client_connection) =
-                establish_peers(server_connection, client_connection, slot_budget as usize).await?;
+                establish_peers(server_connection, client_connection, stream_budget as usize)
+                    .await?;
 
             Ok(Self {
                 _server_endpoint: server_endpoint,

@@ -21,7 +21,7 @@ pub(crate) struct ClientStreamLimits {
 impl Default for ClientStreamLimits {
     fn default() -> Self {
         Self {
-            // Idle and assigned receive slots share this Client-instance bound.
+            // Idle Visitor credits and active streams share this Client-instance bound.
             max_stream_handlers: 1024,
             client_hello_timeout: Duration::from_secs(5),
             backend_connect_timeout: Duration::from_secs(5),
@@ -115,7 +115,7 @@ mod tests {
     use super::{ClientStreamBudget, ClientStreamLimits};
 
     #[test]
-    fn production_limits_bound_idle_and_assigned_receive_slots() {
+    fn production_limits_bound_idle_credit_and_active_visitors() {
         let limits = ClientStreamLimits::default();
         assert_eq!(limits.max_stream_handlers, 1024);
         assert!(u32::try_from(limits.max_stream_handlers).is_ok());

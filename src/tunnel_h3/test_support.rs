@@ -1,4 +1,4 @@
-//! Shared H3 peers for runtime tests. Every fixture uses the production gate and slot carrier.
+//! Shared H3 peers for runtime tests. Every fixture uses the production gate and WebTransport Visitor carrier.
 
 use super::{
     ClientTunnelH3, ClientTunnelStream, ServerRuntimeGeneration, ServerTunnelH3, TunnelReadHalf,
@@ -7,14 +7,10 @@ use super::{
 use std::{io, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Semaphore};
 
-pub(crate) type ServerRead =
-    TunnelReadHalf<h3::server::RequestStream<h3_quinn::RecvStream, bytes::Bytes>>;
-pub(crate) type ServerWrite =
-    TunnelWriteHalf<h3::server::RequestStream<h3_quinn::SendStream<bytes::Bytes>, bytes::Bytes>>;
-pub(crate) type ClientRead =
-    TunnelReadHalf<h3::client::RequestStream<h3_quinn::RecvStream, bytes::Bytes>>;
-pub(crate) type ClientWrite =
-    TunnelWriteHalf<h3::client::RequestStream<h3_quinn::SendStream<bytes::Bytes>, bytes::Bytes>>;
+pub(crate) type ServerRead = TunnelReadHalf<super::stream::VisitorRecv>;
+pub(crate) type ServerWrite = TunnelWriteHalf<super::stream::VisitorSend>;
+pub(crate) type ClientRead = ServerRead;
+pub(crate) type ClientWrite = ServerWrite;
 
 pub(crate) fn test_server_h3_config(
     chain: Vec<rustls::pki_types::CertificateDer<'static>>,

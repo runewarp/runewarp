@@ -250,6 +250,7 @@ For orderly local shutdown that the runtime controls:
 - GOAWAY carries the fork's first unprocessed Client request-stream ID; Runewarp evicts pending classifiers, allows already-returned request resolvers to finish under their original deadlines, and rejects later requests, including the boundary ID, with `H3_REQUEST_REJECTED`. The Client opens no new requests afterward
 - after Server-local work completes, the Server sends the WebTransport DRAIN capsule and waits for the Client to release its Visitors and send CLOSE, then closes with `H3_NO_ERROR` (`0x100`); idle Visitor credit does not prolong drain
 - when that graceful deadline expires, the **Server** force-closes remaining active **Tunnel connections**
+- a **Managed drain** runs the same graceful steps when Control requests it with `drain: true`, then keeps the process running and reporting. To a Client, a drained Server looks exactly like one in graceful shutdown: GOAWAY, DRAIN, then close. Nothing Tunnel-specific is added to the wire (see [`managed.md`](managed.md#managed-drain))
 - **Fast shutdown** and graceful-to-fast escalation close immediately with `H3_NO_ERROR`
 - the **Client instance** stops new dial and retry work before it withdraws or closes active **Tunnel connections**
 - **Graceful Client shutdown** stops offering Visitor credit and withdraws every live Tunnel connection concurrently under one Client-instance-wide `client.graceful-shutdown-duration` deadline, which defaults to `60s` and starts with shutdown; see [placement withdrawal](#placement-withdrawal). Each connection closes after its confirmation; the rest close at the deadline as unconfirmed. `0s` makes graceful Client shutdown behave as fast
@@ -277,9 +278,9 @@ When more than one authenticated connection is live for the same **Tunnel** on o
 
 ## Managed-session Control protocol
 
-In **Managed mode**, each Server or Client runtime opens one mutually authenticated HTTP/2 **Managed session** to the configured **Control address**: one role-specific SSE downlink (`GET /v1/server/events` or `GET /v1/client/events`) plus one state acknowledgment (`PUT /v1/server/state` or `PUT /v1/client/state`) for each successfully handled snapshot on the same connection. The downlink follows the same [SSE profile](sse.md) as the Tunnel event stream.
+In **Managed mode**, each Server or Client runtime opens one mutually authenticated HTTP/2 **Managed session** to the configured **Control address**: one role-specific SSE downlink (`GET /v1/server/events` or `GET /v1/client/events`) plus full state documents (`PUT /v1/server/state` or `PUT /v1/client/state`) on the same connection, sent after each successfully handled snapshot and when a reported fact changes, at most once per second. The downlink follows the same [SSE profile](sse.md) as the Tunnel event stream.
 
-The 60-second first-snapshot/silence windows and Tunnel reconnect backoff apply as documented in [`managed.md`](managed.md). Quiet SSE downlinks use Control-owned comment keepalives; Core sends no periodic state heartbeat. That document is the canonical Core contract for endpoints, SSE framing, input schemas, revision semantics, Server authorization, Client assignment/Retiring, failure taxonomy, wire examples, and Control interoperability.
+The 60-second first-snapshot/silence windows and Tunnel reconnect backoff apply as documented in [`managed.md`](managed.md). Quiet SSE downlinks use Control-owned comment keepalives; Core sends no periodic state heartbeat. That document is the canonical Core contract for endpoints, SSE framing, input schemas, revision semantics, state documents, Managed drain, Server authorization, Client assignment/Retiring, failure taxonomy, wire examples, and Control interoperability.
 
 ## Runtime invariants
 

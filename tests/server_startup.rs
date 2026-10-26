@@ -112,8 +112,8 @@ async fn listeners_share_routes_and_tunnel_pools() -> Result<(), Box<dyn std::er
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-public-bind-address = ["127.0.0.1:0", "[::1]:0"]
-tunnel-bind-address = ["127.0.0.1:0", "[::1]:0"]
+public-bind-addresses = ["127.0.0.1:0", "[::1]:0"]
+tunnel-bind-addresses = ["127.0.0.1:0", "[::1]:0"]
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
 client-identity = "{}"
@@ -215,8 +215,8 @@ async fn runtime_binds_all_configured_listeners_and_releases_them_on_shutdown()
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-public-bind-address = ["127.0.0.1:0", "[::1]:0"]
-tunnel-bind-address = ["127.0.0.1:0", "[::1]:0"]
+public-bind-addresses = ["127.0.0.1:0", "[::1]:0"]
+tunnel-bind-addresses = ["127.0.0.1:0", "[::1]:0"]
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
 client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"

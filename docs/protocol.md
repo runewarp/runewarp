@@ -6,15 +6,15 @@ This document describes Runewarp's wire behavior and runtime invariants.
 
 | Listener | Traffic | Behavior |
 | --- | --- | --- |
-| `server.public-bind-address` (default `0.0.0.0:443/tcp`) | Visitor TLS | Read ClientHello, extract SNI, and route raw bytes without terminating customer TLS |
-| `server.public-bind-address` (same TCP listener) | ACME for the **Server hostname** | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
-| `server.tunnel-bind-address` (default `0.0.0.0:443/udp`) | Client **Tunnel connections** | HTTP/3 over QUIC/TLS with ALPN `h3` |
+| `server.public-bind-address` / `server.public-bind-addresses` (default `0.0.0.0:443/tcp`) | Visitor TLS | Read ClientHello, extract SNI, and route raw bytes without terminating customer TLS |
+| `server.public-bind-address` / `server.public-bind-addresses` (same TCP listeners) | ACME for the **Server hostname** | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
+| `server.tunnel-bind-address` / `server.tunnel-bind-addresses` (default `0.0.0.0:443/udp`) | Client **Tunnel connections** | HTTP/3 over QUIC/TLS with ALPN `h3` |
 
-Each bind key accepts one literal socket address string or an array of 1 to 8 distinct addresses. Each address owns a listener; every listener shares the same Server authorization, Tunnel pools, runtime generation and admission limits. Startup binds all addresses before accepting work; any bind failure releases the earlier sockets and fails startup. Shutdown stops intake across all listeners and drains their Tunnel connections under one shared deadline. Tunnel ports are operator-selected, defaulting to UDP 443 with ALPN `h3` on every listener.
+Each transport has mutually exclusive singular and plural bind keys. `server.public-bind-address` and `server.tunnel-bind-address` accept only one literal socket address string; `server.public-bind-addresses` and `server.tunnel-bind-addresses` accept only arrays of 1 to 8 distinct addresses. Supplying both members of a pair is an error even when either value is empty or invalid. Public and Tunnel forms can be mixed independently; omitting both members of a pair uses `0.0.0.0:443`. Each address owns a listener; every listener shares the same Server authorization, Tunnel pools, runtime generation and admission limits. Startup binds all addresses before accepting work; any bind failure releases the earlier sockets and fails startup. Shutdown stops intake across all listeners and drains their Tunnel connections under one shared deadline. Tunnel ports are operator-selected, defaulting to UDP 443 with ALPN `h3` on every listener.
 
 ## Public TLS routing
 
-For each inbound TCP connection on any configured `server.public-bind-address` listener:
+For each inbound TCP connection on any configured `server.public-bind-address` or `server.public-bind-addresses` listener:
 
 1. Acquire one pre-routing admission slot before starting per-Visitor work.
 2. In direct mode, derive the canonical Visitor tuple from the socket. In strict PROXY v2 mode, verify the accepted peer against configured CIDRs and consume a bounded valid header.

@@ -28,8 +28,10 @@ pub struct ServerRuntimeArgs {
 pub(crate) struct PreparedServerConfig {
     pub(crate) hostname: Option<String>,
     pub(crate) log_level: LogLevel,
-    pub(crate) public_bind_address: Vec<String>,
-    pub(crate) tunnel_bind_address: Vec<String>,
+    pub(crate) public_bind_address: Option<String>,
+    pub(crate) public_bind_addresses: Option<Vec<String>>,
+    pub(crate) tunnel_bind_address: Option<String>,
+    pub(crate) tunnel_bind_addresses: Option<Vec<String>>,
     pub(crate) readiness_bind_address: Option<String>,
     pub(crate) graceful_shutdown_duration: String,
     pub(crate) visitor_proxy_protocol: Option<String>,
@@ -78,6 +80,24 @@ pub(crate) fn prepare_server_config_from_cli(
             messages: vec!["missing [server] section".to_owned()],
         });
     };
+    // Check key presence before typed deserialization so malformed values cannot
+    // hide the singular/plural conflict behind an unrelated shape error.
+    let mut conflicts = Vec::new();
+    for singular in ["public-bind-address", "tunnel-bind-address"] {
+        let plural = format!("{singular}es");
+        if section_value.get(singular).is_some() && section_value.get(plural.as_str()).is_some() {
+            conflicts.push(format!(
+                "server.{singular} and server.{plural} are mutually exclusive"
+            ));
+        }
+    }
+    if !conflicts.is_empty() {
+        return Err(ConfigFileError::Validation {
+            path: path.to_path_buf(),
+            section: "server",
+            messages: conflicts,
+        });
+    }
     let unknown_field_messages = collect_server_unknown_field_messages(&section_value);
     let mut raw = deserialize_selected_section::<RawServerConfig>(path, "server", &section_value)?;
     if let Some(hostname) = resolve_server_hostname_runtime_override(runtime.hostname) {
@@ -137,12 +157,18 @@ fn prepare_raw_server_config_with_defaults(
     PreparedServerConfig {
         hostname: raw.hostname,
         log_level,
-        public_bind_address: raw
-            .public_bind_address
-            .unwrap_or_else(|| vec!["0.0.0.0:443".to_owned()]),
-        tunnel_bind_address: raw
-            .tunnel_bind_address
-            .unwrap_or_else(|| vec!["0.0.0.0:443".to_owned()]),
+        public_bind_address: raw.public_bind_address.or_else(|| {
+            raw.public_bind_addresses
+                .is_none()
+                .then(|| "0.0.0.0:443".to_owned())
+        }),
+        public_bind_addresses: raw.public_bind_addresses,
+        tunnel_bind_address: raw.tunnel_bind_address.or_else(|| {
+            raw.tunnel_bind_addresses
+                .is_none()
+                .then(|| "0.0.0.0:443".to_owned())
+        }),
+        tunnel_bind_addresses: raw.tunnel_bind_addresses,
         readiness_bind_address: raw.readiness_bind_address,
         graceful_shutdown_duration: raw
             .graceful_shutdown_duration
@@ -449,8 +475,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
         assert_eq!(prepared.hostname, Some("tunnel.example.test".to_owned()));
         assert_eq!(prepared.log_level, LogLevel::Info);
-        assert_eq!(prepared.public_bind_address, vec!["0.0.0.0:443"]);
-        assert_eq!(prepared.tunnel_bind_address, vec!["0.0.0.0:443"]);
+        assert_eq!(prepared.public_bind_address, Some("0.0.0.0:443".to_owned()));
+        assert_eq!(prepared.tunnel_bind_address, Some("0.0.0.0:443".to_owned()));
         assert_eq!(prepared.readiness_bind_address, None);
         assert_eq!(prepared.graceful_shutdown_duration, "60s");
         assert!(prepared.manual_cert_present);
@@ -516,7 +542,9 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 identity_dir: None,
                 acme: None,
                 public_bind_address: None,
+                public_bind_addresses: None,
                 tunnel_bind_address: None,
+                tunnel_bind_addresses: None,
                 readiness_bind_address: None,
                 graceful_shutdown_duration: None,
                 visitor_proxy_protocol: None,
@@ -545,8 +573,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             manual.manual_certificate_directory,
             Some(PreparedValue::Ready(default_cert_dir))
         );
-        assert_eq!(manual.public_bind_address, vec!["0.0.0.0:443"]);
-        assert_eq!(manual.tunnel_bind_address, vec!["0.0.0.0:443"]);
+        assert_eq!(manual.public_bind_address, Some("0.0.0.0:443".to_owned()));
+        assert_eq!(manual.tunnel_bind_address, Some("0.0.0.0:443".to_owned()));
         assert_eq!(manual.readiness_bind_address, None);
         assert_eq!(manual.graceful_shutdown_duration, "60s");
 
@@ -562,7 +590,9 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                     state_dir: None,
                 }),
                 public_bind_address: None,
+                public_bind_addresses: None,
                 tunnel_bind_address: None,
+                tunnel_bind_addresses: None,
                 readiness_bind_address: None,
                 graceful_shutdown_duration: None,
                 visitor_proxy_protocol: None,
@@ -616,8 +646,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                     email: Some("admin@example.test".to_owned()),
                     state_dir: Some(PathBuf::from("acme-state")),
                 }),
-                public_bind_address: Some(vec!["127.0.0.1:8443".to_owned()]),
-                tunnel_bind_address: Some(vec!["127.0.0.1:9443".to_owned()]),
+                public_bind_address: Some("127.0.0.1:8443".to_owned()),
+                public_bind_addresses: None,
+                tunnel_bind_address: Some("127.0.0.1:9443".to_owned()),
+                tunnel_bind_addresses: None,
                 readiness_bind_address: Some("127.0.0.1:9000".to_owned()),
                 graceful_shutdown_duration: Some("45s".to_owned()),
                 visitor_proxy_protocol: None,
@@ -643,8 +675,14 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         );
 
         assert_eq!(prepared.log_level, LogLevel::Off);
-        assert_eq!(prepared.public_bind_address, vec!["127.0.0.1:8443"]);
-        assert_eq!(prepared.tunnel_bind_address, vec!["127.0.0.1:9443"]);
+        assert_eq!(
+            prepared.public_bind_address,
+            Some("127.0.0.1:8443".to_owned())
+        );
+        assert_eq!(
+            prepared.tunnel_bind_address,
+            Some("127.0.0.1:9443".to_owned())
+        );
         assert_eq!(
             prepared.readiness_bind_address,
             Some("127.0.0.1:9000".to_owned())
@@ -677,7 +715,9 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 identity_dir: None,
                 acme: None,
                 public_bind_address: None,
+                public_bind_addresses: None,
                 tunnel_bind_address: None,
+                tunnel_bind_addresses: None,
                 readiness_bind_address: None,
                 graceful_shutdown_duration: None,
                 visitor_proxy_protocol: None,
@@ -715,7 +755,9 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
                 identity_dir: None,
                 acme: None,
                 public_bind_address: None,
+                public_bind_addresses: None,
                 tunnel_bind_address: None,
+                tunnel_bind_addresses: None,
                 readiness_bind_address: None,
                 graceful_shutdown_duration: None,
                 visitor_proxy_protocol: None,

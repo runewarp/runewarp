@@ -230,8 +230,10 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `server.hostname` | yes | **Server hostname** for the Runewarp edge itself. Used for TLS validation and ACME. On the runtime `runewarp server` command only, `--hostname` or `RUNEWARP_SERVER_HOSTNAME` may replace this value before validation, with `--hostname` taking precedence. |
 | `server.cert-dir` | no | Directory containing manual/private-CA Server material. Defaults to the XDG Server material path when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
 | `server.identity-dir` | managed only | Directory containing Server identity material for Control authentication. Valid only in managed mode. Defaults to the XDG Server identity path. Must resolve to a different directory than `server.cert-dir`. |
-| `server.public-bind-address` | no | One literal TCP socket address string or an array of 1 to 8 distinct addresses for **Visitor** TLS traffic. Defaults to `"0.0.0.0:443"`. |
-| `server.tunnel-bind-address` | no | One literal UDP socket address string or an array of 1 to 8 distinct addresses for **Client** **Tunnel connections**. Defaults to `"0.0.0.0:443"`; every listener uses ordinary HTTP/3 with ALPN `h3`. |
+| `server.public-bind-address` | no | One literal TCP socket address string for **Visitor** TLS traffic. Mutually exclusive with `server.public-bind-addresses`. Defaults to `"0.0.0.0:443"` when neither key is supplied. |
+| `server.public-bind-addresses` | no | Array of 1 to 8 distinct literal TCP socket addresses for **Visitor** TLS traffic. Mutually exclusive with `server.public-bind-address`. |
+| `server.tunnel-bind-address` | no | One literal UDP socket address string for **Client** **Tunnel connections**. Mutually exclusive with `server.tunnel-bind-addresses`. Defaults to `"0.0.0.0:443"` when neither key is supplied; every listener uses ordinary HTTP/3 with ALPN `h3`. |
+| `server.tunnel-bind-addresses` | no | Array of 1 to 8 distinct literal UDP socket addresses for **Client** **Tunnel connections**, using ALPN `h3`. Mutually exclusive with `server.tunnel-bind-address`. |
 | `server.readiness-bind-address` | no | Optional literal TCP socket address for a probe-only **Server readiness** listener. When configured, TCP accept success means the Server is ready for new ingress admission. There is no default listener. In managed mode the listener address is validated at startup, but the probe stays Unready until the first successful Server input apply. |
 | `server.graceful-shutdown-duration` | no | Operator-facing graceful drain window for the Server role. Defaults to `"60s"`. Supports non-negative integer durations with `ms`, `s`, `m`, or `h` suffixes. `"0s"` disables the longer drain window and makes graceful Server shutdown converge to fast Server behavior. |
 | `server.visitor-proxy-protocol` | no | `"v2"` requires strict PROXY v2 framing on every Visitor connection. Omission keeps direct ingress. |
@@ -242,15 +244,17 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `server.tunnels[].client-identity` | with singular authorization | Lowercase hex SHA-256 fingerprint of one authorized Client public key's SubjectPublicKeyInfo. Mutually exclusive with `server.tunnels[].client-identities`. |
 | `server.tunnels[].client-identities` | with plural authorization | One or more lowercase hex SHA-256 fingerprints of authorized Client public keys' SubjectPublicKeyInfo values. Mutually exclusive with `server.tunnels[].client-identity`. |
 
+Choose at most one key from each singular/plural pair. Singular keys accept only strings and plural keys accept only arrays. Supplying both keys in a pair is an error even if they describe the same address or either value is empty or invalid. Public and Tunnel choices are independent: a singular public address and plural Tunnel addresses, or vice versa, are valid. If neither key in a pair is supplied, that transport uses `0.0.0.0:443`.
+
 Each bind address creates its own listener on the same Server runtime. All listeners share authorization, Tunnel pools, the runtime generation, admission limits, and graceful shutdown. Limits apply across the entire runtime, rather than separately per listener. A failure to bind any Visitor, Tunnel, or readiness address fails startup and releases the earlier sockets. Addresses that differ as literals can still overlap at the operating system, for example wildcard and specific-IP binds on the same port; such conflicts fail startup too. IPv6 wildcard dual-stack behavior follows the operating system's defaults, as it does for a single string.
 
-Both bind keys are file configuration; there are no bind-address CLI flags or environment overrides. Existing single-string configurations keep their meaning. For example, bind separate IPv4 and IPv6 addresses on the same operator-selected port:
+All four bind keys are file configuration; there are no bind-address CLI flags or environment overrides. Existing single-string configurations keep their meaning. For example, bind separate IPv4 and IPv6 addresses on the same operator-selected port:
 
 ```toml
 [server]
 hostname = "tunnel.example.com"
-public-bind-address = ["192.0.2.10:443", "[2001:db8::10]:443"]
-tunnel-bind-address = ["192.0.2.10:443", "[2001:db8::10]:443"]
+public-bind-addresses = ["192.0.2.10:443", "[2001:db8::10]:443"]
+tunnel-bind-addresses = ["192.0.2.10:443", "[2001:db8::10]:443"]
 ```
 
 The addresses must belong to the host; add the remaining certificate and Tunnel configuration as in the examples above.
@@ -367,7 +371,9 @@ Runewarp supports two Client trust modes:
 - every `client-identity` value and every entry in `client-identities` must be lowercase hex without colons
 - `server.tunnels[].client-identity` and `server.tunnels[].client-identities` are mutually exclusive
 - every authorized Client identity must be unique across all Server Tunnels
-- `server.public-bind-address` and `server.tunnel-bind-address` accept a literal socket address string or an array of 1 to 8 distinct literal socket addresses; hostnames, empty arrays, duplicates after address parsing, and larger arrays are rejected
+- `server.public-bind-address` and `server.tunnel-bind-address` accept only one literal socket address string
+- `server.public-bind-addresses` and `server.tunnel-bind-addresses` accept only arrays of 1 to 8 distinct literal socket addresses; hostnames, empty arrays, duplicates after address parsing, and larger arrays are rejected
+- each singular/plural bind pair is mutually exclusive, even if either value is empty or invalid; omitting both defaults that transport to `0.0.0.0:443`
 - `server.readiness-bind-address` when present must be one literal socket address
 - `server.graceful-shutdown-duration` and `client.graceful-shutdown-duration` must be non-negative duration strings such as `"0s"`, `"60s"`, `"5m"`, or `"250ms"`
 - Visitor PROXY v2 requires a non-empty CIDR-only trusted-network list; trusted networks without the protocol setting are rejected

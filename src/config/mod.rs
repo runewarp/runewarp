@@ -431,7 +431,9 @@ fn validate_prepared_server_config(
         hostname,
         log_level,
         public_bind_address,
+        public_bind_addresses,
         tunnel_bind_address,
+        tunnel_bind_addresses,
         readiness_bind_address,
         graceful_shutdown_duration,
         visitor_proxy_protocol,
@@ -493,14 +495,16 @@ fn validate_prepared_server_config(
         }),
     };
 
-    let public_bind_addresses = validate_socket_addresses_field(
+    let public_bind_addresses = validate_server_bind_address_pair(
         "server.public-bind-address",
         public_bind_address,
+        public_bind_addresses,
         &mut messages,
     );
-    let tunnel_connection_bind_addresses = validate_socket_addresses_field(
+    let tunnel_connection_bind_addresses = validate_server_bind_address_pair(
         "server.tunnel-bind-address",
         tunnel_bind_address,
+        tunnel_bind_addresses,
         &mut messages,
     );
     let readiness_bind_address = readiness_bind_address.and_then(|address| {
@@ -1388,6 +1392,29 @@ fn validate_unique_server_addresses(
     }
 }
 
+fn validate_server_bind_address_pair(
+    singular_field: &str,
+    address: Option<String>,
+    addresses: Option<Vec<String>>,
+    messages: &mut Vec<String>,
+) -> Vec<SocketAddr> {
+    match (address, addresses) {
+        (Some(_), Some(_)) => {
+            messages.push(format!(
+                "{singular_field} and {singular_field}es are mutually exclusive"
+            ));
+            Vec::new()
+        }
+        (Some(address), None) => validate_socket_address_field(singular_field, address, messages)
+            .into_iter()
+            .collect(),
+        (None, Some(addresses)) => {
+            validate_socket_addresses_field(&format!("{singular_field}es"), addresses, messages)
+        }
+        (None, None) => unreachable!("config preparation supplies the default bind address"),
+    }
+}
+
 fn validate_socket_addresses_field(
     field_name: &str,
     addresses: Vec<String>,
@@ -1427,22 +1454,6 @@ pub(crate) fn validate_bind_addresses(
         }
     }
     Ok(())
-}
-
-fn deserialize_socket_addresses<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Addresses {
-        One(String),
-        Many(Vec<String>),
-    }
-    Ok(Some(match Addresses::deserialize(deserializer)? {
-        Addresses::One(address) => vec![address],
-        Addresses::Many(addresses) => addresses,
-    }))
 }
 
 fn validate_socket_address_field(
@@ -1662,7 +1673,9 @@ pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value)
             "cert-dir",
             "acme",
             "public-bind-address",
+            "public-bind-addresses",
             "tunnel-bind-address",
+            "tunnel-bind-addresses",
             "readiness-bind-address",
             "graceful-shutdown-duration",
             "visitor-proxy-protocol",
@@ -1796,10 +1809,10 @@ pub(crate) struct RawServerConfig {
     pub(crate) cert_dir: Option<PathBuf>,
     pub(crate) identity_dir: Option<PathBuf>,
     pub(crate) acme: Option<RawServerAcmeConfig>,
-    #[serde(default, deserialize_with = "deserialize_socket_addresses")]
-    pub(crate) public_bind_address: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "deserialize_socket_addresses")]
-    pub(crate) tunnel_bind_address: Option<Vec<String>>,
+    pub(crate) public_bind_address: Option<String>,
+    pub(crate) public_bind_addresses: Option<Vec<String>>,
+    pub(crate) tunnel_bind_address: Option<String>,
+    pub(crate) tunnel_bind_addresses: Option<Vec<String>>,
     pub(crate) readiness_bind_address: Option<String>,
     pub(crate) graceful_shutdown_duration: Option<String>,
     pub(crate) visitor_proxy_protocol: Option<String>,

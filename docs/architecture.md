@@ -39,7 +39,7 @@ This keeps config discovery and defaulting predictable without mixing them into 
 
 After Config preparation, the binary is only a process adapter: it translates CLI input and operating-system signals, then crosses one `ClientRuntime` or `ServerRuntime` library seam. The separate role runtimes own startup side effects, static-versus-Managed construction, optional ACME work, child-runtime completion, orderly shutdown, and teardown. Client and Server deliberately do not share a generic runtime framework because their drain and Managed-session lifetimes differ. The crate-root `ClientRuntime` and `ServerRuntime` exports are the supported process-integration surface. CLI-only lifecycle mechanics stay private. The remaining crate-root startup, transport, and controller exports are intentional lower-level library and integration-test surfaces; they do not participate in process orchestration.
 
-The Server's public TCP and Tunnel UDP bind keys each accept one address or 1 to 8 distinct addresses. All listeners feed one accept loop with shared Visitor intake, handshake admission, Tunnel registry, authorization, runtime generation and shutdown. Listener count does not multiply admission capacity. Startup reserves all listener sockets before starting QUIC drivers or accepting work, and any bind failure releases the earlier reservations.
+For each transport, the Server accepts one literal socket address string through `server.public-bind-address` or `server.tunnel-bind-address`, or an array of 1 to 8 distinct addresses through the corresponding `-bind-addresses` key. Each singular/plural pair is mutually exclusive; public and Tunnel choices are independent, and an omitted pair defaults to `0.0.0.0:443`. All listeners feed one accept loop with shared Visitor intake, handshake admission, Tunnel registry, authorization, runtime generation and shutdown. Listener count does not multiply admission capacity. Startup reserves all listener sockets before starting QUIC drivers or accepting work, and any bind failure releases the earlier reservations.
 
 ## Hostname domain values
 
@@ -103,7 +103,7 @@ Both shapes still use **Server-authoritative routing** for public ingress.
 
 ### Passthrough (default)
 
-1. A **Visitor** connects to the **Server** on any configured public TCP listener in `server.public-bind-address`, which defaults to the single address `0.0.0.0:443`.
+1. A **Visitor** connects to the **Server** on any configured public TCP listener in `server.public-bind-address` or `server.public-bind-addresses`, which defaults to the single address `0.0.0.0:443`.
 2. One Server Visitor-intake module owns global admission, trusted direct-or-strict-PROXY tuple resolution, canonical-source admission, the shared intake deadline, ClientHello parsing, permit release, shutdown cancellation, and rejection/recovery reporting.
 3. The Server buffers enough of the ClientHello to extract SNI.
 4. The Server rejects non-TLS traffic, missing-SNI traffic, and non-ACME application traffic addressed to the **Server hostname**.

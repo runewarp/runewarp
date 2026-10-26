@@ -48,7 +48,7 @@ Visitor HTTP/3 QUIC passthrough needs its own UDP listener configuration key. A 
 - `config show`, `config init`, and `config edit` workflows
 - documented service-manager operation before any background-process CLI surface
 - structured logs and metrics for routing, rejection, reconnect, and pool health
-- clearer external/NAT port mapping, later per-hostname public ports, and IPv6 deployment guidance; Server listeners already support multiple IPv4/IPv6 addresses and configurable ports through `server.public-bind-address` and `server.tunnel-bind-address`
+- clearer external/NAT port mapping, later per-hostname public ports, and IPv6 deployment guidance; Server listeners already support multiple IPv4/IPv6 addresses and configurable ports through `server.public-bind-address` / `server.public-bind-addresses` and `server.tunnel-bind-address` / `server.tunnel-bind-addresses`
 
 ## Performance and timeouts — Exploring
 

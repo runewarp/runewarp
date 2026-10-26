@@ -14,7 +14,7 @@ Use this guide to install Runewarp, prepare trust material, start the runtime, a
 
 Runewarp assumes:
 
-- a public **Server** reachable on its configured `server.public-bind-address` for **Visitor** TLS traffic and `server.tunnel-bind-address` for **Client** **Tunnel connections**
+- a public **Server** reachable on its configured public TCP addresses for **Visitor** TLS traffic and Tunnel UDP addresses for **Client** **Tunnel connections**, using singular `-bind-address` or mutually exclusive plural `-bind-addresses` keys as described in the [configuration reference](configuration.md#server)
 - one or more **Public hostnames** that resolve to the Server
 - a **Local backend** behind the Client
 - a decision about the Server certificate path and, if any Service uses `tls-mode = "terminate"`, the Client certificate path for those **Public hostnames**
@@ -166,8 +166,8 @@ Run the **Server** on a machine with a public IP so **Visitors** and **Client in
 
 - create an A record for the **Server hostname** that points to that machine's public IP
 - use each **Public hostname** as a CNAME to the **Server hostname** as the standard DNS pattern
-- allow Visitor and ACME traffic to reach each `server.public-bind-address` over TCP (TCP 443 by default)
-- allow Clients to reach each `server.tunnel-bind-address` over UDP (UDP 443 by default)
+- allow Visitor and ACME traffic to reach each address in `server.public-bind-address` or `server.public-bind-addresses` over TCP (TCP 443 by default)
+- allow Clients to reach each address in `server.tunnel-bind-address` or `server.tunnel-bind-addresses` over UDP (UDP 443 by default)
 - if you deploy behind NAT, a load balancer, or port mapping, preserve both transports and map their external ports to the configured listeners
 
 Pointing a **Public hostname** directly at the same public IP can also work, but a CNAME to the **Server hostname** is usually clearer.
@@ -224,7 +224,7 @@ The Client uses the same signals. Graceful Client shutdown withdraws every Tunne
 
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
-| No traffic reaches the backend | No active **Tunnel connection** | Confirm the Client is running and can reach the Server on `server.tunnel-bind-address` |
+| No traffic reaches the backend | No active **Tunnel connection** | Confirm the Client is running and can reach a Server address configured through `server.tunnel-bind-address` or `server.tunnel-bind-addresses` |
 | Client cannot connect to the Server | Wrong Server trust path | Check `client.server-trust` and `client.server-ca-file`, or confirm the ACME/public-CA chain is trusted |
 | Server drops a Public hostname | No Server `[[server.tunnels]]` entry grants **Public hostname authorization** for it | Check `server.tunnels[].public-hostnames`, or in managed mode confirm Control published that hostname |
 | Client rejects the stream | No matching **Service** on the Client | Check Client `public-hostnames`, or confirm the sole Service is intentionally Catch-all |

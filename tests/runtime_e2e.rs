@@ -31,6 +31,8 @@ use tokio::sync::{Notify, oneshot};
 use tokio::time::{sleep, timeout};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
+mod udp_forwarder;
+
 fn public_hostname(hostname: &str) -> PublicHostname {
     PublicHostname::try_from(hostname).unwrap()
 }
@@ -3659,4 +3661,266 @@ async fn zero_client_graceful_duration_closes_without_withdrawal() {
     shutdown.begin_graceful();
     assert_eq!(client_outcome(&mut visitor.client_task).await, None);
     visitor.stop().await;
+}
+
+/// A Managed Server runtime behind a shared Server address, applying its input directly.
+struct ReplaceableServer {
+    public_addr: SocketAddr,
+    tunnel_addr: SocketAddr,
+    adapter: runewarp::ServerAuthorizationAdapter,
+    shutdown: OrderlyShutdown,
+    task: tokio::task::JoinHandle<io::Result<()>>,
+}
+
+impl ReplaceableServer {
+    async fn start(certificate: &CertificateDer<'static>, key: &[u8]) -> Self {
+        let authorization = ServerAuthorization::empty_managed();
+        let server = Server::bind(ServerBindConfig {
+            public_bind_addr: localhost(0),
+            tunnel_connection_bind_addr: localhost(0),
+            readiness_bind_addr: None,
+            server_hostname: server_hostname("localhost"),
+            authorization: authorization.clone(),
+            public_tls_config: None,
+            quic_server_config: make_authenticated_server_h3_config(
+                certificate,
+                key,
+                &authorization,
+            ),
+            admission: ServerAdmission::Managed,
+        })
+        .await
+        .unwrap();
+        let shutdown = OrderlyShutdown::new(Duration::from_secs(1), QUIC_CLOSE_FLUSH_DURATION);
+        let public_addr = server.public_addr().unwrap();
+        let tunnel_addr = server.tunnel_addr().unwrap();
+        let adapter = server.authorization_adapter();
+        let task = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move { server.run_with_shutdown(&shutdown).await }
+        });
+        Self {
+            public_addr,
+            tunnel_addr,
+            adapter,
+            shutdown,
+            task,
+        }
+    }
+
+    /// The runtime generation this Server reports in its state acknowledgment.
+    fn generation(&self) -> String {
+        use runewarp::RoleAdapter;
+        self.adapter
+            .acknowledgment_fields()
+            .into_iter()
+            .find_map(|(field, value)| (field == "generation").then_some(value))
+            .expect("Servers report their generation")
+    }
+
+    /// Apply a Server input exactly as Control would publish it.
+    async fn apply(&self, identity: &GeneratedClientIdentity, replacement: Option<String>) {
+        use runewarp::RoleAdapter;
+        let mut input = serde_json::json!({
+            "tunnels": [{
+                "id": "app",
+                "public_hostnames": ["app.example.test", "api.example.test"],
+                "client_identities": [identity.client_identity.to_string()],
+            }],
+        });
+        if let Some(replacement) = replacement {
+            input["replacement_generation"] = replacement.into();
+        }
+        let input = runewarp::ServerAuthorizationAdapter::parse_input(
+            input,
+            &runewarp::ManagedSessionLimits::default(),
+        )
+        .expect("valid Server input");
+        let mut adapter = self.adapter.clone();
+        adapter.apply(input).await.expect("input applies");
+    }
+
+    async fn stop(self) {
+        let _ = self.shutdown.begin_fast();
+        let _ = timeout(Duration::from_secs(2), self.task).await;
+    }
+}
+
+#[tokio::test]
+async fn a_hinted_candidate_replaces_the_old_runtime_while_its_visitor_finishes() {
+    timeout(Duration::from_secs(20), async {
+        let tempdir = tempdir().unwrap();
+        let identity = generate_client_identity().unwrap();
+        let (tunnel_cert, tunnel_key, tunnel_pem) = make_self_signed_cert_with_pem("localhost");
+        let (staged_cert, staged_key) = make_self_signed_cert("app.example.test");
+        let (staged_addr, staged_started, staged_release, staged_task) = spawn_staged_tls_backend(
+            private_key_from_der(&staged_key),
+            staged_cert.clone(),
+            *b"on",
+            *b"e!",
+        )
+        .await;
+        let (api_cert, api_key) = make_self_signed_cert("api.example.test");
+        let (api_addr, api_task) =
+            spawn_tls_backend(private_key_from_der(&api_key), api_cert.clone(), *b"pong").await;
+
+        let old = ReplaceableServer::start(&tunnel_cert, &tunnel_key).await;
+        let new = ReplaceableServer::start(&tunnel_cert, &tunnel_key).await;
+        old.apply(&identity, None).await;
+        new.apply(&identity, None).await;
+        // One Server address in front of both runtimes. Flows keep their first runtime.
+        let resolved_localhost = tokio::net::lookup_host("localhost:0")
+            .await
+            .unwrap()
+            .next()
+            .unwrap();
+        let address = udp_forwarder::UdpForwarder::start(resolved_localhost, old.tunnel_addr).await;
+
+        let directory = tempdir.path();
+        std::fs::write(directory.join("ca.pem"), &tunnel_pem).unwrap();
+        std::fs::write(
+            directory.join(CLIENT_CERT_FILENAME),
+            &identity.certificate_pem,
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join(CLIENT_KEY_FILENAME),
+            &identity.private_key_pem,
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join(CLIENT_IDENTITY_FILENAME),
+            identity.client_identity.to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("client.toml"),
+            format!(
+                r#"
+[client]
+server-address = "localhost:{port}"
+server-trust = "ca-file"
+server-ca-file = "ca.pem"
+identity-dir = "."
+graceful-shutdown-duration = "10s"
+[[client.services]]
+public-hostnames = ["app.example.test"]
+backend-address = "{staged_addr}"
+[[client.services]]
+public-hostnames = ["api.example.test"]
+backend-address = "{api_addr}"
+"#,
+                port = address.local_addr().port(),
+            ),
+        )
+        .unwrap();
+        let settings = Arc::new(load_client_config(&directory.join("client.toml")).unwrap());
+        let instance = ClientInstancePrep::prepare(&settings).await.unwrap();
+        let client_bind_addr = SocketAddr::new(resolved_localhost.ip(), 0);
+        let factory: runewarp::AddressWorkerFactory = {
+            let settings = Arc::clone(&settings);
+            let instance = Arc::clone(&instance);
+            Arc::new(move |server_address, control| {
+                let dial = Arc::new(runewarp::ClientTunnelAttempt::new(
+                    Arc::clone(&settings),
+                    Arc::clone(&instance),
+                    client_bind_addr,
+                ));
+                Box::pin(async move {
+                    runewarp::run_address_worker(
+                        server_address,
+                        control,
+                        dial,
+                        Arc::new(runewarp::SilentAddressWorkerHooks),
+                        runewarp::FixedBackoff(Duration::from_millis(50)),
+                    )
+                    .await
+                })
+            })
+        };
+        let mut controller = runewarp::AddressController::for_static(factory)
+            .with_graceful_shutdown_duration(settings.graceful_shutdown_duration);
+        controller.seed_configured(settings.server_addresses.clone());
+        let client_shutdown = controller.shutdown_handle();
+        let client = tokio::spawn(async move { controller.run().await });
+
+        timeout(Duration::from_secs(5), async {
+            while request_tls_response(old.public_addr, &api_cert, "api.example.test")
+                .await
+                .is_err()
+            {
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the old runtime serves Visitors");
+        // A Visitor placed on the old runtime stays in flight across the replacement.
+        let connector = TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store_with(&staged_cert))
+                .with_no_client_auth(),
+        ));
+        let mut in_flight = connector
+            .connect(
+                ServerName::try_from("app.example.test").unwrap(),
+                TcpStream::connect(old.public_addr).await.unwrap(),
+            )
+            .await
+            .unwrap();
+        in_flight.write_all(b"ping").await.unwrap();
+        staged_started.await.unwrap();
+        let mut first = [0_u8; 2];
+        in_flight.read_exact(&mut first).await.unwrap();
+        assert_eq!(&first, b"on");
+        assert_eq!(address.flows(), 1);
+
+        // Ingress now steers new flows to the new runtime, and Control names it on the old one.
+        address.set_target(new.tunnel_addr);
+        old.apply(&identity, Some(new.generation())).await;
+
+        // The candidate validates, promotes and offers credit on the new runtime.
+        timeout(Duration::from_secs(5), async {
+            while request_tls_response(new.public_addr, &api_cert, "api.example.test")
+                .await
+                .is_err()
+            {
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the promoted candidate serves Visitors");
+        // The old connection is withdrawn from placement while its Visitor finishes there.
+        wait_for_tls_failure(old.public_addr, &api_cert, "api.example.test")
+            .await
+            .expect("the retiring connection receives no new Visitors");
+        staged_release.notify_one();
+        let mut tail = Vec::new();
+        in_flight.read_to_end(&mut tail).await.unwrap();
+        assert_eq!(
+            tail, b"e!",
+            "the in-flight Visitor finishes on the old runtime"
+        );
+        in_flight.shutdown().await.unwrap();
+
+        // Retirement never reconnects: one primary flow, one candidate flow.
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(address.flows(), 2);
+        wait_for_tls_response(new.public_addr, &api_cert, "api.example.test")
+            .await
+            .expect("the new runtime keeps serving");
+
+        client_shutdown.begin(ShutdownMode::Graceful);
+        timeout(Duration::from_secs(5), client)
+            .await
+            .expect("Client drains")
+            .unwrap()
+            .unwrap();
+        old.stop().await;
+        new.stop().await;
+        staged_task.abort();
+        api_task.abort();
+        instance.stop_acme().await;
+    })
+    .await
+    .expect("replacement finishes promptly");
 }

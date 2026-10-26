@@ -7,6 +7,7 @@ mod client_public_cert;
 mod client_runtime;
 pub mod config;
 mod control_address;
+mod fd_capacity;
 mod hostname;
 mod identity;
 pub mod managed_session;
@@ -120,3 +121,11 @@ pub use tunnel_h3::{
     make_server_tunnel_h3_config_with_resolver,
 };
 pub use tunnel_id::TunnelId;
+
+#[cfg(test)]
+mod capacity_benchmark;
+
+#[cfg(test)]
+mod runtime_capacity_tests;
+
+mod visitor_capacity;

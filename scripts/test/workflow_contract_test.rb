@@ -158,6 +158,7 @@ class WorkflowContractTest < Minitest::Test
   def test_public_script_entrypoints_are_kebab_case_without_extensions
     expected_entrypoints = %w[
       audit-dependencies
+      benchmark-visitor-capacity
       check-crates-io-publishing
       check-crates-io-release
       check-distribution

@@ -113,6 +113,9 @@ impl VisitorCredits {
                 }
                 Err(_) => {
                     #[cfg(test)]
+                    crate::capacity_benchmark::GUARD_RESETS
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(test)]
                     self.guard_rejections
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     drop(state);

@@ -414,6 +414,7 @@ mod tests {
         let failing_server_address =
             ServerAddress::parse(&format!("localhost:{failing_port}")).map_err(io::Error::other)?;
         let settings = ClientConfig {
+            max_visitor_streams: 16_384,
             server_addresses: vec![failing_server_address.clone(), valid_server_address.clone()],
             server_hostname: failing_server_address.hostname().clone(),
             server_port: failing_server_address.port(),
@@ -550,5 +551,51 @@ mod tests {
         let mut response = [0_u8; 4];
         tls_stream.read_exact(&mut response).await?;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::ClientRuntime;
+
+    #[tokio::test]
+    async fn static_and_managed_runtimes_share_the_configured_instance_budget() {
+        for managed in [false, true] {
+            let directory = tempfile::tempdir().expect("directory");
+            std::fs::create_dir(directory.path().join("identity")).expect("identity directory");
+            for name in ["client.crt", "client.key", "client-identity.txt"] {
+                std::fs::write(directory.path().join("identity").join(name), "placeholder")
+                    .expect("material");
+            }
+            let path = directory.path().join("config.toml");
+            let admission = if managed {
+                "[control]\naddress = \"control.example.test\"\n"
+            } else {
+                ""
+            };
+            let address = if managed {
+                ""
+            } else {
+                "server-address = \"tunnel.example.test\"\n"
+            };
+            std::fs::write(&path, format!("{admission}[client]\n{address}max-visitor-streams = 512\nidentity-dir = \"identity\"\n[[client.services]]\nbackend-address = \"localhost:8443\"\n")).expect("config");
+            let settings = crate::load_client_config(&path).expect("valid settings");
+            let runtime =
+                ClientRuntime::prepare(&settings, "127.0.0.1:0".parse().expect("address"))
+                    .await
+                    .expect("runtime");
+            let budget = runtime.instance.stream_budget();
+            assert_eq!(
+                budget.limits().max_stream_handlers,
+                512,
+                "managed={managed}"
+            );
+            let semaphore = budget.semaphore();
+            let permits = semaphore
+                .try_acquire_many(512)
+                .expect("configured capacity");
+            assert!(semaphore.try_acquire().is_err());
+            drop(permits);
+        }
     }
 }

@@ -16,6 +16,7 @@ fn localhost(port: u16) -> SocketAddr {
 async fn client_runtime_tears_down_after_shutdown_signal_failure() {
     let server_address = ServerAddress::parse("localhost:9").unwrap();
     let config = ClientConfig {
+        max_visitor_streams: 16_384,
         server_hostname: server_address.hostname().clone(),
         server_port: server_address.port(),
         server_addresses: vec![server_address],

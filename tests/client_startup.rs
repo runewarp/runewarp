@@ -253,6 +253,7 @@ async fn prepared_client_rejects_settings_without_services() {
     .unwrap();
 
     let settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -314,6 +315,7 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
     .unwrap();
 
     let settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -378,6 +380,7 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
     .unwrap();
 
     let settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -439,6 +442,7 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
     fs::create_dir(&public_cert_dir).unwrap();
 
     let settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -528,6 +532,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
 
     let settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -563,6 +568,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     fs::write(&server_ca_path, server_cert_pem).unwrap();
 
     let settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_trust: runewarp::ClientServerTrust::CaFile(server_ca_path),
         ..settings
     };
@@ -651,6 +657,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
 
     let settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -762,6 +769,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
     fs::write(tempdir.path().join("server-ca.pem"), server_ca_pem).unwrap();
 
     let settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -861,6 +869,7 @@ async fn shared_client_instance_prep_survives_reconnect_style_redials() {
     initialize_manual_client_public_cert(&public_cert_dir, "app.example.test").unwrap();
 
     let settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![
             server_address("tunnel.example.test:1"),
             server_address("tunnel.example.test:2"),
@@ -1005,6 +1014,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
 
     // Two services: one terminating (ACME-managed), one passthrough (no cert needed).
     let settings = ClientConfig {
+        max_visitor_streams: 16_384,
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,

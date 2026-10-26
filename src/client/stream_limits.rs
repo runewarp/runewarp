@@ -7,7 +7,7 @@ use crate::runtime_log;
 
 const SATURATION_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Fixed Client routed-stream setup policy. Not operator-configurable.
+/// Client routed-stream setup policy; the instance budget is operator-configurable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ClientStreamLimits {
     pub(crate) max_stream_handlers: usize,
@@ -22,7 +22,7 @@ impl Default for ClientStreamLimits {
     fn default() -> Self {
         Self {
             // Idle Visitor credits and active streams share this Client-instance bound.
-            max_stream_handlers: 1024,
+            max_stream_handlers: crate::visitor_capacity::DEFAULT_VISITOR_CAPACITY,
             client_hello_timeout: Duration::from_secs(5),
             backend_connect_timeout: Duration::from_secs(5),
             initial_backend_write_timeout: Duration::from_secs(5),
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn production_limits_bound_idle_credit_and_active_visitors() {
         let limits = ClientStreamLimits::default();
-        assert_eq!(limits.max_stream_handlers, 1024);
+        assert_eq!(limits.max_stream_handlers, 16_384);
         assert!(u32::try_from(limits.max_stream_handlers).is_ok());
     }
 

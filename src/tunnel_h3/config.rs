@@ -17,10 +17,12 @@ use super::TUNNEL_H3_ALPN;
 /// Maximum decoded HTTP/3 field-section size on either peer, limiting QPACK expansion.
 pub(super) const MAX_FIELD_SECTION_SIZE: u64 = 16 * 1024;
 
-/// Connection-wide QUIC receive credit on either peer, bounding unread transport data across streams.
+/// Shared unread transport-byte bound, not a whole-process memory bound. More credit permits
+/// more buffering without isolating stalled Visitors. See docs/research/visitor-capacity-benchmark.md.
 const CONNECTION_RECEIVE_WINDOW: u32 = 64 * 1024 * 1024;
 
-/// Per-stream QUIC receive credit on either peer, retaining Quinn's 1.25 MB default.
+/// Per-stream unread transport-byte bound. Retaining this window avoids adding buffering while
+/// shared-window starvation remains. See docs/research/visitor-capacity-benchmark.md.
 const STREAM_RECEIVE_WINDOW: u32 = 1_250_000;
 
 /// Request streams for the event-stream subscription, its replacement during resubscription, and

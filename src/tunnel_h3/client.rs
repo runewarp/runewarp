@@ -275,6 +275,8 @@ impl ClientTunnelH3 {
             subscription,
         ));
 
+        #[cfg(test)]
+        crate::capacity_benchmark::CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Self {
             connection,
             state,

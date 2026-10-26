@@ -226,6 +226,9 @@ impl VisitorIntake {
                 return Ok(());
             }
             TunnelRouteOutcome::NoActiveTunnelConnection => {
+                #[cfg(test)]
+                crate::capacity_benchmark::NO_ACTIVE_ROUTE
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 runtime_log::server_route(
                     public_hostname.as_str(),
                     ServerRouteOutcome::NoActiveTunnelConnection,

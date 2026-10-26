@@ -206,6 +206,7 @@ impl ManagedClientHarness {
         fs::write(tempdir.path().join("server-ca.pem"), &server_cert_pem).unwrap();
 
         let settings = ClientConfig {
+            max_visitor_streams: 16_384,
             server_addresses: vec![],
             server_hostname: ServerHostname::try_from("localhost").unwrap(),
             server_port: 443,

@@ -15,7 +15,7 @@ fn withdrawal_uri() -> String {
     format!("https://{SERVER_NAME}{TUNNEL_WITHDRAWAL_PATH}")
 }
 
-async fn pair(permits: usize) -> (Fixture, ServerTunnelH3, ClientTunnelH3) {
+async fn pair(permits: usize) -> (Fixture, ServerTunnel, ClientTunnel) {
     let fixture = Fixture::new().expect("fixture");
     let (server, client) = establish_pair(
         &fixture,
@@ -50,7 +50,7 @@ async fn expect_confirmed(stream: &mut RawClientStream) {
     );
 }
 
-async fn wait_until_withdrawn(server: &ServerTunnelH3) {
+async fn wait_until_withdrawn(server: &ServerTunnel) {
     timeout(STEP, async {
         while server.accepts_visitors() {
             tokio::task::yield_now().await;
@@ -62,8 +62,8 @@ async fn wait_until_withdrawn(server: &ServerTunnelH3) {
 
 /// One open Visitor whose halves both peers still hold.
 async fn active_visitor(
-    server: &ServerTunnelH3,
-    client: &mut ClientTunnelH3,
+    server: &ServerTunnel,
+    client: &mut ClientTunnel,
 ) -> (
     super::super::ServerTunnelStream,
     super::super::ClientTunnelStream,
@@ -439,7 +439,7 @@ enum Scripted {
 /// A raw Server that passes the gate, accepts the session and answers withdrawals from `script`.
 async fn scripted_client(
     script: Vec<Scripted>,
-) -> (ClientTunnelH3, Arc<AtomicUsize>, JoinHandle<()>) {
+) -> (ClientTunnel, Arc<AtomicUsize>, JoinHandle<()>) {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let withdrawals = Arc::new(AtomicUsize::new(0));
@@ -499,7 +499,7 @@ async fn scripted_client(
             }
         }
     });
-    let client = ClientTunnelH3::establish_with_timing(
+    let client = ClientTunnel::establish_with_timing(
         client_connection,
         &server_hostname(),
         no_credit(),

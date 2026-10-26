@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use self::drain::ServerDrain;
-use crate::tunnel::{ServerRuntimeGeneration, ServerTunnelEvents, ServerTunnelH3};
+use crate::tunnel::{ServerRuntimeGeneration, ServerTunnel, ServerTunnelEvents};
 use quinn::Endpoint;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::Notify;
@@ -737,7 +737,7 @@ async fn register_tunnel_connection(
     let handshake = with_handshake_timeout(
         async {
             let connection = connecting.await.map_err(|error| error.to_string())?;
-            ServerTunnelH3::establish(connection, server_hostname, tunnel_events)
+            ServerTunnel::establish(connection, server_hostname, tunnel_events)
                 .await
                 .map(Arc::new)
                 .map_err(|error| error.to_string())

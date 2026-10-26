@@ -22,7 +22,7 @@ use tokio::time::{sleep, timeout};
 
 use super::events::{ServerRuntimeGeneration, TunnelEventState};
 use super::{
-    ClientTunnelH3, ServerTunnelH3, TUNNEL_EVENTS_PATH, TunnelH3Error, TunnelH3Timing,
+    ClientTunnel, ServerTunnel, TUNNEL_EVENTS_PATH, TunnelError, TunnelTiming,
     make_client_tunnel_h3_config, make_server_tunnel_h3_config,
 };
 use crate::quic::StaticClientIdentityAdmission;
@@ -43,8 +43,8 @@ type RawServerStream = h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, By
 type RawSendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 type RawClientStream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
-fn fast_timing() -> TunnelH3Timing {
-    TunnelH3Timing {
+fn fast_timing() -> TunnelTiming {
+    TunnelTiming {
         request_deadline: Duration::from_secs(1),
         keepalive_comment_interval: Duration::from_millis(50),
         blocked_write_deadline: Duration::from_secs(1),
@@ -175,19 +175,19 @@ async fn establish_pair(
     fixture: &Fixture,
     generation: impl Into<super::ServerTunnelEvents>,
     budget: Arc<Semaphore>,
-) -> (ServerTunnelH3, ClientTunnelH3) {
+) -> (ServerTunnel, ClientTunnel) {
     let (server_connection, client_connection) =
         fixture.connect().await.expect("authenticated handshake");
     let hostname = server_hostname();
     let (server, client) = timeout(STEP, async {
         tokio::join!(
-            ServerTunnelH3::establish_with_timing(
+            ServerTunnel::establish_with_timing(
                 server_connection,
                 server_hostname(),
                 generation,
                 fast_timing(),
             ),
-            ClientTunnelH3::establish_with_timing(
+            ClientTunnel::establish_with_timing(
                 client_connection,
                 &hostname,
                 budget,
@@ -368,7 +368,7 @@ async fn client_rejects_an_incompatible_event_stream_and_closes_the_connection()
             closed
         });
 
-        let result = ClientTunnelH3::establish_with_timing(
+        let result = ClientTunnel::establish_with_timing(
             client_connection,
             &server_hostname(),
             no_credit(),
@@ -377,7 +377,7 @@ async fn client_rejects_an_incompatible_event_stream_and_closes_the_connection()
         .await;
 
         assert!(
-            matches!(result, Err(TunnelH3Error::Incompatible(actual)) if actual == reason),
+            matches!(result, Err(TunnelError::Incompatible(actual)) if actual == reason),
             "{reason}: {:?}",
             result.err()
         );
@@ -423,7 +423,7 @@ async fn client_rejects_a_non_event_stream_response() {
             drop(connection);
         });
 
-        let result = ClientTunnelH3::establish_with_timing(
+        let result = ClientTunnel::establish_with_timing(
             client_connection,
             &server_hostname(),
             no_credit(),
@@ -432,7 +432,7 @@ async fn client_rejects_a_non_event_stream_response() {
         .await;
 
         assert!(
-            matches!(result, Err(TunnelH3Error::Incompatible(actual)) if actual == reason),
+            matches!(result, Err(TunnelError::Incompatible(actual)) if actual == reason),
             "{reason}: {:?}",
             result.err()
         );
@@ -460,7 +460,7 @@ async fn comment_keepalives_do_not_satisfy_the_gate() {
         }
     });
 
-    let result = ClientTunnelH3::establish_with_timing(
+    let result = ClientTunnel::establish_with_timing(
         client_connection,
         &server_hostname(),
         no_credit(),
@@ -469,7 +469,7 @@ async fn comment_keepalives_do_not_satisfy_the_gate() {
     .await;
 
     assert!(
-        matches!(result, Err(TunnelH3Error::InitialStateTimeout)),
+        matches!(result, Err(TunnelError::InitialStateTimeout)),
         "{:?}",
         result.err()
     );
@@ -498,7 +498,7 @@ async fn client_resubscribes_after_an_end_or_silence_and_keeps_the_connection() 
         (request, connection, second, third, session)
     });
 
-    let client = ClientTunnelH3::establish_with_timing(
+    let client = ClientTunnel::establish_with_timing(
         client_connection,
         &server_hostname(),
         no_credit(),
@@ -542,7 +542,7 @@ async fn client_closes_when_the_generation_changes_on_one_connection() {
         closed
     });
 
-    let client = ClientTunnelH3::establish_with_timing(
+    let client = ClientTunnel::establish_with_timing(
         client_connection,
         &server_hostname(),
         no_credit(),
@@ -568,7 +568,7 @@ async fn server_sends_state_first_then_keepalives_and_supersedes_older_subscript
     let generation = ServerRuntimeGeneration::generate();
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let (server, (mut send_request, _driver)) = tokio::join!(
-        ServerTunnelH3::establish_with_timing(
+        ServerTunnel::establish_with_timing(
             server_connection,
             server_hostname(),
             generation,
@@ -618,7 +618,7 @@ async fn server_answers_other_requests_with_bodyless_statuses() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let (server, (mut send_request, _driver)) = tokio::join!(
-        ServerTunnelH3::establish_with_timing(
+        ServerTunnel::establish_with_timing(
             server_connection,
             server_hostname(),
             ServerRuntimeGeneration::generate(),
@@ -671,7 +671,7 @@ async fn shutdown_sends_goaway_ends_the_event_stream_and_closes_cleanly() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let (server, (mut send_request, _driver)) = tokio::join!(
-        ServerTunnelH3::establish_with_timing(
+        ServerTunnel::establish_with_timing(
             server_connection,
             server_hostname(),
             ServerRuntimeGeneration::generate(),
@@ -783,7 +783,7 @@ async fn event_stream_requests_must_be_complete_and_bodyless() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let (server, (mut send_request, _driver)) = tokio::join!(
-        ServerTunnelH3::establish_with_timing(
+        ServerTunnel::establish_with_timing(
             server_connection,
             server_hostname(),
             ServerRuntimeGeneration::generate(),
@@ -906,7 +906,7 @@ async fn advertised_header_bound(connection: &quinn::Connection) -> u64 {
 async fn both_peers_advertise_a_16_kib_header_section_bound() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let server = ServerTunnelH3::establish(
+    let server = ServerTunnel::establish(
         server_connection,
         server_hostname(),
         ServerRuntimeGeneration::generate(),
@@ -918,7 +918,7 @@ async fn both_peers_advertise_a_16_kib_header_section_bound() {
 
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let client = tokio::spawn(async move {
-        ClientTunnelH3::establish(client_connection, &server_hostname(), no_credit()).await
+        ClientTunnel::establish(client_connection, &server_hostname(), no_credit()).await
     });
     assert_eq!(advertised_header_bound(&server_connection).await, 16_384);
     client.abort();
@@ -928,7 +928,7 @@ async fn both_peers_advertise_a_16_kib_header_section_bound() {
 async fn oversized_request_headers_are_bodyless_rejections_before_handler_spawn_and_allow_reuse() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let server = ServerTunnelH3::establish(
+    let server = ServerTunnel::establish(
         server_connection,
         server_hostname(),
         ServerRuntimeGeneration::generate(),
@@ -990,7 +990,7 @@ async fn oversized_request_headers_are_bodyless_rejections_before_handler_spawn_
 async fn a_stalled_header_section_does_not_block_other_requests() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let server = ServerTunnelH3::establish(
+    let server = ServerTunnel::establish(
         server_connection,
         server_hostname(),
         ServerRuntimeGeneration::generate(),

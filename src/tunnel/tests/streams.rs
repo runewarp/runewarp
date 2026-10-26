@@ -11,13 +11,13 @@ use tokio::time::{sleep, timeout};
 
 use super::{Fixture, STEP, establish_pair, fast_timing, server_hostname};
 use crate::tunnel::events::ServerRuntimeGeneration;
-use crate::tunnel::{ClientTunnelH3, OpenTunnelStreamError, ServerTunnelH3};
+use crate::tunnel::{ClientTunnel, OpenTunnelStreamError, ServerTunnel};
 
 fn budget(permits: usize) -> Arc<Semaphore> {
     Arc::new(Semaphore::new(permits))
 }
 
-async fn stream_pair(permits: usize) -> (Fixture, ServerTunnelH3, ClientTunnelH3) {
+async fn stream_pair(permits: usize) -> (Fixture, ServerTunnel, ClientTunnel) {
     let fixture = Fixture::new().expect("fixture");
     let (server, client) = establish_pair(
         &fixture,
@@ -471,13 +471,13 @@ async fn visitors_use_server_opened_webtransport_streams_with_permit_backed_cred
     let permits = budget(2);
     let hostname = server_hostname();
     let (server, client) = tokio::join!(
-        ServerTunnelH3::establish_with_timing(
+        ServerTunnel::establish_with_timing(
             server_connection,
             server_hostname(),
             ServerRuntimeGeneration::generate(),
             fast_timing()
         ),
-        ClientTunnelH3::establish_with_timing(
+        ClientTunnel::establish_with_timing(
             client_connection,
             &hostname,
             permits.clone(),
@@ -507,7 +507,7 @@ async fn visitors_use_server_opened_webtransport_streams_with_permit_backed_cred
     );
 }
 
-async fn wait_for_credit(client: &ClientTunnelH3, active: usize, idle: usize) {
+async fn wait_for_credit(client: &ClientTunnel, active: usize, idle: usize) {
     timeout(STEP, async {
         while client.visitor_credit_counts() != (active, idle) {
             tokio::task::yield_now().await;
@@ -779,12 +779,12 @@ async fn wrong_stale_and_truncated_prefixes_never_reach_visitor_handlers() {
     let raw = server_connection.clone();
     let hostname = server_hostname();
     let (server, client) = tokio::join!(
-        ServerTunnelH3::establish(
+        ServerTunnel::establish(
             server_connection,
             server_hostname(),
             ServerRuntimeGeneration::generate()
         ),
-        ClientTunnelH3::establish(client_connection, &hostname, budget(4)),
+        ClientTunnel::establish(client_connection, &hostname, budget(4)),
     );
     let server = server.expect("Server");
     let mut client = client.expect("Client");

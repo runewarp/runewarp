@@ -21,11 +21,11 @@ use crate::{ClientIdentity, ServerHostname};
 use super::events::{KEEPALIVE_COMMENT, ServerTunnelEvents};
 use super::stream::{ServerTunnelStream, TunnelStream};
 use super::{
-    OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TUNNEL_WITHDRAWAL_PATH, TunnelH3Error,
-    TunnelH3Timing, close_connection,
+    OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TUNNEL_WITHDRAWAL_PATH, TunnelError,
+    TunnelTiming, close_connection,
 };
 
-type ServerH3Connection = h3_webtransport::server::ServerConnection<h3_quinn::Connection, Bytes>;
+type ServerConnection = h3_webtransport::server::ServerConnection<h3_quinn::Connection, Bytes>;
 type SessionAcceptor = h3_webtransport::server::Acceptor<h3_quinn::Connection, Bytes>;
 type ServerSession = h3_webtransport::server::Session<h3_quinn::Connection, Bytes>;
 type ServerRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
@@ -38,7 +38,7 @@ type ServerRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 /// no Visitor work remains; the Server closes the connection a fixed time later if the Client
 /// has not. Other signaling requests get bodyless statuses. Dropping the handle closes the
 /// connection immediately with `H3_NO_ERROR`.
-pub struct ServerTunnelH3 {
+pub struct ServerTunnel {
     connection: quinn::Connection,
     client_identity: ClientIdentity,
     shared: Arc<Shared>,
@@ -109,7 +109,7 @@ struct Shared {
     acceptor: SessionAcceptor,
     server_hostname: ServerHostname,
     events: ServerTunnelEvents,
-    timing: TunnelH3Timing,
+    timing: TunnelTiming,
     /// Published once GOAWAY seals request intake.
     goaway: watch::Sender<bool>,
     /// Incremented by each event-stream subscription; an older subscription ends when it changes.
@@ -136,31 +136,26 @@ fn reject_unprocessed(stream: &mut ServerRequestStream) {
     stream.stop_stream(Code::H3_REQUEST_REJECTED);
 }
 
-impl ServerTunnelH3 {
+impl ServerTunnel {
     /// Start HTTP/3 on an authenticated Tunnel connection whose event stream follows `events`.
     /// Requests must target `server_hostname`.
     pub async fn establish(
         connection: quinn::Connection,
         server_hostname: ServerHostname,
         events: impl Into<ServerTunnelEvents>,
-    ) -> Result<Self, TunnelH3Error> {
-        Self::establish_with_timing(
-            connection,
-            server_hostname,
-            events,
-            TunnelH3Timing::default(),
-        )
-        .await
+    ) -> Result<Self, TunnelError> {
+        Self::establish_with_timing(connection, server_hostname, events, TunnelTiming::default())
+            .await
     }
 
     pub(crate) async fn establish_with_timing(
         connection: quinn::Connection,
         server_hostname: ServerHostname,
         events: impl Into<ServerTunnelEvents>,
-        timing: TunnelH3Timing,
-    ) -> Result<Self, TunnelH3Error> {
+        timing: TunnelTiming,
+    ) -> Result<Self, TunnelError> {
         let client_identity =
-            peer_client_identity(&connection).ok_or(TunnelH3Error::MissingClientIdentity)?;
+            peer_client_identity(&connection).ok_or(TunnelError::MissingClientIdentity)?;
         let h3_connection = with_handshake_timeout(
             async {
                 h3::server::builder()
@@ -172,10 +167,10 @@ impl ServerTunnelH3 {
                     .webtransport_drafts([h3::ext::WebTransportDraft::Draft07])
                     .build(h3_quinn::Connection::new(connection.clone()))
                     .await
-                    .map_err(TunnelH3Error::Setup)
+                    .map_err(TunnelError::Setup)
             },
             HANDSHAKE_TIMEOUT,
-            || TunnelH3Error::SetupTimeout,
+            || TunnelError::SetupTimeout,
         )
         .await?;
 
@@ -391,7 +386,7 @@ impl ServerTunnelH3 {
     }
 }
 
-impl Drop for ServerTunnelH3 {
+impl Drop for ServerTunnel {
     fn drop(&mut self) {
         close_connection(&self.connection, Code::H3_NO_ERROR);
     }
@@ -399,7 +394,7 @@ impl Drop for ServerTunnelH3 {
 
 async fn serve_connection(
     connection: quinn::Connection,
-    mut h3_connection: ServerH3Connection,
+    mut h3_connection: ServerConnection,
     shared: Arc<Shared>,
     mut shutdown_requested: oneshot::Receiver<()>,
 ) {
@@ -475,7 +470,7 @@ async fn serve_connection(
 /// already returned may finish under their original deadlines; every later resolver is rejected,
 /// including the boundary ID stock h3 otherwise permits. This follows the actual intake boundary
 /// without reconstructing stream IDs from a count of classified requests.
-async fn send_goaway(h3_connection: &mut ServerH3Connection, shared: &Shared) {
+async fn send_goaway(h3_connection: &mut ServerConnection, shared: &Shared) {
     shared.goaway.send_replace(true);
     let _ = h3_connection.shutdown(1).await;
 }
@@ -763,7 +758,7 @@ async fn send_bodyless_status(
     mut stream: ServerRequestStream,
     status: StatusCode,
     allow: Option<&'static str>,
-    timing: TunnelH3Timing,
+    timing: TunnelTiming,
 ) -> Option<ServerRequestStream> {
     let mut response = Response::builder().status(status);
     if let Some(allow) = allow {
@@ -786,11 +781,7 @@ async fn send_bodyless_status(
 
 /// Answer an invalid or timed-out withdrawal request, then stop any still-open request intake
 /// without resetting the completed response.
-async fn reject_withdrawal(
-    stream: ServerRequestStream,
-    status: StatusCode,
-    timing: TunnelH3Timing,
-) {
+async fn reject_withdrawal(stream: ServerRequestStream, status: StatusCode, timing: TunnelTiming) {
     if let Some(mut stream) = send_bodyless_status(stream, status, None, timing).await {
         stream.stop_sending(Code::H3_REQUEST_CANCELLED);
     }
@@ -869,7 +860,7 @@ async fn serve_events(mut stream: ServerRequestStream, shared: &Shared) {
 
 /// Run one stream write under the blocked-write deadline; `true` when it completed.
 async fn bounded_write(
-    timing: TunnelH3Timing,
+    timing: TunnelTiming,
     write: impl Future<Output = Result<(), StreamError>>,
 ) -> bool {
     matches!(

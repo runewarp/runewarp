@@ -394,7 +394,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::tunnel::{
-        ServerTunnelH3,
+        ServerTunnel,
         test_support::{
             ClientPeer, ServerRead as RecvStream, ServerStreams, ServerWrite as SendStream,
             client_stream, establish_peers, read_to_end, test_server_h3_config,
@@ -982,7 +982,7 @@ mod tests {
     }
 
     async fn request_tls_response_over_tunnel(
-        server_connection: Arc<ServerTunnelH3>,
+        server_connection: Arc<ServerTunnel>,
         backend_cert: &CertificateDer<'static>,
         requested_hostname: &str,
     ) -> io::Result<[u8; 4]> {
@@ -1025,7 +1025,7 @@ mod tests {
     struct TunnelConnectionFixture {
         _server_endpoint: Endpoint,
         _client_endpoint: Endpoint,
-        server_connection: Arc<ServerTunnelH3>,
+        server_connection: Arc<ServerTunnel>,
         client_connection: ClientPeer,
     }
 
@@ -1614,7 +1614,7 @@ mod tests {
     /// Makes a TLS connection over the QUIC tunnel stream, talks to a plain-TCP backend
     /// (because the Client terminates TLS and forwards plaintext).
     async fn request_plaintext_response_over_terminated_tunnel(
-        server_connection: Arc<ServerTunnelH3>,
+        server_connection: Arc<ServerTunnel>,
         public_cert: &CertificateDer<'static>,
         hostname: &str,
     ) -> io::Result<[u8; 4]> {

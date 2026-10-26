@@ -3355,7 +3355,7 @@ fn unauthenticated_h3_client_config(roots: RootCertStore) -> quinn::ClientConfig
 #[tokio::test]
 async fn server_shutdown_seals_placement_while_a_placed_visitor_finishes() {
     timeout(Duration::from_secs(3), async {
-        use runewarp::tunnel::ClientTunnelH3;
+        use runewarp::tunnel::ClientTunnel;
         let (certificate, key) = make_self_signed_cert("tunnel.example.test");
         let identity = generate_client_identity().unwrap();
         let authorization = ServerAuthorization::from_static_tunnels(
@@ -3394,7 +3394,7 @@ async fn server_shutdown_seals_placement_while_a_placed_visitor_finishes() {
             .unwrap()
             .await
             .unwrap();
-        let mut client = ClientTunnelH3::establish(
+        let mut client = ClientTunnel::establish(
             connection,
             &server_hostname("tunnel.example.test"),
             Arc::new(tokio::sync::Semaphore::new(8)),

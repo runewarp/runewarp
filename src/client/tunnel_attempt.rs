@@ -883,7 +883,7 @@ backend-address = "127.0.0.1:443"
     #[test]
     fn a_wrong_generation_candidate_is_a_typed_retryable_failure() {
         let error = crate::ClientStartupError::Connect(crate::ClientConnectError::Tunnel(
-            crate::tunnel::TunnelH3Error::WrongGeneration,
+            crate::tunnel::TunnelError::WrongGeneration,
         ));
 
         let outcome =

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use crate::tunnel::ServerTunnelH3;
+use crate::tunnel::ServerTunnel;
 use tokio::sync::RwLock;
 use tokio::task::AbortHandle;
 
@@ -14,7 +14,7 @@ use super::admission::{
 struct PoolMember {
     member_id: u64,
     client_identity: ClientIdentity,
-    connection: Arc<ServerTunnelH3>,
+    connection: Arc<ServerTunnel>,
     active_streams: Arc<AtomicUsize>,
     close_watcher: AbortHandle,
     _admission_permit: TunnelConnectionPermit,
@@ -24,12 +24,12 @@ struct PoolMember {
 pub(crate) struct SelectedTunnelConnection {
     member_id: u64,
     client_identity: ClientIdentity,
-    connection: Arc<ServerTunnelH3>,
+    connection: Arc<ServerTunnel>,
     active_streams: Arc<AtomicUsize>,
 }
 
 impl SelectedTunnelConnection {
-    pub(crate) fn connection(&self) -> Arc<ServerTunnelH3> {
+    pub(crate) fn connection(&self) -> Arc<ServerTunnel> {
         self.connection.clone()
     }
 
@@ -84,7 +84,7 @@ pub(crate) struct ActiveClientPool {
 /// A pool member detached from its previous Tunnel pool without closing the connection.
 pub(crate) struct TakenPoolMember {
     pub(crate) client_identity: ClientIdentity,
-    connection: Arc<ServerTunnelH3>,
+    connection: Arc<ServerTunnel>,
     active_streams: Arc<AtomicUsize>,
     close_watcher: AbortHandle,
     admission_permit: TunnelConnectionPermit,
@@ -163,7 +163,7 @@ impl ActiveClientPool {
 
     pub(crate) async fn try_register(
         &self,
-        connection: Arc<ServerTunnelH3>,
+        connection: Arc<ServerTunnel>,
         client_identity: ClientIdentity,
     ) -> Result<(), AdmissionRejection> {
         let mut members_guard = self.members.write().await;
@@ -205,7 +205,7 @@ impl ActiveClientPool {
     #[cfg(test)]
     pub(crate) async fn register(
         &self,
-        connection: Arc<ServerTunnelH3>,
+        connection: Arc<ServerTunnel>,
         client_identity: ClientIdentity,
     ) {
         self.try_register(connection, client_identity)
@@ -213,7 +213,7 @@ impl ActiveClientPool {
             .expect("default test admission limits should accept the connection");
     }
 
-    pub(crate) async fn connections(&self) -> Vec<Arc<ServerTunnelH3>> {
+    pub(crate) async fn connections(&self) -> Vec<Arc<ServerTunnel>> {
         self.members
             .read()
             .await
@@ -344,7 +344,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::tunnel::{
-        ServerTunnelH3,
+        ServerTunnel,
         test_support::{ClientPeer, establish_peers, test_server_h3_config},
     };
     use quinn::Endpoint;
@@ -748,7 +748,7 @@ mod tests {
         _server_endpoint: Endpoint,
         _client_endpoint: Endpoint,
         client_connection: ClientPeer,
-        server_connection: Arc<ServerTunnelH3>,
+        server_connection: Arc<ServerTunnel>,
     }
 
     impl TunnelConnectionFixture {

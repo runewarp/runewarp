@@ -31,7 +31,7 @@ use runewarp::{
     QUIC_CLOSE_FLUSH_DURATION, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_KEY_FILENAME,
     ServerHostname, SessionMaterial, ShutdownMode, generate_client_identity,
     initialize_manual_server_certificate, load_client_config, load_server_config,
-    make_client_tunnel_h3_config, tunnel::ClientTunnelH3,
+    make_client_tunnel_h3_config, tunnel::ClientTunnel,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -601,7 +601,7 @@ async fn managed_server_authorization_apply_controls_traffic_and_readiness() {
 async fn connect_event_follower(
     harness: &ManagedServerHarness,
     identity: &GeneratedClientIdentity,
-) -> ClientTunnelH3 {
+) -> ClientTunnel {
     let mut roots = RootCertStore::empty();
     for certificate in
         CertificateDer::pem_file_iter(harness._tempdir.path().join("server-cert/server-ca.crt"))
@@ -620,7 +620,7 @@ async fn connect_event_follower(
         .unwrap()
         .await
         .unwrap();
-    ClientTunnelH3::establish(
+    ClientTunnel::establish(
         connection,
         &ServerHostname::try_from(SERVER_HOSTNAME).unwrap(),
         Arc::new(tokio::sync::Semaphore::new(1)),
@@ -629,7 +629,7 @@ async fn connect_event_follower(
     .unwrap()
 }
 
-async fn wait_for_hint(client: &ClientTunnelH3, expected: Option<&str>) {
+async fn wait_for_hint(client: &ClientTunnel, expected: Option<&str>) {
     let mut state = client.event_state();
     timeout(
         Duration::from_secs(5),

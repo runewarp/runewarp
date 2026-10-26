@@ -33,7 +33,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::tunnel::{
-    ClientTunnelH3, ClientTunnelStream, ReplacementHint, ServerRuntimeGeneration, TunnelH3Error,
+    ClientTunnel, ClientTunnelStream, ReplacementHint, ServerRuntimeGeneration, TunnelError,
     UnconfirmedDrain, WithdrawalOutcome,
 };
 use quinn::Endpoint;
@@ -90,7 +90,7 @@ enum ClientRouteMode {
 
 pub struct Client {
     endpoint: Endpoint,
-    connection: ClientTunnelH3,
+    connection: ClientTunnel,
     tunnel_stream_handler: TunnelConnectionStreamHandler,
 }
 
@@ -99,7 +99,7 @@ pub enum ClientConnectError {
     Bind(io::Error),
     Connect(quinn::ConnectError),
     Handshake(quinn::ConnectionError),
-    Tunnel(TunnelH3Error),
+    Tunnel(TunnelError),
 }
 
 impl fmt::Display for ClientConnectError {
@@ -194,7 +194,7 @@ impl Client {
         .map_err(ClientConnectError::Handshake)?;
         let (services, termination_tls_configs, stream_budget) =
             services_and_configs_for_route_mode(route_mode);
-        let connection = ClientTunnelH3::establish_with_budget_observer(
+        let connection = ClientTunnel::establish_with_budget_observer(
             connection,
             &hostname,
             stream_budget.semaphore(),
@@ -479,7 +479,7 @@ mod tests {
     async fn pair(
         budget: Arc<super::ClientStreamBudget>,
         candidate: bool,
-    ) -> (crate::tunnel::ServerTunnelH3, Client) {
+    ) -> (crate::tunnel::ServerTunnel, Client) {
         let generation = crate::tunnel::ServerRuntimeGeneration::generate();
         let identity = generate_test_client_identity().unwrap();
         let (certificate, private_key) = make_self_signed_cert("tunnel.example.test").unwrap();
@@ -515,7 +515,7 @@ mod tests {
         };
         let server = async {
             let connection = endpoint.accept().await.unwrap().await.unwrap();
-            crate::tunnel::ServerTunnelH3::establish(
+            crate::tunnel::ServerTunnel::establish(
                 connection,
                 crate::ServerHostname::try_from("tunnel.example.test").unwrap(),
                 generation,

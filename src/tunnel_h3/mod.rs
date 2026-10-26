@@ -6,7 +6,7 @@
 //! - ALPN `h3` with a required, pinned Client identity certificate and no application 0-RTT;
 //! - the Tunnel event stream, a Client-opened `GET /v1/tunnel/events` whose first valid `state`
 //!   event is the compatibility gate (there is no Runewarp-specific SETTINGS marker);
-//! - one draft07 WebTransport session after that gate, with Visitors still on receive slots;
+//! - one draft07 WebTransport session after that gate, carrying Server-opened Visitor streams;
 //! - Server orderly shutdown through GOAWAY, with Runewarp enforcing the first-unprocessed
 //!   request-stream boundary;
 //! - bodyless status mapping for misdirected, unknown, or malformed signaling requests.
@@ -19,6 +19,7 @@
 
 mod client;
 mod config;
+mod credit;
 mod events;
 mod server;
 mod stream;
@@ -47,12 +48,11 @@ pub use stream::{
 /// ALPN for HTTP/3 Tunnel connections. There is no fallback to `runewarp/1`.
 pub const TUNNEL_H3_ALPN: &[u8] = b"h3";
 
-/// Idle receive slots one Client keeps open on a Tunnel connection; the Server rejects more.
+/// Idle Visitor credits one Client connection reserves from its aggregate handler budget.
 ///
-/// Each idle slot is one Visitor the Server can place without waiting for the Client, so this
-/// bounds burst capacity per round trip. Idle and assigned slots also hold Client-instance
-/// stream-handler permits.
-pub const MAX_IDLE_RECEIVE_SLOTS: usize = 32;
+/// Each credit lets the Server start one Visitor without a Client acceptance exchange. Active
+/// streams keep their permits separately, so concurrency can exceed this burst allowance.
+pub const MAX_IDLE_VISITOR_CREDIT: usize = 256;
 
 /// Tunnel event-stream resource on the Server hostname's HTTPS origin.
 pub const TUNNEL_EVENTS_PATH: &str = "/v1/tunnel/events";

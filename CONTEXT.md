@@ -32,9 +32,13 @@ _Avoid_: Server version, instance ID, Blue/Green
 The Client-opened HTTP/3 Server-Sent Events subscription on one **Tunnel connection** through which the **Server** sends its full current state: protocol version and **Server runtime generation**. Its first valid state is the compatibility gate; it never carries configuration.
 _Avoid_: control channel, association SSE, Managed session
 
-**Receive slot**:
-A Client-opened plain HTTP/3 `CONNECT` request on one **Tunnel connection** that offers the **Server** one immediately usable chance to place a **Visitor**. The Server assigns a slot by completing its response and sending the Tunnel framing and buffered ClientHello at once; each slot carries exactly one Visitor. Idle and assigned slots hold Client-instance stream-handler capacity.
-_Avoid_: credit, capacity unit, reverse stream
+**Visitor stream**:
+The bidirectional stream carrying exactly one **Visitor** through one **Tunnel connection**. The **Server** assigns it, and its two directions can finish independently.
+_Avoid_: Receive slot, application stream, reverse stream
+
+**Visitor credit**:
+A **Client**-offered opportunity for the **Server** to start a **Visitor stream**, backed by reserved Client-instance handler capacity. Idle credit is unassigned capacity; an active Visitor retains its capacity until its stream ends.
+_Avoid_: Receive slot, backend capacity, request slot
 
 **Client**:
 The operator-run Runewarp component responsible for forwarding traffic between the **Server** and local backends.

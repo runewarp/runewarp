@@ -23,16 +23,12 @@ const CONNECTION_RECEIVE_WINDOW: u32 = 64 * 1024 * 1024;
 /// Per-stream QUIC receive credit on either peer, retaining Quinn's 1.25 MB default.
 const STREAM_RECEIVE_WINDOW: u32 = 1_250_000;
 
-/// Receive slots, idle or assigned, one Tunnel connection may hold: the Client-instance
-/// stream-handler budget, which no single connection can exceed.
-const MAX_RECEIVE_SLOTS: u32 = 1024;
-
 /// Request streams for the event-stream subscription, its replacement during resubscription, and
 /// other bodyless signaling requests.
 const SIGNALING_REQUEST_STREAMS: u32 = 8;
 
 /// Client-initiated request streams the Server admits concurrently on one Tunnel connection.
-pub(crate) const MAX_TUNNEL_REQUEST_STREAMS: u32 = MAX_RECEIVE_SLOTS + SIGNALING_REQUEST_STREAMS;
+pub(crate) const MAX_TUNNEL_REQUEST_STREAMS: u32 = SIGNALING_REQUEST_STREAMS;
 
 /// Unidirectional streams each peer admits: the HTTP/3 control stream, both QPACK streams, and
 /// headroom for reserved stream types that peers may send and receivers must ignore.
@@ -102,7 +98,7 @@ fn server_transport_config() -> TransportConfig {
 
 fn client_transport_config() -> TransportConfig {
     let mut transport_config = base_transport_config();
-    // Visitors still use receive slots; the WebTransport session receives no stream credit.
+    // Grant no Server stream credit until an established session reserves handler permits.
     transport_config.max_concurrent_bidi_streams(0_u8.into());
     transport_config.keep_alive_interval(Some(KEEPALIVE_INTERVAL));
     transport_config
@@ -143,7 +139,7 @@ mod tests {
         let client = format!("{:?}", client_transport_config());
 
         assert!(
-            server.contains("max_concurrent_bidi_streams: 1032"),
+            server.contains("max_concurrent_bidi_streams: 8"),
             "{server}"
         );
         assert!(server.contains("keep_alive_interval: None"), "{server}");

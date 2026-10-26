@@ -4,12 +4,12 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::{Buf, Bytes};
+use futures_util::FutureExt;
 use h3::client::{RequestStream, SendRequest};
 use h3::error::{Code, StreamError};
 use http::{HeaderMap, Method, Request, StatusCode, header};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
-use tokio::task::JoinSet;
-use tokio::time::{Instant, sleep, sleep_until, timeout};
+use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::time::{sleep, timeout};
 
 use crate::ServerHostname;
 use crate::quic::{HANDSHAKE_TIMEOUT, with_handshake_timeout};
@@ -18,7 +18,7 @@ use crate::sse::{SseParseItem, SseParser};
 use super::events::{ServerRuntimeGeneration, TUNNEL_EVENT_SSE_LIMITS, TunnelEventState};
 use super::stream::{ClientTunnelStream, TunnelStream};
 use super::{
-    MAX_IDLE_RECEIVE_SLOTS, OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TunnelH3Error,
+    MAX_IDLE_VISITOR_CREDIT, OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TunnelH3Error,
     TunnelH3Timing, close_connection,
 };
 
@@ -33,9 +33,10 @@ type ClientRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 /// remains usable, and stops once GOAWAY forbids new requests. An incompatible event or a changed
 /// generation closes the connection with `H3_GENERAL_PROTOCOL_ERROR`.
 ///
-/// After the gate and WebTransport session establishment it keeps up to [`MAX_IDLE_RECEIVE_SLOTS`]
-/// receive slots open, each holding one permit from the Client-instance stream budget, and
-/// replenishes a slot whenever one is assigned or fails. Assigned slots are delivered by
+/// After the gate and WebTransport session establishment it keeps up to [`MAX_IDLE_VISITOR_CREDIT`]
+/// idle credits reserved, each holding one permit from the Client-instance stream budget, and
+/// replenishes credit as permits become available until WebTransport DRAIN releases idle capacity.
+/// GOAWAY alone preserves reservations for committed Visitors. Visitor streams are delivered by
 /// [`ClientTunnelH3::accept_tunnel_stream`].
 ///
 /// Dropping the handle closes the connection immediately with `H3_NO_ERROR`.
@@ -48,16 +49,17 @@ pub struct ClientTunnelH3 {
     _send_request: ClientSendRequest,
     _driver: OwnedTask,
     _events: OwnedTask,
-    _slots: OwnedTask,
+    #[cfg(test)]
+    credits: Arc<super::credit::VisitorCredits>,
     _session: OwnedTask,
 }
 
 impl ClientTunnelH3 {
     /// Start HTTP/3 on an authenticated Tunnel connection to `server_hostname`, wait for the
-    /// Server's first valid event-stream state, establish a WebTransport session, then offer slots.
+    /// Server's first valid event-stream state, establish a WebTransport session, then offer credit.
     ///
     /// `stream_budget` is the Client-instance stream-handler budget shared by every Tunnel
-    /// connection; each idle or assigned slot holds one permit until its Tunnel stream drops.
+    /// connection; each idle credit or active stream holds one permit until its Tunnel stream drops.
     pub async fn establish(
         connection: quinn::Connection,
         server_hostname: &ServerHostname,
@@ -121,13 +123,17 @@ impl ClientTunnelH3 {
             || TunnelH3Error::SetupTimeout,
         )
         .await?;
+        let visitor_queue_limit =
+            std::num::NonZeroUsize::new(MAX_IDLE_VISITOR_CREDIT).expect("nonzero idle credit");
         let (mut driver, mut client) = h3_webtransport::client::new(
             driver,
             send_request,
             h3_webtransport::client::Limits {
                 // Keep the WebTransport session limit at one regardless of fork defaults.
                 sessions: std::num::NonZeroUsize::MIN,
-                ..Default::default()
+                incoming: visitor_queue_limit,
+                pending_prefixes: visitor_queue_limit,
+                streams_per_session: visitor_queue_limit,
             },
         );
         let mut send_request = client.send_request();
@@ -176,22 +182,80 @@ impl ClientTunnelH3 {
                 return Err(TunnelH3Error::SessionConnectTimeout);
             }
         };
+        // Intake never waits for handlers. Every queued stream owns a budget permit, which
+        // bounds this queue by the Client-instance budget despite its unbounded channel API.
+        let (assigned_sender, assigned) = mpsc::unbounded_channel();
+        let credits =
+            super::credit::VisitorCredits::new(connection.clone(), stream_budget, budget_observer);
         let session_connection = connection.clone();
+        let maintenance = super::credit::CreditMaintenance(credits.clone());
         let session = OwnedTask::spawn(async move {
+            // Retain a pending semaphore acquisition across arrivals to preserve queue fairness
+            // between connections. Session intake never waits for a handler or budget permit.
+            let credits = &maintenance.0;
+            let mut draining = false;
+            let acquisition = Some(credits.budget().acquire_owned());
+            tokio::pin!(acquisition);
             loop {
-                tokio::select! {
+                let needs_idle = credits.needs_idle();
+                if needs_idle && credits.budget().available_permits() == 0 {
+                    credits.note_budget(false);
+                }
+                let stream = tokio::select! {
                     _ = session.closed() => break,
-                    stream = session.accept_bi() => match stream {
-                        // Visitors use receive slots; reject WebTransport session streams.
-                        Some(mut stream) => {
-                            use h3::quic::{RecvStream, SendStream};
-                            stream.reset(Code::H3_REQUEST_REJECTED.value());
-                            stream.stop_sending(Code::H3_REQUEST_REJECTED.value());
+                    stream = session.accept_bi() => stream,
+                    _ = session.draining(), if !draining => {
+                        draining = true;
+                        // Drop even a pending acquisition so it retains no semaphore queue
+                        // position or reserved permit while this connection finishes Visitors.
+                        acquisition.set(None);
+                        credits.stop_idle();
+                        // draining() can also mean termination. Keep polling intake/closed
+                        // below so CLOSE without peer FIN still terminates immediately.
+                        continue;
+                    }
+                    _ = credits.drained(), if draining => {
+                        // draining() also wakes on termination. closed() can observe CLOSE but
+                        // remain pending awaiting FIN. Check intake after those CONNECT polls:
+                        // None means immediate termination, even if the peer withholds FIN.
+                        match session.accept_bi().now_or_never() {
+                            Some(stream) => stream,
+                            None => {
+                                let _ = session.close(0, "").await;
+                                // The Server owns whole-Tunnel close after our completion ack.
+                                session_connection.closed().await;
+                                break;
+                            }
                         }
-                        // Unlike closed(), this also observes a close capsule without peer FIN.
-                        None => break,
                     },
-                    _ = session_connection.closed() => return,
+                    permit = async {
+                        acquisition.as_mut().as_pin_mut()
+                            .expect("idle maintenance owns an acquisition").await
+                    }, if needs_idle => {
+                        match permit {
+                            Ok(permit) => credits.offer(permit),
+                            Err(_) => break,
+                        }
+                        acquisition.set(Some(credits.budget().acquire_owned()));
+                        continue;
+                    }
+                    _ = session_connection.closed() => break,
+                };
+                let Some(mut stream) = stream else {
+                    break;
+                };
+                use h3::quic::{BidiStream, RecvStream, SendStream};
+                if let Some(permit) = credits.assign() {
+                    let (send, recv) = stream.split();
+                    if assigned_sender
+                        .send(TunnelStream::new(recv, send, permit))
+                        .is_err()
+                    {
+                        break;
+                    }
+                } else {
+                    stream.reset(Code::H3_REQUEST_REJECTED.value());
+                    stream.stop_sending(Code::H3_REQUEST_REJECTED.value());
                 }
             }
             if session_connection.close_reason().is_none() {
@@ -199,16 +263,6 @@ impl ClientTunnelH3 {
             }
         });
 
-        let (assigned_sender, assigned) = mpsc::unbounded_channel();
-        let slots = OwnedTask::spawn(maintain_receive_slots(ReceiveSlotPool {
-            send_request: send_request.clone(),
-            slot_authority: format!("{server_hostname}:443"),
-            stream_budget,
-            budget_observer,
-            connection: connection.clone(),
-            assigned: assigned_sender,
-            timing,
-        }));
         let (state_sender, state) = watch::channel(initial);
         let events = OwnedTask::spawn(follow_events(
             EventFollower {
@@ -228,15 +282,16 @@ impl ClientTunnelH3 {
             _send_request: send_request,
             _driver: driver,
             _events: events,
-            _slots: slots,
+            #[cfg(test)]
+            credits,
             _session: session,
         })
     }
 
-    /// Wait for the Server to place a Visitor on one of this connection's receive slots.
+    /// Wait for a Server-opened Visitor stream on this connection's WebTransport session.
     ///
-    /// `None` once the connection can deliver no more Visitors: it closed, or GOAWAY stopped new
-    /// slots and every outstanding slot has resolved.
+    /// Returns `None` once the connection closes or session intake ends. GOAWAY alone keeps the
+    /// session alive so already-placed Visitors can finish.
     pub async fn accept_tunnel_stream(&mut self) -> Option<ClientTunnelStream> {
         tokio::select! {
             stream = self.assigned.recv() => stream,
@@ -263,6 +318,18 @@ impl ClientTunnelH3 {
     pub fn closed(&self) -> impl Future<Output = quinn::ConnectionError> + Send + 'static + use<> {
         let connection = self.connection.clone();
         async move { connection.closed().await }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn visitor_credit_counts(&self) -> (usize, usize) {
+        self.credits.counts()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn guard_rejections(&self) -> usize {
+        self.credits
+            .guard_rejections
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Observe task completion while retaining the handle, without aborting the observer on drop.
@@ -489,97 +556,4 @@ fn forbids_new_requests(error: &StreamError) -> bool {
         error,
         StreamError::RemoteClosing | StreamError::ConnectionError { .. }
     )
-}
-
-/// Receive-slot maintenance for one Tunnel connection.
-struct ReceiveSlotPool {
-    send_request: ClientSendRequest,
-    /// Authority of every plain CONNECT slot: the Server hostname. The Server ignores the port.
-    slot_authority: String,
-    stream_budget: Arc<Semaphore>,
-    budget_observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
-    connection: quinn::Connection,
-    assigned: mpsc::UnboundedSender<ClientTunnelStream>,
-    timing: TunnelH3Timing,
-}
-
-/// Keep up to [`MAX_IDLE_RECEIVE_SLOTS`] slots open until GOAWAY or connection loss forbids new
-/// requests, then let outstanding slots resolve.
-///
-/// A slot that ends without assignment, for example one the Server rejected, pauses opening for
-/// the resubscribe delay so a refusing Server cannot drive a busy loop.
-async fn maintain_receive_slots(mut pool: ReceiveSlotPool) {
-    let mut waiting: JoinSet<Option<ClientTunnelStream>> = JoinSet::new();
-    let mut opening = true;
-    let mut next_open = Instant::now();
-
-    while opening || !waiting.is_empty() {
-        let may_open = opening && waiting.len() < MAX_IDLE_RECEIVE_SLOTS;
-        if may_open
-            && pool.stream_budget.available_permits() == 0
-            && let Some(observer) = &pool.budget_observer
-        {
-            observer(false);
-        }
-        tokio::select! {
-            _ = pool.connection.closed() => break,
-            resolved = waiting.join_next(), if !waiting.is_empty() => {
-                match resolved {
-                    Some(Ok(Some(stream))) => {
-                        // A dropped receiver resets the stream through its write half.
-                        let _ = pool.assigned.send(stream);
-                    }
-                    Some(Ok(None) | Err(_)) | None => {
-                        if opening {
-                            next_open = Instant::now() + pool.timing.resubscribe_delay;
-                        }
-                    }
-                }
-            }
-            permit = async {
-                sleep_until(next_open).await;
-                pool.stream_budget.clone().acquire_owned().await
-            }, if may_open => {
-                let Ok(permit) = permit else {
-                    opening = false;
-                    continue;
-                };
-                if let Some(observer) = &pool.budget_observer {
-                    observer(true);
-                }
-                match pool.open_slot().await {
-                    Ok(stream) => {
-                        waiting.spawn(wait_for_assignment(stream, permit));
-                    }
-                    Err(error) if forbids_new_requests(&error) => opening = false,
-                    Err(_) => next_open = Instant::now() + pool.timing.resubscribe_delay,
-                }
-            }
-        }
-    }
-}
-
-impl ReceiveSlotPool {
-    /// Send one plain CONNECT request's HEADERS, leaving the stream open for Visitor bytes.
-    async fn open_slot(&mut self) -> Result<ClientRequestStream, StreamError> {
-        let request = Request::builder()
-            .method(Method::CONNECT)
-            .uri(self.slot_authority.as_str())
-            .body(())
-            .expect("a Server hostname and port form a valid CONNECT authority");
-        self.send_request.send_request(request).await
-    }
-}
-
-/// Resolve one slot: a `200` response is the Server's assignment of one Visitor.
-async fn wait_for_assignment(
-    mut stream: ClientRequestStream,
-    permit: OwnedSemaphorePermit,
-) -> Option<ClientTunnelStream> {
-    let response = stream.recv_response().await.ok()?;
-    if response.status() != StatusCode::OK {
-        return None;
-    }
-    let (send, recv) = stream.split();
-    Some(TunnelStream::new(recv, send, Arc::new(permit)))
 }

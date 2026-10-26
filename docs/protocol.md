@@ -26,7 +26,7 @@ For each inbound TCP connection on the configured `server.public-bind-address`:
 10. Otherwise, select a **Tunnel** by exact normalized **Public hostname** from the current **Authorization snapshot**. Static config supplies `server.tunnels[].public-hostnames`; Managed mode receives authorization from Control.
 11. If no Tunnel owns that hostname, drop the connection.
 12. If the selected Tunnel has no active **Tunnel connection**, drop the connection.
-13. Acquire one pending slot-wait permit, then wait up to **5 seconds** for a Client-offered receive slot on the selected Tunnel connection. Assign that slot with a `200` response. On success, acquire one active routed-stream permit, release the pending permit, write a regenerated PROXY v2 header containing the canonical Visitor TCP tuple, then forward the buffered ClientHello as HTTP/3 DATA and continue streaming in both directions. A failed or expired slot wait drops the Visitor without retrying another pool member. Successfully established proxies have no additional lifetime or idle deadline.
+13. Acquire one pending stream-open permit, then wait up to **5 seconds** for permit-backed QUIC credit to open a WebTransport Visitor stream on the selected Tunnel connection. On success, acquire one active routed-stream permit, release the pending permit, write a regenerated PROXY v2 header containing the canonical Visitor TCP tuple, then forward the buffered ClientHello as raw WebTransport stream bytes and continue streaming in both directions. A failed or expired stream open drops the Visitor without retrying another pool member. Successfully established proxies have no additional lifetime or idle deadline.
 
 At `log-level = "debug"`, stderr may include:
 
@@ -60,7 +60,7 @@ Server admission uses fixed production limits; these are runtime safety policy, 
 | Visitor pre-routing work | **4,096** globally | Close the newest accepted socket before spawning its handler |
 | Visitor pre-routing work from one canonical source IP | **256** | Close the newest socket from that source after direct/proxied tuple resolution |
 | Concurrent Server-side QUIC handshakes | **256** | Refuse the newest QUIC `Incoming` before spawning handshake work |
-| Pending Server receive-slot waits | **1,024** | Drop the newest Visitor before waiting for a receive slot |
+| Pending Server Visitor stream opens | **1,024** | Drop the newest Visitor before waiting for Visitor stream credit |
 | Active routed Visitor streams | **4,096** | Drop and reset the newest assigned Tunnel stream before proxying |
 | Active Tunnel connections | **4,096** globally | Complete authentication, then close the newest connection |
 | Active Tunnel connections in one Tunnel pool | **256** | Close the newest connection; keep existing pool members |
@@ -68,7 +68,7 @@ Server admission uses fixed production limits; these are runtime safety policy, 
 
 The global slot protects PROXY header and ClientHello intake. The per-source slot uses the direct socket source or the validated tuple from a trusted strict-PROXY peer. Core never trusts `Forwarded`, `X-Forwarded-For`, or PROXY bytes from an untrusted peer. Completed ClientHellos release both slots before Tunnel selection and proxying.
 
-Pending slot-wait capacity is acquired immediately before waiting for a receive slot and released on assignment, failure, the **5-second** slot-wait deadline, active-stream rejection, cancellation, and shutdown. Tunnel selection reserves registration at the active-Visitor-work gate before the slot wait. After a successful open, synchronous registration under that gate requires the route's Authorization snapshot to remain current and revalidates its Public hostname and Client identity, then atomically converts the reservation into one lease owning active routed-stream capacity, Tunnel-pool member load, routing identity, revocation, and cleanup for the proxy lifetime. Authorization commit and selective revocation use the same gate, so old-route registration cannot escape a replacement scan. Shutdown seals the gate; later registration is rejected and resets the assigned Tunnel stream. Normal return, error, revocation, cancellation, panic, and unpolled drop all release accounting exactly once. Graceful shutdown waits through event notification until both pre-seal reservations and leases are gone, not periodic polling. Established proxies have no additional lifetime or idle deadline in this policy.
+Pending stream-open capacity is acquired immediately before waiting for Visitor stream credit and released on assignment, failure, the **5-second** stream-open deadline, active-stream rejection, cancellation, and shutdown. Tunnel selection reserves registration at the active-Visitor-work gate before the stream open. After a successful open, synchronous registration under that gate requires the route's Authorization snapshot to remain current and revalidates its Public hostname and Client identity, then atomically converts the reservation into one lease owning active routed-stream capacity, Tunnel-pool member load, routing identity, revocation, and cleanup for the proxy lifetime. Authorization commit and selective revocation use the same gate, so old-route registration cannot escape a replacement scan. Shutdown seals the gate; later registration is rejected and resets the assigned Tunnel stream. Normal return, error, revocation, cancellation, panic, and unpolled drop all release accounting exactly once. Graceful shutdown waits through event notification until both pre-seal reservations and leases are gone, not periodic polling. Established proxies have no additional lifetime or idle deadline in this policy.
 
 Tunnel handshake slots are released on every handshake success, rejection, timeout, cancellation, and listener shutdown path. Active Tunnel slots are retained for the connection lifetime, including Authorization pool realignment, and released after connection termination. If realignment combines previously admitted pools above the per-Tunnel limit, those existing healthy connections remain grandfathered; new connections are rejected until churn returns the pool below its limit. Reaching any active-connection limit during admission rejects the newest connection without evicting a healthy pool member.
 
@@ -86,7 +86,7 @@ Each **Client instance** establishes one long-lived QUIC connection per effectiv
 4. Validate the Server certificate for that **Server address**'s **Server hostname**, using either system trust or `client.server-trust = "ca-file"` with an exclusive CA bundle.
 5. Present the Client certificate and authenticate one of the Tunnel's pinned `client-identity` values from its public key.
 6. Start HTTP/3 with Extended CONNECT, WebTransport draft07 and H3 Datagrams enabled in both peers' SETTINGS. The Client opens a bodyless `GET /v1/tunnel/events` and waits for the first valid state with a supported protocol version. No Runewarp-specific SETTINGS marker is sent or required.
-7. After that gate, establish exactly one WebTransport session with Extended CONNECT to `https://<Server hostname>/v1/tunnel/session`. Only then offer receive slots and return a successful connection attempt. A failed gate, negotiation or CONNECT is an ordinary attempt failure under the same retry policy. Static Client readiness and Managed Assignment convergence count only connections with an established WebTransport session.
+7. After that gate, establish exactly one WebTransport session with Extended CONNECT to `https://<Server hostname>/v1/tunnel/session`. Only then reserve permits and offer Visitor credit and return a successful connection attempt. A failed gate, negotiation or CONNECT is an ordinary attempt failure under the same retry policy. Static Client readiness and Managed Assignment convergence count only connections with an established WebTransport session.
 
 Rules:
 
@@ -106,15 +106,27 @@ Both peers pin only WebTransport draft07: the max-sessions SETTINGS identifier i
 
 The WebTransport session CONNECT uses the Server hostname as authority on its HTTPS origin and path `/v1/tunnel/session`. It remains open for the Tunnel connection lifetime. The Server returns bodyless `404` for another WebTransport session path, `421` for a different authority, and `400` for an unsupported Extended CONNECT protocol or invalid WebTransport request or negotiation. The fork's invalid-request and settings rejections remain bodyless `400`; its exhausted WebTransport session cap remains bodyless `429`. Rejections create no WebTransport session and leave ordinary signaling usable. The WebTransport CONNECT response and admission run under the signaling request deadline.
 
-Visitors still use plain-CONNECT receive slots. The WebTransport session carries no Visitor streams, and Runewarp sends no datagrams. H3 Datagram SETTINGS reserve the draft-required capability for later Public QUIC work; they do not implement packet forwarding. The Client continues to grant the Server zero bidirectional stream credit. Unexpected WebTransport session streams are reset without delivering a Visitor.
+The Server opens one bidirectional WebTransport stream per Visitor through `SessionOpener::open_bi`; the Client receives it through its established session's `accept_bi`. The fork validates the full session ID and resets wrong, stale and truncated prefixes without delivering them. Client-originated WebTransport streams are rejected. Runewarp sends no datagrams. H3 Datagram SETTINGS reserve the draft-required capability for later Public QUIC work; they do not implement packet forwarding.
 
-A close capsule or CONNECT stream end observed by either peer closes the whole Tunnel connection with `H3_NO_ERROR`, even if a peer withholds FIN after a close capsule. The Client's ordinary address worker reconnects; no WebTransport session is reopened on an existing connection. Connection loss ends the WebTransport session, and Authorization revocation closes the connection and WebTransport session immediately. GOAWAY alone leaves the established WebTransport session alive while already-placed Visitors drain. The WebTransport session itself does not prolong graceful drain after open Tunnel streams and earlier signaling requests finish.
+A close capsule or CONNECT stream end observed by either peer closes the whole Tunnel connection with `H3_NO_ERROR`, even if a peer withholds FIN after a close capsule. The Client's ordinary address worker reconnects; no WebTransport session is reopened on an existing connection. Connection loss ends the WebTransport session, and Authorization revocation closes the connection and WebTransport session immediately. GOAWAY alone leaves the established WebTransport session alive while already-placed Visitors drain. After local Visitor work and earlier signaling requests finish, the Server sends `DRAIN_WEBTRANSPORT_SESSION` without terminating the session. The Client releases its remaining Visitor leases, including streams queued for application acceptance and unread final bytes, then sends CLOSE. The Server closes the whole Tunnel on observing that CLOSE. The original graceful deadline bounds both phases; expiry, revocation and fast shutdown still close immediately.
 
-## Receive slots and Tunnel events
+## Visitor streams and credit
 
-The Client pre-opens plain `CONNECT` requests to the authenticated **Server hostname** as `:authority`, including a port. The Server binds the normalized host and ignores the authority port. Receive slots do not use Extended CONNECT `:protocol`; the separate WebTransport session does. Each idle slot is one unit of Client-offered availability. The Server never places a Visitor without one; its `200` response assigns exactly one Visitor and immediately carries the internal framing and buffered ClientHello as DATA, without a per-Visitor Client round trip.
+The Client grants the Server zero bidirectional credit during the QUIC handshake. After its WebTransport session is established, one connection task acquires permits from the Client-instance budget to maintain up to **T = 256 idle Visitor credits**, named `MAX_IDLE_VISITOR_CREDIT`. Every idle credit and active Visitor holds one permit from the same **1,024-permit budget**, shared across every connection of that Client instance. An arrival transfers an idle permit into its `TunnelStream`; a background acquisition replenishes idle credit when a permit becomes available. The accept task delivers streams without awaiting handler work. Active concurrency can exceed T and reach the entire budget on one connection. A quiet connection can reserve up to T permits, reducing capacity available to its peers. T bounds the initial burst per connection per credit round trip, about 12,800 arrivals per second at a 20 ms RTT before other costs.
 
-Each connection keeps at most **32 idle receive slots**. Idle and assigned slots each hold a permit from the same **1,024-slot Client-instance budget**, shared across all connections. The Client replenishes assigned or failed slots as permits become available. With no permit, it waits and emits saturation warnings at most once every **10 seconds**. The next acquired permit emits one recovery line only if a saturation warning was emitted; suppressed warnings do not arm another recovery. The Server admits **1,032 Client-initiated bidirectional request streams**, allowing 1,024 receive slots plus eight signaling streams. The Client admits no Server-initiated bidirectional streams. Each peer permits eight unidirectional streams for HTTP/3 control, QPACK, and reserved-stream headroom.
+All credit updates serialize under the connection controller's state mutex. After each update, the configured Quinn target equals active plus idle held permits. The update sets that held target, temporarily sets zero, then restores the held target before returning. It never sets a target above held permits. Quinn 0.11.11 with quinn-proto 0.11.19 otherwise batches increments of at most configured concurrency / 8, which can withhold the last reserved credit indefinitely. The temporary zero target queues already-allocated unsent credit with a zero batching threshold. This dependency on the pinned Quinn setter and batching behavior is covered by the raw eight-to-nine regression and full-budget tests; see [ADR 0007](adr/0007-webtransport-visitor-streams.md) and the [approved amendment](https://github.com/runewarp/runewarp/issues/256#issuecomment-6392362183).
+
+The three public calls acquire separate Quinn locks and are not atomic to its driver or concurrent FIN, ACK and EOF processing. Lowering never revokes already-issued credit. A transport completion during the zero interval allocates no replacement until restore; a completion before or after it can issue irrevocable replacement credit even while its handler retains a permit. Such credit does not reserve new handler capacity. An arrival without an idle permit tries the aggregate budget exactly once without waiting. Failure resets and stops the stream before handing it to a handler, using the existing saturation log rate limit. Normal burst and full-budget simultaneous admission have zero guard rejections. At an exhausted budget, FIN/ACK/EOF can permit a replacement before the previous handler releases its final half, including under production scheduling. That arrival is rejected by the guard. Concurrent tests cover load with handler headroom and saturated rounds whose handlers release before replacement work, separately from the deterministic retained-handler rejection case. No behavior depends on a received reset code.
+
+Both application halves share a resource lease. The final half's Drop lowers the configured target before releasing its transport fields. The actual semaphore permit remains in the lease until both halves' transport fields have dropped, including when their Drops run concurrently. Finished or failed write handles stay retained until application Drop. Transport state can still be freed before application Drop, so the over-issue guard remains necessary.
+
+GOAWAY preserves idle reservations and maintenance because a committed Visitor can arrive on an independently ordered stream after GOAWAY. On WebTransport DRAIN, the Client cancels its pending semaphore acquisition, stops replenishment and lowers the configured target before releasing all idle permits to sibling connections. Successful Server proxies have already observed Client FIN before local completion, so their Client streams own active or application-queued leases before DRAIN. Those leases remain tracked until both halves drop; intake and the no-wait guard remain live. Aborted proxies gain no delivery guarantee. A terminal wake from the session drain API still takes the immediate termination path, including CLOSE without peer FIN. Connection teardown also releases idle permits; active permits return when their stream halves drop.
+
+The Client fork limits for incoming streams, pending prefixes and validated streams per session are each **256**, so the initial T burst does not exceed its queues. The application handoff queue is bounded by held permits rather than waiting on handlers. The Server admits **eight Client-initiated bidirectional request streams** for signaling, including the session CONNECT. Plain CONNECT receive slots are removed and receive bodyless `400`. Each peer permits eight unidirectional streams for HTTP/3 control, QPACK and reserved-stream headroom.
+
+With no budget permit, credit maintenance waits and emits saturation warnings at most once every **10 seconds**. The next acquired permit emits one recovery line only if a saturation warning was emitted; suppressed warnings do not arm another recovery.
+
+## Tunnel events
 
 `GET /v1/tunnel/events` targets the Server hostname's HTTPS origin and ends its request with FIN, without DATA or trailers. The response is `200`, `content-type: text/event-stream`, and `cache-control: no-store`. Its first SSE event has type `state` and JSON data with exactly the currently defined fields:
 
@@ -132,9 +144,9 @@ Oversized request header sections receive bodyless `431` before request-handler 
 
 ## Client-side Service selection
 
-When the Server assigns a receive slot:
+When a WebTransport Visitor stream arrives:
 
-1. Deliver its Tunnel stream to the Client handler. The slot already holds one Client-instance budget permit, retained until both stream halves drop.
+1. Deliver its Tunnel stream to the Client handler. The stream already holds one Client-instance budget permit, retained until both stream halves drop.
 2. Validate and consume the mandatory internal PROXY v2 header, then buffer the forwarded ClientHello. Header and ClientHello intake share a **5-second** completion deadline and have separate **16 KB** caps.
 3. Extract the canonical Visitor TCP tuple from the header and the normalized SNI hostname from the ClientHello.
 4. If there is exactly one configured **Service** and it omits `public-hostnames`, select that **Catch-all Service**.
@@ -148,7 +160,7 @@ When the Server assigns a receive slot:
    b. Open a TCP connection to the selected `backend-address` with a **5-second** connect deadline.
    c. Proxy decrypted data between the TLS stream and the plaintext backend connection.
 
-The Client-instance semaphore bounds idle slots and handler work together across every Tunnel connection. Rejecting an assigned stream drops it and resets its unfinished write direction. Successfully established proxies have no additional lifetime or idle deadline.
+The Client-instance semaphore bounds idle Visitor credits and handler work together across every Tunnel connection. Rejecting an assigned stream drops it and resets its unfinished write direction. Successfully established proxies have no additional lifetime or idle deadline.
 
 Notes:
 
@@ -160,16 +172,16 @@ Notes:
 
 ## Stream lifecycle
 
-Every assigned receive slot begins its response DATA with a regenerated PROXY protocol v2 header containing the canonical Visitor TCP source and original destination. The Client validates and consumes it before parsing the Visitor ClientHello; original TLS bytes follow immediately. Invalid metadata rejects only that stream.
+Every Visitor stream begins its Server-to-Client bytes with a regenerated PROXY protocol v2 header containing the canonical Visitor TCP source and original destination. The Client validates and consumes it before parsing the Visitor ClientHello; original TLS bytes follow immediately. Invalid metadata rejects only that stream.
 
 One internal Tunnel-framing module owns this ordering for Server encoding and Client decoding. Backend PROXY emission is separate and independently controlled per Service.
 
-Tunnel connections support only ALPN `h3`. There is no fallback or dual protocol. The Client requires a draft07 WebTransport session and fails establishment against an older receive-slot-only Server. The Server still accepts an older slot-only Client without a WebTransport session. Operators must upgrade Clients and Servers together. Old `runewarp/1` binaries are incompatible in both directions.
+Tunnel connections support only ALPN `h3`. There is no fallback or dual protocol. Both peers require the WebTransport Visitor carrier; older receive-slot binaries cannot carry Visitors with this version. Operators must upgrade Clients and Servers together. Old `runewarp/1` binaries are incompatible in both directions.
 
 Runewarp uses symmetric close behavior:
 
-- a TCP FIN maps to HTTP/3 request or response FIN in the same direction
-- an HTTP/3 request or response FIN maps to TCP half-close in the same direction
+- a TCP FIN maps to WebTransport stream FIN in the same direction
+- a WebTransport stream FIN maps to TCP half-close in the same direction
 - errors, aborts, or dropping an unfinished write half reset the stream; connection loss terminates all its streams
 - proxy writes flush before waiting for the peer and finish their write direction after copying to EOF
 - each TCP/Tunnel proxy direction owns its halves and completes independently; a failure in one direction does not cancel copying in the other, and the proxy returns its error after both directions finish
@@ -182,9 +194,9 @@ For orderly local shutdown that the runtime controls:
 - when `server.readiness-bind-address` is configured, **Server readiness** is a probe-only TCP listener whose accept success means the Server is eligible for new ingress admission
 - the **Server** drops **Server readiness** immediately when orderly shutdown begins
 - the **Server** stops accepting new Visitor TCP traffic, new **Tunnel connections**, and new streams on already-open **Tunnel connections** before it closes active **Tunnel connections**
-- **Graceful shutdown** concurrently sends GOAWAY on every Tunnel connection using stock `shutdown(1)`, rejects idle slots, ends the event stream, and lets already-placed Visitors finish within one `server.graceful-shutdown-duration` window
+- **Graceful shutdown** concurrently sends GOAWAY on every Tunnel connection using stock `shutdown(1)`, seals new Visitor opens, ends the event stream, and lets already-placed Visitors finish within one `server.graceful-shutdown-duration` window
 - GOAWAY carries the fork's first unprocessed Client request-stream ID; Runewarp evicts pending classifiers, allows already-returned request resolvers to finish under their original deadlines, and rejects later requests, including the boundary ID, with `H3_REQUEST_REJECTED`. The Client opens no new requests afterward
-- each drained connection closes with `H3_NO_ERROR` (`0x100`); idle slots never prolong the drain
+- after Server-local work completes, the Server sends the WebTransport DRAIN capsule and waits for the Client to release its Visitors and send CLOSE, then closes with `H3_NO_ERROR` (`0x100`); idle Visitor credit does not prolong drain
 - when that graceful deadline expires, the **Server** force-closes remaining active **Tunnel connections**
 - **Fast shutdown** and graceful-to-fast escalation close immediately with `H3_NO_ERROR`
 - the **Client instance** stops new dial and retry work before it closes all active **Tunnel connections**

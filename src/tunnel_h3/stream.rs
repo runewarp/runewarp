@@ -1,9 +1,9 @@
-//! Byte-stream adapters over one assigned receive slot.
+//! Byte-stream adapters over one WebTransport Visitor stream.
 //!
-//! An assigned slot carries one Visitor's bytes as HTTP/3 DATA in each direction. The halves
+//! A WebTransport stream carries one Visitor's raw bytes in each direction. The halves
 //! implement Tokio's `AsyncRead` and `AsyncWrite` so proxy and TLS code stay transport-neutral:
 //!
-//! - each write starts its DATA frame immediately; like a buffered writer, the frame may still be
+//! - each write starts its byte chunk immediately; like a buffered writer, the chunk may still be
 //!   in flight until the next write, `poll_flush`, or `poll_shutdown` completes it;
 //! - `poll_shutdown` on the write half ends that direction with FIN;
 //! - a read half returns end-of-file at the peer's FIN;
@@ -11,9 +11,8 @@
 //!   otherwise finish a dropped send stream implicitly, making an aborted Visitor look like a
 //!   clean end.
 //!
-//! `h3` exposes only async sends, so each write moves the send half into one boxed future. The
-//! future always runs to completion before the next write or FIN; cancelling an `h3` write midway
-//! would corrupt the stream (hyperium/h3#360).
+//! Each write moves the send half into one boxed future. It finishes the whole byte chunk before
+//! the next write or FIN. Dropping that future resets its unfinished send half.
 
 use std::future::Future;
 use std::io;
@@ -26,116 +25,101 @@ use h3::error::{Code, StreamError};
 use h3::quic::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-/// Largest single DATA frame written from one `poll_write` call.
+/// Largest single byte chunk written from one `poll_write` call.
 const MAX_WRITE_CHUNK: usize = 64 * 1024;
 
-type ServerRequestStream<S> = h3::server::RequestStream<S, Bytes>;
-type ClientRequestStream<S> = h3::client::RequestStream<S, Bytes>;
+/// Raw WebTransport halves retain the fork's session-termination guards.
+pub type VisitorRecv = h3_webtransport::stream::RecvStream<h3_quinn::RecvStream, Bytes>;
+pub type VisitorSend = h3_webtransport::stream::SendStream<h3_quinn::SendStream<Bytes>, Bytes>;
+pub type ServerTunnelStream = TunnelStream<VisitorRecv, VisitorSend>;
+pub type ClientTunnelStream = TunnelStream<VisitorRecv, VisitorSend>;
 
-/// Server half types of one assigned slot.
-pub type ServerTunnelStream = TunnelStream<
-    ServerRequestStream<h3_quinn::RecvStream>,
-    ServerRequestStream<h3_quinn::SendStream<Bytes>>,
->;
+/// Resources held until both application halves drop. The last half calls `before_drop`
+/// before releasing its transport handles, then releases this resource after those handles.
+pub(crate) trait StreamResource: Send + Sync {
+    fn before_drop(&self) {}
+}
+impl StreamResource for () {}
 
-/// Client half types of one assigned slot.
-pub type ClientTunnelStream = TunnelStream<
-    ClientRequestStream<h3_quinn::RecvStream>,
-    ClientRequestStream<h3_quinn::SendStream<Bytes>>,
->;
+// Each application half calls dropping_half before its fields drop. The lease field must stay
+// after the transport fields in both half structs, retaining the resource through their drops.
+// The counter also covers concurrent half Drops, where Arc::strong_count is not a finalizer.
+struct StreamLease {
+    halves: std::sync::atomic::AtomicUsize,
+    resource: Arc<dyn StreamResource>,
+}
+impl StreamLease {
+    fn dropping_half(&self) {
+        if self
+            .halves
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            self.resource.before_drop();
+        }
+    }
+}
 
-/// Resources released only after both halves of a Tunnel stream drop: Server in-flight request
-/// accounting or a Client stream-handler permit.
-pub(crate) type StreamLease = Arc<dyn Send + Sync>;
-
-/// Send half of an HTTP/3 request stream, on either side.
+/// Send half of a Visitor stream.
 pub trait SendHalf: Send + Sized + Unpin + 'static {
     fn send_data(&mut self, data: Bytes) -> impl Future<Output = Result<(), StreamError>> + Send;
     fn finish(&mut self) -> impl Future<Output = Result<(), StreamError>> + Send;
     fn reset(&mut self);
 }
 
-/// Receive half of an HTTP/3 request stream, on either side.
+/// Receive half of a Visitor stream.
 pub trait RecvHalf: Send + Unpin + 'static {
     fn poll_recv(&mut self, context: &mut Context<'_>) -> Poll<Result<Option<Bytes>, StreamError>>;
 }
 
-impl<S> SendHalf for ServerRequestStream<S>
-where
-    S: SendStream<Bytes> + Send + Unpin + 'static,
-{
-    fn send_data(&mut self, data: Bytes) -> impl Future<Output = Result<(), StreamError>> + Send {
-        h3::server::RequestStream::send_data(self, data)
+impl SendHalf for VisitorSend {
+    async fn send_data(&mut self, mut data: Bytes) -> Result<(), StreamError> {
+        use h3::quic::SendStreamUnframed;
+        while data.has_remaining() {
+            std::future::poll_fn(|cx| self.poll_send(cx, &mut data))
+                .await
+                .map_err(|error| StreamError::Undefined(Box::new(error)))?;
+        }
+        Ok(())
     }
-
-    fn finish(&mut self) -> impl Future<Output = Result<(), StreamError>> + Send {
-        h3::server::RequestStream::finish(self)
+    async fn finish(&mut self) -> Result<(), StreamError> {
+        std::future::poll_fn(|cx| self.poll_finish(cx))
+            .await
+            .map_err(|error| StreamError::Undefined(Box::new(error)))
     }
-
     fn reset(&mut self) {
-        self.stop_stream(Code::H3_REQUEST_CANCELLED);
+        SendStream::reset(self, Code::H3_REQUEST_CANCELLED.value());
     }
 }
 
-impl<S> SendHalf for ClientRequestStream<S>
-where
-    S: SendStream<Bytes> + Send + Unpin + 'static,
-{
-    fn send_data(&mut self, data: Bytes) -> impl Future<Output = Result<(), StreamError>> + Send {
-        h3::client::RequestStream::send_data(self, data)
-    }
-
-    fn finish(&mut self) -> impl Future<Output = Result<(), StreamError>> + Send {
-        h3::client::RequestStream::finish(self)
-    }
-
-    fn reset(&mut self) {
-        self.stop_stream(Code::H3_REQUEST_CANCELLED);
-    }
-}
-
-impl<S> RecvHalf for ServerRequestStream<S>
-where
-    S: RecvStream + Send + Unpin + 'static,
-{
-    fn poll_recv(&mut self, context: &mut Context<'_>) -> Poll<Result<Option<Bytes>, StreamError>> {
-        self.poll_recv_data(context)
-            .map_ok(|chunk| chunk.map(|mut chunk| chunk.copy_to_bytes(chunk.remaining())))
-    }
-}
-
-impl<S> RecvHalf for ClientRequestStream<S>
-where
-    S: RecvStream + Send + Unpin + 'static,
-{
-    fn poll_recv(&mut self, context: &mut Context<'_>) -> Poll<Result<Option<Bytes>, StreamError>> {
-        self.poll_recv_data(context)
-            .map_ok(|chunk| chunk.map(|mut chunk| chunk.copy_to_bytes(chunk.remaining())))
+impl RecvHalf for VisitorRecv {
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<Bytes>, StreamError>> {
+        self.poll_data(cx)
+            .map_err(|error| StreamError::Undefined(Box::new(error)))
     }
 }
 
 /// Send half that resets its stream when dropped without a completed FIN.
 struct ResetOnDrop<S: SendHalf> {
-    half: Option<S>,
+    half: S,
+    finished: bool,
 }
 
 impl<S: SendHalf> ResetOnDrop<S> {
     fn half(&mut self) -> &mut S {
-        self.half
-            .as_mut()
-            .expect("the send half is present until a completed FIN disarms it")
+        &mut self.half
     }
 
     /// The stream ended with FIN; dropping it no longer needs a reset.
     fn disarm(&mut self) {
-        self.half = None;
+        self.finished = true;
     }
 }
 
 impl<S: SendHalf> Drop for ResetOnDrop<S> {
     fn drop(&mut self) {
-        if let Some(half) = self.half.as_mut() {
-            half.reset();
+        if !self.finished {
+            self.half.reset();
         }
     }
 }
@@ -147,25 +131,28 @@ enum WriteState<S: SendHalf> {
     Idle(ResetOnDrop<S>),
     Writing(PendingWrite<S>),
     Finishing(PendingWrite<S>),
-    Finished,
-    Failed,
+    Finished(ResetOnDrop<S>),
+    Failed(Option<ResetOnDrop<S>>),
 }
 
-/// `AsyncWrite` over the send half of one assigned slot.
+/// `AsyncWrite` over the send half of one Visitor stream.
 pub struct TunnelWriteHalf<S: SendHalf> {
     state: WriteState<S>,
-    _lease: StreamLease,
+    lease: Arc<StreamLease>,
 }
 
 impl<S: SendHalf> TunnelWriteHalf<S> {
-    fn new(half: S, lease: StreamLease) -> Self {
+    fn new(half: S, lease: Arc<StreamLease>) -> Self {
         Self {
-            state: WriteState::Idle(ResetOnDrop { half: Some(half) }),
-            _lease: lease,
+            state: WriteState::Idle(ResetOnDrop {
+                half,
+                finished: false,
+            }),
+            lease,
         }
     }
 
-    /// Drive an in-flight DATA write to completion.
+    /// Drive an in-flight byte write to completion.
     fn poll_pending_write(&mut self, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         let WriteState::Writing(write) = &mut self.state else {
             return Poll::Ready(Ok(()));
@@ -177,7 +164,7 @@ impl<S: SendHalf> TunnelWriteHalf<S> {
                 Poll::Ready(Ok(()))
             }
             Err(error) => {
-                self.state = WriteState::Failed;
+                self.state = WriteState::Failed(Some(half));
                 Poll::Ready(Err(stream_io_error(error)))
             }
         }
@@ -192,7 +179,7 @@ impl<S: SendHalf> AsyncWrite for TunnelWriteHalf<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         ready!(this.poll_pending_write(context))?;
-        match std::mem::replace(&mut this.state, WriteState::Failed) {
+        match std::mem::replace(&mut this.state, WriteState::Failed(None)) {
             WriteState::Idle(mut half) => {
                 let length = buffer.len().min(MAX_WRITE_CHUNK);
                 let data = Bytes::copy_from_slice(&buffer[..length]);
@@ -222,7 +209,7 @@ impl<S: SendHalf> AsyncWrite for TunnelWriteHalf<S> {
         let this = self.get_mut();
         ready!(this.poll_pending_write(context))?;
         loop {
-            match std::mem::replace(&mut this.state, WriteState::Failed) {
+            match std::mem::replace(&mut this.state, WriteState::Failed(None)) {
                 WriteState::Idle(mut half) => {
                     this.state = WriteState::Finishing(Box::pin(async move {
                         let result = half.half().finish().await;
@@ -238,18 +225,22 @@ impl<S: SendHalf> AsyncWrite for TunnelWriteHalf<S> {
                             this.state = WriteState::Finishing(finish);
                             Poll::Pending
                         }
-                        Poll::Ready((_, Ok(()))) => {
-                            this.state = WriteState::Finished;
+                        Poll::Ready((half, Ok(()))) => {
+                            this.state = WriteState::Finished(half);
                             Poll::Ready(Ok(()))
                         }
-                        Poll::Ready((_, Err(error))) => Poll::Ready(Err(stream_io_error(error))),
+                        Poll::Ready((half, Err(error))) => {
+                            this.state = WriteState::Failed(Some(half));
+                            Poll::Ready(Err(stream_io_error(error)))
+                        }
                     };
                 }
-                WriteState::Finished => {
-                    this.state = WriteState::Finished;
+                WriteState::Finished(half) => {
+                    this.state = WriteState::Finished(half);
                     return Poll::Ready(Ok(()));
                 }
-                WriteState::Writing(_) | WriteState::Failed => {
+                state @ (WriteState::Writing(_) | WriteState::Failed(_)) => {
+                    this.state = state;
                     return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
                 }
             }
@@ -257,21 +248,21 @@ impl<S: SendHalf> AsyncWrite for TunnelWriteHalf<S> {
     }
 }
 
-/// `AsyncRead` over the receive half of one assigned slot.
+/// `AsyncRead` over the receive half of one Visitor stream.
 pub struct TunnelReadHalf<R: RecvHalf> {
     half: R,
     buffered: Bytes,
     ended: bool,
-    _lease: StreamLease,
+    lease: Arc<StreamLease>,
 }
 
 impl<R: RecvHalf> TunnelReadHalf<R> {
-    fn new(half: R, lease: StreamLease) -> Self {
+    fn new(half: R, lease: Arc<StreamLease>) -> Self {
         Self {
             half,
             buffered: Bytes::new(),
             ended: false,
-            _lease: lease,
+            lease,
         }
     }
 }
@@ -296,14 +287,18 @@ impl<R: RecvHalf> AsyncRead for TunnelReadHalf<R> {
     }
 }
 
-/// One Visitor's bidirectional byte stream over an assigned receive slot.
+/// One Visitor's bidirectional byte stream over a WebTransport Visitor stream.
 pub struct TunnelStream<R: RecvHalf, S: SendHalf> {
     read: TunnelReadHalf<R>,
     write: TunnelWriteHalf<S>,
 }
 
 impl<R: RecvHalf, S: SendHalf> TunnelStream<R, S> {
-    pub(crate) fn new(recv: R, send: S, lease: StreamLease) -> Self {
+    pub(crate) fn new(recv: R, send: S, resource: Arc<dyn StreamResource>) -> Self {
+        let lease = Arc::new(StreamLease {
+            halves: std::sync::atomic::AtomicUsize::new(2),
+            resource,
+        });
         Self {
             read: TunnelReadHalf::new(recv, lease.clone()),
             write: TunnelWriteHalf::new(send, lease),
@@ -351,4 +346,15 @@ impl<R: RecvHalf, S: SendHalf> AsyncWrite for TunnelStream<R, S> {
 
 fn stream_io_error(error: StreamError) -> io::Error {
     io::Error::new(io::ErrorKind::ConnectionReset, error)
+}
+
+impl<S: SendHalf> Drop for TunnelWriteHalf<S> {
+    fn drop(&mut self) {
+        self.lease.dropping_half();
+    }
+}
+impl<R: RecvHalf> Drop for TunnelReadHalf<R> {
+    fn drop(&mut self) {
+        self.lease.dropping_half();
+    }
 }

@@ -242,6 +242,19 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `server.tunnels[].client-identity` | with singular authorization | Lowercase hex SHA-256 fingerprint of one authorized Client public key's SubjectPublicKeyInfo. Mutually exclusive with `server.tunnels[].client-identities`. |
 | `server.tunnels[].client-identities` | with plural authorization | One or more lowercase hex SHA-256 fingerprints of authorized Client public keys' SubjectPublicKeyInfo values. Mutually exclusive with `server.tunnels[].client-identity`. |
 
+Each bind address creates its own listener on the same Server runtime. All listeners share authorization, Tunnel pools, the runtime generation, admission limits, and graceful shutdown. Limits apply across the entire runtime, rather than separately per listener. A failure to bind any Visitor, Tunnel, or readiness address fails startup and releases the earlier sockets. Addresses that differ as literals can still overlap at the operating system, for example wildcard and specific-IP binds on the same port; such conflicts fail startup too. IPv6 wildcard dual-stack behavior follows the operating system's defaults, as it does for a single string.
+
+Both bind keys are file configuration; there are no bind-address CLI flags or environment overrides. Existing single-string configurations keep their meaning. For example, bind separate IPv4 and IPv6 addresses on the same operator-selected port:
+
+```toml
+[server]
+hostname = "tunnel.example.com"
+public-bind-address = ["192.0.2.10:443", "[2001:db8::10]:443"]
+tunnel-bind-address = ["192.0.2.10:443", "[2001:db8::10]:443"]
+```
+
+The addresses must belong to the host; add the remaining certificate and Tunnel configuration as in the examples above.
+
 ### Client
 
 | Key | Required | Notes |
@@ -264,19 +277,6 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 `client.max-visitor-streams` bounds reserved and active capacity; it does not guarantee prompt replacement credit at saturation. After one Visitor completes or aborts, another can still reach the Server's five-second open deadline and lose its connection. This known alpha availability limitation is tracked in [#267](https://github.com/runewarp/runewarp/issues/267). Raising the budget postpones saturation rather than fixing it.
 
 Client reconnect behavior is runtime-owned. There is no `client.reconnect-interval` setting or CLI flag; both config-driven and CLI-only startup use the same built-in jittered backoff described in `docs/protocol.md`.
-
-Each bind address creates its own listener on the same Server runtime. All listeners share authorization, Tunnel pools, the runtime generation, admission limits, and graceful shutdown. Limits apply across the entire runtime, rather than separately per listener. A failure to bind any Visitor, Tunnel, or readiness address fails startup and releases the earlier sockets. Addresses that differ as literals can still overlap at the operating system, for example wildcard and specific-IP binds on the same port; such conflicts fail startup too. IPv6 wildcard dual-stack behavior follows the operating system's defaults, as it does for a single string.
-
-Both bind keys are file configuration; there are no bind-address CLI flags or environment overrides. Existing single-string configurations keep their meaning. For example, bind separate IPv4 and IPv6 addresses on the same operator-selected port:
-
-```toml
-[server]
-hostname = "tunnel.example.com"
-public-bind-address = ["192.0.2.10:443", "[2001:db8::10]:443"]
-tunnel-bind-address = ["192.0.2.10:443", "[2001:db8::10]:443"]
-```
-
-The addresses must belong to the host; add the remaining certificate and Tunnel configuration as in the examples above.
 
 ## Certificates and trust
 

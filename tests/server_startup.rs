@@ -187,7 +187,10 @@ readiness-bind-address = "127.0.0.1:0"
         .authorization_adapter()
         .expect("managed Server exposes an authorization adapter");
     adapter
-        .apply(runewarp::ServerManagedInput { tunnels: vec![] })
+        .apply(runewarp::ServerManagedInput {
+            tunnels: vec![],
+            replacement_generation: None,
+        })
         .await
         .expect("empty Tunnel collection remains a valid first apply");
 

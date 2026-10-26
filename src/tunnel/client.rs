@@ -588,6 +588,7 @@ async fn subscribe(
     events_uri: &str,
 ) -> Result<(TunnelEventState, EventSubscription), TunnelH3Error> {
     let request = Request::get(events_uri)
+        .header(header::ACCEPT, "text/event-stream")
         .body(())
         .map_err(|_| TunnelH3Error::Incompatible("invalid-server-hostname"))?;
     let mut stream = send_request

@@ -18,7 +18,7 @@ use tokio::time::{Instant, interval_at, sleep, timeout, timeout_at};
 use crate::quic::{HANDSHAKE_TIMEOUT, peer_client_identity, with_handshake_timeout};
 use crate::{ClientIdentity, ServerHostname};
 
-use super::events::{KEEPALIVE_COMMENT, ServerRuntimeGeneration, TunnelEventState};
+use super::events::{KEEPALIVE_COMMENT, ServerTunnelEvents};
 use super::stream::{ServerTunnelStream, TunnelStream};
 use super::{
     OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TUNNEL_WITHDRAWAL_PATH, TunnelH3Error,
@@ -108,7 +108,7 @@ struct Shared {
     connection: quinn::Connection,
     acceptor: SessionAcceptor,
     server_hostname: ServerHostname,
-    state: TunnelEventState,
+    events: ServerTunnelEvents,
     timing: TunnelH3Timing,
     /// Published once GOAWAY seals request intake.
     goaway: watch::Sender<bool>,
@@ -137,17 +137,17 @@ fn reject_unprocessed(stream: &mut ServerRequestStream) {
 }
 
 impl ServerTunnelH3 {
-    /// Start HTTP/3 on an authenticated Tunnel connection for the Server running
-    /// `server_generation`. Requests must target `server_hostname`.
+    /// Start HTTP/3 on an authenticated Tunnel connection whose event stream follows `events`.
+    /// Requests must target `server_hostname`.
     pub async fn establish(
         connection: quinn::Connection,
         server_hostname: ServerHostname,
-        server_generation: ServerRuntimeGeneration,
+        events: impl Into<ServerTunnelEvents>,
     ) -> Result<Self, TunnelH3Error> {
         Self::establish_with_timing(
             connection,
             server_hostname,
-            server_generation,
+            events,
             TunnelH3Timing::default(),
         )
         .await
@@ -156,7 +156,7 @@ impl ServerTunnelH3 {
     pub(crate) async fn establish_with_timing(
         connection: quinn::Connection,
         server_hostname: ServerHostname,
-        server_generation: ServerRuntimeGeneration,
+        events: impl Into<ServerTunnelEvents>,
         timing: TunnelH3Timing,
     ) -> Result<Self, TunnelH3Error> {
         let client_identity =
@@ -191,7 +191,7 @@ impl ServerTunnelH3 {
             connection: connection.clone(),
             acceptor,
             server_hostname,
-            state: TunnelEventState::current(server_generation),
+            events: events.into(),
             timing,
             goaway: watch::Sender::new(false),
             subscriptions: watch::Sender::new(0),
@@ -799,13 +799,16 @@ async fn serve_withdrawal(stream: ServerRequestStream, shared: &Shared) {
 
 /// Serve one Tunnel event-stream subscription.
 ///
-/// Sends full current state first, then comment keepalives. Ends with FIN when a newer
-/// subscription supersedes it or GOAWAY has been sent. A write blocked past its deadline cancels
-/// the stream.
+/// Sends the full current snapshot first, then a new full snapshot whenever it changes, and
+/// comment keepalives while quiet. Changes published during a blocked write coalesce, so the next
+/// write carries only the latest snapshot. Ends with FIN when a newer subscription supersedes it
+/// or GOAWAY has been sent. A write blocked past its deadline cancels the stream. The request's
+/// `Accept` header is ignored: the resource has one representation.
 async fn serve_events(mut stream: ServerRequestStream, shared: &Shared) {
     shared.subscriptions.send_modify(|count| *count += 1);
     let mut superseded = shared.subscriptions.subscribe();
     let mut goaway = shared.goaway.subscribe();
+    let mut snapshots = shared.events.subscribe();
     let timing = shared.timing;
 
     let response = Response::builder()
@@ -814,8 +817,9 @@ async fn serve_events(mut stream: ServerRequestStream, shared: &Shared) {
         .header(header::CACHE_CONTROL, "no-store")
         .body(())
         .expect("static event-stream response headers are valid");
+    let initial = snapshots.borrow_and_update().encode_sse();
     if !bounded_write(timing, stream.send_response(response)).await
-        || !bounded_write(timing, stream.send_data(shared.state.encode_sse())).await
+        || !bounded_write(timing, stream.send_data(initial)).await
     {
         stream.stop_stream(Code::H3_REQUEST_CANCELLED);
         return;
@@ -826,6 +830,7 @@ async fn serve_events(mut stream: ServerRequestStream, shared: &Shared) {
     loop {
         let frame = tokio::select! {
             _ = keepalive.tick() => Bytes::from_static(KEEPALIVE_COMMENT),
+            Ok(()) = snapshots.changed() => snapshots.borrow_and_update().encode_sse(),
             _ = superseded.changed() => break,
             _ = async { goaway.wait_for(|sent| *sent).await.map(|_| ()) } => break,
         };

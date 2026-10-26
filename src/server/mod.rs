@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::tunnel::{ServerRuntimeGeneration, ServerTunnelH3};
+use crate::tunnel::{ServerRuntimeGeneration, ServerTunnelEvents, ServerTunnelH3};
 use quinn::Endpoint;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::Notify;
@@ -94,7 +94,7 @@ pub struct Server {
     fatal: FatalSignal,
     admission_policy: ServerAdmissionPolicy,
     server_hostname: ServerHostname,
-    server_generation: ServerRuntimeGeneration,
+    tunnel_events: ServerTunnelEvents,
 }
 
 struct ReadinessProbe {
@@ -330,9 +330,12 @@ impl Server {
         if let Some(gate) = readiness_gate {
             tunnel_registry.set_readiness(gate);
         }
+        // Static Servers never publish a replacement hint; only the Managed adapter does.
+        let tunnel_events = ServerTunnelEvents::new(ServerRuntimeGeneration::generate());
         let authorization_adapter = ServerAuthorizationAdapter::new(
             config.server_hostname.clone(),
             tunnel_registry.clone(),
+            tunnel_events.clone(),
         );
 
         Ok(Self {
@@ -345,7 +348,7 @@ impl Server {
             fatal,
             admission_policy,
             server_hostname: config.server_hostname,
-            server_generation: ServerRuntimeGeneration::generate(),
+            tunnel_events,
         })
     }
 
@@ -404,7 +407,7 @@ impl Server {
             fatal,
             admission_policy,
             server_hostname,
-            server_generation,
+            tunnel_events,
         } = self;
         let mut accept_backoff = AcceptBackoff::default();
         let mut public_accept_not_before = None;
@@ -461,7 +464,7 @@ impl Server {
                         incoming,
                         &mut handshakes,
                         server_hostname.clone(),
-                        server_generation,
+                        tunnel_events.clone(),
                     );
                 }
             }
@@ -558,7 +561,7 @@ fn admit_tunnel_handshake(
     incoming: quinn::Incoming,
     handshakes: &mut JoinSet<()>,
     server_hostname: ServerHostname,
-    server_generation: ServerRuntimeGeneration,
+    tunnel_events: ServerTunnelEvents,
 ) {
     let handshake_permit = match admission_policy.try_admit_handshake() {
         Ok(permit) => permit,
@@ -577,7 +580,7 @@ fn admit_tunnel_handshake(
             handshake_permit,
             admission_policy,
             server_hostname,
-            server_generation,
+            tunnel_events,
         )
         .await;
     });
@@ -589,7 +592,7 @@ async fn register_tunnel_connection(
     handshake_permit: tokio::sync::OwnedSemaphorePermit,
     admission_policy: ServerAdmissionPolicy,
     server_hostname: ServerHostname,
-    server_generation: ServerRuntimeGeneration,
+    tunnel_events: ServerTunnelEvents,
 ) {
     let connecting = match incoming.accept() {
         Ok(connecting) => connecting,
@@ -601,7 +604,7 @@ async fn register_tunnel_connection(
     let handshake = with_handshake_timeout(
         async {
             let connection = connecting.await.map_err(|error| error.to_string())?;
-            ServerTunnelH3::establish(connection, server_hostname, server_generation)
+            ServerTunnelH3::establish(connection, server_hostname, tunnel_events)
                 .await
                 .map(Arc::new)
                 .map_err(|error| error.to_string())

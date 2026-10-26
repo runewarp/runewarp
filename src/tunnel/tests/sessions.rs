@@ -415,6 +415,7 @@ async fn authorization_revocation_ends_the_session_and_connection() {
                 ],
                 authorized_client_identities: vec![fixture.client_identity.clone()],
             }],
+            replacement_generation: None,
         })
         .await
         .expect("authorize Client");
@@ -431,7 +432,10 @@ async fn authorization_revocation_ends_the_session_and_connection() {
         .expect("mTLS");
     let (_sender, session, driver) = session_client(connection.clone()).await;
     authorization
-        .apply(crate::ServerManagedInput { tunnels: vec![] })
+        .apply(crate::ServerManagedInput {
+            tunnels: vec![],
+            replacement_generation: None,
+        })
         .await
         .expect("revoke Client");
     let error = timeout(STEP, connection.closed())

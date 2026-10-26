@@ -41,7 +41,7 @@ pub use config::{
     make_client_tunnel_h3_config, make_server_tunnel_h3_config,
     make_server_tunnel_h3_config_with_resolver,
 };
-pub use events::{ServerRuntimeGeneration, TUNNEL_PROTOCOL_VERSION, TunnelEventState};
+pub use events::{ServerRuntimeGeneration, ServerTunnelEvents, TunnelEventState};
 pub use server::{OpenTunnelStreamError, ServerTunnelH3};
 pub use stream::{
     ClientTunnelStream, ServerTunnelStream, TunnelReadHalf, TunnelStream, TunnelWriteHalf,

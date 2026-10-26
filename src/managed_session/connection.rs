@@ -4,6 +4,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -13,6 +14,7 @@ use hyper::body::Incoming;
 use hyper::client::conn::http2::{self, SendRequest};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::ServerName;
+use serde::{Serialize, Serializer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -164,12 +166,17 @@ impl ManagedSessionConnection {
     pub fn begin_put_applied_revision(
         &self,
         revision: &str,
+        role_fields: &AcknowledgmentFields,
         limits: &ManagedSessionLimits,
     ) -> Pin<Box<dyn Future<Output = Result<(), ConnectionError>> + Send>> {
         let mut sender = self.sender.clone();
         let authority = self.authority.clone();
         let role = self.role;
-        let revision = revision.to_owned();
+        let payload = serde_json::to_vec(&StatePayload {
+            revision,
+            role_fields,
+        })
+        .expect("string-valued state payload serializes");
         let request_deadline = limits.state_request_deadline;
         let response_deadline = limits.state_response_deadline;
         Box::pin(async move {
@@ -177,7 +184,7 @@ impl ManagedSessionConnection {
                 &mut sender,
                 &authority,
                 role,
-                &revision,
+                payload,
                 request_deadline,
                 response_deadline,
             )
@@ -186,11 +193,31 @@ impl ManagedSessionConnection {
     }
 }
 
+/// Role facts appended to every state acknowledgment; see `RoleAdapter::acknowledgment_fields`.
+pub(super) type AcknowledgmentFields = Arc<[(&'static str, String)]>;
+
+/// State acknowledgment body: `revision` first, then role fields in order.
+struct StatePayload<'a> {
+    revision: &'a str,
+    role_fields: &'a [(&'static str, String)],
+}
+
+impl Serialize for StatePayload<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let role_fields = self
+            .role_fields
+            .iter()
+            .filter(|(name, _)| *name != "revision")
+            .map(|(name, value)| (*name, value.as_str()));
+        serializer.collect_map(std::iter::once(("revision", self.revision)).chain(role_fields))
+    }
+}
+
 async fn put_applied_revision_on_sender(
     sender: &mut SendRequest<Full<Bytes>>,
     authority: &str,
     role: ManagedSessionRole,
-    revision: &str,
+    payload: Vec<u8>,
     request_deadline: Duration,
     response_deadline: Duration,
 ) -> Result<(), ConnectionError> {
@@ -200,10 +227,7 @@ async fn put_applied_revision_on_sender(
         .path_and_query(state_path(role))
         .build()
         .expect("control state URI is valid by construction");
-    let payload = serde_json::json!({ "revision": revision });
-    let body = Full::new(Bytes::from(
-        serde_json::to_vec(&payload).expect("revision payload serializes"),
-    ));
+    let body = Full::new(Bytes::from(payload));
     let request = Request::builder()
         .method("PUT")
         .uri(uri)

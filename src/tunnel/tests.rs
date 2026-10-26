@@ -30,6 +30,7 @@ use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
 use crate::{ClientIdentity, ServerHostname, generate_client_identity};
 
 mod sessions;
+mod snapshots;
 mod streams;
 mod withdrawal;
 
@@ -128,6 +129,21 @@ impl Fixture {
 
     /// Complete one authenticated QUIC handshake: `(server side, client side)`.
     async fn connect(&self) -> io::Result<(quinn::Connection, quinn::Connection)> {
+        self.connect_inner(None).await
+    }
+
+    /// Like [`Self::connect`], with a test-specific Client QUIC configuration.
+    async fn connect_with(
+        &self,
+        client_config: quinn::ClientConfig,
+    ) -> io::Result<(quinn::Connection, quinn::Connection)> {
+        self.connect_inner(Some(client_config)).await
+    }
+
+    async fn connect_inner(
+        &self,
+        client_config: Option<quinn::ClientConfig>,
+    ) -> io::Result<(quinn::Connection, quinn::Connection)> {
         let server_addr = self.server_endpoint.local_addr()?;
         let accept = async {
             let incoming = self
@@ -138,11 +154,15 @@ impl Fixture {
             incoming.await.map_err(io::Error::other)
         };
         let connect = async {
-            self.client_endpoint
-                .connect(server_addr, SERVER_NAME)
-                .map_err(io::Error::other)?
-                .await
-                .map_err(io::Error::other)
+            match client_config {
+                Some(config) => self
+                    .client_endpoint
+                    .connect_with(config, server_addr, SERVER_NAME),
+                None => self.client_endpoint.connect(server_addr, SERVER_NAME),
+            }
+            .map_err(io::Error::other)?
+            .await
+            .map_err(io::Error::other)
         };
         timeout(STEP, async { tokio::try_join!(accept, connect) })
             .await
@@ -152,7 +172,7 @@ impl Fixture {
 
 async fn establish_pair(
     fixture: &Fixture,
-    generation: ServerRuntimeGeneration,
+    generation: impl Into<super::ServerTunnelEvents>,
     budget: Arc<Semaphore>,
 ) -> (ServerTunnelH3, ClientTunnelH3) {
     let (server_connection, client_connection) =
@@ -322,12 +342,14 @@ async fn resumed_connections_never_send_application_early_data() {
 
 #[tokio::test]
 async fn client_rejects_an_incompatible_event_stream_and_closes_the_connection() {
-    let incompatible_version = format!(
-        "event: state\ndata: {{\"version\":2,\"generation\":\"{}\"}}\n\n",
-        ServerRuntimeGeneration::generate()
+    let generation = ServerRuntimeGeneration::generate();
+    let legacy_state = format!("event: state\ndata: {{\"generation\":\"{generation}\"}}\n\n");
+    let null_hint = format!(
+        "event: snapshot\ndata: {{\"generation\":\"{generation}\",\"replacement_generation\":null}}\n\n"
     );
     for (body, reason) in [
-        (incompatible_version.into_bytes(), "unsupported-version"),
+        (legacy_state.into_bytes(), "unexpected-event-type"),
+        (null_hint.into_bytes(), "malformed-state"),
         (
             b"event: other\ndata: {}\n\n".to_vec(),
             "unexpected-event-type",
@@ -956,8 +978,8 @@ async fn oversized_request_headers_are_bodyless_rejections_before_handler_spawn_
     assert!(
         read_event_block(&mut events)
             .await
-            .expect("state event")
-            .contains("event: state")
+            .expect("snapshot event")
+            .contains("event: snapshot")
     );
     assert_eq!(server.handlers_spawned(), 1);
     driver.abort();

@@ -491,6 +491,62 @@ async fn managed_client_reconciles_assignments_across_real_servers() {
 }
 
 #[tokio::test]
+async fn managed_client_state_document_reports_generations_per_assigned_address() {
+    let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
+    let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
+    let mut harness = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
+    let server_a = harness.spawn_server_node().await;
+    let failing_port = {
+        let sock = std::net::UdpSocket::bind(localhost(0)).unwrap();
+        let port = sock.local_addr().unwrap().port();
+        drop(sock);
+        port
+    };
+    let addr_a = format!("localhost:{}", server_a.tunnel_addr.port());
+    let addr_fail = format!("localhost:{failing_port}");
+    let generation_a = server_a.adapter.server_generation().to_string();
+
+    harness.push_assignment("cli-7", &[&addr_a, &addr_fail]);
+    wait_for_applied(&mut harness.event_rx, "cli-7").await;
+    let expected = json!({
+        "revision": "cli-7",
+        "servers": {addr_a.clone(): [generation_a], addr_fail.clone(): []},
+    });
+    wait_until(|| {
+        harness
+            .control
+            .metrics
+            .state_bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|body| body == &expected)
+    })
+    .await;
+
+    // Losing the connection is a fact change: the next document drops its generation.
+    server_a.close_remotely().await;
+    let disconnected = json!({
+        "revision": "cli-7",
+        "servers": {addr_a.clone(): [], addr_fail.clone(): []},
+    });
+    wait_until(|| {
+        harness
+            .control
+            .metrics
+            .state_bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|body| body == &disconnected)
+    })
+    .await;
+
+    backend.1.abort();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn managed_client_retires_re_adopts_and_preserves_assignment_through_control_loss() {
     let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
     let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
@@ -543,10 +599,17 @@ async fn managed_client_retires_re_adopts_and_preserves_assignment_through_contr
             let resumed = {
                 let bodies = harness.control.metrics.state_bodies.lock().unwrap();
                 if bodies.len() > reports_before {
+                    let last = bodies.last().expect("a state document");
                     assert_eq!(
-                        bodies.last(),
-                        Some(&json!({ "revision": "rev-readopt" })),
+                        last["revision"],
+                        json!("rev-readopt"),
                         "equal revision after reconnect must be acknowledged"
+                    );
+                    // The first document on the new session carries the full current facts.
+                    assert_eq!(
+                        last["servers"][addr_a.as_str()].as_array().map(Vec::len),
+                        Some(1),
+                        "{last}"
                     );
                     true
                 } else {

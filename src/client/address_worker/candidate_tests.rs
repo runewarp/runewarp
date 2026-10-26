@@ -97,6 +97,7 @@ impl FakeConnection {
         TunnelAttemptOutcome::Connected {
             configured_server_addr: "tunnel.example.test:443".to_owned(),
             hints,
+            generation: crate::tunnel::ServerRuntimeGeneration::generate(),
             run: Box::new(move |shutdown| {
                 Box::pin(async move {
                     connection.started.store(true, Ordering::SeqCst);

@@ -18,7 +18,9 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, watch};
 
-use super::assignment_convergence::{AssignmentConvergence, AssignmentConvergenceTracker};
+use super::assignment_convergence::{
+    AssignmentConvergence, AssignmentConvergenceTracker, CarryingCredit,
+};
 use super::managed_adapter::ClientAssignmentApply;
 use crate::ServerAddress;
 use crate::shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
@@ -97,6 +99,18 @@ impl AddressWorkerControl {
         self.convergence
             .as_ref()
             .and_then(|tracker| tracker.mark_connected(address))
+    }
+
+    /// Record a connection carrying Visitor credit for the Managed state document until the
+    /// guard drops. `None` in static mode, which reports nothing.
+    pub(crate) fn carrying_credit(
+        &self,
+        address: &ServerAddress,
+        generation: crate::tunnel::ServerRuntimeGeneration,
+    ) -> Option<CarryingCredit> {
+        self.convergence
+            .as_ref()
+            .map(|tracker| tracker.carrying_credit(address, generation))
     }
 
     /// Record that this worker lost Connected. Returns the new **Assignment
@@ -248,11 +262,12 @@ impl AddressController {
     /// Production obtains [`crate::ClientAssignmentAdapter`] only through this constructor.
     pub fn for_managed(factory: AddressWorkerFactory) -> (Self, crate::ClientAssignmentAdapter) {
         let (apply_tx, apply_rx) = mpsc::unbounded_channel();
-        let adapter = crate::ClientAssignmentAdapter::new(apply_tx);
+        let convergence = AssignmentConvergenceTracker::new();
+        let adapter = crate::ClientAssignmentAdapter::new(apply_tx, convergence.clone());
         let controller = Self::new_with_mode(ControllerMode::Managed {
             factory,
             apply_rx: Some(apply_rx),
-            convergence: AssignmentConvergenceTracker::new(),
+            convergence,
         });
         (controller, adapter)
     }

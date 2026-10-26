@@ -229,6 +229,11 @@ impl Client {
         self.endpoint.local_addr()
     }
 
+    /// Generation of the Server runtime this connection reached.
+    pub fn server_generation(&self) -> crate::tunnel::ServerRuntimeGeneration {
+        self.connection.server_generation()
+    }
+
     /// Replacement hint the address worker may act on for this connection.
     pub fn replacement_hint(&self) -> watch::Receiver<ReplacementHint> {
         self.connection.replacement_hint()

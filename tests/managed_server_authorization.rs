@@ -62,6 +62,7 @@ const API_HOSTNAME: &str = "api.example.test";
 struct FixtureMetrics {
     tls_accepts: AtomicUsize,
     state_bodies: Mutex<Vec<Value>>,
+    state_raw_bodies: Mutex<Vec<Bytes>>,
     state_statuses: Mutex<Vec<u16>>,
     concurrent_streams: AtomicUsize,
     max_concurrent_streams: AtomicUsize,
@@ -72,6 +73,7 @@ impl FixtureMetrics {
         Self {
             tls_accepts: AtomicUsize::new(0),
             state_bodies: Mutex::new(Vec::new()),
+            state_raw_bodies: Mutex::new(Vec::new()),
             state_statuses: Mutex::new(Vec::new()),
             concurrent_streams: AtomicUsize::new(0),
             max_concurrent_streams: AtomicUsize::new(0),
@@ -724,6 +726,179 @@ async fn managed_server_advertises_replacement_hints_and_reports_its_generation(
 }
 
 #[tokio::test]
+async fn managed_server_state_document_reports_tunnel_connections_and_visitors() {
+    let mut harness = ManagedServerHarness::start().await;
+    let identity = harness.trusted_client.client_identity.to_string();
+    let second = harness.second_client.client_identity.to_string();
+    harness.push_authorization(
+        "rev-1",
+        &format!(
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}},{{"id":"t2","public_hostnames":["{API_HOSTNAME}"],"client_identities":["{second}"]}}]}}"#
+        ),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-1").await;
+    let generation = wait_for_state_revision(&harness.control.metrics, "rev-1").await;
+
+    let client = connect_event_follower(&harness, &harness.trusted_client).await;
+    wait_for_state_document(&harness.control.metrics, "t1 connected", |body| {
+        body["tunnels"]["t1"] == json!(1)
+    })
+    .await;
+    let expected = format!(
+        r#"{{"revision":"rev-1","generation":"{generation}","draining":false,"tunnels":{{"t1":1,"t2":0}},"visitors":0}}"#
+    );
+    assert!(
+        harness
+            .control
+            .metrics
+            .state_raw_bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|body| body == expected.as_bytes()),
+        "exact Server state document {expected}"
+    );
+
+    // Closing the connection is a fact change: a new document reports it without a snapshot.
+    drop(client);
+    wait_for_state_document(&harness.control.metrics, "t1 disconnected", |body| {
+        body["tunnels"]["t1"] == json!(0) && body["revision"] == json!("rev-1")
+    })
+    .await;
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_server_drain_finishes_visitors_and_keeps_reporting_without_resuming() {
+    let mut harness = ManagedServerHarness::start_with_graceful_drain(Duration::from_secs(5)).await;
+    let (backend_addr, backend_started, backend_release, backend_task) = spawn_staged_tls_backend(
+        &harness.app_backend_cert,
+        &harness.app_backend_key,
+        *b"on",
+        *b"e!",
+    )
+    .await;
+    let identity = harness.trusted_client.client_identity.to_string();
+    let tunnels = format!(
+        r#"[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]"#
+    );
+    harness.push_authorization("rev-live", &format!(r#"{{"tunnels":{tunnels}}}"#));
+    wait_for_applied(&mut harness.event_rx, "rev-live").await;
+    wait_for_readiness_open(harness.readiness_addr).await;
+    harness
+        .spawn_client("client-one", backend_addr)
+        .await
+        .expect("authorized tunnel client must connect");
+
+    // One Visitor stays in flight until the backend is released.
+    let connector = TlsConnector::from(Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store_with(&harness.app_backend_cert))
+            .with_no_client_auth(),
+    ));
+    let mut tls_stream = timeout(Duration::from_secs(2), async {
+        loop {
+            let tcp_stream = TcpStream::connect(harness.public_addr).await.unwrap();
+            if let Ok(stream) = connector
+                .connect(
+                    ServerName::try_from(APP_HOSTNAME.to_owned()).unwrap(),
+                    tcp_stream,
+                )
+                .await
+            {
+                break stream;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Visitor reaches the backend");
+    tls_stream.write_all(b"ping").await.unwrap();
+    timeout(Duration::from_secs(1), backend_started)
+        .await
+        .expect("backend starts responding")
+        .expect("staged backend signals");
+    let mut initial = [0_u8; 2];
+    tls_stream.read_exact(&mut initial).await.unwrap();
+    wait_for_state_document(&harness.control.metrics, "one Visitor", |body| {
+        body["visitors"] == json!(1) && body["tunnels"]["t1"] == json!(1)
+    })
+    .await;
+
+    harness.push_authorization(
+        "rev-drain",
+        &format!(r#"{{"tunnels":{tunnels},"drain":true}}"#),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-drain").await;
+    wait_for_readiness_closed(harness.readiness_addr).await;
+    wait_for_state_document(
+        &harness.control.metrics,
+        "draining with a Visitor",
+        |body| {
+            body["revision"] == json!("rev-drain")
+                && body["draining"] == json!(true)
+                && body["visitors"] == json!(1)
+        },
+    )
+    .await;
+    let mut server_task = harness
+        .server_task
+        .take()
+        .expect("harness owns the server task");
+    assert!(
+        timeout(Duration::from_millis(100), &mut server_task)
+            .await
+            .is_err(),
+        "drain waits for the in-flight Visitor"
+    );
+    wait_for_tls_failure(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+        .await
+        .expect("a draining Server places no new Visitors");
+    assert!(
+        !matches!(
+            timeout(
+                Duration::from_secs(1),
+                harness.spawn_client("client-one", backend_addr)
+            )
+            .await,
+            Ok(Ok(()))
+        ),
+        "a draining Server refuses new Tunnel connections"
+    );
+
+    // The in-flight Visitor finishes, then the drain completes without the process exiting.
+    backend_release.notify_one();
+    let mut rest = [0_u8; 2];
+    tls_stream.read_exact(&mut rest).await.unwrap();
+    assert_eq!(&rest, b"e!");
+    // The graceful bound is 5 s from the drain request; the drain never outlives it.
+    timeout(Duration::from_secs(6), &mut server_task)
+        .await
+        .expect("drain completes within the graceful bound")
+        .expect("server task")
+        .expect("drain is not a failure");
+    wait_for_state_document(&harness.control.metrics, "quiescent", |body| {
+        body["draining"] == json!(true)
+            && body["visitors"] == json!(0)
+            && body["tunnels"]["t1"] == json!(0)
+    })
+    .await;
+
+    // A later input without drain applies and reports, but serving never resumes.
+    harness.push_authorization("rev-after", &format!(r#"{{"tunnels":{tunnels}}}"#));
+    wait_for_applied(&mut harness.event_rx, "rev-after").await;
+    wait_for_state_document(&harness.control.metrics, "still draining", |body| {
+        body["revision"] == json!("rev-after") && body["draining"] == json!(true)
+    })
+    .await;
+    assert!(TcpStream::connect(harness.readiness_addr).await.is_err());
+    assert!(TcpStream::connect(harness.public_addr).await.is_err());
+
+    backend_task.abort();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn managed_server_identity_revocation_closes_live_work_and_denies_new_handshakes() {
     let mut harness = ManagedServerHarness::start().await;
     let app_backend = spawn_tls_backend(
@@ -1336,7 +1511,36 @@ async fn wait_for_reconnecting(event_rx: &mut mpsc::UnboundedReceiver<ManagedSes
     .expect("timed out waiting for ManagedSessionEvent::Reconnecting");
 }
 
-/// Wait for an acknowledgment of `revision` and return the Server generation it reports.
+/// Wait for a state document matching `predicate` and return it.
+async fn wait_for_state_document(
+    metrics: &FixtureMetrics,
+    description: &str,
+    predicate: impl Fn(&Value) -> bool,
+) -> Value {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let found = metrics
+                .state_bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|body| predicate(body))
+                .cloned();
+            if let Some(body) = found {
+                break body;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let bodies = metrics.state_bodies.lock().unwrap().clone();
+        panic!("timed out waiting for a state document with {description}: {bodies:?}")
+    })
+}
+
+/// Wait for a state document reporting `revision` and return the Server generation it reports.
 async fn wait_for_state_revision(metrics: &FixtureMetrics, revision: &str) -> String {
     let body = timeout(Duration::from_secs(5), async {
         loop {
@@ -1356,10 +1560,12 @@ async fn wait_for_state_revision(metrics: &FixtureMetrics, revision: &str) -> St
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for state revision {revision}"));
     let fields = body.as_object().expect("state body is a JSON object");
+    let mut keys: Vec<_> = fields.keys().map(String::as_str).collect();
+    keys.sort_unstable();
     assert_eq!(
-        fields.len(),
-        2,
-        "Server acknowledgment is revision and generation: {body}"
+        keys,
+        ["draining", "generation", "revision", "tunnels", "visitors"],
+        "Server state document fields: {body}"
     );
     let generation = fields["generation"]
         .as_str()
@@ -1452,6 +1658,7 @@ async fn handle_request(
         let body = request.collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         metrics.state_bodies.lock().unwrap().push(parsed);
+        metrics.state_raw_bodies.lock().unwrap().push(body);
         metrics.state_statuses.lock().unwrap().push(204);
         metrics.end_stream();
         return Ok(Response::builder()

@@ -14,13 +14,13 @@ use hyper::body::Incoming;
 use hyper::client::conn::http2::{self, SendRequest};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::ServerName;
-use serde::{Serialize, Serializer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
 use super::limits::ManagedSessionLimits;
 use super::role::{ManagedSessionRole, events_path, state_path};
+use super::state::{RoleState, StateDocument};
 use super::status::{
     SseResponseClass, StateResponseClass, classify_sse_response, classify_state_incoming,
 };
@@ -158,28 +158,32 @@ impl ManagedSessionConnection {
         }
     }
 
-    /// Start an applied-revision acknowledgment on a concurrent stream.
+    /// Start a state-document request on a concurrent stream.
     ///
-    /// Uses a cloned HTTP/2 sender so the SSE body can keep being read while
-    /// the report is in flight. Deadlines bound request headers and body
-    /// classification separately.
-    pub fn begin_put_applied_revision(
+    /// Renders the role's facts when the request starts, so it reports the latest state. Uses a
+    /// cloned HTTP/2 sender so the SSE body can keep being read while the request is in flight.
+    /// Deadlines bound request headers and body classification separately.
+    pub fn begin_put_state(
         &self,
-        revision: &str,
-        role_fields: &AcknowledgmentFields,
+        revision: String,
+        role_state: Option<Arc<dyn RoleState>>,
         limits: &ManagedSessionLimits,
     ) -> Pin<Box<dyn Future<Output = Result<(), ConnectionError>> + Send>> {
         let mut sender = self.sender.clone();
         let authority = self.authority.clone();
         let role = self.role;
-        let payload = serde_json::to_vec(&StatePayload {
-            revision,
-            role_fields,
-        })
-        .expect("string-valued state payload serializes");
         let request_deadline = limits.state_request_deadline;
         let response_deadline = limits.state_response_deadline;
         Box::pin(async move {
+            let fields = match role_state {
+                Some(role_state) => role_state.fields().await,
+                None => Vec::new(),
+            };
+            let payload = serde_json::to_vec(&StateDocument {
+                revision: &revision,
+                fields: &fields,
+            })
+            .expect("a string revision and JSON values always serialize");
             put_applied_revision_on_sender(
                 &mut sender,
                 &authority,
@@ -190,26 +194,6 @@ impl ManagedSessionConnection {
             )
             .await
         })
-    }
-}
-
-/// Role facts appended to every state acknowledgment; see `RoleAdapter::acknowledgment_fields`.
-pub(super) type AcknowledgmentFields = Arc<[(&'static str, String)]>;
-
-/// State acknowledgment body: `revision` first, then role fields in order.
-struct StatePayload<'a> {
-    revision: &'a str,
-    role_fields: &'a [(&'static str, String)],
-}
-
-impl Serialize for StatePayload<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let role_fields = self
-            .role_fields
-            .iter()
-            .filter(|(name, _)| *name != "revision")
-            .map(|(name, value)| (*name, value.as_str()));
-        serializer.collect_map(std::iter::once(("revision", self.revision)).chain(role_fields))
     }
 }
 

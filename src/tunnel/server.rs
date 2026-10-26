@@ -226,6 +226,31 @@ impl ServerTunnelH3 {
         &self.client_identity
     }
 
+    /// Whether this connection has established its WebTransport session and is still open: the
+    /// point at which a Client offers Visitor credit. Managed Servers report these connections.
+    pub(crate) fn has_open_session(&self) -> bool {
+        self.shared.session.borrow().is_some() && self.connection.close_reason().is_none()
+    }
+
+    /// Resolve once [`Self::has_open_session`] may have changed: when the WebTransport session
+    /// is established and when the connection closes. Calls `changed` after each. Holds no handle
+    /// that keeps the connection open.
+    pub(crate) fn watch_open_session(
+        &self,
+        changed: impl Fn() + Send + 'static,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        let mut session = self.shared.session.subscribe();
+        let connection = self.connection.clone();
+        async move {
+            tokio::select! {
+                _ = session.wait_for(Option::is_some) => changed(),
+                _ = connection.closed() => {}
+            }
+            let _ = connection.closed().await;
+            changed();
+        }
+    }
+
     /// Whether new Visitors may be placed here: no withdrawal, GOAWAY or connection end.
     ///
     /// Withdrawal is permanent, so a withdrawn connection never regains eligibility, including

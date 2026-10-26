@@ -11,6 +11,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures_util::future::BoxFuture;
 use futures_util::stream::Stream;
 use http::header::CONTENT_TYPE;
 use http::{Request, Response, StatusCode};
@@ -23,13 +24,14 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
     ApplyError, ClientManagedInput, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
     ManagedSession, ManagedSessionEvent, ManagedSessionLimits, ManagedSessionRole, RoleAdapter,
-    ServerManagedInput, SessionMaterial, parse_client_input, parse_server_input,
+    RoleState, ServerManagedInput, SessionMaterial, StateFields, parse_client_input,
+    parse_server_input,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::sync::Mutex;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
@@ -475,12 +477,45 @@ impl RoleAdapter for GatedAdapter {
     }
 }
 
-/// Server-role adapter that reports its runtime generation in every acknowledgment.
-struct GenerationReportingAdapter;
+/// Role facts a test adapter reports: a fixed generation and a changeable Visitor count.
+struct TestRoleState {
+    visitors: Mutex<u64>,
+    changed: Notify,
+}
+
+impl TestRoleState {
+    fn set_visitors(&self, visitors: u64) {
+        *self.visitors.lock().unwrap() = visitors;
+        self.changed.notify_one();
+    }
+}
+
+impl RoleState for TestRoleState {
+    fn fields(&self) -> BoxFuture<'_, StateFields> {
+        let visitors = *self.visitors.lock().unwrap();
+        Box::pin(async move {
+            vec![
+                ("generation", json!(REPORTED_GENERATION)),
+                // A role cannot replace the session-owned revision.
+                ("revision", json!("spoofed")),
+                ("visitors", json!(visitors)),
+            ]
+        })
+    }
+
+    fn changed(&self) -> BoxFuture<'_, ()> {
+        Box::pin(self.changed.notified())
+    }
+}
+
+/// Server-role adapter that reports [`TestRoleState`] in every state document.
+struct FactReportingAdapter {
+    state: Arc<TestRoleState>,
+}
 
 const REPORTED_GENERATION: &str = "01928f3e-7b6a-7c3d-8e4f-0123456789ab";
 
-impl RoleAdapter for GenerationReportingAdapter {
+impl RoleAdapter for FactReportingAdapter {
     type Input = ServerManagedInput;
 
     fn parse_input(
@@ -494,17 +529,26 @@ impl RoleAdapter for GenerationReportingAdapter {
         Ok(())
     }
 
-    fn acknowledgment_fields(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("generation", REPORTED_GENERATION.to_owned()),
-            // A role cannot replace the session-owned revision.
-            ("revision", "spoofed".to_owned()),
-        ]
+    fn role_state(&self) -> Option<Arc<dyn RoleState>> {
+        Some(self.state.clone())
     }
 }
 
+async fn wait_for_state_bodies(metrics: &FixtureMetrics, count: usize) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if metrics.state_raw_bodies.lock().unwrap().len() >= count {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("expected {count} state documents"));
+}
+
 #[tokio::test]
-async fn role_acknowledgment_fields_follow_the_revision_in_the_exact_payload() {
+async fn state_documents_carry_role_facts_and_coalesce_changes_to_one_per_second() {
     let material = generate_control_mtls_material("runewarp-server-a");
     let fixture =
         ControlFixture::start(&material, vec![snapshot_sse("srv-42", "{\"tunnels\":[]}")]).await;
@@ -517,31 +561,52 @@ async fn role_acknowledgment_fields_follow_the_revision_in_the_exact_payload() {
         session_material,
     )
     .unwrap();
+    let state = Arc::new(TestRoleState {
+        visitors: Mutex::new(17),
+        changed: Notify::new(),
+    });
+    let mut adapter = FactReportingAdapter {
+        state: state.clone(),
+    };
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let runner = tokio::spawn(async move {
         session
-            .run(&mut GenerationReportingAdapter, |_| async {}, async {
+            .run(&mut adapter, |_| async {}, async {
                 let _ = stop_rx.await;
             })
             .await;
     });
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if !fixture.metrics.state_raw_bodies.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("expected a state acknowledgment");
-
+    wait_for_state_bodies(&fixture.metrics, 1).await;
+    let first_at = tokio::time::Instant::now();
     assert_eq!(
         fixture.metrics.state_raw_bodies.lock().unwrap()[0],
         Bytes::from(format!(
-            r#"{{"revision":"srv-42","generation":"{REPORTED_GENERATION}"}}"#
+            r#"{{"revision":"srv-42","generation":"{REPORTED_GENERATION}","visitors":17}}"#
         ))
+    );
+
+    // A burst of fact changes coalesces into one document carrying the latest facts.
+    for visitors in [3, 2, 1, 0] {
+        state.set_visitors(visitors);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    wait_for_state_bodies(&fixture.metrics, 2).await;
+    assert!(
+        first_at.elapsed() >= Duration::from_millis(700),
+        "state requests start at most once per second"
+    );
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(
+        *fixture.metrics.state_raw_bodies.lock().unwrap(),
+        [
+            Bytes::from(format!(
+                r#"{{"revision":"srv-42","generation":"{REPORTED_GENERATION}","visitors":17}}"#
+            )),
+            Bytes::from(format!(
+                r#"{{"revision":"srv-42","generation":"{REPORTED_GENERATION}","visitors":0}}"#
+            )),
+        ]
     );
     assert!(
         fixture

@@ -190,6 +190,7 @@ readiness-bind-address = "127.0.0.1:0"
         .apply(runewarp::ServerManagedInput {
             tunnels: vec![],
             replacement_generation: None,
+            drain: false,
         })
         .await
         .expect("empty Tunnel collection remains a valid first apply");

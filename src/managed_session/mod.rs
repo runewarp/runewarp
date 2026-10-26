@@ -19,6 +19,7 @@ mod reconcile;
 mod role;
 mod session;
 mod snapshot;
+mod state;
 mod status;
 mod timing;
 mod tls;
@@ -30,6 +31,7 @@ pub use input::{
 pub use limits::{ManagedSessionLimitKind, ManagedSessionLimits};
 pub use role::ManagedSessionRole;
 pub use session::{ManagedSession, ManagedSessionEvent};
+pub use state::{RoleState, StateFields};
 pub use tls::{
     ControlClientIdentityMaterial, ControlTlsMaterialError, SessionMaterial, TrustLoadError,
 };

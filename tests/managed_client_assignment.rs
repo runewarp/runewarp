@@ -163,6 +163,7 @@ impl QuicServerNode {
             .apply(runewarp::ServerManagedInput {
                 tunnels: self.tunnels.clone(),
                 replacement_generation: replacement,
+                drain: false,
             })
             .await
             .expect("hint applies");

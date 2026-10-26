@@ -81,8 +81,8 @@ pub use identity::{
 pub use managed_session::{
     ApplyError, ClientManagedInput, ControlClientIdentityMaterial, ControlTlsMaterialError,
     InputError, ManagedSession, ManagedSessionEvent, ManagedSessionLimitKind, ManagedSessionLimits,
-    ManagedSessionRole, RoleAdapter, ServerManagedInput, SessionMaterial, TrustLoadError,
-    parse_client_input, parse_server_input,
+    ManagedSessionRole, RoleAdapter, RoleState, ServerManagedInput, SessionMaterial, StateFields,
+    TrustLoadError, parse_client_input, parse_server_input,
 };
 pub use opaque_control_token::OpaqueControlTokenError;
 pub use paths::{

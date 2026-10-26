@@ -12,13 +12,14 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::adapter::{ApplyError, RoleAdapter};
-use super::connection::{AcknowledgmentFields, ConnectionError, ManagedSessionConnection};
+use super::connection::{ConnectionError, ManagedSessionConnection};
 use super::input::InputError;
 use super::limits::{ManagedSessionLimitKind, ManagedSessionLimits};
 use super::reconcile::{AppliedRevision, QueuedSnapshot, SnapshotQueue};
 use super::role::ManagedSessionRole;
 use super::session::ManagedSessionEvent;
 use super::snapshot::{SnapshotEnvelope, SnapshotError, parse_snapshot_event};
+use super::state::RoleState;
 use super::timing::{FIRST_SNAPSHOT_DEADLINE, SessionDeadlines};
 use super::tls::ControlTlsMaterial;
 use crate::ControlAddress;
@@ -84,7 +85,7 @@ pub(super) struct ConnectionLifecycle<I> {
     received_valid_snapshot: bool,
     queue: SnapshotQueue<I>,
     report: ReportState,
-    acknowledgment_fields: AcknowledgmentFields,
+    role_state: Option<Arc<dyn RoleState>>,
     limits: ManagedSessionLimits,
 }
 
@@ -112,7 +113,7 @@ impl<I> ConnectionLifecycle<I> {
             received_valid_snapshot: false,
             queue: SnapshotQueue::new(),
             report: ReportState::default(),
-            acknowledgment_fields: Arc::new([]),
+            role_state: None,
             limits,
         })
     }
@@ -128,7 +129,7 @@ impl<I> ConnectionLifecycle<I> {
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
     {
-        self.acknowledgment_fields = adapter.acknowledgment_fields().into();
+        self.role_state = adapter.role_state();
         let result = self.run_state_machine(adapter, applied, on_event).await;
         ConnectionRun {
             result,
@@ -231,6 +232,8 @@ impl<I> ConnectionLifecycle<I> {
             }
 
             let wait = next_wait(&self.deadlines, Instant::now());
+            let spacing_wait = self.report.spacing_wait();
+            let role_state = self.role_state.clone();
             tokio::select! {
                 biased;
                 result = apply.as_mut(), if phase == ConnectionPhase::Applying => {
@@ -251,6 +254,18 @@ impl<I> ConnectionLifecycle<I> {
                 result = wait_for_report(&mut self.report.in_flight) => {
                     self.report.in_flight = None;
                     self.on_report_finished(result)?;
+                }
+                _ = async {
+                    if let Some(start_at) = spacing_wait {
+                        tokio::time::sleep_until(start_at).await;
+                    }
+                }, if spacing_wait.is_some() => {}
+                _ = async {
+                    if let Some(role_state) = &role_state {
+                        role_state.changed().await;
+                    }
+                }, if role_state.is_some() => {
+                    self.note_role_state_changed();
                 }
             }
         }
@@ -375,28 +390,45 @@ impl<I> ConnectionLifecycle<I> {
         Ok(())
     }
 
+    /// Queue a state document for `revision`. It replaces any unsent one and starts once no
+    /// request is in flight and the per-second spacing allows.
     fn schedule_report(&mut self, revision: String) {
-        if self.report.in_flight.is_some() {
-            self.report.pending = Some(revision);
-            return;
+        self.report.revision = Some(revision);
+        self.report.pending = true;
+        self.drive_report();
+    }
+
+    /// Queue a state document for a role fact change. Before this connection reports a revision
+    /// there is nothing to send; its first snapshot will report the full document.
+    fn note_role_state_changed(&mut self) {
+        if self.report.revision.is_some() {
+            self.report.pending = true;
+            self.drive_report();
         }
-        self.report.in_flight = Some(self.connection.begin_put_applied_revision(
-            &revision,
-            &self.acknowledgment_fields,
-            &self.limits,
-        ));
     }
 
     fn drive_report(&mut self) {
-        if self.report.in_flight.is_none()
-            && let Some(revision) = self.report.pending.take()
-        {
-            self.report.in_flight = Some(self.connection.begin_put_applied_revision(
-                &revision,
-                &self.acknowledgment_fields,
-                &self.limits,
-            ));
+        if self.report.in_flight.is_some() || !self.report.pending {
+            return;
         }
+        let Some(revision) = self.report.revision.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        if self
+            .report
+            .next_start_at()
+            .is_some_and(|start_at| now < start_at)
+        {
+            return;
+        }
+        self.report.pending = false;
+        self.report.last_started = Some(now);
+        self.report.in_flight = Some(self.connection.begin_put_state(
+            revision,
+            self.role_state.clone(),
+            &self.limits,
+        ));
     }
 
     fn on_report_finished(
@@ -429,10 +461,32 @@ enum ConnectionTransition<I> {
 
 type StateReportFuture = Pin<Box<dyn Future<Output = Result<(), ConnectionError>> + Send>>;
 
+/// Minimum spacing between the starts of two state requests on one connection.
+const STATE_REQUEST_SPACING: Duration = Duration::from_secs(1);
+
+/// One in-flight state request and at most one pending document. A pending document is rendered
+/// when it starts, so a newer change always replaces an unsent one.
 #[derive(Default)]
 struct ReportState {
     in_flight: Option<StateReportFuture>,
-    pending: Option<String>,
+    pending: bool,
+    /// Revision this connection last scheduled; every document reports it.
+    revision: Option<String>,
+    last_started: Option<Instant>,
+}
+
+impl ReportState {
+    fn next_start_at(&self) -> Option<Instant> {
+        self.last_started
+            .map(|started| started + STATE_REQUEST_SPACING)
+    }
+
+    /// When a pending document waits only for request spacing, the instant it may start.
+    fn spacing_wait(&self) -> Option<Instant> {
+        (self.pending && self.in_flight.is_none() && self.revision.is_some())
+            .then(|| self.next_start_at())
+            .flatten()
+    }
 }
 
 async fn wait_for_report(report: &mut Option<StateReportFuture>) -> Result<(), ConnectionError> {

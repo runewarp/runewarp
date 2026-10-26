@@ -3708,14 +3708,9 @@ impl ReplaceableServer {
         }
     }
 
-    /// The runtime generation this Server reports in its state acknowledgment.
+    /// The runtime generation this Server reports in its state documents.
     fn generation(&self) -> String {
-        use runewarp::RoleAdapter;
-        self.adapter
-            .acknowledgment_fields()
-            .into_iter()
-            .find_map(|(field, value)| (field == "generation").then_some(value))
-            .expect("Servers report their generation")
+        self.adapter.server_generation().to_string()
     }
 
     /// Apply a Server input exactly as Control would publish it.

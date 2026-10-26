@@ -41,10 +41,15 @@ type ClientRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 /// [`ClientTunnelH3::accept_tunnel_stream`]. [`ClientTunnelH3::withdrawal`] withdraws the
 /// connection from placement during graceful Client shutdown.
 ///
+/// A candidate attempt ([`ClientTunnelH3::establish_candidate`]) additionally requires the first
+/// snapshot to name an expected generation before it opens the WebTransport session.
+/// [`ClientTunnelH3::replacement_hint`] reports the replacement hint the Client may act on.
+///
 /// Dropping the handle closes the connection immediately with `H3_NO_ERROR`.
 pub struct ClientTunnelH3 {
     connection: quinn::Connection,
     state: watch::Receiver<TunnelEventState>,
+    hint: watch::Receiver<ReplacementHint>,
     assigned: mpsc::UnboundedReceiver<ClientTunnelStream>,
     /// `h3` closes the connection when its last request sender drops, so the handle keeps one
     /// for its lifetime; background tasks that stop after GOAWAY must not end placed Visitors.
@@ -77,18 +82,46 @@ impl ClientTunnelH3 {
         .await
     }
 
-    pub(crate) async fn establish_with_budget_observer(
+    /// Like [`Self::establish`] for a candidate connection: the first snapshot must name
+    /// `expected_generation`. Any other generation closes the connection with `H3_NO_ERROR` before
+    /// the WebTransport session and returns [`TunnelH3Error::WrongGeneration`], so the candidate
+    /// never offers Visitor credit.
+    pub async fn establish_candidate(
         connection: quinn::Connection,
         server_hostname: &ServerHostname,
         stream_budget: Arc<Semaphore>,
-        observer: Arc<dyn Fn(bool) + Send + Sync>,
+        expected_generation: ServerRuntimeGeneration,
     ) -> Result<Self, TunnelH3Error> {
         Self::establish_internal(
             connection,
             server_hostname,
             stream_budget,
-            TunnelH3Timing::default(),
-            Some(observer),
+            EstablishOptions {
+                expected_generation: Some(expected_generation),
+                ..EstablishOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Production establishment reporting Client-instance budget saturation to `observer`, with
+    /// an optional candidate generation check.
+    pub(crate) async fn establish_with_budget_observer(
+        connection: quinn::Connection,
+        server_hostname: &ServerHostname,
+        stream_budget: Arc<Semaphore>,
+        observer: Arc<dyn Fn(bool) + Send + Sync>,
+        expected_generation: Option<ServerRuntimeGeneration>,
+    ) -> Result<Self, TunnelH3Error> {
+        Self::establish_internal(
+            connection,
+            server_hostname,
+            stream_budget,
+            EstablishOptions {
+                budget_observer: Some(observer),
+                expected_generation,
+                ..EstablishOptions::default()
+            },
         )
         .await
     }
@@ -99,16 +132,50 @@ impl ClientTunnelH3 {
         stream_budget: Arc<Semaphore>,
         timing: TunnelH3Timing,
     ) -> Result<Self, TunnelH3Error> {
-        Self::establish_internal(connection, server_hostname, stream_budget, timing, None).await
+        Self::establish_internal(
+            connection,
+            server_hostname,
+            stream_budget,
+            EstablishOptions {
+                timing,
+                ..EstablishOptions::default()
+            },
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn establish_candidate_with_timing(
+        connection: quinn::Connection,
+        server_hostname: &ServerHostname,
+        stream_budget: Arc<Semaphore>,
+        expected_generation: ServerRuntimeGeneration,
+        timing: TunnelH3Timing,
+    ) -> Result<Self, TunnelH3Error> {
+        Self::establish_internal(
+            connection,
+            server_hostname,
+            stream_budget,
+            EstablishOptions {
+                timing,
+                expected_generation: Some(expected_generation),
+                budget_observer: None,
+            },
+        )
+        .await
     }
 
     async fn establish_internal(
         connection: quinn::Connection,
         server_hostname: &ServerHostname,
         stream_budget: Arc<Semaphore>,
-        timing: TunnelH3Timing,
-        budget_observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+        options: EstablishOptions,
     ) -> Result<Self, TunnelH3Error> {
+        let EstablishOptions {
+            timing,
+            budget_observer,
+            expected_generation,
+        } = options;
         let (driver, send_request) = with_handshake_timeout(
             async {
                 h3::client::builder()
@@ -147,7 +214,7 @@ impl ClientTunnelH3 {
         let events_uri = format!("https://{server_hostname}{TUNNEL_EVENTS_PATH}");
         let (initial, subscription) = match timeout(
             timing.initial_state_deadline,
-            subscribe(&mut send_request, &events_uri),
+            subscribe(&mut send_request, &events_uri, || {}),
         )
         .await
         {
@@ -164,6 +231,12 @@ impl ClientTunnelH3 {
                 return Err(TunnelH3Error::InitialStateTimeout);
             }
         };
+        // A candidate that reached another runtime, including the primary's, is not a failure of
+        // the Server; it closes cleanly before any session or credit exists.
+        if expected_generation.is_some_and(|expected| expected != initial.server_generation) {
+            close_connection(&connection, Code::H3_NO_ERROR);
+            return Err(TunnelH3Error::WrongGeneration);
+        }
 
         let request = Request::builder()
             .method(Method::CONNECT)
@@ -275,12 +348,17 @@ impl ClientTunnelH3 {
         });
 
         let (state_sender, state) = watch::channel(initial);
+        let (hint_sender, hint) = watch::channel(ReplacementHint {
+            generation: initial.hinted_replacement(),
+            interruptions: 0,
+        });
         let events = OwnedTask::spawn(follow_events(
             EventFollower {
                 connection: connection.clone(),
                 send_request: send_request.clone(),
                 events_uri,
                 state: state_sender,
+                hint: hint_sender,
                 timing,
             },
             subscription,
@@ -291,6 +369,7 @@ impl ClientTunnelH3 {
         Ok(Self {
             connection,
             state,
+            hint,
             assigned,
             send_request,
             withdrawal_uri: format!("https://{server_hostname}{TUNNEL_WITHDRAWAL_PATH}"),
@@ -382,6 +461,14 @@ impl ClientTunnelH3 {
         self.state.clone()
     }
 
+    /// Replacement hint the Client may act on for this connection.
+    ///
+    /// The sender drops when event following stops: after connection loss, an incompatible
+    /// event, or GOAWAY. GOAWAY keeps the last valid hint.
+    pub fn replacement_hint(&self) -> watch::Receiver<ReplacementHint> {
+        self.hint.clone()
+    }
+
     /// Wait until the connection closes for any reason.
     pub fn closed(&self) -> impl Future<Output = quinn::ConnectionError> + Send + 'static + use<> {
         let connection = self.connection.clone();
@@ -418,6 +505,28 @@ impl Drop for ClientTunnelH3 {
     fn drop(&mut self) {
         close_connection(&self.connection, Code::H3_NO_ERROR);
     }
+}
+
+/// Establishment knobs shared by production, candidate and test entry points.
+#[derive(Default)]
+struct EstablishOptions {
+    timing: TunnelH3Timing,
+    budget_observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+    /// Candidate attempts require the first snapshot to name this generation.
+    expected_generation: Option<ServerRuntimeGeneration>,
+}
+
+/// The replacement hint a Client may act on for one connection.
+///
+/// `generation` is the current subscription's hint. It is `None` when the snapshot carries no
+/// hint, when the hint names this connection's own generation, and while the Client resubscribes
+/// after an interrupted subscription. `interruptions` counts those interruptions, so an observer
+/// that misses the paused value still sees that one happened. GOAWAY is not an interruption: the
+/// Client stops resubscribing and the last hint stands.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReplacementHint {
+    pub generation: Option<ServerRuntimeGeneration>,
+    pub interruptions: u64,
 }
 
 /// How placement withdrawal on one connection ended.
@@ -582,10 +691,12 @@ fn close_after_failure(connection: &quinn::Connection, error: &TunnelH3Error) {
 
 /// Open one subscription and read until its first valid snapshot.
 ///
-/// Comment keepalives before the first state do not satisfy the gate.
+/// `opened` runs once the request stream opens, before any response. Comment keepalives before
+/// the first state do not satisfy the gate.
 async fn subscribe(
     send_request: &mut ClientSendRequest,
     events_uri: &str,
+    opened: impl FnOnce(),
 ) -> Result<(TunnelEventState, EventSubscription), TunnelH3Error> {
     let request = Request::get(events_uri)
         .header(header::ACCEPT, "text/event-stream")
@@ -595,6 +706,7 @@ async fn subscribe(
         .send_request(request)
         .await
         .map_err(TunnelH3Error::EventStream)?;
+    opened();
     stream.finish().await.map_err(TunnelH3Error::EventStream)?;
     let response = stream
         .recv_response()
@@ -685,6 +797,7 @@ struct EventFollower {
     send_request: ClientSendRequest,
     events_uri: String,
     state: watch::Sender<TunnelEventState>,
+    hint: watch::Sender<ReplacementHint>,
     timing: TunnelH3Timing,
 }
 
@@ -733,7 +846,11 @@ impl EventFollower {
 
     /// Resubscribe until a valid subscription starts. `None` when the connection closed, GOAWAY
     /// forbids new requests, or the Server became incompatible.
+    ///
+    /// The first request GOAWAY does not refuse pauses the replacement hint until a new snapshot
+    /// arrives, so replacement never acts on a hint from a subscription that failed.
     async fn resubscribe(&mut self) -> Option<EventSubscription> {
+        let mut paused = false;
         loop {
             if self.connection.close_reason().is_some() {
                 return None;
@@ -741,7 +858,9 @@ impl EventFollower {
             sleep(self.timing.resubscribe_delay).await;
             let subscribed = timeout(
                 self.timing.initial_state_deadline,
-                subscribe(&mut self.send_request, &self.events_uri),
+                subscribe(&mut self.send_request, &self.events_uri, || {
+                    pause_hint(&self.hint, &mut paused);
+                }),
             )
             .await;
             match subscribed {
@@ -755,7 +874,7 @@ impl EventFollower {
                 Ok(Err(TunnelH3Error::EventStream(error))) if forbids_new_requests(&error) => {
                     return None;
                 }
-                Ok(Err(_)) | Err(_) => {}
+                Ok(Err(_)) | Err(_) => pause_hint(&self.hint, &mut paused),
             }
         }
     }
@@ -772,7 +891,24 @@ impl EventFollower {
             *current = state;
             changed
         });
+        self.hint.send_if_modified(|hint| {
+            let generation = state.hinted_replacement();
+            let changed = hint.generation != generation;
+            hint.generation = generation;
+            changed
+        });
         true
+    }
+}
+
+/// Clear the hint and count one interruption, once per resubscription.
+fn pause_hint(hint: &watch::Sender<ReplacementHint>, paused: &mut bool) {
+    if !*paused {
+        *paused = true;
+        hint.send_modify(|hint| {
+            hint.generation = None;
+            hint.interruptions += 1;
+        });
     }
 }
 

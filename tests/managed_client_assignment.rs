@@ -1,6 +1,7 @@
 //! Black-box integration tests for managed Client assignment reconciliation (#157).
 
 mod common;
+mod udp_forwarder;
 
 use std::convert::Infallible;
 use std::fs;
@@ -149,9 +150,24 @@ struct QuicServerNode {
     tunnel_addr: SocketAddr,
     shutdown: OrderlyShutdown,
     task: JoinHandle<io::Result<()>>,
+    adapter: runewarp::ServerAuthorizationAdapter,
+    tunnels: Vec<ServerTunnelConfig>,
 }
 
 impl QuicServerNode {
+    /// Advertise `replacement` on every Tunnel event stream, as a Control input would.
+    async fn publish_hint(&self, replacement: Option<runewarp::ServerRuntimeGeneration>) {
+        use runewarp::RoleAdapter;
+        let mut adapter = self.adapter.clone();
+        adapter
+            .apply(runewarp::ServerManagedInput {
+                tunnels: self.tunnels.clone(),
+                replacement_generation: replacement,
+            })
+            .await
+            .expect("hint applies");
+    }
+
     /// Close Tunnel connections from the Server side (remote closure for Retiring Clients).
     async fn close_remotely(self) {
         let _ = self.shutdown.begin_fast();
@@ -320,15 +336,32 @@ impl ManagedClientHarness {
     }
 
     async fn spawn_server_node(&self) -> QuicServerNode {
-        let authorization = ServerAuthorization::from_static_tunnels(
-            &ServerHostname::try_from("localhost").unwrap(),
-            &[ServerTunnelConfig {
-                id: None,
-                public_hostnames: vec![PublicHostname::try_from(APP_HOSTNAME).unwrap()],
-                authorized_client_identities: vec![self.client_identity.clone()],
-            }],
-        )
-        .unwrap();
+        self.spawn_server_node_with(ServerAdmission::Static).await
+    }
+
+    /// A Managed Server whose authorization a test applies directly, hints included.
+    async fn spawn_managed_server_node(&self) -> QuicServerNode {
+        let node = self.spawn_server_node_with(ServerAdmission::Managed).await;
+        node.publish_hint(None).await;
+        node
+    }
+
+    async fn spawn_server_node_with(&self, admission: ServerAdmission) -> QuicServerNode {
+        let managed = admission == ServerAdmission::Managed;
+        let tunnels = vec![ServerTunnelConfig {
+            id: managed.then(|| runewarp::TunnelId::parse("app").unwrap()),
+            public_hostnames: vec![PublicHostname::try_from(APP_HOSTNAME).unwrap()],
+            authorized_client_identities: vec![self.client_identity.clone()],
+        }];
+        let authorization = if managed {
+            ServerAuthorization::empty_managed()
+        } else {
+            ServerAuthorization::from_static_tunnels(
+                &ServerHostname::try_from("localhost").unwrap(),
+                &tunnels,
+            )
+            .unwrap()
+        };
         let server = Server::bind(ServerBindConfig {
             public_bind_addr: localhost(0),
             tunnel_connection_bind_addr: first_localhost_address(0).await,
@@ -342,12 +375,13 @@ impl ManagedClientHarness {
                 Arc::new(authorization),
             )
             .unwrap(),
-            admission: ServerAdmission::Static,
+            admission,
         })
         .await
         .unwrap();
         let public_addr = server.public_addr().unwrap();
         let tunnel_addr = server.tunnel_addr().unwrap();
+        let adapter = server.authorization_adapter();
         let shutdown = OrderlyShutdown::new(Duration::from_millis(50), QUIC_CLOSE_FLUSH_DURATION);
         let server_shutdown = shutdown.clone();
         let task = tokio::spawn(async move { server.run_with_shutdown(&server_shutdown).await });
@@ -356,6 +390,8 @@ impl ManagedClientHarness {
             tunnel_addr,
             shutdown,
             task,
+            adapter,
+            tunnels,
         }
     }
 
@@ -701,6 +737,62 @@ async fn managed_client_fatal_worker_exits_the_runtime() {
     shutdown.request();
     let _ = timeout(Duration::from_secs(2), session_task).await;
     control.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_client_candidates_pause_while_retiring_and_never_count_toward_convergence() {
+    let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
+    let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
+    let mut harness = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
+    let server = harness.spawn_managed_server_node().await;
+    let forwarder =
+        udp_forwarder::UdpForwarder::start(first_localhost_address(0).await, server.tunnel_addr)
+            .await;
+    let address = format!("localhost:{}", forwarder.local_addr().port());
+
+    harness.push_assignment("rev-1", &[&address]);
+    wait_for_applied(&mut harness.event_rx, "rev-1").await;
+    wait_until(|| harness.convergence() == AssignmentConvergence::Converged).await;
+    wait_until_visitor_ok(server.public_addr, &harness.backend_cert).await;
+    assert_eq!(forwarder.flows(), 1);
+
+    // A hint naming a runtime that never answers keeps candidates retrying against the same
+    // runtime: each lands on the wrong generation, on its own socket, and never counts.
+    server
+        .publish_hint(Some(runewarp::ServerRuntimeGeneration::generate()))
+        .await;
+    wait_until(|| forwarder.flows() >= 3).await;
+    assert_eq!(harness.convergence(), AssignmentConvergence::Converged);
+    assert_eq!(harness.worker_count(), 1);
+    wait_until_visitor_ok(server.public_addr, &harness.backend_cert).await;
+
+    // Removal makes the address Retiring: candidates stop and the primary keeps serving.
+    harness.push_assignment("rev-2", &[]);
+    wait_for_applied(&mut harness.event_rx, "rev-2").await;
+    sleep(Duration::from_millis(200)).await;
+    let retiring_flows = forwarder.flows();
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        forwarder.flows(),
+        retiring_flows,
+        "Retiring starts no candidates"
+    );
+    wait_until_visitor_ok(server.public_addr, &harness.backend_cert).await;
+
+    // Re-adding re-adopts the primary, and the standing hint restarts candidates.
+    harness.push_assignment("rev-3", &[&address]);
+    wait_for_applied(&mut harness.event_rx, "rev-3").await;
+    wait_until(|| forwarder.flows() > retiring_flows + 1).await;
+    assert_eq!(harness.convergence(), AssignmentConvergence::Converged);
+    assert_eq!(harness.worker_count(), 1);
+
+    // Shutdown while a candidate warms ends the runtime promptly.
+    harness.shutdown().await;
+    let after_shutdown = forwarder.flows();
+    sleep(Duration::from_millis(200)).await;
+    assert_eq!(forwarder.flows(), after_shutdown);
+    server.close_remotely().await;
+    backend.1.abort();
 }
 
 async fn wait_for_reconnecting(events: &mut mpsc::UnboundedReceiver<ManagedSessionEvent>) {

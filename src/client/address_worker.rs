@@ -5,23 +5,30 @@
 //! Establishing / Reconnecting work immediately, leaves a live Connected tunnel until
 //! remote close or process **Infrastructure drain**, re-adopts without a duplicate dial,
 //! and observes connect/disconnect for **Assignment convergence**.
+//!
+//! While a primary connection is live, the worker also owns at most one **Candidate Tunnel
+//! connection** for its address. A replacement hint on the primary starts a candidate after a
+//! jittered delay; the candidate must reach the hinted generation before it offers credit. Once
+//! validated, it joins as a second active connection and both carry Visitors. When the primary
+//! ends, the joined connection takes over without a reconnect. Candidates never count toward
+//! convergence or readiness, and an unvalidated one never carries a Visitor.
 
-#[cfg(test)]
 use std::future::Future;
-#[cfg(test)]
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
+use tokio::sync::watch;
 
 use super::address_controller::{AddressWorkerControl, MaintenanceIntent};
-#[cfg(test)]
-use super::tunnel_attempt::TunnelConnectionEnd;
-use super::tunnel_attempt::{TunnelAttemptOutcome, TunnelConnectionRun};
+use super::tunnel_attempt::{
+    TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionEnd, TunnelConnectionRun,
+};
 use crate::ServerAddress;
 use crate::reconnect_policy::ReconnectPolicy;
-use rand::RngCore;
+use crate::tunnel::{ReplacementHint, ServerRuntimeGeneration};
+use rand::{RngCore, SeedableRng};
 
 /// Dial / connect adapter for [`run_address_worker`].
 ///
@@ -29,21 +36,46 @@ use rand::RngCore;
 /// Retiring correctness exercises the same policy path as production.
 pub trait AddressWorkerDial: Send + Sync {
     fn establish(&self, address: ServerAddress) -> BoxFuture<'static, TunnelAttemptOutcome>;
+
+    /// Open a candidate connection on a fresh socket that must reach `expected_generation`
+    /// before it offers Visitor credit.
+    ///
+    /// A wrong generation is a retryable failure. Dials without candidate support fail every
+    /// candidate, which leaves the primary untouched.
+    fn establish_candidate(
+        &self,
+        _address: ServerAddress,
+        _expected_generation: ServerRuntimeGeneration,
+    ) -> BoxFuture<'static, TunnelAttemptOutcome> {
+        Box::pin(async {
+            TunnelAttemptOutcome::Retryable(TunnelAttemptFailure::unclassified(
+                "candidate attempts are unsupported",
+            ))
+        })
+    }
 }
 
 /// Backoff between dial / reconnect attempts.
 pub trait AddressWorkerBackoff: Send {
     fn next_delay(&mut self) -> Duration;
     fn reset_after_connected(&mut self);
+    /// A fresh, independent sequence of the same kind, used for candidate retries.
+    fn fresh(&self) -> Self
+    where
+        Self: Sized;
 }
 
-impl<R: RngCore + Send> AddressWorkerBackoff for ReconnectPolicy<R> {
+impl<R: RngCore + SeedableRng + Send> AddressWorkerBackoff for ReconnectPolicy<R> {
     fn next_delay(&mut self) -> Duration {
         self.next_retry().delay
     }
 
     fn reset_after_connected(&mut self) {
         self.reset();
+    }
+
+    fn fresh(&self) -> Self {
+        Self::new_with_rng(R::from_os_rng())
     }
 }
 
@@ -57,6 +89,10 @@ impl AddressWorkerBackoff for FixedBackoff {
     }
 
     fn reset_after_connected(&mut self) {}
+
+    fn fresh(&self) -> Self {
+        *self
+    }
 }
 
 /// Optional hooks for runtime logging around lifecycle transitions.
@@ -87,6 +123,7 @@ where
 {
     let mut connected_once = false;
     let mut maintenance = control.subscribe_maintenance();
+    let mut candidate_backoff = backoff.fresh();
     loop {
         if control.shutdown_requested() || control.maintenance_intent() == MaintenanceIntent::Retire
         {
@@ -112,11 +149,12 @@ where
             return Ok(());
         }
 
-        let (configured_server_addr, run): (String, TunnelConnectionRun) = match outcome {
+        let (configured_server_addr, run, hints) = match outcome {
             TunnelAttemptOutcome::Connected {
                 configured_server_addr,
                 run,
-            } => (configured_server_addr, run),
+                hints,
+            } => (configured_server_addr, run, hints),
             TunnelAttemptOutcome::Retryable(failure) => {
                 let delay = backoff.next_delay();
                 let delay_secs = display_delay_secs(delay);
@@ -134,8 +172,8 @@ where
         };
 
         let first_connection = !connected_once;
-        let retiring = control.maintenance_intent() == MaintenanceIntent::Retire;
-        if !retiring {
+        let retiring_intent = control.maintenance_intent() == MaintenanceIntent::Retire;
+        if !retiring_intent {
             backoff.reset_after_connected();
         }
         connected_once = true;
@@ -146,22 +184,18 @@ where
             crate::runtime_log::client_assignment_convergence(status);
         }
 
-        // The run observes process shutdown through the shared Client-instance mode and
-        // deadline. Retire logging continues alongside it until shutdown.
-        let run_result = {
-            let run = run(control.orderly_shutdown());
-            tokio::pin!(run);
-            let observe =
-                wait_for_process_shutdown_observing_retire(&control, &configured_server_addr);
-            tokio::pin!(observe);
-            let mut observing = true;
-            loop {
-                tokio::select! {
-                    result = &mut run => break result,
-                    _ = &mut observe, if observing => observing = false,
-                }
-            }
-        };
+        // Every active connection observes process shutdown through the shared Client-instance
+        // mode and deadline. Candidates and Retire logging continue alongside until the last
+        // active connection ends.
+        let run_result = ConnectedAddress {
+            address: &address,
+            configured_server_addr: &configured_server_addr,
+            control: &control,
+            dial: dial.as_ref(),
+            candidate_backoff: &mut candidate_backoff,
+        }
+        .run(run, hints)
+        .await;
 
         if let Some(status) = control.observe_disconnected(&address) {
             crate::runtime_log::client_assignment_convergence(status);
@@ -200,6 +234,354 @@ where
     }
 }
 
+type ConnectionRunFuture = Pin<Box<dyn Future<Output = Result<(), TunnelConnectionEnd>> + Send>>;
+
+/// One active connection of a Connected address: its run and the hints it reports.
+struct Active {
+    run: ConnectionRunFuture,
+    hints: watch::Receiver<ReplacementHint>,
+    /// False once the hint sender dropped, as after GOAWAY: the last hint stands.
+    hints_live: bool,
+    interruptions: u64,
+}
+
+impl Active {
+    fn start(
+        run: TunnelConnectionRun,
+        hints: watch::Receiver<ReplacementHint>,
+        shutdown: crate::OrderlyShutdown,
+    ) -> Self {
+        let interruptions = hints.borrow().interruptions;
+        Self {
+            run: run(shutdown),
+            hints,
+            hints_live: true,
+            interruptions,
+        }
+    }
+
+    fn hinted_generation(&self) -> Option<ServerRuntimeGeneration> {
+        self.hints.borrow().generation
+    }
+
+    /// Whether the current hint still names `target` from the subscription the worker last
+    /// observed, unpaused. Checked at join, since the hint may have changed while the candidate
+    /// completed.
+    fn still_hints(&self, target: ServerRuntimeGeneration) -> bool {
+        let hint = self.hints.borrow();
+        hint.generation == Some(target) && !hint.paused && hint.interruptions == self.interruptions
+    }
+}
+
+/// Wait for `active`'s run, pending forever when there is none.
+async fn finished(active: &mut Option<Active>) -> Result<(), TunnelConnectionEnd> {
+    match active {
+        Some(active) => (&mut active.run).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Candidate lifecycle for one address: at most one candidate at a time.
+enum Candidate {
+    Idle,
+    /// Waiting out the jittered delay before the next attempt toward `target`.
+    Waiting {
+        target: ServerRuntimeGeneration,
+        delay: Pin<Box<tokio::time::Sleep>>,
+        /// Whether an attempt toward `target` has already started and been logged.
+        started: bool,
+    },
+    /// An attempt toward `target` is in flight.
+    Warming {
+        target: ServerRuntimeGeneration,
+        attempt: BoxFuture<'static, TunnelAttemptOutcome>,
+    },
+}
+
+enum CandidateEvent {
+    DelayElapsed,
+    Attempted(TunnelAttemptOutcome),
+}
+
+impl Candidate {
+    /// Wait for the pending delay or attempt; pending forever while idle.
+    async fn progress(&mut self) -> CandidateEvent {
+        match self {
+            Self::Idle => std::future::pending().await,
+            Self::Waiting { delay, .. } => {
+                delay.as_mut().await;
+                CandidateEvent::DelayElapsed
+            }
+            Self::Warming { attempt, .. } => CandidateEvent::Attempted(attempt.await),
+        }
+    }
+
+    fn target(&self) -> Option<ServerRuntimeGeneration> {
+        match self {
+            Self::Idle => None,
+            Self::Waiting { target, .. } | Self::Warming { target, .. } => Some(*target),
+        }
+    }
+
+    /// Drop any candidate work. An unvalidated candidate holds no credit and carried no Visitor,
+    /// so closing it affects no traffic.
+    fn abort(&mut self, configured_server_addr: &str, reason: &str) {
+        let started = match self {
+            Self::Idle => false,
+            Self::Waiting { started, .. } => *started,
+            Self::Warming { .. } => true,
+        };
+        *self = Self::Idle;
+        if started {
+            crate::runtime_log::client_tunnel_candidate_aborted(configured_server_addr, reason);
+        }
+    }
+}
+
+/// One Connected stretch of an address worker: up to two active connections plus candidate work.
+struct ConnectedAddress<'a, D: ?Sized, B> {
+    address: &'a ServerAddress,
+    configured_server_addr: &'a str,
+    control: &'a AddressWorkerControl,
+    dial: &'a D,
+    candidate_backoff: &'a mut B,
+}
+
+impl<D, B> ConnectedAddress<'_, D, B>
+where
+    D: AddressWorkerDial + ?Sized,
+    B: AddressWorkerBackoff,
+{
+    /// Run until the address has no active connection, returning how the last one ended.
+    ///
+    /// The primary's hints drive candidates. A validated candidate joins as `joined`; when the
+    /// primary ends, `joined` takes over without a reconnect. While a second connection is
+    /// active, no further candidate starts.
+    async fn run(
+        mut self,
+        run: TunnelConnectionRun,
+        hints: watch::Receiver<ReplacementHint>,
+    ) -> Result<(), TunnelConnectionEnd> {
+        let shutdown = self.control.orderly_shutdown();
+        let mut primary = Active::start(run, hints, shutdown.clone());
+        let mut joined: Option<Active> = None;
+        // A withdrawal protocol failure on a connection that is not last still fails the process.
+        let mut protocol_failure: Option<TunnelConnectionEnd> = None;
+        let mut candidate = Candidate::Idle;
+        let mut maintenance = self.control.subscribe_maintenance();
+        let mut maintenance_live = true;
+        let mut shutdown_started = shutdown.mode().is_some();
+        let mut logged_retiring = false;
+        if self.control.maintenance_intent() == MaintenanceIntent::Retire {
+            crate::runtime_log::client_tunnel_retiring(self.configured_server_addr);
+            logged_retiring = true;
+        }
+        self.reconcile(&mut candidate, &primary, joined.is_some(), shutdown_started);
+
+        loop {
+            let is_active = !matches!(candidate, Candidate::Idle);
+            let has_joined = joined.is_some();
+            tokio::select! {
+                // Connection ends, shutdown, Retire and hint changes win over a completing
+                // candidate.
+                biased;
+                result = &mut primary.run => {
+                    let Some(next) = joined.take() else {
+                        // No other active connection: the ordinary reconnect runs.
+                        candidate.abort(self.configured_server_addr, "primary-lost");
+                        return protocol_failure.map_or(result, Err);
+                    };
+                    keep_protocol_failure(&mut protocol_failure, result);
+                    if !shutdown_started {
+                        crate::runtime_log::client_tunnel_handed_over(self.configured_server_addr);
+                    }
+                    primary = next;
+                    self.reconcile(&mut candidate, &primary, false, shutdown_started);
+                }
+                result = finished(&mut joined), if has_joined => {
+                    joined = None;
+                    keep_protocol_failure(&mut protocol_failure, result);
+                    self.reconcile(&mut candidate, &primary, false, shutdown_started);
+                }
+                _ = shutdown.wait_started(), if !shutdown_started => {
+                    shutdown_started = true;
+                    candidate.abort(self.configured_server_addr, "shutdown");
+                }
+                changed = maintenance.changed(), if maintenance_live => {
+                    if changed.is_err() {
+                        maintenance_live = false;
+                        continue;
+                    }
+                    if self.control.maintenance_intent() == MaintenanceIntent::Retire {
+                        if !logged_retiring {
+                            crate::runtime_log::client_tunnel_retiring(self.configured_server_addr);
+                            logged_retiring = true;
+                        }
+                        candidate.abort(self.configured_server_addr, "retiring");
+                    } else {
+                        // Re-adopted: the standing hint may start a candidate again.
+                        logged_retiring = false;
+                        self.reconcile(&mut candidate, &primary, has_joined, shutdown_started);
+                    }
+                }
+                changed = primary.hints.changed(), if primary.hints_live => {
+                    if changed.is_err() {
+                        primary.hints_live = false;
+                        continue;
+                    }
+                    let hint = *primary.hints.borrow_and_update();
+                    if hint.interruptions != primary.interruptions {
+                        // Pause replacement; the resubscribed snapshot decides whether it restarts.
+                        primary.interruptions = hint.interruptions;
+                        candidate.abort(self.configured_server_addr, "subscription-interrupted");
+                    }
+                    self.reconcile(&mut candidate, &primary, has_joined, shutdown_started);
+                }
+                event = candidate.progress(), if is_active => match event {
+                    CandidateEvent::DelayElapsed => {
+                        if let Some(target) = candidate.target() {
+                            crate::runtime_log::client_tunnel_candidate_starting(
+                                self.configured_server_addr,
+                                &target.to_string(),
+                            );
+                            candidate = Candidate::Warming {
+                                target,
+                                attempt: self.dial.establish_candidate(self.address.clone(), target),
+                            };
+                        }
+                    }
+                    CandidateEvent::Attempted(outcome) => {
+                        if let Some(next) =
+                            self.settle(&primary, &mut candidate, outcome, &shutdown, shutdown_started)
+                        {
+                            joined = Some(next);
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    /// Join a validated candidate, or schedule its retry after a failure.
+    fn settle(
+        &mut self,
+        primary: &Active,
+        candidate: &mut Candidate,
+        outcome: TunnelAttemptOutcome,
+        shutdown: &crate::OrderlyShutdown,
+        shutdown_started: bool,
+    ) -> Option<Active> {
+        let target = candidate.target()?;
+        *candidate = Candidate::Idle;
+        let message = match outcome {
+            TunnelAttemptOutcome::Connected { run, hints, .. } => {
+                // Retire, shutdown or a hint change may race the attempt's completion. Then the
+                // candidate is dropped before it runs, so it never offered credit. A paused or
+                // changed hint is handled by the next hint event; until then the candidate
+                // waits to retry.
+                if !self.allows_candidates(shutdown_started) {
+                    return None;
+                }
+                if !primary.still_hints(target) {
+                    *candidate = waiting(target, self.candidate_backoff.next_delay(), true);
+                    return None;
+                }
+                crate::runtime_log::client_tunnel_candidate_joined(
+                    self.configured_server_addr,
+                    &target.to_string(),
+                );
+                self.candidate_backoff.reset_after_connected();
+                // Starting the run releases the candidate's credit.
+                return Some(Active::start(run, hints, shutdown.clone()));
+            }
+            TunnelAttemptOutcome::Retryable(failure) => {
+                let delay = self.candidate_backoff.next_delay();
+                let delay_secs = display_delay_secs(delay);
+                match failure.unclassified_message() {
+                    Some(message) => crate::runtime_log::client_tunnel_candidate_failed(
+                        self.configured_server_addr,
+                        delay_secs,
+                        message,
+                    ),
+                    None => failure.report_candidate_after_retry_delay(
+                        self.configured_server_addr,
+                        delay_secs,
+                    ),
+                }
+                *candidate = waiting(target, delay, true);
+                return None;
+            }
+            // Local material also fails the next primary reconnect, which owns the fatal exit.
+            // A candidate only retries.
+            TunnelAttemptOutcome::FatalLocalMaterial(message) => message,
+        };
+        let delay = self.candidate_backoff.next_delay();
+        crate::runtime_log::client_tunnel_candidate_failed(
+            self.configured_server_addr,
+            display_delay_secs(delay),
+            &message,
+        );
+        *candidate = waiting(target, delay, true);
+        None
+    }
+
+    fn allows_candidates(&self, shutdown_started: bool) -> bool {
+        !shutdown_started
+            && !self.control.shutdown_requested()
+            && self.control.maintenance_intent() == MaintenanceIntent::Maintain
+    }
+
+    /// Make the candidate follow the primary's hint: none, the same target (a no-op), or a new
+    /// target. No candidate starts while a second connection is already active.
+    fn reconcile(
+        &mut self,
+        candidate: &mut Candidate,
+        primary: &Active,
+        has_joined: bool,
+        shutdown_started: bool,
+    ) {
+        let allowed = self.allows_candidates(shutdown_started);
+        let hint = primary.hinted_generation();
+        match (candidate.target(), hint.filter(|_| allowed)) {
+            (None, None) => {}
+            (Some(_), None) => candidate.abort(self.configured_server_addr, "hint-withdrawn"),
+            (Some(current), Some(hint)) if current == hint => {}
+            (current, Some(hint)) => {
+                if current.is_some() {
+                    candidate.abort(self.configured_server_addr, "hint-changed");
+                }
+                if has_joined {
+                    return;
+                }
+                // A new hint restarts the retry sequence from its first jittered window.
+                self.candidate_backoff.reset_after_connected();
+                *candidate = waiting(hint, self.candidate_backoff.next_delay(), false);
+            }
+        }
+    }
+}
+
+/// Remember the first withdrawal protocol failure among connections that ended earlier.
+fn keep_protocol_failure(
+    failure: &mut Option<TunnelConnectionEnd>,
+    result: Result<(), TunnelConnectionEnd>,
+) {
+    if failure.is_none()
+        && let Err(end) = result
+        && end.withdrawal_protocol_failure_message().is_some()
+    {
+        *failure = Some(end);
+    }
+}
+
+fn waiting(target: ServerRuntimeGeneration, delay: Duration, started: bool) -> Candidate {
+    Candidate::Waiting {
+        target,
+        delay: Box::pin(tokio::time::sleep(delay)),
+        started,
+    }
+}
+
 /// Production helper: [`run_address_worker`] with [`ReconnectPolicy`] backoff.
 pub async fn run_address_worker_with_reconnect_policy<D, H>(
     address: ServerAddress,
@@ -212,43 +594,6 @@ where
     H: AddressWorkerHooks + ?Sized,
 {
     run_address_worker(address, control, dial, hooks, ReconnectPolicy::new()).await
-}
-
-/// Wait for process shutdown while observing Retire without closing the live tunnel.
-pub(crate) async fn wait_for_process_shutdown_observing_retire(
-    control: &AddressWorkerControl,
-    configured_server_addr: &str,
-) {
-    let mut maintenance = control.subscribe_maintenance();
-    let mut shutdown = control.subscribe_shutdown();
-    let mut logged_retiring = false;
-    if control.maintenance_intent() == MaintenanceIntent::Retire {
-        crate::runtime_log::client_tunnel_retiring(configured_server_addr);
-        logged_retiring = true;
-    }
-    if control.shutdown_requested() {
-        return;
-    }
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || control.shutdown_requested() {
-                    return;
-                }
-            }
-            changed = maintenance.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-                if !logged_retiring
-                    && control.maintenance_intent() == MaintenanceIntent::Retire
-                {
-                    crate::runtime_log::client_tunnel_retiring(configured_server_addr);
-                    logged_retiring = true;
-                }
-            }
-        }
-    }
 }
 
 /// Returns true when the worker should continue retrying after the delay.
@@ -309,6 +654,7 @@ pub fn connected_session_until(
 ) -> TunnelAttemptOutcome {
     TunnelAttemptOutcome::Connected {
         configured_server_addr,
+        hints: watch::channel(ReplacementHint::default()).1,
         run: Box::new(move |shutdown| {
             Box::pin(async move {
                 tokio::select! {
@@ -324,6 +670,9 @@ fn display_delay_secs(delay: Duration) -> u64 {
     let rounded = delay.as_nanos().div_ceil(1_000_000_000);
     u64::try_from(rounded.max(1)).unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+mod candidate_tests;
 
 #[cfg(test)]
 mod tests {
@@ -356,6 +705,7 @@ mod tests {
                     }
                     TunnelAttemptOutcome::Connected {
                         configured_server_addr: "a.example.test:443".to_owned(),
+                        hints: no_hints(),
                         run: Box::new(move |_shutdown| {
                             Box::pin(async move {
                                 Err(TunnelConnectionEnd::unclassified("connection ended"))
@@ -766,6 +1116,7 @@ mod tests {
                     connected.fetch_add(1, Ordering::SeqCst);
                     TunnelAttemptOutcome::Connected {
                         configured_server_addr: address.hostname().to_string(),
+                        hints: no_hints(),
                         run: Box::new(move |shutdown| {
                             Box::pin(async move {
                                 assert_eq!(shutdown.wait_started().await, ShutdownMode::Graceful);
@@ -815,6 +1166,10 @@ mod tests {
             sibling_stayed_graceful.load(Ordering::SeqCst),
             "a failed sibling must not escalate another drain to Fast"
         );
+    }
+
+    fn no_hints() -> watch::Receiver<ReplacementHint> {
+        watch::channel(ReplacementHint::default()).1
     }
 
     async fn wait_until(predicate: impl Fn() -> bool) {

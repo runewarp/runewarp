@@ -124,6 +124,12 @@ impl TunnelEventState {
         }
     }
 
+    /// The replacement hint, unless it names this snapshot's own generation.
+    pub(crate) fn hinted_replacement(&self) -> Option<ServerRuntimeGeneration> {
+        self.replacement_generation
+            .filter(|replacement| *replacement != self.server_generation)
+    }
+
     /// One complete `snapshot` SSE event.
     pub(crate) fn encode_sse(&self) -> Bytes {
         let wire = WireSnapshotOut {

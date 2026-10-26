@@ -62,16 +62,25 @@ impl AddressWorkerControl {
         *self.maintenance.borrow()
     }
 
+    /// A receiver whose `changed()` fires only for intent changes after this call.
+    ///
+    /// A plain clone would inherit this handle's never-advanced version and report earlier
+    /// Retire / re-adopt transitions as fresh changes.
     pub fn subscribe_maintenance(&self) -> watch::Receiver<MaintenanceIntent> {
-        self.maintenance.clone()
+        let mut maintenance = self.maintenance.clone();
+        maintenance.mark_unchanged();
+        maintenance
     }
 
     pub fn shutdown_requested(&self) -> bool {
         *self.shutdown.borrow()
     }
 
+    /// A receiver whose `changed()` fires only for shutdown requests after this call.
     pub fn subscribe_shutdown(&self) -> watch::Receiver<bool> {
-        self.shutdown.clone()
+        let mut shutdown = self.shutdown.clone();
+        shutdown.mark_unchanged();
+        shutdown
     }
 
     /// Returns true exactly once across all workers for the one-shot Client-ready log.
@@ -895,6 +904,36 @@ mod tests {
             .await
             .expect("shutdown should drain workers");
         assert_eq!(controller.worker_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn new_subscriptions_start_at_the_current_intent_and_shutdown() {
+        use futures_util::FutureExt;
+        let mut controller = AddressController::new();
+        let target = address("tunnel.example.test");
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        assert!(controller.add(target.clone(), move |_address, control| {
+            let _ = control_tx.send(control.clone());
+            async move {
+                wait_for_shutdown(&control).await;
+                Ok(())
+            }
+        }));
+        let control = control_rx.await.unwrap();
+
+        assert!(controller.remove(&target));
+        assert!(controller.re_adopt(&target));
+        let mut maintenance = control.subscribe_maintenance();
+        assert!(
+            maintenance.changed().now_or_never().is_none(),
+            "an earlier Retire and re-adoption is not a change for a new subscriber"
+        );
+
+        controller.request_shutdown();
+        let mut shutdown = control.subscribe_shutdown();
+        assert!(shutdown.changed().now_or_never().is_none());
+        assert!(control.shutdown_requested());
+        controller.run_until_idle().await.unwrap();
     }
 
     #[tokio::test]

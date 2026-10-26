@@ -29,6 +29,7 @@ use crate::quic::StaticClientIdentityAdmission;
 use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
 use crate::{ClientIdentity, ServerHostname, generate_client_identity};
 
+mod candidates;
 mod sessions;
 mod snapshots;
 mod streams;

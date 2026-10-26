@@ -33,9 +33,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::tunnel::{
-    ClientTunnelH3, ClientTunnelStream, TunnelH3Error, UnconfirmedDrain, WithdrawalOutcome,
+    ClientTunnelH3, ClientTunnelStream, ReplacementHint, ServerRuntimeGeneration, TunnelH3Error,
+    UnconfirmedDrain, WithdrawalOutcome,
 };
 use quinn::Endpoint;
+use tokio::sync::watch;
 
 pub(crate) use self::stream_limits::{ClientStreamBudget, ClientStreamLimits};
 pub(crate) use self::termination_tls::TerminationTlsConfigs;
@@ -71,6 +73,8 @@ pub(crate) struct RoutedClientConnectConfig {
     pub(crate) quic_client_config: quinn::ClientConfig,
     pub(crate) termination_tls_configs: TerminationTlsConfigs,
     pub(crate) stream_budget: Arc<ClientStreamBudget>,
+    /// A candidate attempt requires the Server to report this runtime generation.
+    pub(crate) expected_generation: Option<ServerRuntimeGeneration>,
 }
 
 enum ClientRouteMode {
@@ -142,6 +146,7 @@ impl Client {
             ClientRouteMode::CatchAll {
                 backend_address: config.backend_address,
             },
+            None,
         )
         .await
     }
@@ -159,6 +164,7 @@ impl Client {
                 termination_tls_configs: config.termination_tls_configs,
                 stream_budget: config.stream_budget,
             },
+            config.expected_generation,
         )
         .await
     }
@@ -169,6 +175,7 @@ impl Client {
         server_name: String,
         quic_client_config: quinn::ClientConfig,
         route_mode: ClientRouteMode,
+        expected_generation: Option<ServerRuntimeGeneration>,
     ) -> Result<Self, ClientConnectError> {
         let hostname = crate::ServerHostname::try_from(server_name.as_str()).map_err(|_| {
             ClientConnectError::Connect(quinn::ConnectError::InvalidServerName(server_name.clone()))
@@ -201,6 +208,7 @@ impl Client {
                     }
                 })
             },
+            expected_generation,
         )
         .await
         .map_err(ClientConnectError::Tunnel)?;
@@ -219,6 +227,11 @@ impl Client {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.endpoint.local_addr()
+    }
+
+    /// Replacement hint the address worker may act on for this connection.
+    pub fn replacement_hint(&self) -> watch::Receiver<ReplacementHint> {
+        self.connection.replacement_hint()
     }
 
     pub async fn run(mut self) -> Result<(), quinn::ConnectionError> {
@@ -265,6 +278,8 @@ impl Client {
         mut self,
         shutdown: &OrderlyShutdown,
     ) -> Result<Option<WithdrawalOutcome>, quinn::ConnectionError> {
+        // A candidate starts offering credit only once it runs, which joining decides.
+        self.connection.release_credit();
         let closed = self.connection.closed();
         tokio::pin!(closed);
         let mut accepting = true;
@@ -358,6 +373,7 @@ fn services_and_configs_for_route_mode(
 mod tests {
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use quinn::Endpoint;
@@ -451,6 +467,87 @@ mod tests {
             io::Error::other(format!("accept task failed: {join_error}"))
         })??;
         Ok(())
+    }
+
+    /// A Server peer and a routed Client sharing `budget`; a `candidate` Client requires the
+    /// Server's generation.
+    async fn pair(
+        budget: Arc<super::ClientStreamBudget>,
+        candidate: bool,
+    ) -> (crate::tunnel::ServerTunnelH3, Client) {
+        let generation = crate::tunnel::ServerRuntimeGeneration::generate();
+        let identity = generate_test_client_identity().unwrap();
+        let (certificate, private_key) = make_self_signed_cert("tunnel.example.test").unwrap();
+        let endpoint = Endpoint::server(
+            test_server_h3_config(
+                vec![certificate.clone()],
+                private_key_from_der(&private_key),
+                std::slice::from_ref(&identity.client_identity),
+            )
+            .unwrap(),
+            localhost(0),
+        )
+        .unwrap();
+        let config = super::RoutedClientConnectConfig {
+            local_bind_addr: localhost(0),
+            server_addr: endpoint.local_addr().unwrap(),
+            server_name: "tunnel.example.test".to_owned(),
+            services: vec![crate::ServiceConfig {
+                public_hostnames: None,
+                backend_address: "127.0.0.1:9".to_owned(),
+                tls_mode: crate::ClientTlsMode::Passthrough,
+                proxy_protocol: None,
+            }],
+            quic_client_config: make_client_tunnel_h3_config(
+                root_store_with(&certificate).unwrap(),
+                client_certificate_chain(&identity).unwrap(),
+                client_private_key(&identity).unwrap(),
+            )
+            .unwrap(),
+            termination_tls_configs: super::TerminationTlsConfigs::empty(),
+            stream_budget: budget,
+            expected_generation: candidate.then_some(generation),
+        };
+        let server = async {
+            let connection = endpoint.accept().await.unwrap().await.unwrap();
+            crate::tunnel::ServerTunnelH3::establish(
+                connection,
+                crate::ServerHostname::try_from("tunnel.example.test").unwrap(),
+                generation,
+            )
+            .await
+            .unwrap()
+        };
+        let (server, client) = tokio::join!(server, Client::connect_with_services(config));
+        (server, client.unwrap())
+    }
+
+    fn budget(permits: usize) -> Arc<super::ClientStreamBudget> {
+        Arc::new(super::ClientStreamBudget::new(super::ClientStreamLimits {
+            max_stream_handlers: permits,
+            ..super::ClientStreamLimits::default()
+        }))
+    }
+
+    #[tokio::test]
+    async fn a_candidate_receives_visitors_only_once_it_runs() {
+        let budget = budget(8);
+        let (server, client) = pair(budget.clone(), true).await;
+        // An unjoined candidate holds no credit, so dropping it can cut no Visitor.
+        assert!(
+            server
+                .open_tunnel_stream(Duration::from_millis(200))
+                .await
+                .is_err()
+        );
+        assert_eq!(budget.semaphore().available_permits(), 8);
+
+        let shutdown = crate::OrderlyShutdown::new(Duration::from_secs(30), Duration::ZERO);
+        let _task = tokio::spawn(async move { client.run_with_shutdown(&shutdown).await });
+        let _visitor = server
+            .open_tunnel_stream(Duration::from_secs(2))
+            .await
+            .expect("a running candidate offers credit");
     }
 
     fn generate_test_client_identity() -> io::Result<GeneratedClientIdentity> {

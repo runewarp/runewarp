@@ -36,7 +36,9 @@ use std::time::Duration;
 use h3::error::{Code, ConnectionError, StreamError};
 use tokio::task::JoinHandle;
 
-pub use client::{ClientTunnelH3, ProtocolFailure, UnconfirmedDrain, WithdrawalOutcome};
+pub use client::{
+    ClientTunnelH3, ProtocolFailure, ReplacementHint, UnconfirmedDrain, WithdrawalOutcome,
+};
 pub use config::{
     make_client_tunnel_h3_config, make_server_tunnel_h3_config,
     make_server_tunnel_h3_config_with_resolver,
@@ -122,11 +124,18 @@ pub enum TunnelH3Error {
     InitialStateTimeout,
     /// The Server's event stream does not speak this Runewarp protocol.
     Incompatible(&'static str),
+    /// A candidate's first snapshot named a Server runtime generation other than the hinted one.
+    WrongGeneration,
 }
 
 impl TunnelH3Error {
     pub(crate) fn is_unauthorized_client_identity(&self) -> bool {
         matches!(self, Self::Transport(error) if crate::quic::is_tls_access_denied(error))
+    }
+
+    /// Whether a candidate reached a Server runtime generation other than the hinted one.
+    pub fn is_wrong_generation(&self) -> bool {
+        matches!(self, Self::WrongGeneration)
     }
 }
 
@@ -154,6 +163,9 @@ impl fmt::Display for TunnelH3Error {
             }
             Self::Incompatible(reason) => {
                 write!(formatter, "incompatible tunnel event stream: {reason}")
+            }
+            Self::WrongGeneration => {
+                formatter.write_str("tunnel candidate reached an unexpected server generation")
             }
         }
     }

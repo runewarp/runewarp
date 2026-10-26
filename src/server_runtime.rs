@@ -14,7 +14,7 @@ enum ServerRuntimeMode {
     Static,
     Managed {
         session: Box<ManagedSession>,
-        adapter: ServerAuthorizationAdapter,
+        adapter: Box<ServerAuthorizationAdapter>,
     },
 }
 
@@ -58,7 +58,10 @@ impl ServerRuntime {
             let adapter = server
                 .authorization_adapter()
                 .expect("managed Server preparation constructs an authorization adapter");
-            ServerRuntimeMode::Managed { session, adapter }
+            ServerRuntimeMode::Managed {
+                session,
+                adapter: Box::new(adapter),
+            }
         } else {
             ServerRuntimeMode::Static
         };
@@ -100,7 +103,7 @@ impl ServerRuntime {
             ServerRuntimeMode::Managed {
                 mut session,
                 mut adapter,
-            } => run_managed(server, shutdown, session.as_mut(), &mut adapter).await,
+            } => run_managed(server, shutdown, session.as_mut(), adapter.as_mut()).await,
         }
     }
 }

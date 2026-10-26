@@ -51,7 +51,7 @@ async fn wait_for_hint(
 }
 
 #[tokio::test]
-async fn a_candidate_on_the_expected_generation_establishes_and_offers_credit() {
+async fn a_candidate_offers_credit_only_once_released() {
     let fixture = Fixture::new().expect("fixture");
     let generation = ServerRuntimeGeneration::generate();
     let budget = Arc::new(Semaphore::new(4));
@@ -65,17 +65,25 @@ async fn a_candidate_on_the_expected_generation_establishes_and_offers_credit() 
         ),
         establish_candidate(client_connection, budget.clone(), generation),
     );
-    let _server = server.expect("server establishes");
-    let client = client.expect("candidate passes the generation check");
-
+    let server = server.expect("server establishes");
+    let mut client = client.expect("candidate passes the generation check");
     assert_eq!(client.server_generation(), generation);
-    timeout(STEP, async {
-        while budget.available_permits() > 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("candidate offers credit");
+
+    // Until promotion releases it, the Server cannot place a Visitor on the candidate.
+    assert!(
+        server
+            .open_tunnel_stream(Duration::from_millis(200))
+            .await
+            .is_err()
+    );
+    assert_eq!(budget.available_permits(), 4);
+
+    client.release_credit();
+    let _visitor = server
+        .open_tunnel_stream(STEP)
+        .await
+        .expect("released credit admits a Visitor");
+    assert!(budget.available_permits() < 4);
 }
 
 #[tokio::test]

@@ -154,17 +154,21 @@ async fn drain_retired_until_readopted(
     control: &AddressWorkerControl,
     retiring: &mut JoinSet<()>,
 ) -> bool {
+    if retiring.is_empty() {
+        return false;
+    }
     let mut maintenance = control.subscribe_maintenance();
     let mut maintenance_live = true;
     loop {
-        if retiring.is_empty() {
-            return false;
-        }
+        // Check re-adoption first: it may land together with the last drain finishing.
         if !control.shutdown_requested()
             && control.orderly_shutdown().mode().is_none()
             && control.maintenance_intent() == MaintenanceIntent::Maintain
         {
             return true;
+        }
+        if retiring.is_empty() {
+            return false;
         }
         tokio::select! {
             _ = retiring.join_next() => {}

@@ -9,7 +9,7 @@ use futures_util::FutureExt;
 use h3::client::{RequestStream, SendRequest};
 use h3::error::{Code, StreamError};
 use http::{HeaderMap, Method, Request, StatusCode, header};
-use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::time::{sleep, timeout};
 
 use crate::ServerHostname;
@@ -60,6 +60,8 @@ pub struct ClientTunnelH3 {
     _events: OwnedTask,
     credits: Arc<super::credit::VisitorCredits>,
     _session: OwnedTask,
+    /// Held by a candidate until [`Self::release_credit`]; the session offers no credit before.
+    credit_release: Option<oneshot::Sender<()>>,
 }
 
 impl ClientTunnelH3 {
@@ -84,8 +86,8 @@ impl ClientTunnelH3 {
 
     /// Like [`Self::establish`] for a candidate connection: the first snapshot must name
     /// `expected_generation`. Any other generation closes the connection with `H3_NO_ERROR` before
-    /// the WebTransport session and returns [`TunnelH3Error::WrongGeneration`], so the candidate
-    /// never offers Visitor credit.
+    /// the WebTransport session and returns [`TunnelH3Error::WrongGeneration`]. A candidate that
+    /// passes offers no Visitor credit until [`Self::release_credit`].
     pub async fn establish_candidate(
         connection: quinn::Connection,
         server_hostname: &ServerHostname,
@@ -265,7 +267,29 @@ impl ClientTunnelH3 {
             super::credit::VisitorCredits::new(connection.clone(), stream_budget, budget_observer);
         let session_connection = connection.clone();
         let maintenance = super::credit::CreditMaintenance(credits.clone());
+        // A candidate offers no credit until promotion, so a rejected candidate never holds a
+        // committed Visitor.
+        let (credit_release, credit_released) = match expected_generation {
+            Some(_) => {
+                let (release, released) = oneshot::channel();
+                (Some(release), Some(released))
+            }
+            None => (None, None),
+        };
         let session = OwnedTask::spawn(async move {
+            if let Some(released) = credit_released {
+                let released = tokio::select! {
+                    released = released => released.is_ok(),
+                    _ = session.closed() => false,
+                    _ = session_connection.closed() => false,
+                };
+                if !released {
+                    if session_connection.close_reason().is_none() {
+                        close_connection(&session_connection, Code::H3_NO_ERROR);
+                    }
+                    return;
+                }
+            }
             // Retain a pending semaphore acquisition across arrivals to preserve queue fairness
             // between connections. Session intake never waits for a handler or budget permit.
             let credits = &maintenance.0;
@@ -379,7 +403,16 @@ impl ClientTunnelH3 {
             _events: events,
             credits,
             _session: session,
+            credit_release,
         })
+    }
+
+    /// Start offering Visitor credit on a candidate connection. A no-op otherwise, or when
+    /// already released.
+    pub fn release_credit(&mut self) {
+        if let Some(release) = self.credit_release.take() {
+            let _ = release.send(());
+        }
     }
 
     /// Wait for a Server-opened Visitor stream on this connection's WebTransport session.

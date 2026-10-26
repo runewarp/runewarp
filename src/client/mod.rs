@@ -310,6 +310,8 @@ impl Client {
         shutdown: &OrderlyShutdown,
         mut retirement: Option<oneshot::Receiver<Instant>>,
     ) -> Result<Option<ConnectionDrain>, quinn::ConnectionError> {
+        // A candidate starts offering credit only once it runs, which promotion decides.
+        self.connection.release_credit();
         let closed = self.connection.closed();
         tokio::pin!(closed);
         let mut accepting = true;
@@ -531,6 +533,15 @@ mod tests {
     async fn retirement_pair(
         budget: Arc<super::ClientStreamBudget>,
     ) -> (crate::tunnel::ServerTunnelH3, Client) {
+        pair(budget, false).await
+    }
+
+    /// Like [`retirement_pair`]; a `candidate` Client requires the Server's generation.
+    async fn pair(
+        budget: Arc<super::ClientStreamBudget>,
+        candidate: bool,
+    ) -> (crate::tunnel::ServerTunnelH3, Client) {
+        let generation = crate::tunnel::ServerRuntimeGeneration::generate();
         let identity = generate_test_client_identity().unwrap();
         let (certificate, private_key) = make_self_signed_cert("tunnel.example.test").unwrap();
         let endpoint = Endpoint::server(
@@ -561,14 +572,14 @@ mod tests {
             .unwrap(),
             termination_tls_configs: super::TerminationTlsConfigs::empty(),
             stream_budget: budget,
-            expected_generation: None,
+            expected_generation: candidate.then_some(generation),
         };
         let server = async {
             let connection = endpoint.accept().await.unwrap().await.unwrap();
             crate::tunnel::ServerTunnelH3::establish(
                 connection,
                 crate::ServerHostname::try_from("tunnel.example.test").unwrap(),
-                crate::tunnel::ServerRuntimeGeneration::generate(),
+                generation,
             )
             .await
             .unwrap()
@@ -610,6 +621,26 @@ mod tests {
         })
         .await
         .expect("permits settle");
+    }
+
+    #[tokio::test]
+    async fn a_candidate_receives_visitors_only_once_it_runs() {
+        let budget = budget(8);
+        let (server, client) = pair(budget.clone(), true).await;
+        // An unpromoted candidate holds no credit, so dropping it can cut no Visitor.
+        assert!(
+            server
+                .open_tunnel_stream(Duration::from_millis(200))
+                .await
+                .is_err()
+        );
+        assert_eq!(budget.semaphore().available_permits(), 8);
+
+        let (_retire, _task) = run_retirable(client, shutdown(Duration::from_secs(30)));
+        let _visitor = server
+            .open_tunnel_stream(Duration::from_secs(2))
+            .await
+            .expect("a running candidate offers credit");
     }
 
     #[tokio::test]

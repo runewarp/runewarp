@@ -133,9 +133,9 @@ impl Drop for DropFlag {
 
 #[derive(Default)]
 struct FakeDial {
-    primaries: Mutex<VecDeque<Arc<FakeConnection>>>,
+    primaries: Arc<Mutex<VecDeque<Arc<FakeConnection>>>>,
     candidates: Mutex<VecDeque<CandidateScript>>,
-    primary_dials: AtomicUsize,
+    primary_dials: Arc<AtomicUsize>,
     /// Every candidate attempt: when it started, its target, and whether it was dropped.
     attempts: Mutex<Vec<(Instant, ServerRuntimeGeneration, Arc<AtomicBool>)>>,
 }
@@ -177,9 +177,12 @@ impl FakeDial {
 
 impl AddressWorkerDial for FakeDial {
     fn establish(&self, _address: ServerAddress) -> BoxFuture<'static, TunnelAttemptOutcome> {
-        self.primary_dials.fetch_add(1, Ordering::SeqCst);
-        let next = self.primaries.lock().unwrap().pop_front();
+        // Count and consume only once polled, so a dial the worker drops unpolled loses nothing.
+        let dials = Arc::clone(&self.primary_dials);
+        let primaries = Arc::clone(&self.primaries);
         Box::pin(async move {
+            dials.fetch_add(1, Ordering::SeqCst);
+            let next = primaries.lock().unwrap().pop_front();
             match next {
                 Some(connection) => connection.outcome(),
                 None => std::future::pending().await,
@@ -753,5 +756,35 @@ async fn re_adding_an_address_while_a_retired_connection_drains_resumes_maintena
     settle().await;
     assert_eq!(view.worker_count(), 1);
     assert!(!next.ended(), "the re-adopted address stays maintained");
+    runtime.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn re_adoption_landing_with_the_last_drain_still_resumes_maintenance() {
+    let old = FakeConnection::new();
+    let new = FakeConnection::new();
+    let dial = FakeDial::with_primary(&old);
+    let (mut controller, mut adapter) =
+        AddressController::for_managed(factory(&dial, Arc::new(SilentAddressWorkerHooks)));
+    let view = controller.view();
+    let runtime = tokio::spawn(async move { controller.run().await });
+    apply(&mut adapter, vec![address()]).await;
+    wait_until(|| view.assignment_convergence() == AssignmentConvergence::Converged).await;
+    dial.script(CandidateScript::Connect(Arc::clone(&new)));
+    old.set_hint(hint(Some(generation()), 0));
+    wait_until(|| old.retired_with().is_some()).await;
+    apply(&mut adapter, Vec::new()).await;
+    new.close();
+    wait_until(|| new.ended()).await;
+    settle().await;
+
+    // The last retired connection ends while the re-adoption applies.
+    let next = FakeConnection::new();
+    dial.add_primary(&next);
+    old.close();
+    apply(&mut adapter, vec![address()]).await;
+    wait_until(|| dial.primary_dials() == 2).await;
+    wait_until(|| view.assignment_convergence() == AssignmentConvergence::Converged).await;
+    assert_eq!(view.worker_count(), 1);
     runtime.abort();
 }

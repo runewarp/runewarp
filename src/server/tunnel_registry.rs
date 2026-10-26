@@ -157,6 +157,12 @@ pub(crate) struct TunnelRegistry {
 }
 
 impl TunnelRegistry {
+    /// Whether new Visitor placement could still be admitted.
+    #[cfg(test)]
+    pub(crate) fn admits_new_visitor_work(&self) -> bool {
+        self.begin_active_visitor_admission().is_some()
+    }
+
     fn begin_active_visitor_admission(&self) -> Option<ActiveVisitorAdmission> {
         let mut inner = self
             .visitor_work
@@ -691,11 +697,10 @@ impl TunnelRegistry {
     /// Each authorized Managed Tunnel ID with its number of open Tunnel connections that have
     /// established a WebTransport session. Static authorization has no Tunnel IDs and reports none.
     pub(crate) async fn reported_tunnel_connections(&self) -> Vec<(String, usize)> {
-        // Same pools-before-authorization lock order as routing keeps indexes aligned.
-        let (pools, snapshot) = {
-            let pools = self.tunnel_pools.read().await;
-            (pools.clone(), self.authorization.current())
-        };
+        // Hold the pools read lock throughout, as routing does, so an Authorization apply cannot
+        // realign or rehome members between reads and count a connection twice or not at all.
+        let pools = self.tunnel_pools.read().await;
+        let snapshot = self.authorization.current();
         let Some(ids) = snapshot.managed_tunnel_ids() else {
             return Vec::new();
         };

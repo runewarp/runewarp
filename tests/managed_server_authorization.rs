@@ -759,11 +759,31 @@ async fn managed_server_state_document_reports_tunnel_connections_and_visitors()
         "exact Server state document {expected}"
     );
 
+    // Moving the identity to t2 rehomes its connection: one document counts it exactly once.
+    let before_move = state_document_count(&harness.control.metrics);
+    harness.push_authorization(
+        "rev-2",
+        &format!(
+            r#"{{"tunnels":[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{second}"]}},{{"id":"t2","public_hostnames":["{API_HOSTNAME}"],"client_identities":["{identity}"]}}]}}"#
+        ),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-2").await;
+    let moved =
+        wait_for_state_document_after(&harness.control.metrics, before_move, "rev-2", |body| {
+            body["revision"] == json!("rev-2")
+        })
+        .await;
+    assert_eq!(moved["tunnels"], json!({"t1": 0, "t2": 1}), "{moved}");
+
     // Closing the connection is a fact change: a new document reports it without a snapshot.
+    let before_close = state_document_count(&harness.control.metrics);
     drop(client);
-    wait_for_state_document(&harness.control.metrics, "t1 disconnected", |body| {
-        body["tunnels"]["t1"] == json!(0) && body["revision"] == json!("rev-1")
-    })
+    wait_for_state_document_after(
+        &harness.control.metrics,
+        before_close,
+        "t2 disconnected",
+        |body| body["tunnels"]["t2"] == json!(0) && body["revision"] == json!("rev-2"),
+    )
     .await;
     harness.shutdown().await;
 }
@@ -1517,6 +1537,21 @@ async fn wait_for_state_document(
     description: &str,
     predicate: impl Fn(&Value) -> bool,
 ) -> Value {
+    wait_for_state_document_after(metrics, 0, description, predicate).await
+}
+
+/// Number of state documents received so far, to wait only for later ones.
+fn state_document_count(metrics: &FixtureMetrics) -> usize {
+    metrics.state_bodies.lock().unwrap().len()
+}
+
+/// Wait for a state document sent after the first `skip` documents that matches `predicate`.
+async fn wait_for_state_document_after(
+    metrics: &FixtureMetrics,
+    skip: usize,
+    description: &str,
+    predicate: impl Fn(&Value) -> bool,
+) -> Value {
     timeout(Duration::from_secs(5), async {
         loop {
             let found = metrics
@@ -1524,6 +1559,7 @@ async fn wait_for_state_document(
                 .lock()
                 .unwrap()
                 .iter()
+                .skip(skip)
                 .rev()
                 .find(|body| predicate(body))
                 .cloned();

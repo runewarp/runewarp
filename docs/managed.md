@@ -285,8 +285,8 @@ Any downlink or state-document failure closes the whole connection. That connect
 
 Control drains a Managed Server by publishing an input with `drain: true`. The drain starts once that input applies, before the state document reports its revision. The Server then:
 
-1. reports `draining: true` and drops **Server readiness**;
-2. refuses new Tunnel connections and new Visitor placement, as graceful shutdown does: it closes its public and Tunnel listeners;
+1. stops admitting new Tunnel connections and new Visitor placement, before any state document reports `draining: true`, so `draining` with zero `visitors` always means no Visitor can still land;
+2. drops **Server readiness** and closes its public and Tunnel listeners, as graceful shutdown does;
 3. sends GOAWAY on every Tunnel connection, so Clients leave it under the Server-drain rules in [`protocol.md`](protocol.md);
 4. lets in-flight Visitors finish within `server.graceful-shutdown-duration`, measured from the start of the drain, then closes the remaining Tunnel connections;
 5. keeps running, applying input, and sending state documents until the process is terminated. `tunnels` falls to `0` per Tunnel as connections close, and `visitors` reaching `0` marks quiescence.

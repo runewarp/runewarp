@@ -82,6 +82,9 @@ impl RoleAdapter for ServerAuthorizationAdapter {
         self.tunnel_events
             .set_replacement_generation(input.replacement_generation);
         if input.drain {
+            // Seal new Tunnel connections and placement before `draining` becomes visible, so
+            // a document reporting `draining` with zero Visitors means no Visitor can still land.
+            self.registry.stop_accepting_new_work();
             self.drain.begin();
         }
         Ok(())
@@ -130,5 +133,41 @@ impl RoleState for ServerReportedState {
 
     fn changed(&self) -> BoxFuture<'_, ()> {
         Box::pin(self.changed.notified())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ServerAuthorizationAdapter, ServerDrain, TunnelRegistry};
+    use crate::managed_session::{RoleAdapter, ServerManagedInput};
+    use crate::tunnel::{ServerRuntimeGeneration, ServerTunnelEvents};
+    use crate::{ServerHostname, ServerTunnelConfig};
+
+    #[tokio::test]
+    async fn a_reported_drain_has_already_sealed_new_placement() {
+        let hostname = ServerHostname::try_from("tunnel.example.test").expect("hostname");
+        let tunnels: Vec<ServerTunnelConfig> = Vec::new();
+        let registry = TunnelRegistry::configured_managed(&hostname, &tunnels).expect("registry");
+        let drain = ServerDrain::new();
+        let mut adapter = ServerAuthorizationAdapter::new(
+            hostname,
+            registry.clone(),
+            ServerTunnelEvents::new(ServerRuntimeGeneration::generate()),
+            drain.clone(),
+        );
+        assert!(registry.admits_new_visitor_work());
+
+        adapter
+            .apply(ServerManagedInput {
+                tunnels,
+                replacement_generation: None,
+                drain: true,
+            })
+            .await
+            .expect("drain applies");
+
+        // `draining` with zero Visitors means quiescent only if no Visitor can still be placed.
+        assert!(drain.is_draining());
+        assert!(!registry.admits_new_visitor_work());
     }
 }

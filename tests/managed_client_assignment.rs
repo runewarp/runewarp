@@ -524,7 +524,8 @@ async fn managed_client_state_document_reports_generations_per_assigned_address(
     })
     .await;
 
-    // Losing the connection is a fact change: the next document drops its generation.
+    // Losing the connection is a fact change: a later document drops its generation.
+    let before_close = harness.control.metrics.state_bodies.lock().unwrap().len();
     server_a.close_remotely().await;
     let disconnected = json!({
         "revision": "cli-7",
@@ -538,6 +539,7 @@ async fn managed_client_state_document_reports_generations_per_assigned_address(
             .lock()
             .unwrap()
             .iter()
+            .skip(before_close)
             .any(|body| body == &disconnected)
     })
     .await;

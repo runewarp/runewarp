@@ -11,7 +11,7 @@ This document describes what Core implements today. Product policy (lifecycle la
 - **Audience:** Control implementers and Core runtime integrators
 - **Session:** one mutually authenticated HTTP/2 connection per Server or Client runtime
 - **Downlink:** one role-specific SSE stream carrying versioned full snapshots
-- **Acknowledgment:** revision-only state writes after successfully handled snapshots; no periodic state heartbeat
+- **Acknowledgment:** state writes carrying the applied revision after successfully handled snapshots, plus the Server's runtime generation on the Server role; no periodic state heartbeat
 - **Role inputs:** Server authorization and Client Server-address assignment use separate schemas
 - **Failure model:** protocol or reporting failure replaces the session; reconnect retains last-applied in-memory state after the first successful apply
 
@@ -21,6 +21,7 @@ This document describes what Core implements today. Product policy (lifecycle la
 | --- | --- |
 | [`architecture.md`](architecture.md) | System shape, data paths, and trust model |
 | [`protocol.md`](protocol.md) | Tunnel/QUIC wire behavior and stream lifecycle |
+| [`sse.md`](sse.md) | SSE profile shared by the downlink and the Tunnel event stream |
 | [`security.md`](security.md) | Authentication and revocation boundaries |
 | [`configuration.md`](configuration.md) | `[control]`, identity directories, and validation |
 | [`usage.md`](usage.md) | Operator workflows and static-first setup |
@@ -94,26 +95,22 @@ Core does not follow redirects, honor `Retry-After`, or attach session IDs / run
 
 | Role | Method | Path | Success | Notes |
 | --- | --- | --- | --- | --- |
-| Server | `GET` | `/v1/server/events` | `200` + `Content-Type: text/event-stream` (optional charset) | `Accept: text/event-stream`; empty body |
+| Server | `GET` | `/v1/server/events` | `200` + `Content-Type: text/event-stream` (optional charset) | Core sends `Accept: text/event-stream`, which Control ignores; empty body |
 | Client | `GET` | `/v1/client/events` | same | same |
-| Server | `PUT` | `/v1/server/state` | `204` with empty body | `Content-Type: application/json`; body `{"revision":"..."}` only |
-| Client | `PUT` | `/v1/client/state` | same | same |
+| Server | `PUT` | `/v1/server/state` | `204` with empty body | `Content-Type: application/json`; body `{"revision":"...","generation":"..."}` |
+| Client | `PUT` | `/v1/client/state` | same | `Content-Type: application/json`; body `{"revision":"..."}` only |
 
 SSE status `204`, redirects, other non-success statuses, missing `Content-Type`, and wrong media types all fail the session and trigger reconnect. A state write that is not exact `204` with an already-ended empty body also fails the session and triggers reconnect.
 
 ## SSE framing
 
-Core uses standard SSE framing, not the browser EventSource connection lifecycle:
+The downlink follows the [SSE profile](sse.md), which owns framing, the line and event-type limits, keepalive and silence timing, delivery, and versioning. Downlink specifics:
 
-- `event:` sets the event type
-- `data:` lines join with `\n`
-- lines starting with `:` are comment keepalives (byte activity only; no event)
-- `id`, `retry`, and unknown fields are ignored
-- empty dispatched events (no type and empty data) are skipped
-- invalid UTF-8, malformed framing, missing required snapshot fields, empty revision, invalid JSON, unknown event types, and input/size limit violations fail the session
-- unfinished line, event-type, and accumulated event-data sizes are enforced incrementally across fragmented HTTP/2 chunks (see [Input and reporting limits](#input-and-reporting-limits))
+- accumulated event data, and so a complete snapshot, is capped at **1 MiB**
+- the first-snapshot deadline starts at connection start, so it also bounds dial, TLS, and opening the SSE request
+- missing required snapshot fields, an empty revision, invalid JSON, and input limit violations fail the session like framing errors do
 
-Every v1 data event must be `event: snapshot`. The first data event on every connection must be a snapshot. V1 never emits patches; patch delivery requires a future protocol version.
+Every v1 data event must be `event: snapshot`. The first data event on every connection must be a snapshot. V1 never emits patches.
 
 ### Snapshot envelope
 
@@ -126,7 +123,7 @@ Every v1 data event must be `event: snapshot`. The first data event on every con
 
 `revision` uses the same opaque-string rules as **Tunnel ID**: non-empty, at most 128 Unicode scalars, no ASCII whitespace or control characters. Core compares equality only.
 
-Unknown JSON fields in a known v1 snapshot are ignored. Behavior-changing fields require a new protocol version.
+Unknown JSON fields in a known v1 snapshot are ignored. Within `/v1/`, Control may add only fields an older Core can safely ignore; any other change needs a new path version.
 
 ### Server `input`
 
@@ -138,7 +135,8 @@ Unknown JSON fields in a known v1 snapshot are ignored. Behavior-changing fields
       "public_hostnames": ["app.example.com"],
       "client_identities": ["4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef"]
     }
-  ]
+  ],
+  "replacement_generation": "fedcba9876543210fedcba9876543210"
 }
 ```
 
@@ -150,6 +148,8 @@ Rules (as implemented):
 - normalized Public hostnames and Client identities must be unique across the whole set
 - cardinality is bounded (see [Input and reporting limits](#input-and-reporting-limits)): at most 4,096 tunnels, 4,096 Public hostnames total / 256 per Tunnel, and 4,096 Client identities total / 64 per Tunnel
 - unknown per-tunnel JSON fields are ignored
+- `replacement_generation` is optional. It is a **Replacement hint** naming another **Server runtime generation** behind the same Server address, as 32 lowercase hexadecimal characters. `null`, another JSON type, or an invalid encoding makes the input `Rejected` and keeps the prior authorization and hint.
+- a `replacement_generation` equal to the Server's own generation means no hint on that runtime, so Control can publish the same input to the old and new runtime. Any other value is advertised on every live Tunnel event stream of that runtime (see [`protocol.md`](protocol.md#tunnel-events)). Omitting or changing the value advertises a new full snapshot.
 
 ### Client `input`
 
@@ -191,28 +191,26 @@ Runtime reconciliation events (no status endpoint):
 | `Superseded` | A queued snapshot was discarded for a newer candidate |
 | `Reconnecting` | The Managed session is replacing the HTTP/2 connection |
 
-A Server revision is acknowledged only after the atomic authorization swap and dispatch of required local revocation work, without awaiting peer closure. A Client revision is acknowledged after Address-controller maintenance intent is replaced, without awaiting DNS, handshake, or connection success.
+A Server revision is acknowledged only after the atomic authorization swap, dispatch of required local revocation work, and publication of the input's replacement hint to Tunnel event streams, without awaiting peer closure or event writes. A Client revision is acknowledged after Address-controller maintenance intent is replaced, without awaiting DNS, handshake, or connection success.
 
 ## State acknowledgment
 
 For each valid snapshot envelope whose revision is newly applied or already matches the applied revision:
 
 1. Apply a new revision, or skip apply when the revision already matches the process's applied revision.
-2. Schedule one `PUT .../state` with body `{"revision":"<applied>"}` off the downlink reconciliation critical path.
+2. Schedule one `PUT .../state` off the downlink reconciliation critical path. The Client body is `{"revision":"<applied>"}`. The Server body is `{"revision":"<applied>","generation":"<own generation>"}`, where `generation` is its **Server runtime generation** in the Tunnel event-stream encoding.
 3. Maintain at most one in-flight state request and one coalesced latest pending revision; newer successful applies replace older pending reports.
 4. Treat exact `204` with an already-ended empty body as acknowledgment success. Non-204 and body-bearing responses are rejected without collecting an unbounded body.
 5. On any state-write failure or deadline miss, replace the whole Managed session while retaining the latest successfully applied revision in memory for re-acknowledgment after reconnect.
 
-Rejected and superseded revisions are never acknowledged. Acknowledgments never include desired revision, **Server readiness**, **Assignment convergence**, rejection reasons, or richer role state. Core sends no periodic state heartbeat; Control health and staleness classification remain outside this protocol. SSE reads, snapshot application, silence/first-snapshot timers, and Authorization revocations stay responsive while a state report is slow or failed.
+Rejected and superseded revisions are never acknowledged. The Server generation is the only role fact an acknowledgment carries. Acknowledgments never include desired revision, **Server readiness**, **Assignment convergence**, rejection reasons, or other role state. Core sends no periodic state heartbeat; Control health and staleness classification remain outside this protocol. SSE reads, snapshot application, silence/first-snapshot timers, and Authorization revocations stay responsive while a state report is slow or failed.
 
 ## Input and reporting limits
 
-Core enforces fixed production limits (injectable smaller values in tests only; no operator configuration or wire negotiation):
+Core enforces fixed production limits (injectable smaller values in tests only; no operator configuration or wire negotiation). The [SSE profile](sse.md#limits) adds its 4 KiB line and 64 B event-type limits:
 
 | Limit | Production default |
 | --- | --- |
-| Unfinished SSE line | **4 KiB** |
-| SSE event type | **64 B** |
 | Accumulated SSE event data / complete snapshot | **1 MiB** |
 | Cumulative decoded allocation | **2 MiB** |
 | Revision / Tunnel ID | **128** Unicode scalars |
@@ -230,13 +228,13 @@ Limit violations fail the entire Managed session and reconnect; Core never parti
 | Window | Value | Notes |
 | --- | --- | --- |
 | First-snapshot deadline | **60 s** from connection start | Bounds dial + TLS + SSE open + first valid snapshot envelope; keepalive comments do not extend it |
-| Silence timeout | **60 s** without any SSE bytes | Reset by any SSE bytes, including `:` comments |
+| Silence timeout | **60 s** without any SSE bytes | Per the [SSE profile](sse.md#timing) |
 | State request deadline | **5 s** | Bounds `PUT .../state` through response headers |
 | State response deadline | **5 s** | Bounds classifying an already-ended bodyless `204` |
-| Control keepalive cadence | Less than **60 s** between SSE bytes | `:` comments keep quiet sessions active; **20 s** is recommended, not required |
+| Control keepalive cadence | Less than **60 s** between SSE bytes | Per the [SSE profile](sse.md#timing); **20 s** is recommended, not required |
 | Reconnect backoff | `1, 2, 3, 5, 8, 12, 18, 27, 41, 60` s | Full jitter over `0..window`; same policy as Tunnel reconnect |
 
-Any downlink or state-acknowledgment failure closes the whole connection. Reconnect backoff resets after a valid snapshot envelope establishes the new session, even when its role input is later rejected. On reconnection, the first fresh full snapshot must confirm currency: an equal already-applied revision is acknowledged without reconciliation churn.
+Any downlink or state-acknowledgment failure closes the whole connection. That connection carries only the downlink and its acknowledgments, so replacing it costs no traffic. A Tunnel event-stream failure only resubscribes, because the Tunnel connection carries live Visitors. Reconnect backoff resets after a valid snapshot envelope establishes the new session, even when its role input is later rejected. On reconnection, the first fresh full snapshot must confirm currency: an equal already-applied revision is acknowledged without reconciliation churn.
 
 ## Managed Server behavior
 
@@ -292,7 +290,7 @@ Before the first successful apply, remote and protocol failures keep the process
 
 ```text
 event: snapshot
-data: {"revision":"srv-42","input":{"tunnels":[{"id":"550e8400-e29b-41d4-a716-446655440000","public_hostnames":["app.example.com"],"client_identities":["4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef"]}]}}
+data: {"revision":"srv-42","input":{"tunnels":[{"id":"550e8400-e29b-41d4-a716-446655440000","public_hostnames":["app.example.com"],"client_identities":["4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef"]}],"replacement_generation":"fedcba9876543210fedcba9876543210"}}
 
 ```
 
@@ -314,6 +312,14 @@ data: {"revision":"cli-7","input":{"server_addresses":["tunnel.example.com"]}}
 ### Applied-state acknowledgment
 
 ```http
+PUT /v1/server/state HTTP/2
+Host: control.example.com
+Content-Type: application/json
+
+{"revision":"srv-42","generation":"0123456789abcdef0123456789abcdef"}
+```
+
+```http
 PUT /v1/client/state HTTP/2
 Host: control.example.com
 Content-Type: application/json
@@ -329,6 +335,7 @@ Successful response: `204` with an empty body.
 | --- | --- | --- |
 | `event: patch` | Session failure → reconnect | Black-box / integration fixtures |
 | Client `server_addresses` containing an IP literal | `Rejected`; SSE stays open | `tests/managed_session_apply.rs` |
+| Server `replacement_generation` in uppercase hex | `Rejected`; prior authorization and hint retained | `tests/managed_server_authorization.rs` |
 | SSE response `307` redirect | Session failure → reconnect (redirects not followed) | `tests/managed_session_downlink.rs` |
 | State response `500` | Session failure → reconnect; equal first snapshot is re-acknowledged without re-apply | `tests/managed_session_apply.rs` |
 | 60 s silence after first snapshot | Session failure → reconnect | `tests/managed_session_downlink.rs` |
@@ -347,18 +354,19 @@ Label each requirement as **Control must** (wire contract Control implements) or
 - [ ] Negotiate HTTP/2 (`h2`); reject HTTP/1.1-only peers
 - [ ] Expose exact paths `/v1/server/events`, `/v1/client/events`, `/v1/server/state`, `/v1/client/state`
 - [ ] Accept exactly one SSE downlink per connection for the matching role path
-- [ ] Respond to SSE with status `200` and `Content-Type: text/event-stream`
+- [ ] Respond to SSE with status `200` and `Content-Type: text/event-stream`, ignoring `Accept`
 - [ ] Emit `event: snapshot` full documents only (no v1 patches)
 - [ ] Send a current full snapshot as the first data event on every connection
 - [ ] Use non-empty opaque `revision` values that identify immutable complete inputs (max 128 Unicode scalars; no ASCII whitespace or controls)
 - [ ] Require unique opaque `tunnels[].id` (**Tunnel ID**) on every managed Server tunnel (same opaque-string rules as revision)
 - [ ] Use plural-only Server fields `tunnels[].public_hostnames` / `tunnels[].client_identities` and Client field `server_addresses`
 - [ ] Allow empty overall `tunnels` / `server_addresses` collections
+- [ ] Send Server `replacement_generation` only as 32 lowercase hexadecimal characters, and omit it when there is no hint
 - [ ] Emit SSE comment keepalives often enough that silence stays under 60 s (20 s cadence recommended)
 - [ ] Accept state `PUT` only after the matching downlink is active on that connection
 - [ ] Respond to successful state writes with exact `204` and an already-ended empty body
-- [ ] Keep snapshots within Core's documented size and cardinality limits (4 KiB SSE line, 64 B event type, 1 MiB snapshot / event data, 2 MiB decoded allocation, 4,096 tunnels, 4,096/256 Public hostnames, 4,096/64 Client identities, 256 Server addresses)
-- [ ] Treat state body as revision-only; ignore unknown future keys defensively if you add none today
+- [ ] Keep snapshots within Core's documented size and cardinality limits ([SSE profile](sse.md#limits) 4 KiB line and 64 B event type, 1 MiB snapshot / event data, 2 MiB decoded allocation, 4,096 tunnels, 4,096/256 Public hostnames, 4,096/64 Client identities, 256 Server addresses)
+- [ ] Accept Server state bodies `{"revision","generation"}` and Client state bodies `{"revision"}`; ignore unknown keys
 - [ ] Do not rely on Core following redirects or honoring `Retry-After`
 - [ ] Do not rely on SSE `id` / `retry` / Last-Event-ID replay
 
@@ -377,7 +385,8 @@ Label each requirement as **Control must** (wire contract Control implements) or
 - [ ] Maintain managed Client assignments independently per address; Retire removals without local close; re-adopt on re-add
 - [ ] Keep applied state memory-only across process restart
 - [ ] Keep the Managed session active through Server graceful drain until final process exit
-- [ ] Leave desired-versus-applied drift comparison and health classification to Control; acknowledge only the applied revision
+- [ ] Leave desired-versus-applied drift comparison and health classification to Control; acknowledge only the applied revision and, on the Server, its runtime generation
+- [ ] Suppress a Server `replacement_generation` equal to the Server's own generation; publish any other hint to Tunnel event streams before acknowledging the revision
 
 ## Outside the Core contract
 
@@ -389,4 +398,4 @@ The following remain outside this contract and must not be assumed from Core:
 - Lifecycle classification, capacity ownership, and Terraform/provider drain orchestration
 - v1 patch events, capability negotiation, HTTP/3 Control, and browser EventSource compatibility
 
-Infrastructure drain uses Core's existing graceful process shutdown path. Managed input adds no drain field, SSE event, or state-acknowledgment field.
+Infrastructure drain uses Core's existing graceful process shutdown path. Managed input adds no drain-specific field, SSE event, or state-acknowledgment field.

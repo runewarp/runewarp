@@ -85,7 +85,7 @@ Each **Client instance** establishes one long-lived QUIC connection per effectiv
 3. Negotiate QUIC with ALPN `h3`.
 4. Validate the Server certificate for that **Server address**'s **Server hostname**, using either system trust or `client.server-trust = "ca-file"` with an exclusive CA bundle.
 5. Present the Client certificate and authenticate one of the Tunnel's pinned `client-identity` values from its public key.
-6. Start HTTP/3 with Extended CONNECT, WebTransport draft07 and H3 Datagrams enabled in both peers' SETTINGS. The Client opens a bodyless `GET /v1/tunnel/events` and waits for the first valid state with a supported protocol version. No Runewarp-specific SETTINGS marker is sent or required.
+6. Start HTTP/3 with Extended CONNECT, WebTransport draft07 and H3 Datagrams enabled in both peers' SETTINGS. The Client opens a bodyless `GET /v1/tunnel/events` and waits for the first valid snapshot. No Runewarp-specific SETTINGS marker is sent or required.
 7. After that gate, establish exactly one WebTransport session with Extended CONNECT to `https://<Server hostname>/v1/tunnel/session`. Only then reserve permits and offer Visitor credit and return a successful connection attempt. A failed gate, negotiation or CONNECT is an ordinary attempt failure under the same retry policy. Static Client readiness and Managed Assignment convergence count only connections with an established WebTransport session.
 
 Rules:
@@ -95,7 +95,7 @@ Rules:
 - reconnect attempts re-resolve the hostname portion of each effective **Server address** every time, including the first jittered retry window
 - every attempt reloads the selected system or exclusive-CA trust roots and the Client certificate/key; exclusive-CA mode never loads or combines system roots
 - QUIC handshakes time out after **10 seconds** on both sides; Server HTTP/3 establishment shares that handshake deadline and admission permit
-- the Client allows **60 seconds** for the first valid event-stream state after HTTP/3 setup, then **60 seconds** for WebTransport negotiation and CONNECT
+- the Client allows **60 seconds** for the first valid event-stream snapshot after HTTP/3 setup, then **60 seconds** for WebTransport negotiation and CONNECT
 - idle timeout is **60 seconds**
 - only the Client sends QUIC keepalive pings, every **20 seconds**
 - both peers advertise a **16 KiB decoded HTTP/3 field-section limit**, with **64 MiB connection receive credit** and **1,250,000 bytes of stream receive credit**
@@ -130,17 +130,25 @@ With no budget permit, credit maintenance waits and emits saturation warnings at
 
 ## Tunnel events
 
-`GET /v1/tunnel/events` targets the Server hostname's HTTPS origin and ends its request with FIN, without DATA or trailers. The response is `200`, `content-type: text/event-stream`, and `cache-control: no-store`. Its first SSE event has type `state` and JSON data with exactly the currently defined fields:
+The Tunnel event stream follows the [SSE profile](sse.md). That document owns framing, the line and event-type limits, keepalive and silence timing, delivery, and versioning. This section covers only what is specific to the Tunnel link.
+
+`GET /v1/tunnel/events` targets the Server hostname's HTTPS origin and ends its request with FIN, without DATA or trailers. The Client sends `Accept: text/event-stream`; the Server ignores `Accept`. The response is `200`, `content-type: text/event-stream`, and `cache-control: no-store`. Every data event has type `snapshot` and JSON data with the Server's full current state:
 
 ```text
-event: state
-data: {"version":1,"generation":"0123456789abcdef0123456789abcdef"}
+event: snapshot
+data: {"generation":"0123456789abcdef0123456789abcdef","replacement_generation":"fedcba9876543210fedcba9876543210"}
 
 ```
 
-`version` must be `1`; `generation` is an opaque, fresh random value per Server runtime, encoded as 32 lowercase hexadecimal characters. Unknown state fields are ignored. State carries no configuration or credentials. There is no event history, `Last-Event-ID`, polling, or application acknowledgment. A new subscription supersedes the old one and starts with the full current state. Quiet subscriptions receive `: keepalive` comments every **20 seconds**. A blocked Server event write is cancelled after **60 seconds**. SSE lines and event data are capped at **4 KB**, and event names at **64 bytes**.
+`generation` is required. It is an opaque, fresh random value per Server runtime, encoded as 32 lowercase hexadecimal characters. `replacement_generation` is an optional **Replacement hint** with the same encoding. When present, it names another Server runtime generation behind the same Server address; absent means no hint. `null`, another JSON type, or an invalid encoding makes the snapshot malformed. Unknown fields are ignored. Snapshots carry no configuration, addresses, or credentials.
 
-The Client waits at most **60 seconds** for a subscription's first valid state; keepalive comments do not satisfy that gate. After a stream end, failure, or **60 seconds of silence**, it waits **one second** and resubscribes while the connection remains usable and GOAWAY permits requests. A malformed or unsupported state, unexpected event type, or changed generation on the same connection closes the connection with `H3_GENERAL_PROTOCOL_ERROR`.
+The Server writes the initial snapshot, then a new full snapshot whenever the advertised hint changes. All Tunnel connections on one Server runtime follow the same current snapshot. Each subscription holds at most one pending snapshot: a change published while a write is blocked replaces any unwritten one, so the next write carries only the latest snapshot. A blocked Server event write is cancelled after **60 seconds**. A new subscription supersedes the old one and starts with the current snapshot. Event data is capped at **4 KiB**.
+
+Static Servers never send a hint. In Managed mode, Control supplies the hint in the Server input; a value equal to the Server's own generation is not advertised (see [`managed.md`](managed.md#server-input)). Clients accept hints and take no action on them.
+
+The first-snapshot deadline starts after HTTP/3 setup. After a stream end, failure, or **60 seconds of silence**, the Client waits **one second** and resubscribes while the connection remains usable and GOAWAY permits requests. A malformed snapshot, unexpected event type, or changed generation on the same connection closes the connection with `H3_GENERAL_PROTOCOL_ERROR`.
+
+A Tunnel subscription failure only resubscribes; it never replaces the connection. The Tunnel connection carries live Visitor streams, and the event stream holds no state those Visitors depend on, so closing the connection would cost traffic and gain nothing. A Managed-session downlink failure replaces the whole HTTP/2 connection instead, because that connection carries only the downlink and its acknowledgments.
 
 Oversized request header sections receive bodyless `431` before request-handler work is spawned; the connection remains usable. Signaling host mismatches receive bodyless `421`; unknown paths receive `404`; another method on the events resource receives `405` with `Allow: GET`, and on the withdrawal resource `405` with `Allow: PUT`. Validly declared positive content, otherwise valid DATA content, or trailers on a bodyless signaling request receive `400`. Malformed messages use the applicable HTTP/3 error, including `H3_MESSAGE_ERROR` for invalid content length. Bodyless-request intake has a **5-second** deadline from request headers and returns `408` on expiry. After a withdrawal `400` or `408`, the Server stops any still-open request intake without resetting the completed response.
 
@@ -249,7 +257,7 @@ When more than one authenticated connection is live for the same **Tunnel** on o
 
 ## Managed-session Control protocol
 
-In **Managed mode**, each Server or Client runtime opens one mutually authenticated HTTP/2 **Managed session** to the configured **Control address**: one role-specific SSE downlink (`GET /v1/server/events` or `GET /v1/client/events`) plus one revision-only state acknowledgment (`PUT /v1/server/state` or `PUT /v1/client/state`) for each successfully handled snapshot on the same connection.
+In **Managed mode**, each Server or Client runtime opens one mutually authenticated HTTP/2 **Managed session** to the configured **Control address**: one role-specific SSE downlink (`GET /v1/server/events` or `GET /v1/client/events`) plus one state acknowledgment (`PUT /v1/server/state` or `PUT /v1/client/state`) for each successfully handled snapshot on the same connection. The downlink follows the same [SSE profile](sse.md) as the Tunnel event stream.
 
 The 60-second first-snapshot/silence windows and Tunnel reconnect backoff apply as documented in [`managed.md`](managed.md). Quiet SSE downlinks use Control-owned comment keepalives; Core sends no periodic state heartbeat. That document is the canonical Core contract for endpoints, SSE framing, input schemas, revision semantics, Server authorization, Client assignment/Retiring, failure taxonomy, wire examples, and Control interoperability.
 

@@ -28,8 +28,12 @@ _Avoid_: Tunnel, route
 An opaque value identifying one running process of a **Server**. A new value is generated at every start; it is not a credential, certificate, or enrollment identity, and only distinguishes one incarnation of the same Server from another.
 _Avoid_: Server version, instance ID, Blue/Green
 
+**Replacement hint**:
+An optional **Server runtime generation** that a **Server** advertises on its **Tunnel event stream** to name another runtime behind the same **Server address**. It carries no address, credential, or configuration. In **Managed mode**, Control sets it in the Server input; a hint naming the Server's own generation is not advertised. Static Servers never send one.
+_Avoid_: redirect, migration target, failover address
+
 **Tunnel event stream**:
-The Client-opened HTTP/3 Server-Sent Events subscription on one **Tunnel connection** through which the **Server** sends its full current state: protocol version and **Server runtime generation**. Its first valid state is the compatibility gate; it never carries configuration.
+The Client-opened HTTP/3 Server-Sent Events subscription on one **Tunnel connection** through which the **Server** sends full snapshots of its current state: its **Server runtime generation** and any **Replacement hint**. Its first valid snapshot is the compatibility gate; it never carries configuration.
 _Avoid_: control channel, association SSE, Managed session
 
 **Visitor stream**:

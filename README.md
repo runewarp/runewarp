@@ -131,6 +131,7 @@ A simple, open-source client/server tunneling tool whose config model and simple
 
 - [Tunnel protocol](docs/protocol.md) — Tunnel wire behavior and runtime invariants
 - [Managed-session protocol](docs/managed.md) — normative Control contract and interoperability checklist
+- [SSE profile](docs/sse.md) — event-stream rules shared by the Tunnel and Managed-session links
 
 ### Contributors and maintainers
 

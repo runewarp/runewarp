@@ -23,7 +23,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
     ApplyError, ClientManagedInput, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
     ManagedSession, ManagedSessionEvent, ManagedSessionLimits, ManagedSessionRole, RoleAdapter,
-    SessionMaterial, parse_client_input,
+    ServerManagedInput, SessionMaterial, parse_client_input, parse_server_input,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -59,6 +59,7 @@ struct FixtureMetrics {
     tls_accepts: AtomicUsize,
     request_paths: Mutex<Vec<String>>,
     state_bodies: Mutex<Vec<Value>>,
+    state_raw_bodies: Mutex<Vec<Bytes>>,
     state_statuses: Mutex<Vec<u16>>,
     concurrent_streams: AtomicUsize,
     max_concurrent_streams: AtomicUsize,
@@ -71,6 +72,7 @@ impl FixtureMetrics {
             tls_accepts: AtomicUsize::new(0),
             request_paths: Mutex::new(Vec::new()),
             state_bodies: Mutex::new(Vec::new()),
+            state_raw_bodies: Mutex::new(Vec::new()),
             state_statuses: Mutex::new(Vec::new()),
             concurrent_streams: AtomicUsize::new(0),
             max_concurrent_streams: AtomicUsize::new(0),
@@ -283,6 +285,7 @@ async fn handle_request(
         let body = request.collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
         metrics.state_bodies.lock().unwrap().push(parsed);
+        metrics.state_raw_bodies.lock().unwrap().push(body);
 
         let behavior = behavior.lock().unwrap().clone();
         let (fail, hang, body_bearing, hold) = match behavior {
@@ -472,6 +475,89 @@ impl RoleAdapter for GatedAdapter {
     }
 }
 
+/// Server-role adapter that reports its runtime generation in every acknowledgment.
+struct GenerationReportingAdapter;
+
+const REPORTED_GENERATION: &str = "0123456789abcdef0123456789abcdef";
+
+impl RoleAdapter for GenerationReportingAdapter {
+    type Input = ServerManagedInput;
+
+    fn parse_input(
+        input: Value,
+        limits: &runewarp::ManagedSessionLimits,
+    ) -> Result<Self::Input, runewarp::InputError> {
+        parse_server_input(input, limits)
+    }
+
+    async fn apply(&mut self, _input: Self::Input) -> Result<(), ApplyError> {
+        Ok(())
+    }
+
+    fn acknowledgment_fields(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("generation", REPORTED_GENERATION.to_owned()),
+            // A role cannot replace the session-owned revision.
+            ("revision", "spoofed".to_owned()),
+        ]
+    }
+}
+
+#[tokio::test]
+async fn role_acknowledgment_fields_follow_the_revision_in_the_exact_payload() {
+    let material = generate_control_mtls_material("runewarp-server-a");
+    let fixture =
+        ControlFixture::start(&material, vec![snapshot_sse("srv-42", "{\"tunnels\":[]}")]).await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Server,
+        session_material,
+    )
+    .unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(&mut GenerationReportingAdapter, |_| async {}, async {
+                let _ = stop_rx.await;
+            })
+            .await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !fixture.metrics.state_raw_bodies.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("expected a state acknowledgment");
+
+    assert_eq!(
+        fixture.metrics.state_raw_bodies.lock().unwrap()[0],
+        Bytes::from(format!(
+            r#"{{"revision":"srv-42","generation":"{REPORTED_GENERATION}"}}"#
+        ))
+    );
+    assert!(
+        fixture
+            .metrics
+            .request_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path == &format!("PUT {SERVER_STATE_PATH}"))
+    );
+
+    let _ = stop_tx.send(());
+    runner.await.unwrap();
+    fixture.shutdown().await;
+}
+
 #[tokio::test]
 async fn apply_acknowledges_revision_on_same_connection_with_exact_payload() {
     let material = generate_control_mtls_material("runewarp-client-a");
@@ -534,9 +620,8 @@ async fn apply_acknowledges_revision_on_same_connection_with_exact_payload() {
     .expect("expected immediate state acknowledgment");
 
     {
-        let bodies = fixture.metrics.state_bodies.lock().unwrap();
-        assert_eq!(bodies[0], serde_json::json!({"revision":"rev-1"}));
-        assert_eq!(bodies[0].as_object().unwrap().len(), 1);
+        let bodies = fixture.metrics.state_raw_bodies.lock().unwrap();
+        assert_eq!(bodies[0], Bytes::from_static(br#"{"revision":"rev-1"}"#));
         let statuses = fixture.metrics.state_statuses.lock().unwrap();
         assert_eq!(statuses[0], 204);
         let paths = fixture.metrics.request_paths.lock().unwrap();

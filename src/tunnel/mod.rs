@@ -4,7 +4,7 @@
 //! `runewarp/h3` fork's HTTP/3 and WebTransport drivers over Quinn and rustls:
 //!
 //! - ALPN `h3` with a required, pinned Client identity certificate and no application 0-RTT;
-//! - the Tunnel event stream, a Client-opened `GET /v1/tunnel/events` whose first valid `state`
+//! - the Tunnel event stream, a Client-opened `GET /v1/tunnel/events` whose first valid `snapshot`
 //!   event is the compatibility gate (there is no Runewarp-specific SETTINGS marker);
 //! - one draft07 WebTransport session after that gate, carrying Server-opened Visitor streams;
 //! - Client placement withdrawal, a bodyless `PUT /v1/tunnel/withdrawal` answered with a delayed
@@ -41,7 +41,7 @@ pub use config::{
     make_client_tunnel_h3_config, make_server_tunnel_h3_config,
     make_server_tunnel_h3_config_with_resolver,
 };
-pub use events::{ServerRuntimeGeneration, TUNNEL_PROTOCOL_VERSION, TunnelEventState};
+pub use events::{ServerRuntimeGeneration, ServerTunnelEvents, TunnelEventState};
 pub use server::{OpenTunnelStreamError, ServerTunnelH3};
 pub use stream::{
     ClientTunnelStream, ServerTunnelStream, TunnelReadHalf, TunnelStream, TunnelWriteHalf,
@@ -74,7 +74,7 @@ pub(crate) struct TunnelH3Timing {
     pub keepalive_comment_interval: Duration,
     /// Server bound for one event-stream write blocked by flow control.
     pub blocked_write_deadline: Duration,
-    /// Client bound for receiving the first valid state of a subscription.
+    /// Client bound for receiving the first valid snapshot of a subscription.
     pub initial_state_deadline: Duration,
     /// Client bound for silence on an established subscription.
     pub silence_deadline: Duration,

@@ -87,10 +87,10 @@ async fn complete_authorized_tunnel_handshake(
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"))?
             .map_err(io::Error::other)?;
-        let tunnel = runewarp::tunnel_h3::ServerTunnelH3::establish(
+        let tunnel = runewarp::tunnel::ServerTunnelH3::establish(
             connection,
             runewarp::ServerHostname::try_from("tunnel.example.test").unwrap(),
-            runewarp::tunnel_h3::ServerRuntimeGeneration::generate(),
+            runewarp::tunnel::ServerRuntimeGeneration::generate(),
         )
         .await
         .map_err(io::Error::other)?;

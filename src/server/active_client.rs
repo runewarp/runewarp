@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use crate::tunnel_h3::ServerTunnelH3;
+use crate::tunnel::ServerTunnelH3;
 use tokio::sync::RwLock;
 use tokio::task::AbortHandle;
 
@@ -343,7 +343,7 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
 
-    use crate::tunnel_h3::{
+    use crate::tunnel::{
         ServerTunnelH3,
         test_support::{ClientPeer, establish_peers, test_server_h3_config},
     };

@@ -6,7 +6,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::tunnel_h3::ServerTunnelH3;
+use crate::tunnel::ServerTunnelH3;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable, Aborted};
 use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock};
 
@@ -749,7 +749,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::tunnel_h3::{
+    use crate::tunnel::{
         ServerTunnelH3,
         test_support::{ClientPeer, establish_peers, test_server_h3_config},
     };

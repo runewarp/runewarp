@@ -6,12 +6,13 @@
 use std::fmt;
 use std::future::{Future, pending};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::Instant;
 
 use super::adapter::{ApplyError, RoleAdapter};
-use super::connection::{ConnectionError, ManagedSessionConnection};
+use super::connection::{AcknowledgmentFields, ConnectionError, ManagedSessionConnection};
 use super::input::InputError;
 use super::limits::{ManagedSessionLimitKind, ManagedSessionLimits};
 use super::reconcile::{AppliedRevision, QueuedSnapshot, SnapshotQueue};
@@ -83,6 +84,7 @@ pub(super) struct ConnectionLifecycle<I> {
     received_valid_snapshot: bool,
     queue: SnapshotQueue<I>,
     report: ReportState,
+    acknowledgment_fields: AcknowledgmentFields,
     limits: ManagedSessionLimits,
 }
 
@@ -110,6 +112,7 @@ impl<I> ConnectionLifecycle<I> {
             received_valid_snapshot: false,
             queue: SnapshotQueue::new(),
             report: ReportState::default(),
+            acknowledgment_fields: Arc::new([]),
             limits,
         })
     }
@@ -125,6 +128,7 @@ impl<I> ConnectionLifecycle<I> {
         F: FnMut(ManagedSessionEvent) -> Fut,
         Fut: Future<Output = ()>,
     {
+        self.acknowledgment_fields = adapter.acknowledgment_fields().into();
         let result = self.run_state_machine(adapter, applied, on_event).await;
         ConnectionRun {
             result,
@@ -376,20 +380,22 @@ impl<I> ConnectionLifecycle<I> {
             self.report.pending = Some(revision);
             return;
         }
-        self.report.in_flight = Some(
-            self.connection
-                .begin_put_applied_revision(&revision, &self.limits),
-        );
+        self.report.in_flight = Some(self.connection.begin_put_applied_revision(
+            &revision,
+            &self.acknowledgment_fields,
+            &self.limits,
+        ));
     }
 
     fn drive_report(&mut self) {
         if self.report.in_flight.is_none()
             && let Some(revision) = self.report.pending.take()
         {
-            self.report.in_flight = Some(
-                self.connection
-                    .begin_put_applied_revision(&revision, &self.limits),
-            );
+            self.report.in_flight = Some(self.connection.begin_put_applied_revision(
+                &revision,
+                &self.acknowledgment_fields,
+                &self.limits,
+            ));
         }
     }
 

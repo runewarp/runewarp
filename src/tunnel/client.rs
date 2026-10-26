@@ -28,7 +28,7 @@ type ClientRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
 /// Client-owned HTTP/3 Tunnel connection whose Server passed the event-stream gate.
 ///
-/// Establishment waits for the Server's first valid state and WebTransport session CONNECT, so a
+/// Establishment waits for the Server's first valid snapshot and WebTransport session CONNECT, so a
 /// caller may offer availability as soon as it holds this handle. The subscription follows the
 /// connection lifetime: it resubscribes after an end, failure, or silence while the connection
 /// remains usable, and stops once GOAWAY forbids new requests. An incompatible event or a changed
@@ -580,7 +580,7 @@ fn close_after_failure(connection: &quinn::Connection, error: &TunnelH3Error) {
     close_connection(connection, code);
 }
 
-/// Open one subscription and read until its first valid state.
+/// Open one subscription and read until its first valid snapshot.
 ///
 /// Comment keepalives before the first state do not satisfy the gate.
 async fn subscribe(
@@ -588,6 +588,7 @@ async fn subscribe(
     events_uri: &str,
 ) -> Result<(TunnelEventState, EventSubscription), TunnelH3Error> {
     let request = Request::get(events_uri)
+        .header(header::ACCEPT, "text/event-stream")
         .body(())
         .map_err(|_| TunnelH3Error::Incompatible("invalid-server-hostname"))?;
     let mut stream = send_request

@@ -8,9 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Added Client placement withdrawal and graceful Client shutdown: the Client withdraws every Tunnel connection with `PUT /v1/tunnel/withdrawal`, lets in-flight Visitors finish under the new `client.graceful-shutdown-duration` deadline (default `60s`), and escalates to fast shutdown on a second `Ctrl-C` or `SIGQUIT`. Unconfirmed drains log a warning; a Server that violates the withdrawal protocol makes the Client exit nonzero. Servers stop placing Visitors on a withdrawn connection, confirm with `204` once its Visitors finish, and close it five seconds later if the Client has not. Upgrade Servers with or before Clients: an older Server rejects withdrawal, which fails graceful Client shutdown. (#271)
+- Added Server replacement hints. A Managed Server input may name a `replacement_generation`, and the Server advertises it on every Tunnel event stream; a hint naming the Server's own generation is not advertised, and an invalid one rejects the input. Static Servers send no hints, and Clients accept hints without acting on them yet. (#272)
 
 ### Changed
 
+- Changed the Tunnel event stream to send `event: snapshot` instead of `event: state`, dropped the in-band `version` field (the `/v1/` path governs versioning), and made Clients send `Accept: text/event-stream`. The Managed Server state acknowledgment now also carries the Server's `generation`. This is a breaking lockstep Tunnel and Managed-session protocol change; upgrade Clients, Servers, and Control together. (#272)
+- Renamed the `runewarp::tunnel_h3` library module to `runewarp::tunnel` and removed `TUNNEL_PROTOCOL_VERSION`; `ServerTunnelH3::establish` now takes a `ServerTunnelEvents` source or a `ServerRuntimeGeneration`. (#272)
 - Raised the default shared Client Visitor budget to 16,384 and Server maxima to 65,536 active routed streams and 4,096 pending opens. Unix Client and Server startup raise the soft fd limit where possible and reduce effective Visitor capacities with one warning when descriptors are insufficient. Single-release recovery at saturation remains a known alpha availability limitation tracked in #267. (#266)
 - Replaced HTTP/3 receive slots with Server-opened WebTransport Visitor streams, with 256 permit-backed idle credits per connection and a shared 1,024-Visitor Client budget. Graceful Server shutdown now releases idle credits on WebTransport DRAIN and waits for Client Visitor completion before ending the session. This is a breaking lockstep Tunnel protocol upgrade; Clients and Servers must upgrade together. (#265)
 - Required Clients to establish one WebTransport draft07 session on every Tunnel connection, closing the whole connection when its WebTransport session ends while receive slots continue carrying Visitors. This is a breaking lockstep Tunnel protocol upgrade; Clients and Servers must upgrade together. (#264)
@@ -69,7 +72,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
-- Removed the `runewarp/1` Rust configuration builders, `RUNEWARP_ALPN`, and `MAX_SERVER_OPENED_BIDI_STREAMS`; use the `tunnel_h3` configuration and connection APIs. (#250)
+- Removed the `runewarp/1` Rust configuration builders, `RUNEWARP_ALPN`, and `MAX_SERVER_OPENED_BIDI_STREAMS`; use the `tunnel` configuration and connection APIs. (#250)
 
 ## [0.2.0] - 2026-06-30
 

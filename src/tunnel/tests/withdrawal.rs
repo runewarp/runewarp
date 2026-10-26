@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
 use super::*;
-use crate::tunnel_h3::{
+use crate::tunnel::{
     OpenTunnelStreamError, ProtocolFailure, TUNNEL_WITHDRAWAL_PATH, UnconfirmedDrain,
     WithdrawalOutcome,
 };

@@ -13,12 +13,15 @@ use serde_json::Value;
 use super::limits::{ManagedSessionLimitKind, ManagedSessionLimits};
 
 use crate::config::ServerTunnelConfig;
+use crate::tunnel::ServerRuntimeGeneration;
 use crate::{ClientIdentity, PublicHostname, ServerAddress, TunnelId};
 
 /// Validated Server role input from a Managed-session snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServerManagedInput {
     pub tunnels: Vec<ServerTunnelConfig>,
+    /// Replacement hint to advertise on Tunnel event streams; `None` clears it.
+    pub replacement_generation: Option<ServerRuntimeGeneration>,
 }
 
 /// Validated Client role input from a Managed-session snapshot.
@@ -101,6 +104,22 @@ pub fn parse_server_input(
         }
     }
 
+    let replacement_generation = match input.get("replacement_generation") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .and_then(ServerRuntimeGeneration::parse)
+                .ok_or_else(|| {
+                    InputError::InvalidShape(
+                        "server input replacement_generation was not 32 lowercase hexadecimal \
+                         characters"
+                            .into(),
+                    )
+                })?,
+        ),
+    };
+
     let raw: RawServerInput = serde_json::from_value(input).map_err(|_| {
         InputError::InvalidShape("server input was not a JSON object with tunnel entries".into())
     })?;
@@ -125,7 +144,10 @@ pub fn parse_server_input(
     validate_unique_public_hostnames(&tunnels)?;
     validate_unique_client_identities(&tunnels)?;
 
-    Ok(ServerManagedInput { tunnels })
+    Ok(ServerManagedInput {
+        tunnels,
+        replacement_generation,
+    })
 }
 
 /// Parse and validate Client snapshot `input`.
@@ -369,7 +391,44 @@ mod tests {
     #[test]
     fn server_input_accepts_empty_tunnels() {
         let input = parse_server_input(json!({"tunnels": []}), &default_limits()).unwrap();
-        assert_eq!(input, ServerManagedInput { tunnels: vec![] });
+        assert_eq!(
+            input,
+            ServerManagedInput {
+                tunnels: vec![],
+                replacement_generation: None,
+            }
+        );
+    }
+
+    #[test]
+    fn server_input_accepts_an_optional_replacement_generation() {
+        let input = parse_server_input(
+            json!({"tunnels": [], "replacement_generation": "fedcba9876543210fedcba9876543210"}),
+            &default_limits(),
+        )
+        .unwrap();
+        assert_eq!(
+            input.replacement_generation.map(|value| value.to_string()),
+            Some("fedcba9876543210fedcba9876543210".to_owned())
+        );
+    }
+
+    #[test]
+    fn server_input_rejects_an_invalid_replacement_generation() {
+        for value in [
+            json!(null),
+            json!(7),
+            json!(["fedcba9876543210fedcba9876543210"]),
+            json!("fedcba98"),
+            json!("FEDCBA9876543210FEDCBA9876543210"),
+        ] {
+            let error = parse_server_input(
+                json!({"tunnels": [], "replacement_generation": value}),
+                &default_limits(),
+            )
+            .unwrap_err();
+            assert!(matches!(error, InputError::InvalidShape(_)), "{value}");
+        }
     }
 
     #[test]
@@ -395,7 +454,8 @@ mod tests {
                     authorized_client_identities: vec![
                         IDENTITY_A.parse::<ClientIdentity>().unwrap()
                     ],
-                }]
+                }],
+                replacement_generation: None,
             }
         );
     }

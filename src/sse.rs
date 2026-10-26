@@ -1,6 +1,7 @@
 //! Server-Sent Events framing shared by Managed-session downlinks and the Tunnel event stream.
 //!
-//! Parses the standard SSE wire format. Comment keepalives are reported as activity but never
+//! Implements the framing half of Runewarp's SSE profile (`docs/sse.md`). Parses the standard SSE
+//! wire format. Comment keepalives are reported as activity but never
 //! dispatch an event. `id` and `retry` fields are accepted and ignored so they cannot steer
 //! revision or reconnect behavior. Line, event-type, and accumulated data sizes are enforced
 //! incrementally across fragmented chunks.
@@ -233,6 +234,29 @@ mod tests {
             vec![SseParseItem::Event(super::SseEvent {
                 event_type: Some("snapshot".to_owned()),
                 data: "{\"revision\":\"rev-1\",\"input\":{}}".to_owned(),
+            })]
+        );
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored() {
+        let mut parser = SseParser::new(DEFAULT_LIMITS);
+        let items = parser
+            .push(
+                b"future: value
+bare
+event: snapshot
+data: {}
+
+",
+            )
+            .unwrap();
+
+        assert_eq!(
+            items,
+            vec![SseParseItem::Event(super::SseEvent {
+                event_type: Some("snapshot".to_owned()),
+                data: "{}".to_owned(),
             })]
         );
     }

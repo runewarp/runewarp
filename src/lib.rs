@@ -29,8 +29,8 @@ mod sse;
 mod startup;
 mod tls_material;
 mod trust;
+pub mod tunnel;
 mod tunnel_framing;
-pub mod tunnel_h3;
 mod tunnel_id;
 
 pub use client::{
@@ -116,7 +116,7 @@ pub use startup::{
     ClientInstancePrep, ClientStartupError, PreparedClient, PreparedServer, ServerStartupError,
 };
 pub use trust::ClientServerTrust;
-pub use tunnel_h3::{
+pub use tunnel::{
     ProtocolFailure, UnconfirmedDrain, WithdrawalOutcome, make_client_tunnel_h3_config,
     make_server_tunnel_h3_config, make_server_tunnel_h3_config_with_resolver,
 };

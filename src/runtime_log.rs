@@ -609,7 +609,7 @@ pub fn client_tunnel_withdrawal_confirmed(configured_server_addr: &str) {
 /// Quiescence was not confirmed, so active Visitors may have been terminated.
 pub fn client_tunnel_withdrawal_unconfirmed(
     configured_server_addr: &str,
-    reason: crate::tunnel_h3::UnconfirmedDrain,
+    reason: crate::tunnel::UnconfirmedDrain,
 ) {
     emit(
         EventLevel::Warn,
@@ -625,7 +625,7 @@ pub fn client_tunnel_withdrawal_unconfirmed(
 
 pub fn client_tunnel_withdrawal_failed(
     configured_server_addr: &str,
-    failure: crate::tunnel_h3::ProtocolFailure,
+    failure: crate::tunnel::ProtocolFailure,
 ) {
     emit(
         EventLevel::Error,

@@ -29,8 +29,9 @@ use runewarp::{
     ControlClientIdentityMaterial, ControlTrust, GeneratedClientIdentity, ManagedSession,
     ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PreparedClient, PreparedServer,
     QUIC_CLOSE_FLUSH_DURATION, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_KEY_FILENAME,
-    SessionMaterial, ShutdownMode, generate_client_identity, initialize_manual_server_certificate,
-    load_client_config, load_server_config,
+    ServerHostname, SessionMaterial, ShutdownMode, generate_client_identity,
+    initialize_manual_server_certificate, load_client_config, load_server_config,
+    make_client_tunnel_h3_config, tunnel::ClientTunnelH3,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -594,6 +595,133 @@ async fn managed_server_authorization_apply_controls_traffic_and_readiness() {
     harness.shutdown().await;
 }
 
+/// Open a Tunnel connection as `identity` and follow its event-stream snapshots.
+async fn connect_event_follower(
+    harness: &ManagedServerHarness,
+    identity: &GeneratedClientIdentity,
+) -> ClientTunnelH3 {
+    let mut roots = RootCertStore::empty();
+    for certificate in
+        CertificateDer::pem_file_iter(harness._tempdir.path().join("server-cert/server-ca.crt"))
+            .unwrap()
+    {
+        roots.add(certificate.unwrap()).unwrap();
+    }
+    let chain = CertificateDer::pem_slice_iter(identity.certificate_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let key = PrivateKeyDer::from_pem_slice(identity.private_key_pem.as_bytes()).unwrap();
+    let mut endpoint = quinn::Endpoint::client(localhost(0)).unwrap();
+    endpoint.set_default_client_config(make_client_tunnel_h3_config(roots, chain, key).unwrap());
+    let connection = endpoint
+        .connect(harness.tunnel_addr, SERVER_HOSTNAME)
+        .unwrap()
+        .await
+        .unwrap();
+    ClientTunnelH3::establish(
+        connection,
+        &ServerHostname::try_from(SERVER_HOSTNAME).unwrap(),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+    )
+    .await
+    .unwrap()
+}
+
+async fn wait_for_hint(client: &ClientTunnelH3, expected: Option<&str>) {
+    let mut state = client.event_state();
+    timeout(
+        Duration::from_secs(5),
+        state.wait_for(|state| {
+            state
+                .replacement_generation
+                .map(|value| value.to_string())
+                .as_deref()
+                == expected
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for replacement hint {expected:?}"))
+    .unwrap();
+}
+
+#[tokio::test]
+async fn managed_server_advertises_replacement_hints_and_reports_its_generation() {
+    const REPLACEMENT: &str = "fedcba9876543210fedcba9876543210";
+    let mut harness = ManagedServerHarness::start().await;
+    let identity = harness.trusted_client.client_identity.to_string();
+    let tunnels = format!(
+        r#"[{{"id":"t1","public_hostnames":["{APP_HOSTNAME}"],"client_identities":["{identity}"]}}]"#
+    );
+
+    harness.push_authorization("rev-1", &format!(r#"{{"tunnels":{tunnels}}}"#));
+    wait_for_applied(&mut harness.event_rx, "rev-1").await;
+    let generation = wait_for_state_revision(&harness.control.metrics, "rev-1").await;
+    let client = connect_event_follower(&harness, &harness.trusted_client).await;
+    assert_eq!(client.server_generation().to_string(), generation);
+    wait_for_hint(&client, None).await;
+
+    // A hint naming another runtime is advertised as a new full snapshot.
+    harness.push_authorization(
+        "rev-2",
+        &format!(r#"{{"tunnels":{tunnels},"replacement_generation":"{REPLACEMENT}"}}"#),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-2").await;
+    assert_eq!(
+        wait_for_state_revision(&harness.control.metrics, "rev-2").await,
+        generation
+    );
+    wait_for_hint(&client, Some(REPLACEMENT)).await;
+
+    // A hint naming this runtime is suppressed, which clears the advertised hint.
+    harness.push_authorization(
+        "rev-self",
+        &format!(r#"{{"tunnels":{tunnels},"replacement_generation":"{generation}"}}"#),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-self").await;
+    wait_for_hint(&client, None).await;
+
+    harness.push_authorization(
+        "rev-3",
+        &format!(r#"{{"tunnels":{tunnels},"replacement_generation":"{REPLACEMENT}"}}"#),
+    );
+    wait_for_applied(&mut harness.event_rx, "rev-3").await;
+    wait_for_hint(&client, Some(REPLACEMENT)).await;
+
+    // An invalid hint rejects the whole input: authorization and the advertised hint stay.
+    let mut state = client.event_state();
+    state.mark_unchanged();
+    harness.push_authorization(
+        "rev-bad",
+        r#"{"tunnels":[],"replacement_generation":"FEDCBA9876543210FEDCBA9876543210"}"#,
+    );
+    wait_for_rejected(&mut harness.event_rx, "rev-bad").await;
+    sleep(Duration::from_millis(200)).await;
+    assert!(
+        !state.has_changed().unwrap(),
+        "rejected input must not publish"
+    );
+    assert!(
+        timeout(Duration::from_millis(100), client.closed())
+            .await
+            .is_err(),
+        "rejected input must keep the prior authorization"
+    );
+    assert!(
+        harness
+            .control
+            .metrics
+            .state_bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|body| body.get("revision") != Some(&json!("rev-bad"))),
+        "rejected revision must not be acknowledged"
+    );
+
+    drop(client);
+    harness.shutdown().await;
+}
+
 #[tokio::test]
 async fn managed_server_identity_revocation_closes_live_work_and_denies_new_handshakes() {
     let mut harness = ManagedServerHarness::start().await;
@@ -860,8 +988,8 @@ async fn managed_server_retains_authorization_through_control_session_loss() {
                 let bodies = harness.control.metrics.state_bodies.lock().unwrap();
                 if bodies.len() > reports_before {
                     assert_eq!(
-                        bodies.last(),
-                        Some(&json!({ "revision": "rev-1" })),
+                        bodies.last().and_then(|body| body.get("revision")),
+                        Some(&json!("rev-1")),
                         "equal revision after reconnect must be acknowledged"
                     );
                     true
@@ -1207,24 +1335,43 @@ async fn wait_for_reconnecting(event_rx: &mut mpsc::UnboundedReceiver<ManagedSes
     .expect("timed out waiting for ManagedSessionEvent::Reconnecting");
 }
 
-async fn wait_for_state_revision(metrics: &FixtureMetrics, revision: &str) {
-    let expected = json!({ "revision": revision });
-    timeout(Duration::from_secs(5), async {
+/// Wait for an acknowledgment of `revision` and return the Server generation it reports.
+async fn wait_for_state_revision(metrics: &FixtureMetrics, revision: &str) -> String {
+    let body = timeout(Duration::from_secs(5), async {
         loop {
-            let ready = metrics
+            let found = metrics
                 .state_bodies
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|body| body == &expected);
-            if ready {
-                break;
+                .find(|body| body.get("revision") == Some(&json!(revision)))
+                .cloned();
+            if let Some(body) = found {
+                break body;
             }
             sleep(Duration::from_millis(20)).await;
         }
     })
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for state revision {revision}"));
+    let fields = body.as_object().expect("state body is a JSON object");
+    assert_eq!(
+        fields.len(),
+        2,
+        "Server acknowledgment is revision and generation: {body}"
+    );
+    let generation = fields["generation"]
+        .as_str()
+        .expect("generation is a string")
+        .to_owned();
+    assert!(
+        generation.len() == 32
+            && generation
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "generation is 32 lowercase hex characters: {generation}"
+    );
+    generation
 }
 
 async fn wait_for_readiness_open(readiness_addr: SocketAddr) {

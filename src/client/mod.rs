@@ -32,7 +32,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::tunnel_h3::{
+use crate::tunnel::{
     ClientTunnelH3, ClientTunnelStream, TunnelH3Error, UnconfirmedDrain, WithdrawalOutcome,
 };
 use quinn::Endpoint;
@@ -369,7 +369,7 @@ mod tests {
 
     use super::{Client, ClientConnectConfig, ClientConnectError};
     use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
-    use crate::tunnel_h3::test_support::test_server_h3_config;
+    use crate::tunnel::test_support::test_server_h3_config;
     use crate::{GeneratedClientIdentity, generate_client_identity, make_client_tunnel_h3_config};
 
     #[test]

@@ -46,4 +46,12 @@ pub trait RoleAdapter: Send {
     /// Atomically apply a validated input. Returning `Err` rejects the
     /// candidate without acknowledging its revision.
     fn apply(&mut self, input: Self::Input) -> impl Future<Output = Result<(), ApplyError>> + Send;
+
+    /// Role facts added after `revision` to every state acknowledgment body, in order.
+    ///
+    /// Read once per connection, so values must stay fixed for the process lifetime. A field
+    /// named `revision` is ignored: the session owns the applied revision. Defaults to none.
+    fn acknowledgment_fields(&self) -> Vec<(&'static str, String)> {
+        Vec::new()
+    }
 }

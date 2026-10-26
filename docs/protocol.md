@@ -136,11 +136,11 @@ The Tunnel event stream follows the [SSE profile](sse.md). That document owns fr
 
 ```text
 event: snapshot
-data: {"generation":"0123456789abcdef0123456789abcdef","replacement_generation":"fedcba9876543210fedcba9876543210"}
+data: {"generation":"01928f3e-7b6a-7c3d-8e4f-0123456789ab","replacement_generation":"01928f3e-9c1d-7fed-9cba-9876543210fe"}
 
 ```
 
-`generation` is required. It is an opaque, fresh random value per Server runtime, encoded as 32 lowercase hexadecimal characters. `replacement_generation` is an optional **Replacement hint** with the same encoding. When present, it names another Server runtime generation behind the same Server address; absent means no hint. `null`, another JSON type, or an invalid encoding makes the snapshot malformed. Unknown fields are ignored. Snapshots carry no configuration, addresses, or credentials.
+`generation` is required. The Server mints a fresh UUIDv7 at every start and sends it in canonical form: 36 lowercase characters with hyphens (`8-4-4-4-12`), version 7, and the RFC 9562 variant. Uppercase, unhyphenated, braced, URN, and other-version forms are invalid. Clients compare generations for equality only. A UUIDv7 embeds its mint time, so a generation reveals when that Server runtime started. `replacement_generation` is an optional **Replacement hint** with the same encoding. When present, it names another Server runtime generation behind the same Server address; absent means no hint. `null`, another JSON type, or an invalid encoding makes the snapshot malformed. Unknown fields are ignored. Snapshots carry no configuration, addresses, or credentials.
 
 The Server writes the initial snapshot, then a new full snapshot whenever the advertised hint changes. All Tunnel connections on one Server runtime follow the same current snapshot. Each subscription holds at most one pending snapshot: a change published while a write is blocked replaces any unwritten one, so the next write carries only the latest snapshot. A blocked Server event write is cancelled after **60 seconds**. A new subscription supersedes the old one and starts with the current snapshot. Event data is capped at **4 KiB**.
 

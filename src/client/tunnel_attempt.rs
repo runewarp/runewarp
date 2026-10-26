@@ -766,7 +766,7 @@ backend-address = "127.0.0.1:443"
                 // The pre-`snapshot` event type is no longer compatible.
                 let state = concat!(
                     "event: state\n",
-                    "data: {\"generation\":\"0123456789abcdef0123456789abcdef\"}\n\n",
+                    "data: {\"generation\":\"01928f3e-7b6a-7c3d-8e4f-0123456789ab\"}\n\n",
                 );
                 stream
                     .send_data(bytes::Bytes::from_static(state.as_bytes()))

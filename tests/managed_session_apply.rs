@@ -478,7 +478,7 @@ impl RoleAdapter for GatedAdapter {
 /// Server-role adapter that reports its runtime generation in every acknowledgment.
 struct GenerationReportingAdapter;
 
-const REPORTED_GENERATION: &str = "0123456789abcdef0123456789abcdef";
+const REPORTED_GENERATION: &str = "01928f3e-7b6a-7c3d-8e4f-0123456789ab";
 
 impl RoleAdapter for GenerationReportingAdapter {
     type Input = ServerManagedInput;

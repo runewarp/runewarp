@@ -112,8 +112,8 @@ pub fn parse_server_input(
                 .and_then(ServerRuntimeGeneration::parse)
                 .ok_or_else(|| {
                     InputError::InvalidShape(
-                        "server input replacement_generation was not 32 lowercase hexadecimal \
-                         characters"
+                        "server input replacement_generation was not a canonical lowercase \
+                         UUIDv7"
                             .into(),
                     )
                 })?,
@@ -403,13 +403,13 @@ mod tests {
     #[test]
     fn server_input_accepts_an_optional_replacement_generation() {
         let input = parse_server_input(
-            json!({"tunnels": [], "replacement_generation": "fedcba9876543210fedcba9876543210"}),
+            json!({"tunnels": [], "replacement_generation": "01928f3e-9c1d-7fed-9cba-9876543210fe"}),
             &default_limits(),
         )
         .unwrap();
         assert_eq!(
             input.replacement_generation.map(|value| value.to_string()),
-            Some("fedcba9876543210fedcba9876543210".to_owned())
+            Some("01928f3e-9c1d-7fed-9cba-9876543210fe".to_owned())
         );
     }
 
@@ -418,9 +418,11 @@ mod tests {
         for value in [
             json!(null),
             json!(7),
-            json!(["fedcba9876543210fedcba9876543210"]),
-            json!("fedcba98"),
-            json!("FEDCBA9876543210FEDCBA9876543210"),
+            json!(["01928f3e-9c1d-7fed-9cba-9876543210fe"]),
+            json!("01928f3e"),
+            json!("01928F3E-9C1D-7FED-9CBA-9876543210FE"),
+            json!("01928f3e-9c1d-4fed-9cba-9876543210fe"),
+            json!("fedcba9876543210fedcba9876543210"),
         ] {
             let error = parse_server_input(
                 json!({"tunnels": [], "replacement_generation": value}),

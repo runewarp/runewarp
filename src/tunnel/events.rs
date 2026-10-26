@@ -10,11 +10,11 @@ use std::sync::Arc;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
+use uuid::{Uuid, Variant, Version};
 
 use crate::sse::SseLimits;
 
 const SNAPSHOT_EVENT_TYPE: &str = "snapshot";
-const GENERATION_BYTES: usize = 16;
 
 /// SSE bounds for the Tunnel event stream: the Managed-session line and event-name bounds, with a
 /// small data cap because lifecycle state never carries configuration.
@@ -29,45 +29,34 @@ pub(crate) const KEEPALIVE_COMMENT: &[u8] = b": keepalive\n\n";
 
 /// Opaque identifier of one Server process incarnation.
 ///
-/// A Server generates a fresh value at startup. It is neither a credential nor enrollment
-/// identity; Clients only compare values to tell one runtime generation of the same Server from
-/// another.
+/// A Server mints a fresh UUIDv7 at startup. It is neither a credential nor enrollment identity;
+/// Clients only compare values to tell one runtime generation of the same Server from another.
+/// UUIDv7 embeds its millisecond mint time, which it reveals. Generations from different processes
+/// sort by that timestamp only to the millisecond; Core never relies on their order.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
-pub struct ServerRuntimeGeneration([u8; GENERATION_BYTES]);
+pub struct ServerRuntimeGeneration(Uuid);
 
 impl ServerRuntimeGeneration {
-    /// Generate a fresh random generation for a starting Server process.
+    /// Mint a fresh generation for a starting Server process.
     pub fn generate() -> Self {
-        Self(rand::random())
+        Self(Uuid::now_v7())
     }
 
-    /// Parse the wire form: exactly 32 lowercase hexadecimal characters.
+    /// Parse the wire form: a UUIDv7 in canonical lowercase hyphenated form. Uppercase,
+    /// unhyphenated, braced, URN, other-version, and other-variant forms are rejected.
     pub(crate) fn parse(value: &str) -> Option<Self> {
-        if value.len() != GENERATION_BYTES * 2 {
-            return None;
-        }
-        let mut bytes = [0_u8; GENERATION_BYTES];
-        let (pairs, _) = value.as_bytes().as_chunks::<2>();
-        for (byte, [high, low]) in bytes.iter_mut().zip(pairs) {
-            *byte = (lower_hex_value(*high)? << 4) | lower_hex_value(*low)?;
-        }
-        Some(Self(bytes))
-    }
-}
-
-fn lower_hex_value(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        _ => None,
+        let uuid = Uuid::try_parse(value).ok()?;
+        let canonical = uuid.hyphenated().encode_lower(&mut Uuid::encode_buffer()) == value;
+        (canonical
+            && uuid.get_version() == Some(Version::SortRand)
+            && uuid.get_variant() == Variant::RFC4122)
+            .then_some(Self(uuid))
     }
 }
 
 impl fmt::Display for ServerRuntimeGeneration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
-            .iter()
-            .try_for_each(|byte| write!(formatter, "{byte:02x}"))
+        fmt::Display::fmt(&self.0.hyphenated(), formatter)
     }
 }
 
@@ -225,8 +214,8 @@ mod tests {
     };
     use crate::sse::{SseParseItem, SseParser};
 
-    const GENERATION: &str = "0123456789abcdef0123456789abcdef";
-    const REPLACEMENT: &str = "fedcba9876543210fedcba9876543210";
+    const GENERATION: &str = "01928f3e-7b6a-7c3d-8e4f-0123456789ab";
+    const REPLACEMENT: &str = "01928f3e-9c1d-7fed-9cba-9876543210fe";
 
     fn generation(value: &str) -> ServerRuntimeGeneration {
         ServerRuntimeGeneration::parse(value).expect("valid generation")
@@ -242,19 +231,48 @@ mod tests {
     }
 
     #[test]
-    fn generations_are_fresh_and_render_as_32_lowercase_hex_characters() {
+    fn generations_are_time_ordered_uuidv7s_in_canonical_form() {
         let first = ServerRuntimeGeneration::generate();
         let second = ServerRuntimeGeneration::generate();
 
         assert_ne!(first, second);
         let rendered = first.to_string();
-        assert_eq!(rendered.len(), 32);
+        assert_eq!(rendered.len(), 36);
+        for (index, byte) in rendered.bytes().enumerate() {
+            match index {
+                8 | 13 | 18 | 23 => assert_eq!(byte, b'-', "{rendered}"),
+                14 => assert_eq!(byte, b'7', "version nibble: {rendered}"),
+                19 => assert!(b"89ab".contains(&byte), "variant: {rendered}"),
+                _ => assert!(
+                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+                    "{rendered}"
+                ),
+            }
+        }
         assert!(
-            rendered
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            rendered < second.to_string(),
+            "later generations sort after earlier ones"
         );
         assert_eq!(ServerRuntimeGeneration::parse(&rendered), Some(first));
+    }
+
+    #[test]
+    fn generation_parsing_accepts_only_the_canonical_uuidv7_form() {
+        assert!(ServerRuntimeGeneration::parse(GENERATION).is_some());
+        for invalid in [
+            "",
+            "01928F3E-7B6A-7C3D-8E4F-0123456789AB",
+            "01928f3e7b6a7c3d8e4f0123456789ab",
+            "{01928f3e-7b6a-7c3d-8e4f-0123456789ab}",
+            "urn:uuid:01928f3e-7b6a-7c3d-8e4f-0123456789ab",
+            "01928f3e-7b6a-4c3d-8e4f-0123456789ab",
+            "01928f3e-7b6a-7c3d-ce4f-0123456789ab",
+            "01928f3e-7b6a-7c3d-8e4f-0123456789a",
+            "0123456789abcdef0123456789abcdef",
+            "00000000-0000-0000-0000-000000000000",
+        ] {
+            assert_eq!(ServerRuntimeGeneration::parse(invalid), None, "{invalid}");
+        }
     }
 
     #[test]
@@ -329,7 +347,12 @@ mod tests {
             ),
             (
                 Some("snapshot"),
-                r#"{"generation":"0123456789ABCDEF0123456789ABCDEF"}"#.to_owned(),
+                r#"{"generation":"01928F3E-7B6A-7C3D-8E4F-0123456789AB"}"#.to_owned(),
+                TunnelEventError::InvalidGeneration,
+            ),
+            (
+                Some("snapshot"),
+                r#"{"generation":"0123456789abcdef0123456789abcdef"}"#.to_owned(),
                 TunnelEventError::InvalidGeneration,
             ),
             (
@@ -354,7 +377,12 @@ mod tests {
             ),
             (
                 Some("snapshot"),
-                hint(r#""FEDCBA9876543210FEDCBA9876543210""#),
+                hint(r#""01928F3E-9C1D-7FED-9CBA-9876543210FE""#),
+                TunnelEventError::MalformedState,
+            ),
+            (
+                Some("snapshot"),
+                hint(r#""fedcba9876543210fedcba9876543210""#),
                 TunnelEventError::MalformedState,
             ),
         ] {

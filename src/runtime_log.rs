@@ -697,15 +697,27 @@ pub fn client_tunnel_candidate_failed(
     );
 }
 
-pub fn client_tunnel_candidate_promoted(configured_server_addr: &str, server_generation: &str) {
+/// A validated candidate joined the address as a second active connection.
+pub fn client_tunnel_candidate_joined(configured_server_addr: &str, server_generation: &str) {
     emit(
         EventLevel::Info,
         &event_line(
-            "client tunnel candidate promoted",
+            "client tunnel candidate joined",
             [
                 ("server-address", Cow::Borrowed(configured_server_addr)),
                 ("server-generation", Cow::Borrowed(server_generation)),
             ],
+        ),
+    );
+}
+
+/// The primary ended and the address's other active connection took over without reconnecting.
+pub fn client_tunnel_handed_over(configured_server_addr: &str) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "client tunnel handed over",
+            [("server-address", Cow::Borrowed(configured_server_addr))],
         ),
     );
 }
@@ -719,17 +731,6 @@ pub fn client_tunnel_candidate_aborted(configured_server_addr: &str, reason: &st
                 ("server-address", Cow::Borrowed(configured_server_addr)),
                 ("reason", Cow::Borrowed(reason)),
             ],
-        ),
-    );
-}
-
-/// GOAWAY forbade retirement withdrawal, so the Server's drain retired the connection.
-pub fn client_tunnel_retired_by_server_drain(configured_server_addr: &str) {
-    emit(
-        EventLevel::Info,
-        &event_line(
-            "client tunnel retired by server drain",
-            [("server-address", Cow::Borrowed(configured_server_addr))],
         ),
     );
 }
@@ -1514,14 +1515,13 @@ mod tests {
         EventLevel, InstallOutcome, ServerRouteOutcome, acme, build_subscriber,
         client_graceful_shutdown_closing_tunnel_connection, client_graceful_shutdown_started,
         client_ready, client_route, client_trust_store_warning, client_tunnel_candidate_aborted,
-        client_tunnel_candidate_failed, client_tunnel_candidate_promoted,
+        client_tunnel_candidate_failed, client_tunnel_candidate_joined,
         client_tunnel_candidate_rejected, client_tunnel_candidate_starting, client_tunnel_closed,
         client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
-        client_tunnel_disconnected, client_tunnel_resolution_failed,
-        client_tunnel_retired_by_server_drain, client_tunnel_retiring, client_tunnel_unauthorized,
-        emit, emit_server_tunnel_connection_dropped, install, installed_level,
-        managed_session_event, server_admission_saturated,
-        server_graceful_shutdown_deadline_expired,
+        client_tunnel_disconnected, client_tunnel_handed_over, client_tunnel_resolution_failed,
+        client_tunnel_retiring, client_tunnel_unauthorized, emit,
+        emit_server_tunnel_connection_dropped, install, installed_level, managed_session_event,
+        server_admission_saturated, server_graceful_shutdown_deadline_expired,
         server_orderly_shutdown_closing_tunnel_connections, server_orderly_shutdown_escalated,
         server_orderly_shutdown_started, server_public_listener_ready, server_readiness_gained,
         server_readiness_listener_enabled, server_readiness_lost, server_route,
@@ -1644,9 +1644,9 @@ mod tests {
                 3,
                 "failed to connect: connection refused",
             );
-            client_tunnel_candidate_promoted("a.example.test:443", &generation);
+            client_tunnel_candidate_joined("a.example.test:443", &generation);
             client_tunnel_candidate_aborted("a.example.test:443", "hint-withdrawn");
-            client_tunnel_retired_by_server_drain("a.example.test:443");
+            client_tunnel_handed_over("a.example.test:443");
         });
 
         for line in [
@@ -1656,10 +1656,10 @@ mod tests {
             "WARN client tunnel candidate rejected: server-address=a.example.test:443 reason=wrong-generation next-retry-delay=2s".to_owned(),
             "WARN client tunnel candidate failed: server-address=a.example.test:443 next-retry-delay=3s: failed to connect".to_owned(),
             format!(
-                "INFO client tunnel candidate promoted: server-address=a.example.test:443 server-generation={generation}"
+                "INFO client tunnel candidate joined: server-address=a.example.test:443 server-generation={generation}"
             ),
             "INFO client tunnel candidate aborted: server-address=a.example.test:443 reason=hint-withdrawn".to_owned(),
-            "INFO client tunnel retired by server drain: server-address=a.example.test:443".to_owned(),
+            "INFO client tunnel handed over: server-address=a.example.test:443".to_owned(),
         ] {
             assert!(output.contains(&line), "{line}\n{output}");
         }

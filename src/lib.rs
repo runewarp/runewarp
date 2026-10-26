@@ -39,9 +39,9 @@ pub use client::{
     AssignmentConvergence, Client, ClientAssignmentAdapter, ClientConfigResolutionDefaults,
     ClientConfigResolutionError, ClientConnectConfig, ClientConnectError, ClientRuntimeArgs,
     ClientTunnelAttempt, FixedBackoff, MaintenanceIntent, SelectedClientConfig,
-    SilentAddressWorkerHooks, TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionControl,
-    TunnelConnectionEnd, TunnelConnectionRun, resolve_client_config_from_cli,
-    resolve_selected_client_config, run_address_worker, select_client_config,
+    SilentAddressWorkerHooks, TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionEnd,
+    TunnelConnectionRun, resolve_client_config_from_cli, resolve_selected_client_config,
+    run_address_worker, select_client_config,
 };
 pub use client_admission::ClientAdmission;
 pub use client_hello::{

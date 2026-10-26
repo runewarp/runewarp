@@ -3746,8 +3746,26 @@ impl ReplaceableServer {
     }
 }
 
+/// How the old runtime leaves after the candidate joined.
+#[derive(Clone, Copy, Debug)]
+enum OldRuntimeLeaves {
+    /// Graceful Server shutdown: GOAWAY, then drain.
+    Drain,
+    /// Fast Server shutdown closes the old connection at once.
+    Abruptly,
+}
+
 #[tokio::test]
-async fn a_hinted_candidate_replaces_the_old_runtime_while_its_visitor_finishes() {
+async fn a_joined_candidate_serves_beside_the_old_runtime_until_it_drains() {
+    replacement_scenario(OldRuntimeLeaves::Drain).await;
+}
+
+#[tokio::test]
+async fn a_joined_candidate_takes_over_when_the_old_connection_is_lost() {
+    replacement_scenario(OldRuntimeLeaves::Abruptly).await;
+}
+
+async fn replacement_scenario(leaves: OldRuntimeLeaves) {
     timeout(Duration::from_secs(20), async {
         let tempdir = tempdir().unwrap();
         let identity = generate_client_identity().unwrap();
@@ -3878,7 +3896,7 @@ backend-address = "{api_addr}"
         address.set_target(new.tunnel_addr);
         old.apply(&identity, Some(new.generation())).await;
 
-        // The candidate validates, promotes and offers credit on the new runtime.
+        // The candidate validates, joins and offers credit on the new runtime.
         timeout(Duration::from_secs(5), async {
             while request_tls_response(new.public_addr, &api_cert, "api.example.test")
                 .await
@@ -3888,21 +3906,42 @@ backend-address = "{api_addr}"
             }
         })
         .await
-        .expect("the promoted candidate serves Visitors");
-        // The old connection is withdrawn from placement while its Visitor finishes there.
-        wait_for_tls_failure(old.public_addr, &api_cert, "api.example.test")
+        .expect("the joined candidate serves Visitors");
+        // No withdrawal: the old connection keeps carrying Visitors during the overlap.
+        wait_for_tls_response(old.public_addr, &api_cert, "api.example.test")
             .await
-            .expect("the retiring connection receives no new Visitors");
-        staged_release.notify_one();
-        let mut tail = Vec::new();
-        in_flight.read_to_end(&mut tail).await.unwrap();
-        assert_eq!(
-            tail, b"e!",
-            "the in-flight Visitor finishes on the old runtime"
-        );
-        in_flight.shutdown().await.unwrap();
+            .expect("the old runtime still serves Visitors");
 
-        // Retirement never reconnects: one primary flow, one candidate flow.
+        match leaves {
+            OldRuntimeLeaves::Drain => {
+                // GOAWAY seals the old runtime while its in-flight Visitor finishes there.
+                let _ = old.shutdown.begin_graceful();
+                wait_for_tls_failure(old.public_addr, &api_cert, "api.example.test")
+                    .await
+                    .expect("a draining runtime takes no new Visitors");
+                staged_release.notify_one();
+                let mut tail = Vec::new();
+                in_flight.read_to_end(&mut tail).await.unwrap();
+                assert_eq!(
+                    tail, b"e!",
+                    "the in-flight Visitor finishes on the old runtime"
+                );
+                in_flight.shutdown().await.unwrap();
+            }
+            OldRuntimeLeaves::Abruptly => {
+                let _ = old.shutdown.begin_fast();
+                drop(in_flight);
+            }
+        }
+        timeout(Duration::from_secs(5), async {
+            while !old.task.is_finished() {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the old runtime stops");
+
+        // The joined connection serves on without a reconnect: one flow per connection.
         sleep(Duration::from_millis(300)).await;
         assert_eq!(address.flows(), 2);
         wait_for_tls_response(new.public_addr, &api_cert, "api.example.test")

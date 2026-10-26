@@ -10,61 +10,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use futures_util::future::BoxFuture;
-use tokio::sync::{oneshot, watch};
-use tokio::time::Instant;
+use tokio::sync::watch;
 
-use super::{AddressWorkerDial, ConnectionDrain};
+use super::AddressWorkerDial;
 use crate::tunnel::{ReplacementHint, ServerRuntimeGeneration};
 use crate::{ClientInstancePrep, PreparedClient, ServerAddress};
 
-/// Runs one authenticated Tunnel connection until remote close, process shutdown, or retirement.
+/// Runs one authenticated Tunnel connection until remote close or process shutdown.
+///
+/// The argument is the Client-instance [`crate::OrderlyShutdown`]: Graceful withdraws the
+/// connection under its shared deadline, and Fast closes it at once.
 pub type TunnelConnectionRun = Box<
-    dyn FnOnce(TunnelConnectionControl) -> BoxFuture<'static, Result<(), TunnelConnectionEnd>>
+    dyn FnOnce(crate::OrderlyShutdown) -> BoxFuture<'static, Result<(), TunnelConnectionEnd>>
         + Send,
 >;
-
-/// What a [`TunnelConnectionRun`] observes besides its own connection.
-///
-/// The Client-instance [`crate::OrderlyShutdown`] withdraws the connection under its shared
-/// deadline on Graceful and closes it at once on Fast. Retirement asks the connection to
-/// withdraw after a promoted candidate replaced it, bounded by its own deadline.
-pub struct TunnelConnectionControl {
-    shutdown: crate::OrderlyShutdown,
-    retirement: Option<oneshot::Receiver<Instant>>,
-}
-
-impl TunnelConnectionControl {
-    pub(crate) fn new(
-        shutdown: crate::OrderlyShutdown,
-        retirement: oneshot::Receiver<Instant>,
-    ) -> Self {
-        Self {
-            shutdown,
-            retirement: Some(retirement),
-        }
-    }
-
-    /// Client-instance shutdown mode and graceful deadline.
-    pub fn shutdown(&self) -> &crate::OrderlyShutdown {
-        &self.shutdown
-    }
-
-    /// Resolve with the retirement deadline once the address worker retires this connection;
-    /// pending forever when it never does.
-    pub async fn retired(&mut self) -> Instant {
-        if let Some(retirement) = self.retirement.as_mut()
-            && let Ok(deadline) = retirement.await
-        {
-            return deadline;
-        }
-        self.retirement = None;
-        std::future::pending().await
-    }
-
-    fn into_parts(self) -> (crate::OrderlyShutdown, Option<oneshot::Receiver<Instant>>) {
-        (self.shutdown, self.retirement)
-    }
-}
 
 /// Typed result of one production Tunnel-connection attempt.
 pub enum TunnelAttemptOutcome {
@@ -437,11 +396,10 @@ impl ClientTunnelAttempt {
             TunnelAttemptOutcome::Connected {
                 configured_server_addr,
                 hints,
-                run: Box::new(move |control| {
+                run: Box::new(move |shutdown| {
                     Box::pin(async move {
-                        let (shutdown, retirement) = control.into_parts();
-                        match client.run_with_control(&shutdown, retirement).await {
-                            Ok(drain) => report_drain(drain, &connection_context),
+                        match client.run_with_shutdown(&shutdown).await {
+                            Ok(withdrawal) => report_withdrawal(withdrawal, &connection_context),
                             Err(error) => {
                                 let message = error.to_string();
                                 Err(classify_connection_end(error, connection_context, message))
@@ -450,31 +408,6 @@ impl ClientTunnelAttempt {
                     })
                 }),
             }
-        }
-    }
-}
-
-/// Report how a withdrawal ended. Only a graceful-shutdown protocol failure fails the process;
-/// retirement happens outside shutdown, so its failure only closes that connection.
-fn report_drain(
-    drain: Option<ConnectionDrain>,
-    context: &ConnectionContext,
-) -> Result<(), TunnelConnectionEnd> {
-    use crate::{UnconfirmedDrain, WithdrawalOutcome};
-    match drain {
-        None => Ok(()),
-        Some(ConnectionDrain::Shutdown(outcome)) => report_withdrawal(Some(outcome), context),
-        Some(ConnectionDrain::Retirement(WithdrawalOutcome::Unconfirmed(
-            UnconfirmedDrain::RequestsForbidden,
-        ))) => {
-            crate::runtime_log::client_tunnel_retired_by_server_drain(
-                &context.configured_server_addr,
-            );
-            Ok(())
-        }
-        Some(ConnectionDrain::Retirement(outcome)) => {
-            let _ = report_withdrawal(Some(outcome), context);
-            Ok(())
         }
     }
 }
@@ -941,38 +874,6 @@ backend-address = "127.0.0.1:443"
         })
         .await
         .expect("incompatible attempt finishes promptly");
-    }
-
-    #[test]
-    fn only_a_shutdown_withdrawal_protocol_failure_fails_the_process() {
-        use crate::{ProtocolFailure, UnconfirmedDrain, WithdrawalOutcome};
-        let failure = WithdrawalOutcome::ProtocolFailure(ProtocolFailure::Status(404));
-
-        let shutdown = report_drain(
-            Some(ConnectionDrain::Shutdown(failure)),
-            &connection_context(),
-        );
-        assert!(
-            shutdown
-                .err()
-                .and_then(|end| end.withdrawal_protocol_failure_message().map(str::to_owned))
-                .is_some()
-        );
-        for outcome in [
-            failure,
-            WithdrawalOutcome::Confirmed,
-            WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::Deadline),
-            WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::RequestsForbidden),
-        ] {
-            assert!(
-                report_drain(
-                    Some(ConnectionDrain::Retirement(outcome)),
-                    &connection_context()
-                )
-                .is_ok(),
-                "{outcome:?}"
-            );
-        }
     }
 
     #[test]

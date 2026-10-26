@@ -69,7 +69,7 @@ async fn a_candidate_offers_credit_only_once_released() {
     let mut client = client.expect("candidate passes the generation check");
     assert_eq!(client.server_generation(), generation);
 
-    // Until promotion releases it, the Server cannot place a Visitor on the candidate.
+    // Until joining releases it, the Server cannot place a Visitor on the candidate.
     assert!(
         server
             .open_tunnel_stream(Duration::from_millis(200))

@@ -267,7 +267,7 @@ impl ClientTunnelH3 {
             super::credit::VisitorCredits::new(connection.clone(), stream_budget, budget_observer);
         let session_connection = connection.clone();
         let maintenance = super::credit::CreditMaintenance(credits.clone());
-        // A candidate offers no credit until promotion, so a rejected candidate never holds a
+        // A candidate offers no credit until it joins, so a rejected candidate never holds a
         // committed Visitor.
         let (credit_release, credit_released) = match expected_generation {
             Some(_) => {
@@ -437,25 +437,6 @@ impl ClientTunnelH3 {
     /// reach their handlers. It always ends by closing the connection with `H3_NO_ERROR`; dropping
     /// it early leaves closing to the caller.
     pub fn withdrawal(&self) -> impl Future<Output = WithdrawalOutcome> + Send + 'static + use<> {
-        self.withdraw(false)
-    }
-
-    /// Withdraw this connection from placement after a candidate replaced it.
-    ///
-    /// Behaves like [`Self::withdrawal`], except when GOAWAY already forbids requests: no
-    /// withdrawal is sent and the connection stays open, because the Server's own drain and
-    /// WebTransport DRAIN retire it. The future then resolves with
-    /// [`UnconfirmedDrain::RequestsForbidden`] once the connection closes.
-    pub fn retirement_withdrawal(
-        &self,
-    ) -> impl Future<Output = WithdrawalOutcome> + Send + 'static + use<> {
-        self.withdraw(true)
-    }
-
-    fn withdraw(
-        &self,
-        leave_goaway_to_server_drain: bool,
-    ) -> impl Future<Output = WithdrawalOutcome> + Send + 'static + use<> {
         self.credits.stop_replenishing();
         let connection = self.connection.clone();
         let credits = self.credits.clone();
@@ -480,12 +461,6 @@ impl ClientTunnelH3 {
                     WithdrawalStep::Done(outcome) => break outcome,
                 }
             };
-            if leave_goaway_to_server_drain
-                && outcome == WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::RequestsForbidden)
-            {
-                connection.closed().await;
-                return outcome;
-            }
             if outcome == WithdrawalOutcome::Confirmed {
                 confirmed.send_replace(true);
                 credits.stop_idle();
@@ -585,7 +560,7 @@ struct EstablishOptions {
 /// `paused` is set as soon as a subscription ends, before the Client knows why. A resubscription
 /// GOAWAY refuses clears it and leaves `generation` standing, because GOAWAY is not an
 /// interruption. Any other resubscription counts an interruption, and the next valid snapshot
-/// clears the pause. Replacement must not promote a candidate while paused.
+/// clears the pause. Replacement must not join a candidate while paused.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReplacementHint {
     pub generation: Option<ServerRuntimeGeneration>,

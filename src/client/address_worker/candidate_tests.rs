@@ -33,9 +33,12 @@ fn hint(generation: Option<ServerRuntimeGeneration>, interruptions: u64) -> Repl
 struct FakeConnection {
     hints: Mutex<Option<watch::Sender<ReplacementHint>>>,
     remote_close: Notify,
-    retired_with: Mutex<Option<Instant>>,
+    /// Whether the worker started the run, which is when a real candidate offers credit.
+    started: AtomicBool,
     shutdown_seen: AtomicBool,
     ended: AtomicBool,
+    /// Report a withdrawal protocol failure when shutdown withdraws this connection.
+    fail_withdrawal: AtomicBool,
 }
 
 impl FakeConnection {
@@ -43,9 +46,10 @@ impl FakeConnection {
         Arc::new(Self {
             hints: Mutex::new(Some(watch::Sender::new(ReplacementHint::default()))),
             remote_close: Notify::new(),
-            retired_with: Mutex::new(None),
+            started: AtomicBool::new(false),
             shutdown_seen: AtomicBool::new(false),
             ended: AtomicBool::new(false),
+            fail_withdrawal: AtomicBool::new(false),
         })
     }
 
@@ -64,12 +68,21 @@ impl FakeConnection {
         self.remote_close.notify_one();
     }
 
-    fn retired_with(&self) -> Option<Instant> {
-        *self.retired_with.lock().unwrap()
+    fn started(&self) -> bool {
+        self.started.load(Ordering::SeqCst)
     }
 
     fn ended(&self) -> bool {
         self.ended.load(Ordering::SeqCst)
+    }
+
+    fn shutdown_seen(&self) -> bool {
+        self.shutdown_seen.load(Ordering::SeqCst)
+    }
+
+    /// Running and not ended: an active connection carrying Visitors.
+    fn active(&self) -> bool {
+        self.started() && !self.ended()
     }
 
     fn outcome(self: &Arc<Self>) -> TunnelAttemptOutcome {
@@ -84,24 +97,19 @@ impl FakeConnection {
         TunnelAttemptOutcome::Connected {
             configured_server_addr: "tunnel.example.test:443".to_owned(),
             hints,
-            run: Box::new(move |mut control| {
+            run: Box::new(move |shutdown| {
                 Box::pin(async move {
-                    let shutdown = control.shutdown().clone();
+                    connection.started.store(true, Ordering::SeqCst);
                     let result = tokio::select! {
                         _ = shutdown.wait_started() => {
                             connection.shutdown_seen.store(true, Ordering::SeqCst);
-                            Ok(())
-                        }
-                        deadline = control.retired() => {
-                            *connection.retired_with.lock().unwrap() = Some(deadline);
-                            // A retiring connection drains until remote close or shutdown.
-                            tokio::select! {
-                                _ = shutdown.wait_started() => {
-                                    connection.shutdown_seen.store(true, Ordering::SeqCst);
-                                }
-                                _ = connection.remote_close.notified() => {}
+                            if connection.fail_withdrawal.load(Ordering::SeqCst) {
+                                Err(TunnelConnectionEnd::withdrawal_protocol_failure(
+                                    "withdrawal failed",
+                                ))
+                            } else {
+                                Ok(())
                             }
-                            Ok(())
                         }
                         _ = connection.remote_close.notified() => {
                             Err(TunnelConnectionEnd::unclassified("connection closed"))
@@ -301,7 +309,7 @@ async fn wait_until(predicate: impl Fn() -> bool) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_hint_promotes_one_validated_candidate_and_retires_the_old_connection() {
+async fn a_validated_candidate_joins_beside_the_primary_and_takes_over_without_reconnecting() {
     let old = FakeConnection::new();
     let new = FakeConnection::new();
     let harness = Harness::start(&old).await;
@@ -312,36 +320,79 @@ async fn a_hint_promotes_one_validated_candidate_and_retires_the_old_connection(
 
     let hinted_at = Instant::now();
     old.set_hint(hint(Some(target), 0));
-    harness.wait_for_attempts(1).await;
-    wait_until(|| old.retired_with().is_some()).await;
+    wait_until(|| new.started()).await;
 
     let attempts = harness.dial.attempts();
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].1, target);
     assert_eq!(attempts[0].0 - hinted_at, CANDIDATE_DELAY);
-    let retired_with = old.retired_with().expect("old connection retires");
-    assert_eq!(retired_with - attempts[0].0, GRACEFUL);
-    assert!(!new.ended(), "the promoted candidate is the primary");
+    assert!(
+        old.active() && new.active(),
+        "both connections carry Visitors"
+    );
 
-    // The old connection's later hints no longer start candidates.
-    old.set_hint(hint(Some(generation()), 0));
+    // An abrupt loss of the old connection during the overlap hands over without a reconnect.
     old.close();
     wait_until(|| old.ended()).await;
     tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(new.active());
+    assert_eq!(harness.dial.primary_dials(), 1);
     assert_eq!(harness.dial.attempts().len(), 1);
-    assert_eq!(
-        harness.dial.primary_dials(),
-        1,
-        "retirement never reconnects"
-    );
 
-    // The promoted connection owns reconnect.
+    // The joined connection now owns reconnect.
     let next = FakeConnection::new();
     harness.dial.add_primary(&next);
     new.close();
     wait_until(|| harness.dial.primary_dials() == 2).await;
     harness.finish(ShutdownMode::Graceful).await;
-    assert!(next.shutdown_seen.load(Ordering::SeqCst));
+    assert!(next.shutdown_seen());
+}
+
+#[tokio::test(start_paused = true)]
+async fn losing_the_joined_connection_keeps_the_primary_and_rejoins_while_the_hint_stands() {
+    let old = FakeConnection::new();
+    let first = FakeConnection::new();
+    let second = FakeConnection::new();
+    let harness = Harness::start(&old).await;
+    let target = generation();
+    harness
+        .dial
+        .script(CandidateScript::Connect(Arc::clone(&first)));
+    harness
+        .dial
+        .script(CandidateScript::Connect(Arc::clone(&second)));
+
+    old.set_hint(hint(Some(target), 0));
+    wait_until(|| first.started()).await;
+    first.close();
+    wait_until(|| second.started()).await;
+
+    assert!(old.active() && second.active());
+    assert_eq!(harness.dial.primary_dials(), 1);
+    harness.finish(ShutdownMode::Fast).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_further_candidate_starts_while_a_second_connection_is_active() {
+    let old = FakeConnection::new();
+    let new = FakeConnection::new();
+    let harness = Harness::start(&old).await;
+    harness
+        .dial
+        .script(CandidateScript::Connect(Arc::clone(&new)));
+    old.set_hint(hint(Some(generation()), 0));
+    wait_until(|| new.started()).await;
+
+    old.set_hint(hint(Some(generation()), 0));
+    old.set_hint(hint(None, 0));
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert_eq!(harness.dial.attempts().len(), 1);
+    assert!(
+        new.active(),
+        "a hint change never touches a joined connection"
+    );
+    harness.finish(ShutdownMode::Fast).await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -378,12 +429,12 @@ async fn a_changed_hint_aborts_the_candidate_and_starts_one_for_the_new_generati
     assert!(attempts[0].2, "the old candidate was aborted");
     assert_eq!(attempts[1].1, second);
     assert_eq!(attempts[1].0 - changed_at, CANDIDATE_DELAY);
-    assert!(!primary.ended());
+    assert!(primary.active());
     harness.finish(ShutdownMode::Fast).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_withdrawn_hint_aborts_an_unpromoted_candidate() {
+async fn a_withdrawn_hint_aborts_an_unvalidated_candidate() {
     let primary = FakeConnection::new();
     let harness = Harness::start(&primary).await;
 
@@ -396,8 +447,7 @@ async fn a_withdrawn_hint_aborts_an_unpromoted_candidate() {
     let attempts = harness.dial.attempts();
     assert_eq!(attempts.len(), 1);
     assert!(attempts[0].2);
-    assert!(!primary.ended());
-    assert!(primary.retired_with().is_none());
+    assert!(primary.active());
     harness.finish(ShutdownMode::Fast).await;
 }
 
@@ -425,8 +475,7 @@ async fn failed_candidates_retry_while_the_hint_stands_and_keep_the_primary() {
     );
     assert_eq!(attempts[1].0 - attempts[0].0, CANDIDATE_DELAY);
     assert_eq!(attempts[2].0 - attempts[1].0, CANDIDATE_DELAY);
-    assert!(!primary.ended());
-    assert!(primary.retired_with().is_none());
+    assert!(primary.active());
     assert_eq!(harness.dial.primary_dials(), 1);
     harness.finish(ShutdownMode::Fast).await;
 }
@@ -450,7 +499,7 @@ async fn a_subscription_interruption_aborts_the_candidate_until_the_resubscribed
 
     primary.set_hint(hint(Some(target), 1));
     harness.wait_for_attempts(2).await;
-    assert!(!primary.ended(), "the primary stays up");
+    assert!(primary.active(), "the primary stays up");
 
     // A resubscription the worker observes only after its new snapshot still restarts.
     primary.set_hint(hint(Some(target), 2));
@@ -460,7 +509,7 @@ async fn a_subscription_interruption_aborts_the_candidate_until_the_resubscribed
 }
 
 #[tokio::test(start_paused = true)]
-async fn losing_the_primary_aborts_the_candidate_and_reconnects_normally() {
+async fn losing_the_primary_without_a_second_connection_aborts_the_candidate_and_reconnects() {
     let primary = FakeConnection::new();
     let harness = Harness::start(&primary).await;
 
@@ -475,7 +524,7 @@ async fn losing_the_primary_aborts_the_candidate_and_reconnects_normally() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn after_goaway_the_last_hint_stands_and_the_candidate_still_promotes() {
+async fn after_goaway_the_last_hint_stands_and_the_candidate_still_joins() {
     let old = FakeConnection::new();
     let new = FakeConnection::new();
     let harness = Harness::start(&old).await;
@@ -485,12 +534,15 @@ async fn after_goaway_the_last_hint_stands_and_the_candidate_still_promotes() {
     harness
         .dial
         .script(CandidateScript::Connect(Arc::clone(&new)));
-    harness.wait_for_attempts(1).await;
-    wait_until(|| old.retired_with().is_some()).await;
+    wait_until(|| new.started()).await;
 
-    assert_eq!(harness.dial.attempts().len(), 1);
+    // The draining connection finishes; the joined one serves on without a reconnect.
+    old.close();
+    wait_until(|| old.ended()).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(new.active());
+    assert_eq!(harness.dial.primary_dials(), 1);
     harness.finish(ShutdownMode::Graceful).await;
-    assert!(old.shutdown_seen.load(Ordering::SeqCst) && new.shutdown_seen.load(Ordering::SeqCst));
 }
 
 #[tokio::test(start_paused = true)]
@@ -509,7 +561,7 @@ async fn graceful_shutdown_aborts_a_warming_candidate_at_once() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn shutdown_waits_for_a_retiring_connection_and_reaches_it() {
+async fn shutdown_reaches_both_active_connections_and_waits_for_them() {
     for mode in [ShutdownMode::Graceful, ShutdownMode::Fast] {
         let old = FakeConnection::new();
         let new = FakeConnection::new();
@@ -518,19 +570,37 @@ async fn shutdown_waits_for_a_retiring_connection_and_reaches_it() {
             .dial
             .script(CandidateScript::Connect(Arc::clone(&new)));
         old.set_hint(hint(Some(generation()), 0));
-        wait_until(|| old.retired_with().is_some()).await;
+        wait_until(|| new.started()).await;
 
         harness.finish(mode).await;
-        assert!(
-            old.ended() && old.shutdown_seen.load(Ordering::SeqCst),
-            "{mode:?}"
-        );
-        assert!(new.ended(), "{mode:?}");
+        assert!(old.shutdown_seen() && new.shutdown_seen(), "{mode:?}");
+        assert!(old.ended() && new.ended(), "{mode:?}");
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn static_readiness_fires_once_across_a_promotion() {
+async fn a_joined_connections_withdrawal_protocol_failure_fails_the_process() {
+    let old = FakeConnection::new();
+    let new = FakeConnection::new();
+    new.fail_withdrawal.store(true, Ordering::SeqCst);
+    let harness = Harness::start(&old).await;
+    harness
+        .dial
+        .script(CandidateScript::Connect(Arc::clone(&new)));
+    old.set_hint(hint(Some(generation()), 0));
+    wait_until(|| new.started()).await;
+
+    harness.shutdown.begin(ShutdownMode::Graceful);
+    let result = tokio::time::timeout(Duration::from_secs(5), harness.runtime)
+        .await
+        .expect("runtime finishes")
+        .expect("runtime join");
+    assert_eq!(result, Err("withdrawal failed".to_owned()));
+    assert!(old.shutdown_seen());
+}
+
+#[tokio::test(start_paused = true)]
+async fn static_readiness_fires_once_across_a_join_and_handover() {
     struct ReadyHooks(Arc<AtomicUsize>);
 
     impl AddressWorkerHooks for ReadyHooks {
@@ -547,7 +617,7 @@ async fn static_readiness_fires_once_across_a_promotion() {
         .dial
         .script(CandidateScript::Connect(Arc::clone(&new)));
     old.set_hint(hint(Some(generation()), 0));
-    wait_until(|| old.retired_with().is_some()).await;
+    wait_until(|| new.started()).await;
     old.close();
     wait_until(|| old.ended()).await;
     settle().await;
@@ -566,7 +636,7 @@ async fn apply(adapter: &mut crate::ClientAssignmentAdapter, addresses: Vec<Serv
 }
 
 #[tokio::test(start_paused = true)]
-async fn convergence_ignores_candidates_and_survives_a_promotion() {
+async fn convergence_ignores_candidates_and_survives_a_join_and_handover() {
     let old = FakeConnection::new();
     let new = FakeConnection::new();
     let dial = FakeDial::with_primary(&old);
@@ -584,7 +654,7 @@ async fn convergence_ignores_candidates_and_survives_a_promotion() {
         view.assignment_convergence(),
         AssignmentConvergence::Converged
     );
-    wait_until(|| old.retired_with().is_some()).await;
+    wait_until(|| new.started()).await;
     old.close();
     wait_until(|| old.ended()).await;
     settle().await;
@@ -621,7 +691,7 @@ async fn removal_aborts_a_warming_candidate_and_re_adding_restarts_it() {
         1,
         "a Retiring address starts no candidates"
     );
-    assert!(!primary.ended(), "Retiring keeps the primary");
+    assert!(primary.active(), "Retiring keeps the primary");
 
     apply(&mut adapter, vec![address()]).await;
     wait_until(|| dial.attempts().len() == 2).await;
@@ -656,7 +726,7 @@ async fn gated_candidate(
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_hint_withdrawn_as_the_candidate_completes_prevents_promotion() {
+async fn a_hint_withdrawn_as_the_candidate_completes_prevents_the_join() {
     let old = FakeConnection::new();
     let new = FakeConnection::new();
     let (harness, gate) = gated_candidate(&old, &new, generation()).await;
@@ -667,10 +737,10 @@ async fn a_hint_withdrawn_as_the_candidate_completes_prevents_promotion() {
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     assert!(
-        old.retired_with().is_none(),
-        "the old connection stays primary"
+        !new.started(),
+        "the candidate never ran, so it never offered credit"
     );
-    assert!(!old.ended());
+    assert!(old.active());
     assert_eq!(harness.dial.attempts().len(), 1);
     harness.finish(ShutdownMode::Fast).await;
 }
@@ -687,16 +757,13 @@ async fn losing_the_primary_as_the_candidate_completes_takes_the_ordinary_reconn
     gate.notify_one();
     wait_until(|| harness.dial.primary_dials() == 2).await;
 
-    assert!(
-        old.retired_with().is_none(),
-        "no promotion after primary loss"
-    );
+    assert!(!new.started(), "no join after primary loss");
     harness.finish(ShutdownMode::Fast).await;
-    assert!(next.shutdown_seen.load(Ordering::SeqCst));
+    assert!(next.shutdown_seen());
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_paused_hint_blocks_promotion_until_goaway_restores_it() {
+async fn a_paused_hint_blocks_the_join_until_goaway_restores_it() {
     let old = FakeConnection::new();
     let first = FakeConnection::new();
     let target = generation();
@@ -706,85 +773,16 @@ async fn a_paused_hint_blocks_promotion_until_goaway_restores_it() {
     old.set_hint(paused(Some(target), 0));
     gate.notify_one();
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(old.retired_with().is_none(), "no promotion while paused");
+    assert!(!first.started(), "no join while paused");
 
-    // GOAWAY refused the resubscription: the hint stands and the candidate promotes on retry.
+    // GOAWAY refused the resubscription: the hint stands and the candidate joins on retry.
     let second = FakeConnection::new();
     harness
         .dial
         .script(CandidateScript::Connect(Arc::clone(&second)));
     old.set_hint(hint(Some(target), 0));
     old.stop_hints();
-    wait_until(|| old.retired_with().is_some()).await;
+    wait_until(|| second.started()).await;
     assert_eq!(harness.dial.attempts().len(), 2);
     harness.finish(ShutdownMode::Fast).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn re_adding_an_address_while_a_retired_connection_drains_resumes_maintenance() {
-    let old = FakeConnection::new();
-    let new = FakeConnection::new();
-    let dial = FakeDial::with_primary(&old);
-    let (mut controller, mut adapter) =
-        AddressController::for_managed(factory(&dial, Arc::new(SilentAddressWorkerHooks)));
-    let view = controller.view();
-    let runtime = tokio::spawn(async move { controller.run().await });
-    apply(&mut adapter, vec![address()]).await;
-    wait_until(|| view.assignment_convergence() == AssignmentConvergence::Converged).await;
-    dial.script(CandidateScript::Connect(Arc::clone(&new)));
-    old.set_hint(hint(Some(generation()), 0));
-    wait_until(|| old.retired_with().is_some()).await;
-
-    // Retiring, then the promoted primary closes while the old connection still drains.
-    apply(&mut adapter, Vec::new()).await;
-    new.close();
-    wait_until(|| new.ended()).await;
-    settle().await;
-    assert_eq!(
-        view.worker_count(),
-        1,
-        "the worker still drains the old connection"
-    );
-
-    let next = FakeConnection::new();
-    dial.add_primary(&next);
-    apply(&mut adapter, vec![address()]).await;
-    wait_until(|| dial.primary_dials() == 2).await;
-    wait_until(|| view.assignment_convergence() == AssignmentConvergence::Converged).await;
-    old.close();
-    wait_until(|| old.ended()).await;
-    settle().await;
-    assert_eq!(view.worker_count(), 1);
-    assert!(!next.ended(), "the re-adopted address stays maintained");
-    runtime.abort();
-}
-
-#[tokio::test(start_paused = true)]
-async fn re_adoption_landing_with_the_last_drain_still_resumes_maintenance() {
-    let old = FakeConnection::new();
-    let new = FakeConnection::new();
-    let dial = FakeDial::with_primary(&old);
-    let (mut controller, mut adapter) =
-        AddressController::for_managed(factory(&dial, Arc::new(SilentAddressWorkerHooks)));
-    let view = controller.view();
-    let runtime = tokio::spawn(async move { controller.run().await });
-    apply(&mut adapter, vec![address()]).await;
-    wait_until(|| view.assignment_convergence() == AssignmentConvergence::Converged).await;
-    dial.script(CandidateScript::Connect(Arc::clone(&new)));
-    old.set_hint(hint(Some(generation()), 0));
-    wait_until(|| old.retired_with().is_some()).await;
-    apply(&mut adapter, Vec::new()).await;
-    new.close();
-    wait_until(|| new.ended()).await;
-    settle().await;
-
-    // The last retired connection ends while the re-adoption applies.
-    let next = FakeConnection::new();
-    dial.add_primary(&next);
-    old.close();
-    apply(&mut adapter, vec![address()]).await;
-    wait_until(|| dial.primary_dials() == 2).await;
-    wait_until(|| view.assignment_convergence() == AssignmentConvergence::Converged).await;
-    assert_eq!(view.worker_count(), 1);
-    runtime.abort();
 }

@@ -33,7 +33,7 @@ An optional **Server runtime generation** that a **Server** advertises on its **
 _Avoid_: redirect, migration target, failover address
 
 **Candidate Tunnel connection**:
-A second **Tunnel connection** a **Client instance** opens to the same **Server address** while a **Replacement hint** stands. It must reach the hinted **Server runtime generation** before it offers **Visitor credit**, then becomes the address's primary while the old connection retires through **Placement withdrawal**. It never counts for **Assignment convergence** or **Client readiness**, and streams never move to it.
+A second **Tunnel connection** a **Client instance** opens to the same **Server address** while a **Replacement hint** stands. It must reach the hinted **Server runtime generation** before it offers **Visitor credit**, then joins as a second active connection; both carry **Visitors** until the old runtime drains or the connection is lost, and the survivor becomes the address's primary. It never counts for **Assignment convergence** or **Client readiness**, and streams never move to it.
 _Avoid_: standby connection, failover connection, migration
 
 **Tunnel event stream**:
@@ -45,7 +45,7 @@ The bidirectional stream carrying exactly one **Visitor** through one **Tunnel c
 _Avoid_: Receive slot, application stream, reverse stream
 
 **Placement withdrawal**:
-The terminal, Client-initiated removal of one **Tunnel connection** from new **Visitor** placement during graceful Client shutdown or after a **Candidate Tunnel connection** replaced it. Visitors already committed to it may finish; it never withdraws the Client identity or other connections.
+The terminal, Client-initiated removal of one **Tunnel connection** from new **Visitor** placement during graceful Client shutdown. Visitors already committed to it may finish; it never withdraws the Client identity or other connections.
 _Avoid_: drain, DRAIN_ACK, disconnect
 
 **Quiescent**:
@@ -260,7 +260,7 @@ _Avoid_: Duplicate hostname config, registration
 - Each **Tunnel connection** belongs to exactly one **Client instance**
 - A **Server address** has at most one **Candidate Tunnel connection** at a time per **Client instance**
 - A **Client instance** establishes one or more **Tunnel connections**
-- A **Client instance** dials one or more **Server addresses**, with one **Tunnel connection** per **Server address**; a replacement briefly adds one **Candidate Tunnel connection**
+- A **Client instance** dials one or more **Server addresses**, with one **Tunnel connection** per **Server address**; a replacement adds one **Candidate Tunnel connection** until the old runtime goes away
 - A **Visitor** reaches a **Local backend** only through a **Tunnel**
 - A **Server address** points at exactly one **Server**
 - A **Server hostname** identifies the public edge, not an operator application

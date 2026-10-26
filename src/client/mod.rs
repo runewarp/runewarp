@@ -22,8 +22,8 @@ pub(crate) use address_worker::{wait_for_retry_delay, wait_for_shutdown};
 pub use assignment_convergence::AssignmentConvergence;
 pub use managed_adapter::ClientAssignmentAdapter;
 pub use tunnel_attempt::{
-    ClientTunnelAttempt, TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionControl,
-    TunnelConnectionEnd, TunnelConnectionRun,
+    ClientTunnelAttempt, TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionEnd,
+    TunnelConnectionRun,
 };
 
 use std::fmt;
@@ -37,8 +37,7 @@ use crate::tunnel::{
     UnconfirmedDrain, WithdrawalOutcome,
 };
 use quinn::Endpoint;
-use tokio::sync::{oneshot, watch};
-use tokio::time::Instant;
+use tokio::sync::watch;
 
 pub(crate) use self::stream_limits::{ClientStreamBudget, ClientStreamLimits};
 pub(crate) use self::termination_tls::TerminationTlsConfigs;
@@ -76,15 +75,6 @@ pub(crate) struct RoutedClientConnectConfig {
     pub(crate) stream_budget: Arc<ClientStreamBudget>,
     /// A candidate attempt requires the Server to report this runtime generation.
     pub(crate) expected_generation: Option<ServerRuntimeGeneration>,
-}
-
-/// Why a connection run withdrew its connection from placement, and how that ended.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ConnectionDrain {
-    /// Graceful Client shutdown withdrew the connection.
-    Shutdown(WithdrawalOutcome),
-    /// A promoted candidate replaced the connection, which then retired.
-    Retirement(WithdrawalOutcome),
 }
 
 enum ClientRouteMode {
@@ -285,48 +275,17 @@ impl Client {
     /// Server committed first, and returns the withdrawal outcome. The shared graceful deadline
     /// or a later Fast escalation closes the connection with an unconfirmed drain.
     pub async fn run_with_shutdown(
-        self,
-        shutdown: &OrderlyShutdown,
-    ) -> Result<Option<WithdrawalOutcome>, quinn::ConnectionError> {
-        Ok(self
-            .run_with_control(shutdown, None)
-            .await?
-            .map(|drain| match drain {
-                ConnectionDrain::Shutdown(outcome) | ConnectionDrain::Retirement(outcome) => {
-                    outcome
-                }
-            }))
-    }
-
-    /// Like [`Self::run_with_shutdown`], and retire the connection when `retirement` yields a
-    /// deadline.
-    ///
-    /// Retirement withdraws the connection from placement as graceful shutdown does, bounded by
-    /// that deadline. Under GOAWAY no withdrawal is sent and the Server's drain retires the
-    /// connection. A later graceful shutdown joins the retirement under the earlier of the two
-    /// deadlines; Fast closes at once.
-    pub(crate) async fn run_with_control(
         mut self,
         shutdown: &OrderlyShutdown,
-        mut retirement: Option<oneshot::Receiver<Instant>>,
-    ) -> Result<Option<ConnectionDrain>, quinn::ConnectionError> {
-        // A candidate starts offering credit only once it runs, which promotion decides.
+    ) -> Result<Option<WithdrawalOutcome>, quinn::ConnectionError> {
+        // A candidate starts offering credit only once it runs, which joining decides.
         self.connection.release_credit();
         let closed = self.connection.closed();
         tokio::pin!(closed);
         let mut accepting = true;
-        let mut withdrawal: Option<
-            std::pin::Pin<Box<dyn Future<Output = WithdrawalOutcome> + Send>>,
-        > = None;
-        let mut retirement_deadline = None;
-        let mut joined_shutdown = false;
+        let mut withdrawal = None;
         loop {
             let withdrawing = withdrawal.is_some();
-            let retiring = retirement_deadline.is_some();
-            let deadline = match (retirement_deadline, shutdown.graceful_deadline()) {
-                (Some(retirement), Some(shutdown)) => Some(Instant::min(retirement, shutdown)),
-                (retirement, shutdown) => retirement.or(shutdown),
-            };
             let outcome = tokio::select! {
                 biased;
                 // The withdrawal observes connection loss itself, so only its result counts.
@@ -337,16 +296,11 @@ impl Client {
                     WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::FastShutdown)
                 }
                 _ = async {
-                    match deadline {
+                    match shutdown.graceful_deadline() {
                         Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending().await,
                     }
                 }, if withdrawing => WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::Deadline),
-                // Graceful shutdown joins an in-flight retirement; only its deadline applies.
-                _ = shutdown.wait_started(), if retiring && !joined_shutdown => {
-                    joined_shutdown = true;
-                    continue;
-                }
                 mode = shutdown.wait_started(), if !withdrawing => {
                     if mode == ShutdownMode::Graceful
                         && !shutdown.graceful_shutdown_duration().is_zero()
@@ -358,16 +312,6 @@ impl Client {
                     self.connection.close();
                     tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
                     return Ok(None);
-                }
-                deadline = async {
-                    retirement.as_mut().expect("retirement pending").await
-                }, if !withdrawing && retirement.is_some() => {
-                    retirement = None;
-                    if let Ok(deadline) = deadline {
-                        retirement_deadline = Some(deadline);
-                        withdrawal = Some(Box::pin(self.connection.retirement_withdrawal()));
-                    }
-                    continue;
                 }
                 error = &mut closed, if !withdrawing => return Err(error),
                 stream = self.connection.accept_tunnel_stream(), if accepting => {
@@ -387,11 +331,7 @@ impl Client {
             };
             self.connection.close();
             tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
-            return Ok(Some(if retiring {
-                ConnectionDrain::Retirement(outcome)
-            } else {
-                ConnectionDrain::Shutdown(outcome)
-            }));
+            return Ok(Some(outcome));
         }
     }
 
@@ -529,14 +469,8 @@ mod tests {
         Ok(())
     }
 
-    /// A Server peer and a routed Client on one Tunnel connection, sharing `budget`.
-    async fn retirement_pair(
-        budget: Arc<super::ClientStreamBudget>,
-    ) -> (crate::tunnel::ServerTunnelH3, Client) {
-        pair(budget, false).await
-    }
-
-    /// Like [`retirement_pair`]; a `candidate` Client requires the Server's generation.
+    /// A Server peer and a routed Client sharing `budget`; a `candidate` Client requires the
+    /// Server's generation.
     async fn pair(
         budget: Arc<super::ClientStreamBudget>,
         candidate: bool,
@@ -595,39 +529,11 @@ mod tests {
         }))
     }
 
-    fn shutdown(graceful: Duration) -> crate::OrderlyShutdown {
-        crate::OrderlyShutdown::new(graceful, Duration::ZERO)
-    }
-
-    /// Run `client` with a retirement trigger; returns the trigger and the running task.
-    fn run_retirable(
-        client: Client,
-        shutdown: crate::OrderlyShutdown,
-    ) -> (
-        tokio::sync::oneshot::Sender<tokio::time::Instant>,
-        tokio::task::JoinHandle<Result<Option<super::ConnectionDrain>, quinn::ConnectionError>>,
-    ) {
-        let (retire, retirement) = tokio::sync::oneshot::channel();
-        let task =
-            tokio::spawn(async move { client.run_with_control(&shutdown, Some(retirement)).await });
-        (retire, task)
-    }
-
-    async fn wait_for_permits(budget: &super::ClientStreamBudget, permits: usize) {
-        timeout(Duration::from_secs(2), async {
-            while budget.semaphore().available_permits() != permits {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("permits settle");
-    }
-
     #[tokio::test]
     async fn a_candidate_receives_visitors_only_once_it_runs() {
         let budget = budget(8);
         let (server, client) = pair(budget.clone(), true).await;
-        // An unpromoted candidate holds no credit, so dropping it can cut no Visitor.
+        // An unjoined candidate holds no credit, so dropping it can cut no Visitor.
         assert!(
             server
                 .open_tunnel_stream(Duration::from_millis(200))
@@ -636,206 +542,12 @@ mod tests {
         );
         assert_eq!(budget.semaphore().available_permits(), 8);
 
-        let (_retire, _task) = run_retirable(client, shutdown(Duration::from_secs(30)));
+        let shutdown = crate::OrderlyShutdown::new(Duration::from_secs(30), Duration::ZERO);
+        let _task = tokio::spawn(async move { client.run_with_shutdown(&shutdown).await });
         let _visitor = server
             .open_tunnel_stream(Duration::from_secs(2))
             .await
             .expect("a running candidate offers credit");
-    }
-
-    #[tokio::test]
-    async fn retirement_withdraws_and_returns_every_permit_once_confirmed() {
-        let budget = budget(8);
-        let (_server, client) = retirement_pair(budget.clone()).await;
-        wait_for_permits(&budget, 0).await;
-        let (retire, task) = run_retirable(client, shutdown(Duration::from_secs(30)));
-
-        retire
-            .send(tokio::time::Instant::now() + Duration::from_secs(10))
-            .unwrap();
-        let drain = timeout(Duration::from_secs(2), task)
-            .await
-            .expect("retirement finishes")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            drain,
-            Some(super::ConnectionDrain::Retirement(
-                crate::WithdrawalOutcome::Confirmed
-            ))
-        );
-        wait_for_permits(&budget, 8).await;
-    }
-
-    #[tokio::test]
-    async fn the_retirement_deadline_closes_an_unconfirmed_connection() {
-        let budget = budget(8);
-        let (server, client) = retirement_pair(budget.clone()).await;
-        // A committed Visitor that never sends its header keeps the connection from quiescing.
-        let _visitor = server
-            .open_tunnel_stream(Duration::from_secs(1))
-            .await
-            .unwrap();
-        let (retire, task) = run_retirable(client, shutdown(Duration::from_secs(30)));
-
-        let started = tokio::time::Instant::now();
-        retire.send(started + Duration::from_millis(300)).unwrap();
-        let drain = timeout(Duration::from_secs(2), task)
-            .await
-            .expect("deadline ends retirement")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            drain,
-            Some(super::ConnectionDrain::Retirement(
-                crate::WithdrawalOutcome::Unconfirmed(crate::UnconfirmedDrain::Deadline)
-            ))
-        );
-        assert!(started.elapsed() >= Duration::from_millis(300));
-        timeout(Duration::from_secs(2), server.closed())
-            .await
-            .expect("connection closes");
-    }
-
-    #[tokio::test]
-    async fn graceful_shutdown_joins_an_in_flight_retirement() {
-        let budget = budget(8);
-        let (server, client) = retirement_pair(budget.clone()).await;
-        let visitor = server
-            .open_tunnel_stream(Duration::from_secs(1))
-            .await
-            .unwrap();
-        let shutdown = shutdown(Duration::from_secs(30));
-        let (retire, task) = run_retirable(client, shutdown.clone());
-        retire
-            .send(tokio::time::Instant::now() + Duration::from_secs(30))
-            .unwrap();
-        timeout(Duration::from_secs(2), async {
-            while server.accepts_visitors() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("retirement withdrawal commits");
-
-        let _ = shutdown.begin_graceful();
-        // The one in-flight withdrawal serves both and confirms once the Visitor ends.
-        drop(visitor);
-        let drain = timeout(Duration::from_secs(2), task)
-            .await
-            .expect("joined drain finishes")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            drain,
-            Some(super::ConnectionDrain::Retirement(
-                crate::WithdrawalOutcome::Confirmed
-            ))
-        );
-        wait_for_permits(&budget, 8).await;
-    }
-
-    #[tokio::test]
-    async fn a_shorter_shutdown_deadline_bounds_an_in_flight_retirement() {
-        let budget = budget(8);
-        let (server, client) = retirement_pair(budget.clone()).await;
-        let _visitor = server
-            .open_tunnel_stream(Duration::from_secs(1))
-            .await
-            .unwrap();
-        let shutdown = shutdown(Duration::from_millis(200));
-        let (retire, task) = run_retirable(client, shutdown.clone());
-        retire
-            .send(tokio::time::Instant::now() + Duration::from_secs(30))
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let _ = shutdown.begin_graceful();
-        let drain = timeout(Duration::from_secs(2), task)
-            .await
-            .expect("shutdown deadline ends retirement")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            drain,
-            Some(super::ConnectionDrain::Retirement(
-                crate::WithdrawalOutcome::Unconfirmed(crate::UnconfirmedDrain::Deadline)
-            ))
-        );
-    }
-
-    #[tokio::test]
-    async fn fast_shutdown_closes_a_retiring_connection_at_once() {
-        let budget = budget(8);
-        let (server, client) = retirement_pair(budget.clone()).await;
-        let _visitor = server
-            .open_tunnel_stream(Duration::from_secs(1))
-            .await
-            .unwrap();
-        let shutdown = shutdown(Duration::from_secs(30));
-        let (retire, task) = run_retirable(client, shutdown.clone());
-        retire
-            .send(tokio::time::Instant::now() + Duration::from_secs(30))
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let _ = shutdown.begin_fast();
-        let drain = timeout(Duration::from_secs(2), task)
-            .await
-            .expect("Fast ends retirement")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            drain,
-            Some(super::ConnectionDrain::Retirement(
-                crate::WithdrawalOutcome::Unconfirmed(crate::UnconfirmedDrain::FastShutdown)
-            ))
-        );
-    }
-
-    #[tokio::test]
-    async fn after_goaway_retirement_sends_no_withdrawal_and_leaves_closing_to_the_server() {
-        let budget = budget(8);
-        let (server, client) = retirement_pair(budget.clone()).await;
-        let server = Arc::new(server);
-        let visitor = server
-            .open_tunnel_stream(Duration::from_secs(1))
-            .await
-            .unwrap();
-        let draining = tokio::spawn({
-            let server = Arc::clone(&server);
-            async move { server.shutdown(Duration::from_secs(10)).await }
-        });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let (retire, task) = run_retirable(client, shutdown(Duration::from_secs(30)));
-
-        retire
-            .send(tokio::time::Instant::now() + Duration::from_secs(30))
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(
-            !task.is_finished(),
-            "the connection stays open for the Server drain"
-        );
-
-        drop(visitor);
-        let drain = timeout(Duration::from_secs(5), task)
-            .await
-            .expect("Server drain closes the connection")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            drain,
-            Some(super::ConnectionDrain::Retirement(
-                crate::WithdrawalOutcome::Unconfirmed(crate::UnconfirmedDrain::RequestsForbidden)
-            ))
-        );
-        draining.await.unwrap();
     }
 
     fn generate_test_client_identity() -> io::Result<GeneratedClientIdentity> {

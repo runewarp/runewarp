@@ -555,17 +555,6 @@ impl PreparedClient {
         self.client.replacement_hint()
     }
 
-    /// Run like [`Self::run_with_shutdown`], retiring the connection when `retirement` yields a
-    /// deadline.
-    pub(crate) async fn run_with_control(
-        self,
-        shutdown: &OrderlyShutdown,
-        retirement: Option<tokio::sync::oneshot::Receiver<tokio::time::Instant>>,
-    ) -> Result<Option<crate::client::ConnectionDrain>, quinn::ConnectionError> {
-        self.run_tunnel_then_maybe_stop_acme(|client| client.run_with_control(shutdown, retirement))
-            .await
-    }
-
     async fn run_tunnel_then_maybe_stop_acme<F, Fut, T>(
         self,
         run_tunnel: F,

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::tunnel_h3::{ServerRuntimeGeneration, ServerTunnelH3};
+use crate::tunnel::{ServerRuntimeGeneration, ServerTunnelH3};
 use quinn::Endpoint;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::Notify;

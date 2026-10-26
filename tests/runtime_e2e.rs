@@ -82,7 +82,7 @@ async fn forwards_tls_passthrough_end_to_end() {
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
         public_tls_config: None,
-        quic_server_config: runewarp::tunnel_h3::make_server_tunnel_h3_config(
+        quic_server_config: runewarp::tunnel::make_server_tunnel_h3_config(
             vec![tunnel_cert.clone()],
             private_key_from_der(&tunnel_key),
             Arc::new(authorization.clone()),
@@ -101,7 +101,7 @@ async fn forwards_tls_passthrough_end_to_end() {
         server_addr: tunnel_addr,
         server_name: "tunnel.example.test".to_owned(),
         backend_address: backend_address.to_string(),
-        quic_client_config: runewarp::tunnel_h3::make_client_tunnel_h3_config(
+        quic_client_config: runewarp::tunnel::make_client_tunnel_h3_config(
             root_store_with(&tunnel_cert),
             client_certificate_chain(&trusted_client),
             client_private_key(&trusted_client),
@@ -3353,7 +3353,7 @@ fn unauthenticated_h3_client_config(roots: RootCertStore) -> quinn::ClientConfig
 #[tokio::test]
 async fn server_shutdown_seals_placement_while_a_placed_visitor_finishes() {
     timeout(Duration::from_secs(3), async {
-        use runewarp::tunnel_h3::ClientTunnelH3;
+        use runewarp::tunnel::ClientTunnelH3;
         let (certificate, key) = make_self_signed_cert("tunnel.example.test");
         let identity = generate_client_identity().unwrap();
         let authorization = ServerAuthorization::from_static_tunnels(

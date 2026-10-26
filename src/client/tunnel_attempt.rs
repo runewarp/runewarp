@@ -725,7 +725,7 @@ backend-address = "127.0.0.1:443"
             let settings =
                 Arc::new(crate::load_client_config(&directory.path().join("config.toml")).unwrap());
             let endpoint = quinn::Endpoint::server(
-                crate::tunnel_h3::test_support::test_server_h3_config(
+                crate::tunnel::test_support::test_server_h3_config(
                     vec![rustls::pki_types::CertificateDer::from(certificate.cert)],
                     rustls::pki_types::PrivateKeyDer::from_pem_slice(
                         certificate.signing_key.serialize_pem().as_bytes(),

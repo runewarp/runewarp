@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use crate::tunnel_h3::ClientTunnelStream;
+use crate::tunnel::ClientTunnelStream;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
@@ -393,7 +393,7 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
-    use crate::tunnel_h3::{
+    use crate::tunnel::{
         ServerTunnelH3,
         test_support::{
             ClientPeer, ServerRead as RecvStream, ServerStreams, ServerWrite as SendStream,

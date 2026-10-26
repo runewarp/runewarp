@@ -10,8 +10,8 @@ use tokio::sync::Semaphore;
 use tokio::time::{sleep, timeout};
 
 use super::{Fixture, STEP, establish_pair, fast_timing, server_hostname};
-use crate::tunnel_h3::events::ServerRuntimeGeneration;
-use crate::tunnel_h3::{ClientTunnelH3, OpenTunnelStreamError, ServerTunnelH3};
+use crate::tunnel::events::ServerRuntimeGeneration;
+use crate::tunnel::{ClientTunnelH3, OpenTunnelStreamError, ServerTunnelH3};
 
 fn budget(permits: usize) -> Arc<Semaphore> {
     Arc::new(Semaphore::new(permits))
@@ -313,7 +313,7 @@ async fn graceful_shutdown_retains_visitors_queued_for_application_acceptance() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drain_releases_idle_credit_for_a_sibling_before_the_client_finishes_its_tail() {
-    use crate::tunnel_h3::MAX_IDLE_VISITOR_CREDIT;
+    use crate::tunnel::MAX_IDLE_VISITOR_CREDIT;
 
     timeout(Duration::from_secs(15), async {
         // Cover a full idle reserve, a pending refill, and a refill released during shutdown.
@@ -519,7 +519,7 @@ async fn wait_for_credit(client: &ClientTunnelH3, active: usize, idle: usize) {
 
 #[tokio::test]
 async fn a_full_idle_credit_burst_and_concurrency_up_to_the_aggregate_budget_have_no_resets() {
-    use crate::tunnel_h3::MAX_IDLE_VISITOR_CREDIT;
+    use crate::tunnel::MAX_IDLE_VISITOR_CREDIT;
     timeout(Duration::from_secs(10), async {
         let (_fixture, server, mut client) = stream_pair(1024).await;
         wait_for_credit(&client, 0, MAX_IDLE_VISITOR_CREDIT).await;
@@ -638,7 +638,7 @@ async fn credit_exhaustion_waits_until_both_handler_halves_release_and_recovers(
 
 #[tokio::test]
 async fn two_connections_share_the_budget_and_quiet_connections_hold_at_most_t_permits() {
-    use crate::tunnel_h3::MAX_IDLE_VISITOR_CREDIT;
+    use crate::tunnel::MAX_IDLE_VISITOR_CREDIT;
     let fixture = Fixture::new().expect("fixture");
     let permits = budget(MAX_IDLE_VISITOR_CREDIT + 2);
     let (_first_server, first_client) = establish_pair(
@@ -688,7 +688,7 @@ async fn explicit_reserved_credit_eight_to_nine_is_advertised_without_extra_capa
     let fixture = Fixture::new().expect("fixture");
     let (server, client) = fixture.connect().await.expect("handshake");
     // No H3 driver: this isolates Quinn's explicit application credit updates.
-    let credits = crate::tunnel_h3::credit::VisitorCredits::new(client, budget(9), None);
+    let credits = crate::tunnel::credit::VisitorCredits::new(client, budget(9), None);
     for _ in 0..8 {
         credits.offer(
             credits

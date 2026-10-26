@@ -69,7 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
-- Removed the `runewarp/1` Rust configuration builders, `RUNEWARP_ALPN`, and `MAX_SERVER_OPENED_BIDI_STREAMS`; use the `tunnel_h3` configuration and connection APIs. (#250)
+- Removed the `runewarp/1` Rust configuration builders, `RUNEWARP_ALPN`, and `MAX_SERVER_OPENED_BIDI_STREAMS`; use the `tunnel` configuration and connection APIs. (#250)
 
 ## [0.2.0] - 2026-06-30
 

@@ -423,7 +423,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::tunnel_h3::{
+    use crate::tunnel::{
         ServerTunnelH3,
         test_support::{
             ClientPeer, ServerStreams, establish_peers, read_to_end, test_server_h3_config,

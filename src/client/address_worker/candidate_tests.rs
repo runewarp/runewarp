@@ -24,6 +24,7 @@ fn hint(generation: Option<ServerRuntimeGeneration>, interruptions: u64) -> Repl
     ReplacementHint {
         generation,
         interruptions,
+        paused: false,
     }
 }
 
@@ -116,6 +117,8 @@ impl FakeConnection {
 
 enum CandidateScript {
     Connect(Arc<FakeConnection>),
+    /// Connect once the test releases the gate, so completion can coincide with other events.
+    ConnectWhen(Arc<FakeConnection>, Arc<Notify>),
     Fail(&'static str),
 }
 
@@ -200,6 +203,10 @@ impl AddressWorkerDial for FakeDial {
             let _flag = DropFlag(dropped);
             match script {
                 Some(CandidateScript::Connect(connection)) => connection.outcome(),
+                Some(CandidateScript::ConnectWhen(connection, gate)) => {
+                    gate.notified().await;
+                    connection.outcome()
+                }
                 Some(CandidateScript::Fail(message)) => {
                     TunnelAttemptOutcome::Retryable(TunnelAttemptFailure::unclassified(message))
                 }
@@ -617,5 +624,134 @@ async fn removal_aborts_a_warming_candidate_and_re_adding_restarts_it() {
     wait_until(|| dial.attempts().len() == 2).await;
     assert_eq!(dial.attempts()[1].1, target);
     assert_eq!(dial.primary_dials(), 1, "re-adoption does not dial");
+    runtime.abort();
+}
+
+fn paused(generation: Option<ServerRuntimeGeneration>, interruptions: u64) -> ReplacementHint {
+    ReplacementHint {
+        paused: true,
+        ..hint(generation, interruptions)
+    }
+}
+
+/// Start a primary, hint `target`, and leave one gated candidate attempt in flight.
+async fn gated_candidate(
+    old: &Arc<FakeConnection>,
+    new: &Arc<FakeConnection>,
+    target: ServerRuntimeGeneration,
+) -> (Harness, Arc<Notify>) {
+    let harness = Harness::start(old).await;
+    let gate = Arc::new(Notify::new());
+    harness.dial.script(CandidateScript::ConnectWhen(
+        Arc::clone(new),
+        Arc::clone(&gate),
+    ));
+    old.set_hint(hint(Some(target), 0));
+    harness.wait_for_attempts(1).await;
+    settle().await;
+    (harness, gate)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hint_withdrawn_as_the_candidate_completes_prevents_promotion() {
+    let old = FakeConnection::new();
+    let new = FakeConnection::new();
+    let (harness, gate) = gated_candidate(&old, &new, generation()).await;
+
+    // Both become ready before the worker runs again.
+    old.set_hint(hint(None, 0));
+    gate.notify_one();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert!(
+        old.retired_with().is_none(),
+        "the old connection stays primary"
+    );
+    assert!(!old.ended());
+    assert_eq!(harness.dial.attempts().len(), 1);
+    harness.finish(ShutdownMode::Fast).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn losing_the_primary_as_the_candidate_completes_takes_the_ordinary_reconnect() {
+    let old = FakeConnection::new();
+    let new = FakeConnection::new();
+    let (harness, gate) = gated_candidate(&old, &new, generation()).await;
+    let next = FakeConnection::new();
+    harness.dial.add_primary(&next);
+
+    old.close();
+    gate.notify_one();
+    wait_until(|| harness.dial.primary_dials() == 2).await;
+
+    assert!(
+        old.retired_with().is_none(),
+        "no promotion after primary loss"
+    );
+    harness.finish(ShutdownMode::Fast).await;
+    assert!(next.shutdown_seen.load(Ordering::SeqCst));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paused_hint_blocks_promotion_until_goaway_restores_it() {
+    let old = FakeConnection::new();
+    let first = FakeConnection::new();
+    let target = generation();
+    let (harness, gate) = gated_candidate(&old, &first, target).await;
+
+    // The subscription ended; the Client does not know yet whether GOAWAY caused it.
+    old.set_hint(paused(Some(target), 0));
+    gate.notify_one();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(old.retired_with().is_none(), "no promotion while paused");
+
+    // GOAWAY refused the resubscription: the hint stands and the candidate promotes on retry.
+    let second = FakeConnection::new();
+    harness
+        .dial
+        .script(CandidateScript::Connect(Arc::clone(&second)));
+    old.set_hint(hint(Some(target), 0));
+    old.stop_hints();
+    wait_until(|| old.retired_with().is_some()).await;
+    assert_eq!(harness.dial.attempts().len(), 2);
+    harness.finish(ShutdownMode::Fast).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn re_adding_an_address_while_a_retired_connection_drains_resumes_maintenance() {
+    let old = FakeConnection::new();
+    let new = FakeConnection::new();
+    let dial = FakeDial::with_primary(&old);
+    let (mut controller, mut adapter) =
+        AddressController::for_managed(factory(&dial, Arc::new(SilentAddressWorkerHooks)));
+    let view = controller.view();
+    let runtime = tokio::spawn(async move { controller.run().await });
+    apply(&mut adapter, vec![address()]).await;
+    wait_until(|| view.assignment_convergence() == AssignmentConvergence::Converged).await;
+    dial.script(CandidateScript::Connect(Arc::clone(&new)));
+    old.set_hint(hint(Some(generation()), 0));
+    wait_until(|| old.retired_with().is_some()).await;
+
+    // Retiring, then the promoted primary closes while the old connection still drains.
+    apply(&mut adapter, Vec::new()).await;
+    new.close();
+    wait_until(|| new.ended()).await;
+    settle().await;
+    assert_eq!(
+        view.worker_count(),
+        1,
+        "the worker still drains the old connection"
+    );
+
+    let next = FakeConnection::new();
+    dial.add_primary(&next);
+    apply(&mut adapter, vec![address()]).await;
+    wait_until(|| dial.primary_dials() == 2).await;
+    wait_until(|| view.assignment_convergence() == AssignmentConvergence::Converged).await;
+    old.close();
+    wait_until(|| old.ended()).await;
+    settle().await;
+    assert_eq!(view.worker_count(), 1);
+    assert!(!next.ended(), "the re-adopted address stays maintained");
     runtime.abort();
 }

@@ -351,6 +351,7 @@ impl ClientTunnelH3 {
         let (hint_sender, hint) = watch::channel(ReplacementHint {
             generation: initial.hinted_replacement(),
             interruptions: 0,
+            paused: false,
         });
         let events = OwnedTask::spawn(follow_events(
             EventFollower {
@@ -546,12 +547,17 @@ struct EstablishOptions {
 /// `generation` is the current subscription's hint. It is `None` when the snapshot carries no
 /// hint, when the hint names this connection's own generation, and while the Client resubscribes
 /// after an interrupted subscription. `interruptions` counts those interruptions, so an observer
-/// that misses the paused value still sees that one happened. GOAWAY is not an interruption: the
-/// Client stops resubscribing and the last hint stands.
+/// that misses the cleared value still sees that one happened.
+///
+/// `paused` is set as soon as a subscription ends, before the Client knows why. A resubscription
+/// GOAWAY refuses clears it and leaves `generation` standing, because GOAWAY is not an
+/// interruption. Any other resubscription counts an interruption, and the next valid snapshot
+/// clears the pause. Replacement must not promote a candidate while paused.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReplacementHint {
     pub generation: Option<ServerRuntimeGeneration>,
     pub interruptions: u64,
+    pub paused: bool,
 }
 
 /// How placement withdrawal on one connection ended.
@@ -840,6 +846,9 @@ async fn follow_events(mut follower: EventFollower, mut subscription: EventSubsc
             return;
         }
         drop(subscription);
+        follower
+            .hint
+            .send_if_modified(|hint| !std::mem::replace(&mut hint.paused, true));
         match follower.resubscribe().await {
             Some(next) => subscription = next,
             None => return,
@@ -872,10 +881,10 @@ impl EventFollower {
     /// Resubscribe until a valid subscription starts. `None` when the connection closed, GOAWAY
     /// forbids new requests, or the Server became incompatible.
     ///
-    /// The first request GOAWAY does not refuse pauses the replacement hint until a new snapshot
-    /// arrives, so replacement never acts on a hint from a subscription that failed.
+    /// The first request GOAWAY does not refuse clears the replacement hint and counts an
+    /// interruption, so replacement never acts on a hint from a subscription that failed.
     async fn resubscribe(&mut self) -> Option<EventSubscription> {
-        let mut paused = false;
+        let mut interrupted = false;
         loop {
             if self.connection.close_reason().is_some() {
                 return None;
@@ -884,7 +893,7 @@ impl EventFollower {
             let subscribed = timeout(
                 self.timing.initial_state_deadline,
                 subscribe(&mut self.send_request, &self.events_uri, || {
-                    pause_hint(&self.hint, &mut paused);
+                    count_interruption(&self.hint, &mut interrupted);
                 }),
             )
             .await;
@@ -897,9 +906,13 @@ impl EventFollower {
                     return None;
                 }
                 Ok(Err(TunnelH3Error::EventStream(error))) if forbids_new_requests(&error) => {
+                    // GOAWAY: the last valid hint stands unless an interruption already cleared it.
+                    if !interrupted {
+                        self.hint.send_modify(|hint| hint.paused = false);
+                    }
                     return None;
                 }
-                Ok(Err(_)) | Err(_) => pause_hint(&self.hint, &mut paused),
+                Ok(Err(_)) | Err(_) => count_interruption(&self.hint, &mut interrupted),
             }
         }
     }
@@ -918,8 +931,9 @@ impl EventFollower {
         });
         self.hint.send_if_modified(|hint| {
             let generation = state.hinted_replacement();
-            let changed = hint.generation != generation;
+            let changed = hint.generation != generation || hint.paused;
             hint.generation = generation;
+            hint.paused = false;
             changed
         });
         true
@@ -927,9 +941,9 @@ impl EventFollower {
 }
 
 /// Clear the hint and count one interruption, once per resubscription.
-fn pause_hint(hint: &watch::Sender<ReplacementHint>, paused: &mut bool) {
-    if !*paused {
-        *paused = true;
+fn count_interruption(hint: &watch::Sender<ReplacementHint>, interrupted: &mut bool) {
+    if !*interrupted {
+        *interrupted = true;
         hint.send_modify(|hint| {
             hint.generation = None;
             hint.interruptions += 1;

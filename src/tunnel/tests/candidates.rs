@@ -5,6 +5,18 @@ use tokio::sync::oneshot;
 use super::*;
 use crate::tunnel::{ReplacementHint, ServerTunnelEvents};
 
+fn hint_state(
+    generation: Option<ServerRuntimeGeneration>,
+    interruptions: u64,
+    paused: bool,
+) -> ReplacementHint {
+    ReplacementHint {
+        generation,
+        interruptions,
+        paused,
+    }
+}
+
 fn hinted(server: ServerRuntimeGeneration, hint: ServerRuntimeGeneration) -> Bytes {
     TunnelEventState {
         server_generation: server,
@@ -133,14 +145,7 @@ async fn the_replacement_hint_follows_snapshots_and_ignores_the_own_generation()
     assert_eq!(*hint.borrow(), ReplacementHint::default());
 
     release_tx.send(()).expect("fake server waits");
-    wait_for_hint(
-        &mut hint,
-        ReplacementHint {
-            generation: Some(replacement),
-            interruptions: 0,
-        },
-    )
-    .await;
+    wait_for_hint(&mut hint, hint_state(Some(replacement), 0, false)).await;
     let _server = fake_server.await.expect("fake server task");
 }
 
@@ -173,32 +178,11 @@ async fn an_interrupted_subscription_pauses_the_hint_until_resubscribed() {
     .await
     .expect("gate passes");
     let mut hint = client.replacement_hint();
-    wait_for_hint(
-        &mut hint,
-        ReplacementHint {
-            generation: Some(replacement),
-            interruptions: 0,
-        },
-    )
-    .await;
+    wait_for_hint(&mut hint, hint_state(Some(replacement), 0, false)).await;
 
-    wait_for_hint(
-        &mut hint,
-        ReplacementHint {
-            generation: None,
-            interruptions: 1,
-        },
-    )
-    .await;
+    wait_for_hint(&mut hint, hint_state(None, 1, true)).await;
     release_tx.send(()).expect("fake server waits");
-    wait_for_hint(
-        &mut hint,
-        ReplacementHint {
-            generation: Some(replacement),
-            interruptions: 1,
-        },
-    )
-    .await;
+    wait_for_hint(&mut hint, hint_state(Some(replacement), 1, false)).await;
     let _server = fake_server.await.expect("fake server task");
     assert!(
         timeout(Duration::from_millis(100), client.closed())
@@ -244,13 +228,7 @@ async fn goaway_keeps_the_last_hint_without_resubscribing() {
         .expect("fake server finishes")
         .expect("fake server task");
     assert!(!resubscribed, "GOAWAY forbids resubscription");
-    assert_eq!(
-        *hint.borrow(),
-        ReplacementHint {
-            generation: Some(replacement),
-            interruptions: 0,
-        }
-    );
+    assert_eq!(*hint.borrow(), hint_state(Some(replacement), 0, false));
 }
 
 #[tokio::test]
@@ -263,14 +241,40 @@ async fn a_published_hint_reaches_the_client_and_a_cleared_one_withdraws_it() {
     let mut hint = client.replacement_hint();
 
     events.set_replacement_generation(Some(replacement));
-    wait_for_hint(
-        &mut hint,
-        ReplacementHint {
-            generation: Some(replacement),
-            interruptions: 0,
-        },
-    )
-    .await;
+    wait_for_hint(&mut hint, hint_state(Some(replacement), 0, false)).await;
     events.set_replacement_generation(None);
     wait_for_hint(&mut hint, ReplacementHint::default()).await;
+}
+
+#[tokio::test]
+async fn a_failed_subscription_pauses_replacement_before_the_resubscribe_delay() {
+    let fixture = Fixture::new().expect("fixture");
+    let generation = ServerRuntimeGeneration::generate();
+    let replacement = ServerRuntimeGeneration::generate();
+    let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
+    let fake_server = tokio::spawn(async move {
+        let mut connection = raw_server(server_connection).await;
+        let (_, mut stream) = accept_raw_request(&mut connection).await;
+        respond_events(&mut stream, &hinted(generation, replacement)).await;
+        let session = accept_raw_session(&mut connection).await;
+        stream.finish().await.expect("subscription ends");
+        (connection, stream, session)
+    });
+
+    let client = ClientTunnelH3::establish_with_timing(
+        client_connection,
+        &server_hostname(),
+        no_credit(),
+        TunnelH3Timing {
+            resubscribe_delay: Duration::from_secs(30),
+            ..fast_timing()
+        },
+    )
+    .await
+    .expect("gate passes");
+    let mut hint = client.replacement_hint();
+
+    // The hint stands, in case GOAWAY ended the subscription, but replacement pauses at once.
+    wait_for_hint(&mut hint, hint_state(Some(replacement), 0, true)).await;
+    let _server = fake_server.await.expect("fake server task");
 }

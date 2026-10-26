@@ -126,11 +126,53 @@ where
     H: AddressWorkerHooks + ?Sized,
     B: AddressWorkerBackoff,
 {
+    let mut backoff = backoff;
     let mut retiring = JoinSet::new();
-    let result = maintain_address(address, &control, dial, hooks, backoff, &mut retiring).await;
-    // Each retired connection ends by its own deadline, shutdown, or remote close.
-    while retiring.join_next().await.is_some() {}
-    result
+    loop {
+        let result = maintain_address(
+            address.clone(),
+            &control,
+            Arc::clone(&dial),
+            Arc::clone(&hooks),
+            &mut backoff,
+            &mut retiring,
+        )
+        .await;
+        // The controller still sees this worker as live while retired connections drain, so a
+        // re-adoption meanwhile must resume maintenance rather than be lost.
+        if result.is_err() || !drain_retired_until_readopted(&control, &mut retiring).await {
+            // Each retired connection ends by its own deadline, shutdown, or remote close.
+            while retiring.join_next().await.is_some() {}
+            return result;
+        }
+    }
+}
+
+/// Wait for retired connections to finish. Returns true if the address is maintained again
+/// first; the drains then continue alongside the resumed worker.
+async fn drain_retired_until_readopted(
+    control: &AddressWorkerControl,
+    retiring: &mut JoinSet<()>,
+) -> bool {
+    let mut maintenance = control.subscribe_maintenance();
+    let mut maintenance_live = true;
+    loop {
+        if retiring.is_empty() {
+            return false;
+        }
+        if !control.shutdown_requested()
+            && control.orderly_shutdown().mode().is_none()
+            && control.maintenance_intent() == MaintenanceIntent::Maintain
+        {
+            return true;
+        }
+        tokio::select! {
+            _ = retiring.join_next() => {}
+            changed = maintenance.changed(), if maintenance_live => {
+                maintenance_live = changed.is_ok();
+            }
+        }
+    }
 }
 
 async fn maintain_address<D, H, B>(
@@ -138,7 +180,7 @@ async fn maintain_address<D, H, B>(
     control: &AddressWorkerControl,
     dial: Arc<D>,
     hooks: Arc<H>,
-    mut backoff: B,
+    backoff: &mut B,
     retiring: &mut JoinSet<()>,
 ) -> Result<(), String>
 where
@@ -217,7 +259,7 @@ where
             control,
             dial: dial.as_ref(),
             candidate_backoff: &mut candidate_backoff,
-            retiring,
+            retiring: &mut *retiring,
         }
         .run(run, hints)
         .await;
@@ -290,6 +332,14 @@ impl Primary {
 
     fn hinted_generation(&self) -> Option<ServerRuntimeGeneration> {
         self.hints.borrow().generation
+    }
+
+    /// Whether the primary's current hint still names `target` from the subscription the worker
+    /// last observed, unpaused. Checked at promotion, since the hint may have changed while the
+    /// candidate completed.
+    fn still_hints(&self, target: ServerRuntimeGeneration) -> bool {
+        let hint = self.hints.borrow();
+        hint.generation == Some(target) && !hint.paused && hint.interruptions == self.interruptions
     }
 }
 
@@ -392,6 +442,8 @@ where
         loop {
             let is_active = !matches!(candidate, Candidate::Idle);
             tokio::select! {
+                // Primary loss, shutdown, Retire and hint changes win over a completing candidate.
+                biased;
                 result = &mut primary.run => {
                     // Primary loss has one recovery path: the ordinary reconnect.
                     candidate.abort(self.configured_server_addr, "primary-lost");
@@ -431,6 +483,7 @@ where
                     }
                     self.reconcile(&mut candidate, hint.generation, shutdown_started);
                 }
+                Some(_) = self.retiring.join_next(), if !self.retiring.is_empty() => {}
                 event = candidate.progress(), if is_active => match event {
                     CandidateEvent::DelayElapsed => {
                         if let Some(target) = candidate.target() {
@@ -467,12 +520,19 @@ where
         *candidate = Candidate::Idle;
         let message = match outcome {
             TunnelAttemptOutcome::Connected { run, hints, .. } => {
-                // Retire or shutdown may race the attempt's completion; then the candidate is
-                // dropped unpromoted, which closes it and returns any credit it reserved.
-                if self.allows_candidates(shutdown_started) {
-                    self.promote(primary, run, hints, shutdown, target);
-                    self.reconcile(candidate, primary.hinted_generation(), shutdown_started);
+                // Retire, shutdown or a hint change may race the attempt's completion. Then the
+                // candidate is dropped unpromoted, which closes it and returns any credit it
+                // reserved. A paused or changed hint is handled by the next hint event; until
+                // then the candidate waits to retry.
+                if !self.allows_candidates(shutdown_started) {
+                    return;
                 }
+                if !primary.still_hints(target) {
+                    *candidate = waiting(target, self.candidate_backoff.next_delay(), true);
+                    return;
+                }
+                self.promote(primary, run, hints, shutdown, target);
+                self.reconcile(candidate, primary.hinted_generation(), shutdown_started);
                 return;
             }
             TunnelAttemptOutcome::Retryable(failure) => {

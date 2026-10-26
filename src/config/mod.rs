@@ -21,7 +21,7 @@ use self::preparation::server::{
     PreparedServerAcmeConfig, PreparedServerConfig, PreparedServerTunnelConfig,
 };
 use crate::control_address::ControlAddress;
-use crate::server_address::ServerAddress;
+use crate::server_address::{MAX_CLIENT_SERVER_ADDRESSES, ServerAddress};
 use crate::server_identity::{ServerIdentity, read_server_identity};
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, validate_server_tls_material,
@@ -675,6 +675,14 @@ pub(crate) fn validate_prepared_client_config(
     let managed = control.address.is_some();
     if control.section_present && control.address.is_none() {
         messages.push("control.address is required".to_owned());
+    }
+
+    if !managed
+        && server_addresses
+            .as_ref()
+            .is_some_and(|addresses| addresses.len() > MAX_CLIENT_SERVER_ADDRESSES)
+    {
+        messages.push(format!("client.server-addresses must contain at most {MAX_CLIENT_SERVER_ADDRESSES} entries in static mode"));
     }
 
     let mut validated_server_addresses = Vec::new();

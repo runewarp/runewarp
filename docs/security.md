@@ -112,7 +112,7 @@ The tunnel-connection trust model is:
 
 The pinned value is the client public key, not the certificate lifetime or serial number. Handshake admission and Public-hostname routing consult one shared **Authorization snapshot**, so identity additions and removals can replace admission without rebinding the tunnel listener. Live Tunnel connections retain their authenticated Client identity, and admitted Visitor streams retain their Public hostname and serving connection, so the runtime can dispatch targeted connection closes and stream resets without disturbing unrelated work.
 
-Static fanout does not change these trust boundaries. When a Client dials multiple **Server addresses**, each **Tunnel connection** still uses the same shared Client identity, Server-certificate validation mode, and local Service-routing config.
+Static fanout is limited to 1 to 256 distinct effective Server addresses after CLI overrides, matching the Managed production ceiling and bounding assigned-address worker and endpoint fanout. Managed assignments may be empty. Static fanout does not change these trust boundaries. When a Client dials multiple **Server addresses**, each **Tunnel connection** still uses the same shared Client identity, Server-certificate validation mode, and local Service-routing config.
 
 ## Control authentication (managed mode)
 

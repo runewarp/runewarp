@@ -138,7 +138,7 @@ backend-address = "localhost:8443"
 
 That client uses a **Catch-all Service**: the server still owns explicit **Public hostname** authorization, while the sole client service forwards every admitted hostname to one **Local backend**.
 
-For static fanout, switch only the dial side:
+For static fanout, switch only the dial side. One static Client accepts 1 to 256 distinct Server addresses, matching the Managed assignment ceiling and bounding worker and endpoint fanout:
 
 ```toml
 [client]
@@ -183,7 +183,7 @@ If you omit `--config`, Runewarp looks for `$XDG_CONFIG_HOME/runewarp/config.tom
 
 When one shared Server config needs a per-process **Server hostname**, `runewarp server --hostname <HOSTNAME>` or `RUNEWARP_SERVER_HOSTNAME=<HOSTNAME>` overrides `server.hostname` before validation, with precedence `--hostname` > `RUNEWARP_SERVER_HOSTNAME` > `server.hostname`. This is a narrow runtime seam for the Server runtime only; ordinary operator workflows should keep `server.hostname` in config.
 
-For runtime-only startup, `--server-address` is repeatable. One occurrence gives the ordinary single-target shape; multiple occurrences make one Client reconcile those Server addresses concurrently.
+For runtime-only startup, `--server-address` is repeatable. One occurrence gives the ordinary single-target shape; multiple occurrences make one Client reconcile those Server addresses concurrently, up to 256 distinct addresses. The flags replace file address values before validation, so the cap applies to the effective assignment.
 
 For a static CLI-only Client with a Catch-all Service:
 

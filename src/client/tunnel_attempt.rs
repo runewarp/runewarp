@@ -32,6 +32,8 @@ pub enum TunnelAttemptOutcome {
         run: TunnelConnectionRun,
         /// Replacement hint the address worker follows while this connection is its primary.
         hints: watch::Receiver<ReplacementHint>,
+        /// Generation of the Server runtime this connection reached.
+        generation: crate::tunnel::ServerRuntimeGeneration,
     },
     Retryable(TunnelAttemptFailure),
     FatalLocalMaterial(String),
@@ -393,9 +395,11 @@ impl ClientTunnelAttempt {
                 resolved_server_addr,
             };
             let hints = client.replacement_hint();
+            let generation = client.server_generation();
             TunnelAttemptOutcome::Connected {
                 configured_server_addr,
                 hints,
+                generation,
                 run: Box::new(move |shutdown| {
                     Box::pin(async move {
                         match client.run_with_shutdown(&shutdown).await {

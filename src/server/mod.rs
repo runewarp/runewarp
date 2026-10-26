@@ -1,6 +1,7 @@
 mod active_client;
 mod admission;
 mod authorization;
+mod drain;
 mod managed_adapter;
 mod readiness;
 mod tunnel_registry;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use self::drain::ServerDrain;
 use crate::tunnel::{ServerRuntimeGeneration, ServerTunnelEvents, ServerTunnelH3};
 use quinn::Endpoint;
 use tokio::net::{TcpListener, TcpSocket};
@@ -95,6 +97,7 @@ pub struct Server {
     admission_policy: ServerAdmissionPolicy,
     server_hostname: ServerHostname,
     tunnel_events: ServerTunnelEvents,
+    drain: ServerDrain,
 }
 
 struct ReadinessProbe {
@@ -332,10 +335,12 @@ impl Server {
         }
         // Static Servers never publish a replacement hint; only the Managed adapter does.
         let tunnel_events = ServerTunnelEvents::new(ServerRuntimeGeneration::generate());
+        let drain = ServerDrain::new();
         let authorization_adapter = ServerAuthorizationAdapter::new(
             config.server_hostname.clone(),
             tunnel_registry.clone(),
             tunnel_events.clone(),
+            drain.clone(),
         );
 
         Ok(Self {
@@ -349,6 +354,7 @@ impl Server {
             admission_policy,
             server_hostname: config.server_hostname,
             tunnel_events,
+            drain,
         })
     }
 
@@ -396,7 +402,45 @@ impl Server {
         }
     }
 
+    /// Serve until `shutdown` completes, or until a Managed drain completes.
+    ///
+    /// Drain runs the same bounded graceful path as process shutdown, starting when Control
+    /// requests it, then returns `Ok` without the process exiting. Process shutdown during a drain
+    /// joins it under the drain's original deadline; Fast still escalates.
     pub async fn run_with_shutdown(self, shutdown: &OrderlyShutdown) -> io::Result<()> {
+        let local = OrderlyShutdown::new(
+            shutdown.graceful_shutdown_duration(),
+            shutdown.quic_close_flush_duration(),
+        );
+        let drain = self.drain.clone();
+        let follow = async {
+            let mode = tokio::select! {
+                mode = shutdown.wait_started() => mode,
+                () = drain.wait() => {
+                    runtime_log::server_drain_started();
+                    ShutdownMode::Graceful
+                }
+            };
+            match mode {
+                ShutdownMode::Fast => {
+                    let _ = local.begin_fast();
+                }
+                ShutdownMode::Graceful => {
+                    let _ = local.begin_graceful();
+                    shutdown.wait_for_fast().await;
+                    let _ = local.begin_fast();
+                }
+            }
+            std::future::pending::<()>().await;
+        };
+        tokio::select! {
+            biased;
+            result = self.serve(&local) => result,
+            () = follow => unreachable!("shutdown following never completes"),
+        }
+    }
+
+    async fn serve(self, shutdown: &OrderlyShutdown) -> io::Result<()> {
         let Self {
             public_listener,
             tunnel_endpoint,
@@ -408,6 +452,7 @@ impl Server {
             admission_policy,
             server_hostname,
             tunnel_events,
+            drain: _,
         } = self;
         let mut accept_backoff = AcceptBackoff::default();
         let mut public_accept_not_before = None;

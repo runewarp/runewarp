@@ -520,6 +520,11 @@ pub fn server_readiness_lost(bind_address: SocketAddr) {
     );
 }
 
+/// Control requested a Managed drain; the Server runs its bounded graceful drain and keeps running.
+pub fn server_drain_started() {
+    emit(EventLevel::Info, &event_line("server drain started", []));
+}
+
 pub fn server_orderly_shutdown_started(mode: ShutdownMode, effective_graceful_duration: Duration) {
     emit(
         EventLevel::Info,

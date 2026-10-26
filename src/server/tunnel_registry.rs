@@ -51,6 +51,8 @@ struct ActiveVisitorWorkRecord {
 struct ActiveVisitorWorkState {
     inner: StdMutex<ActiveVisitorWorkSet>,
     quiescent: Notify,
+    /// Signals the Managed state reporter that a reported fact may have changed.
+    reported_state_changed: Arc<Notify>,
 }
 
 struct ActiveVisitorWorkSet {
@@ -136,6 +138,7 @@ impl Drop for ActiveVisitorWork {
             .is_some();
         if removed {
             self.state.quiescent.notify_waiters();
+            self.state.reported_state_changed.notify_one();
         }
     }
 }
@@ -154,6 +157,12 @@ pub(crate) struct TunnelRegistry {
 }
 
 impl TunnelRegistry {
+    /// Whether new Visitor placement could still be admitted.
+    #[cfg(test)]
+    pub(crate) fn admits_new_visitor_work(&self) -> bool {
+        self.begin_active_visitor_admission().is_some()
+    }
+
     fn begin_active_visitor_admission(&self) -> Option<ActiveVisitorAdmission> {
         let mut inner = self
             .visitor_work
@@ -209,6 +218,7 @@ impl TunnelRegistry {
                     sealed: false,
                 }),
                 quiescent: Notify::new(),
+                reported_state_changed: Arc::new(Notify::new()),
             }),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
@@ -275,6 +285,7 @@ impl TunnelRegistry {
                     sealed: false,
                 }),
                 quiescent: Notify::new(),
+                reported_state_changed: Arc::new(Notify::new()),
             }),
             next_stream_id: Arc::new(AtomicU64::new(1)),
             accepting_tunnel_connections: Arc::new(AtomicBool::new(true)),
@@ -462,7 +473,11 @@ impl TunnelRegistry {
         };
         drop(pools);
         match pool.try_register(connection.clone(), client_identity).await {
-            Ok(()) => TunnelRegistrationOutcome::Registered,
+            Ok(()) => {
+                let changed = self.visitor_work.reported_state_changed.clone();
+                tokio::spawn(connection.watch_open_session(move || changed.notify_one()));
+                TunnelRegistrationOutcome::Registered
+            }
             Err(rejection) => {
                 connection.close(b"server tunnel admission saturated");
                 TunnelRegistrationOutcome::Rejected(rejection)
@@ -555,6 +570,7 @@ impl TunnelRegistry {
                 abort_requested: false,
             },
         );
+        self.visitor_work.reported_state_changed.notify_one();
         ActiveVisitorWork {
             stream_id,
             state: self.visitor_work.clone(),
@@ -659,6 +675,46 @@ impl TunnelRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .work
             .len()
+    }
+
+    /// Signals that a fact a Managed Server reports may have changed: a Visitor started or
+    /// finished, or a Tunnel connection established its session or closed.
+    pub(crate) fn reported_state_changed(&self) -> Arc<Notify> {
+        self.visitor_work.reported_state_changed.clone()
+    }
+
+    /// Placed Visitors still running. After [`Self::stop_accepting_new_work`], zero means
+    /// quiescent: sealed admissions never become placed work.
+    pub(crate) fn in_flight_visitor_count(&self) -> usize {
+        self.visitor_work
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .work
+            .len()
+    }
+
+    /// Each authorized Managed Tunnel ID with its number of open Tunnel connections that have
+    /// established a WebTransport session. Static authorization has no Tunnel IDs and reports none.
+    pub(crate) async fn reported_tunnel_connections(&self) -> Vec<(String, usize)> {
+        // Hold the pools read lock throughout, as routing does, so an Authorization apply cannot
+        // realign or rehome members between reads and count a connection twice or not at all.
+        let pools = self.tunnel_pools.read().await;
+        let snapshot = self.authorization.current();
+        let Some(ids) = snapshot.managed_tunnel_ids() else {
+            return Vec::new();
+        };
+        let mut reported = Vec::with_capacity(ids.len());
+        for (id, pool) in ids.iter().zip(pools.iter()) {
+            let count = pool
+                .connections()
+                .await
+                .iter()
+                .filter(|connection| connection.has_open_session())
+                .count();
+            reported.push((id.as_str().to_owned(), count));
+        }
+        reported
     }
 
     pub(crate) fn has_outstanding_visitor_work(&self) -> bool {

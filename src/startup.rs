@@ -549,6 +549,10 @@ impl PreparedClient {
     }
 
     /// Replacement hint the address worker may act on for this connection.
+    pub(crate) fn server_generation(&self) -> crate::tunnel::ServerRuntimeGeneration {
+        self.client.server_generation()
+    }
+
     pub(crate) fn replacement_hint(
         &self,
     ) -> tokio::sync::watch::Receiver<crate::tunnel::ReplacementHint> {

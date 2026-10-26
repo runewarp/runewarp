@@ -22,6 +22,7 @@ use futures_util::future::BoxFuture;
 use tokio::sync::watch;
 
 use super::address_controller::{AddressWorkerControl, MaintenanceIntent};
+use super::assignment_convergence::CarryingCredit;
 use super::tunnel_attempt::{
     TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionEnd, TunnelConnectionRun,
 };
@@ -149,12 +150,13 @@ where
             return Ok(());
         }
 
-        let (configured_server_addr, run, hints) = match outcome {
+        let (configured_server_addr, run, hints, generation) = match outcome {
             TunnelAttemptOutcome::Connected {
                 configured_server_addr,
                 run,
                 hints,
-            } => (configured_server_addr, run, hints),
+                generation,
+            } => (configured_server_addr, run, hints, generation),
             TunnelAttemptOutcome::Retryable(failure) => {
                 let delay = backoff.next_delay();
                 let delay_secs = display_delay_secs(delay);
@@ -194,7 +196,7 @@ where
             dial: dial.as_ref(),
             candidate_backoff: &mut candidate_backoff,
         }
-        .run(run, hints)
+        .run(run, hints, generation)
         .await;
 
         if let Some(status) = control.observe_disconnected(&address) {
@@ -239,6 +241,8 @@ type ConnectionRunFuture = Pin<Box<dyn Future<Output = Result<(), TunnelConnecti
 /// One active connection of a Connected address: its run and the hints it reports.
 struct Active {
     run: ConnectionRunFuture,
+    /// Reports this connection in the Managed state document while it runs and offers credit.
+    _carrying_credit: Option<CarryingCredit>,
     hints: watch::Receiver<ReplacementHint>,
     /// False once the hint sender dropped, as after GOAWAY: the last hint stands.
     hints_live: bool,
@@ -250,10 +254,12 @@ impl Active {
         run: TunnelConnectionRun,
         hints: watch::Receiver<ReplacementHint>,
         shutdown: crate::OrderlyShutdown,
+        carrying_credit: Option<CarryingCredit>,
     ) -> Self {
         let interruptions = hints.borrow().interruptions;
         Self {
             run: run(shutdown),
+            _carrying_credit: carrying_credit,
             hints,
             hints_live: true,
             interruptions,
@@ -361,9 +367,15 @@ where
         mut self,
         run: TunnelConnectionRun,
         hints: watch::Receiver<ReplacementHint>,
+        generation: ServerRuntimeGeneration,
     ) -> Result<(), TunnelConnectionEnd> {
         let shutdown = self.control.orderly_shutdown();
-        let mut primary = Active::start(run, hints, shutdown.clone());
+        let mut primary = Active::start(
+            run,
+            hints,
+            shutdown.clone(),
+            self.control.carrying_credit(self.address, generation),
+        );
         let mut joined: Option<Active> = None;
         // A withdrawal protocol failure on a connection that is not last still fails the process.
         let mut protocol_failure: Option<TunnelConnectionEnd> = None;
@@ -474,7 +486,12 @@ where
         let target = candidate.target()?;
         *candidate = Candidate::Idle;
         let message = match outcome {
-            TunnelAttemptOutcome::Connected { run, hints, .. } => {
+            TunnelAttemptOutcome::Connected {
+                run,
+                hints,
+                generation,
+                ..
+            } => {
                 // Retire, shutdown or a hint change may race the attempt's completion. Then the
                 // candidate is dropped before it runs, so it never offered credit. A paused or
                 // changed hint is handled by the next hint event; until then the candidate
@@ -492,7 +509,12 @@ where
                 );
                 self.candidate_backoff.reset_after_connected();
                 // Starting the run releases the candidate's credit.
-                return Some(Active::start(run, hints, shutdown.clone()));
+                return Some(Active::start(
+                    run,
+                    hints,
+                    shutdown.clone(),
+                    self.control.carrying_credit(self.address, generation),
+                ));
             }
             TunnelAttemptOutcome::Retryable(failure) => {
                 let delay = self.candidate_backoff.next_delay();
@@ -655,6 +677,7 @@ pub fn connected_session_until(
     TunnelAttemptOutcome::Connected {
         configured_server_addr,
         hints: watch::channel(ReplacementHint::default()).1,
+        generation: ServerRuntimeGeneration::generate(),
         run: Box::new(move |shutdown| {
             Box::pin(async move {
                 tokio::select! {
@@ -706,6 +729,7 @@ mod tests {
                     TunnelAttemptOutcome::Connected {
                         configured_server_addr: "a.example.test:443".to_owned(),
                         hints: no_hints(),
+                        generation: ServerRuntimeGeneration::generate(),
                         run: Box::new(move |_shutdown| {
                             Box::pin(async move {
                                 Err(TunnelConnectionEnd::unclassified("connection ended"))
@@ -1117,6 +1141,7 @@ mod tests {
                     TunnelAttemptOutcome::Connected {
                         configured_server_addr: address.hostname().to_string(),
                         hints: no_hints(),
+                        generation: ServerRuntimeGeneration::generate(),
                         run: Box::new(move |shutdown| {
                             Box::pin(async move {
                                 assert_eq!(shutdown.wait_started().await, ShutdownMode::Graceful);

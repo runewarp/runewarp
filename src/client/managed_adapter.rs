@@ -7,13 +7,17 @@
 //! controller's [`crate::AddressController::run`] loop, which dispatches each
 //! command before answering the oneshot.
 
-use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
+use std::sync::Arc;
 
+use futures_util::future::BoxFuture;
+use serde_json::Value;
+use tokio::sync::{Notify, mpsc, oneshot};
+
+use super::assignment_convergence::AssignmentConvergenceTracker;
 use crate::ServerAddress;
 use crate::managed_session::{
-    ApplyError, ClientManagedInput, InputError, ManagedSessionLimits, RoleAdapter,
-    parse_client_input,
+    ApplyError, ClientManagedInput, InputError, ManagedSessionLimits, RoleAdapter, RoleState,
+    StateFields, parse_client_input,
 };
 
 /// One assignment apply dispatched to the Address-controller owner.
@@ -27,11 +31,41 @@ pub(crate) struct ClientAssignmentApply {
 #[derive(Debug)]
 pub struct ClientAssignmentAdapter {
     apply_tx: mpsc::UnboundedSender<ClientAssignmentApply>,
+    convergence: AssignmentConvergenceTracker,
 }
 
 impl ClientAssignmentAdapter {
-    pub(crate) fn new(apply_tx: mpsc::UnboundedSender<ClientAssignmentApply>) -> Self {
-        Self { apply_tx }
+    pub(crate) fn new(
+        apply_tx: mpsc::UnboundedSender<ClientAssignmentApply>,
+        convergence: AssignmentConvergenceTracker,
+    ) -> Self {
+        Self {
+            apply_tx,
+            convergence,
+        }
+    }
+}
+
+/// Facts a Managed Client reports: the generations of the connections carrying Visitor credit
+/// for each assigned Server address.
+struct ClientReportedState {
+    convergence: AssignmentConvergenceTracker,
+    changed: Arc<Notify>,
+}
+
+impl RoleState for ClientReportedState {
+    fn fields(&self) -> BoxFuture<'_, StateFields> {
+        let servers = self.convergence.reported_servers();
+        Box::pin(async move {
+            vec![(
+                "servers",
+                serde_json::to_value(servers).unwrap_or_else(|_| Value::Object(Default::default())),
+            )]
+        })
+    }
+
+    fn changed(&self) -> BoxFuture<'_, ()> {
+        Box::pin(self.changed.notified())
     }
 }
 
@@ -54,6 +88,13 @@ impl RoleAdapter for ClientAssignmentAdapter {
             .await
             .map_err(|_| ApplyError::new("address controller dropped apply acknowledgment"))?
     }
+
+    fn role_state(&self) -> Option<Arc<dyn RoleState>> {
+        Some(Arc::new(ClientReportedState {
+            convergence: self.convergence.clone(),
+            changed: self.convergence.reported_state_changed(),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -70,7 +111,10 @@ mod tests {
     #[tokio::test]
     async fn apply_dispatches_addresses_and_awaits_acknowledgment() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut adapter = ClientAssignmentAdapter::new(tx);
+        let mut adapter = ClientAssignmentAdapter::new(
+            tx,
+            super::super::assignment_convergence::AssignmentConvergenceTracker::new(),
+        );
         let apply = tokio::spawn(async move {
             adapter
                 .apply(
@@ -97,7 +141,10 @@ mod tests {
     #[tokio::test]
     async fn apply_propagates_controller_failure() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut adapter = ClientAssignmentAdapter::new(tx);
+        let mut adapter = ClientAssignmentAdapter::new(
+            tx,
+            super::super::assignment_convergence::AssignmentConvergenceTracker::new(),
+        );
         let apply = tokio::spawn(async move {
             adapter
                 .apply(
@@ -124,7 +171,10 @@ mod tests {
     async fn apply_fails_when_controller_channel_is_closed() {
         let (tx, rx) = mpsc::unbounded_channel::<ClientAssignmentApply>();
         drop(rx);
-        let mut adapter = ClientAssignmentAdapter::new(tx);
+        let mut adapter = ClientAssignmentAdapter::new(
+            tx,
+            super::super::assignment_convergence::AssignmentConvergenceTracker::new(),
+        );
         let error = adapter
             .apply(
                 ClientAssignmentAdapter::parse_input(

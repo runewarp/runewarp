@@ -22,6 +22,8 @@ pub struct ServerManagedInput {
     pub tunnels: Vec<ServerTunnelConfig>,
     /// Replacement hint to advertise on Tunnel event streams; `None` clears it.
     pub replacement_generation: Option<ServerRuntimeGeneration>,
+    /// Start the one-way drain. `false` or absent leaves the Server as it is.
+    pub drain: bool,
 }
 
 /// Validated Client role input from a Managed-session snapshot.
@@ -120,6 +122,16 @@ pub fn parse_server_input(
         ),
     };
 
+    let drain = match input.get("drain") {
+        None => false,
+        Some(Value::Bool(drain)) => *drain,
+        Some(_) => {
+            return Err(InputError::InvalidShape(
+                "server input drain was not a boolean".into(),
+            ));
+        }
+    };
+
     let raw: RawServerInput = serde_json::from_value(input).map_err(|_| {
         InputError::InvalidShape("server input was not a JSON object with tunnel entries".into())
     })?;
@@ -147,6 +159,7 @@ pub fn parse_server_input(
     Ok(ServerManagedInput {
         tunnels,
         replacement_generation,
+        drain,
     })
 }
 
@@ -396,6 +409,7 @@ mod tests {
             ServerManagedInput {
                 tunnels: vec![],
                 replacement_generation: None,
+                drain: false,
             }
         );
     }
@@ -411,6 +425,26 @@ mod tests {
             input.replacement_generation.map(|value| value.to_string()),
             Some("01928f3e-9c1d-7fed-9cba-9876543210fe".to_owned())
         );
+    }
+
+    #[test]
+    fn server_input_accepts_an_optional_boolean_drain() {
+        for (input, drain) in [
+            (json!({"tunnels": []}), false),
+            (json!({"tunnels": [], "drain": false}), false),
+            (json!({"tunnels": [], "drain": true}), true),
+        ] {
+            assert_eq!(
+                parse_server_input(input, &default_limits()).unwrap().drain,
+                drain
+            );
+        }
+        for value in [json!(null), json!("true"), json!(1)] {
+            let error =
+                parse_server_input(json!({"tunnels": [], "drain": value}), &default_limits())
+                    .unwrap_err();
+            assert!(matches!(error, InputError::InvalidShape(_)), "{value}");
+        }
     }
 
     #[test]
@@ -458,6 +492,7 @@ mod tests {
                     ],
                 }],
                 replacement_generation: None,
+                drain: false,
             }
         );
     }

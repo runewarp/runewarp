@@ -154,7 +154,7 @@ Client fork intake, pending-prefix and per-session delivery queues each admit 25
 | **Client identity** | Pinned public-key identity used to authenticate the Client to the Server; each Tunnel may authorize one or more of them |
 | **Public hostname authorization** | Owned by the current **Authorization snapshot**: static `server.tunnels[].public-hostnames` at startup, or Control-published Server snapshots in **Managed mode** |
 | **Authorization snapshot** | Immutable Server-owned set of Public-hostname routing and trusted Client identities; Public-hostname routing and QUIC Client-identity handshake admission consult the same current snapshot. Static snapshots have no Tunnel ID; managed snapshots carry Tunnel IDs as pool continuity keys |
-| **Managed session** | Authenticated Control relationship for versioned full-input snapshots and applied-state acknowledgments carrying the revision (plus the Server runtime generation on Servers); separate from **Server readiness**, Visitor traffic, and **Tunnel connections** (see [`managed.md`](managed.md)) |
+| **Managed session** | Authenticated Control relationship for versioned full-input snapshots, full **State documents**, and the one-way **Managed drain**; separate from **Server readiness**, Visitor traffic, and **Tunnel connections** (see [`managed.md`](managed.md)) |
 | **Public hostname CA** (manual) | Private trust anchor in `client.public-cert-dir` shared with Visitors when `tls-mode = "terminate"` is in use |
 | **Public hostname certificates via Client ACME** | Automatically provisioned by Let's Encrypt via `[client.acme]` for **Public hostnames** of terminating Services; `acme-tls/1` challenge traffic for those hostnames is routed through the Server to the Client like ordinary Visitor TLS |
 

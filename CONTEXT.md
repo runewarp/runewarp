@@ -49,7 +49,7 @@ The terminal, Client-initiated removal of one **Tunnel connection** from new **V
 _Avoid_: drain, DRAIN_ACK, disconnect
 
 **Quiescent**:
-The state of a withdrawn **Tunnel connection** with no committed **Visitor stream** left. Idle **Visitor credit** is not work. The **Server** confirms it with `204`.
+The state of a withdrawn **Tunnel connection** with no committed **Visitor stream** left. Idle **Visitor credit** is not work. The **Server** confirms it with `204`. A Server in a **Managed drain** is quiescent when its **State document** reports zero in-flight Visitors.
 _Avoid_: idle, drained
 
 **Visitor credit**:
@@ -149,7 +149,7 @@ The Managed Client lifecycle state for a connected **Server address** removed fr
 _Avoid_: drain, local close, cancelled
 
 **Infrastructure drain**:
-Provider-controlled graceful process shutdown of a runtime (for example Kubernetes termination). Distinct from managed assignment or authorization removal, which never initiate drain.
+Graceful process shutdown of a runtime by whatever supervises the process, such as a termination signal. Distinct from a **Managed drain**, which leaves the process running, and from managed assignment or authorization removal, which never initiate drain.
 _Avoid_: Retiring, authorization revocation, assignment removal
 
 **Control**:
@@ -213,8 +213,16 @@ The certificate a **Server** presents to authenticate its **Server identity** to
 _Avoid_: Server certificate, Server identity
 
 **Managed session**:
-The authenticated live relationship between one **Server** or **Client instance** and **Control** for receiving versioned snapshots and acknowledging applied revisions. It is separate from **Server readiness**, Visitor traffic, and **Tunnel connections**.
+The authenticated live relationship between one **Server** or **Client instance** and **Control** for receiving versioned snapshots and sending **State documents**. It is separate from **Server readiness**, Visitor traffic, and **Tunnel connections**.
 _Avoid_: Tunnel connection, data path, control channel
+
+**State document**:
+The full current state a Managed peer sends to **Control** with `PUT .../state`: the applied revision plus the role's facts. A **Server** reports its **Server runtime generation**, whether it is draining, open **Tunnel connections** per **Tunnel ID**, and in-flight Visitors; a **Client instance** reports the generations of its connections carrying credit per assigned **Server address**. Every document is complete; there are no deltas.
+_Avoid_: acknowledgment, heartbeat, status report
+
+**Managed drain**:
+The one-way, bounded drain **Control** requests from a running Managed **Server** with `drain: true`. The Server drops readiness, refuses new **Tunnel connections** and placement, sends GOAWAY, lets in-flight Visitors finish within `server.graceful-shutdown-duration`, and keeps running and reporting until terminated. It never resumes serving.
+_Avoid_: shutdown, withdrawal, Retiring
 
 **Tunnel pool**:
 The set of live **Tunnel connections** and their serving **Client instances** currently available for one **Tunnel**, regardless of which authorized **Client identity** each member uses.

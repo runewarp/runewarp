@@ -3,10 +3,13 @@
 //! Convergence is separate from applied revision. Retiring connections are
 //! excluded: only currently assigned addresses contribute to the aggregate.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use tokio::sync::Notify;
+
 use crate::ServerAddress;
+use crate::tunnel::ServerRuntimeGeneration;
 
 /// Aggregate progress of the current managed Client assignment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +48,9 @@ struct ConvergenceState {
     /// ones. Aggregate convergence intersects this with `assigned` so Retiring
     /// connections are excluded until re-adopted.
     connected: HashSet<ServerAddress>,
+    /// Generations of the connections carrying Visitor credit, keyed by a per-connection token.
+    carrying_credit: HashMap<ServerAddress, Vec<(u64, ServerRuntimeGeneration)>>,
+    next_connection: u64,
 }
 
 impl ConvergenceState {
@@ -65,11 +71,96 @@ impl ConvergenceState {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AssignmentConvergenceTracker {
     inner: Arc<Mutex<ConvergenceState>>,
+    /// Signals the Managed state reporter that the assignment or a connection changed.
+    reported_state_changed: Arc<Notify>,
+}
+
+/// Records one connection carrying Visitor credit until dropped.
+#[derive(Debug)]
+pub(crate) struct CarryingCredit {
+    tracker: AssignmentConvergenceTracker,
+    address: ServerAddress,
+    token: u64,
+}
+
+impl Drop for CarryingCredit {
+    fn drop(&mut self) {
+        {
+            let mut state = self.tracker.lock();
+            if let Some(connections) = state.carrying_credit.get_mut(&self.address) {
+                connections.retain(|(token, _)| *token != self.token);
+                if connections.is_empty() {
+                    state.carrying_credit.remove(&self.address);
+                }
+            }
+        }
+        self.tracker.reported_state_changed.notify_one();
+    }
 }
 
 impl AssignmentConvergenceTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ConvergenceState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Record a connection to `address` on `generation` that carries Visitor credit, until the
+    /// returned guard drops.
+    pub fn carrying_credit(
+        &self,
+        address: &ServerAddress,
+        generation: ServerRuntimeGeneration,
+    ) -> CarryingCredit {
+        let token = {
+            let mut state = self.lock();
+            let token = state.next_connection;
+            state.next_connection = token.wrapping_add(1);
+            state
+                .carrying_credit
+                .entry(address.clone())
+                .or_default()
+                .push((token, generation));
+            token
+        };
+        self.reported_state_changed.notify_one();
+        CarryingCredit {
+            tracker: self.clone(),
+            address: address.clone(),
+            token,
+        }
+    }
+
+    /// Each assigned address, as `host:port`, with the sorted generations of its connections
+    /// carrying credit. Retiring addresses are not assigned and are not reported.
+    pub fn reported_servers(&self) -> BTreeMap<String, Vec<String>> {
+        let state = self.lock();
+        state
+            .assigned
+            .iter()
+            .map(|address| {
+                let mut generations: Vec<String> = state
+                    .carrying_credit
+                    .get(address)
+                    .into_iter()
+                    .flatten()
+                    .map(|(_, generation)| generation.to_string())
+                    .collect();
+                generations.sort_unstable();
+                (
+                    format!("{}:{}", address.hostname().as_str(), address.port()),
+                    generations,
+                )
+            })
+            .collect()
+    }
+
+    pub fn reported_state_changed(&self) -> Arc<Notify> {
+        self.reported_state_changed.clone()
     }
 
     pub fn current(&self) -> AssignmentConvergence {
@@ -90,6 +181,7 @@ impl AssignmentConvergenceTracker {
         let previous = state.current();
         state.assigned = addresses.iter().cloned().collect();
         let next = state.current();
+        self.reported_state_changed.notify_one();
         (next != previous).then_some(next)
     }
 

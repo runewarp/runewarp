@@ -416,6 +416,7 @@ async fn authorization_revocation_ends_the_session_and_connection() {
                 authorized_client_identities: vec![fixture.client_identity.clone()],
             }],
             replacement_generation: None,
+            drain: false,
         })
         .await
         .expect("authorize Client");
@@ -435,6 +436,7 @@ async fn authorization_revocation_ends_the_session_and_connection() {
         .apply(crate::ServerManagedInput {
             tunnels: vec![],
             replacement_generation: None,
+            drain: false,
         })
         .await
         .expect("revoke Client");

@@ -14,7 +14,7 @@ enum ServerRuntimeMode {
     Static,
     Managed {
         session: Box<ManagedSession>,
-        adapter: ServerAuthorizationAdapter,
+        adapter: Box<ServerAuthorizationAdapter>,
     },
 }
 
@@ -58,7 +58,10 @@ impl ServerRuntime {
             let adapter = server
                 .authorization_adapter()
                 .expect("managed Server preparation constructs an authorization adapter");
-            ServerRuntimeMode::Managed { session, adapter }
+            ServerRuntimeMode::Managed {
+                session,
+                adapter: Box::new(adapter),
+            }
         } else {
             ServerRuntimeMode::Static
         };
@@ -100,7 +103,7 @@ impl ServerRuntime {
             ServerRuntimeMode::Managed {
                 mut session,
                 mut adapter,
-            } => run_managed(server, shutdown, session.as_mut(), &mut adapter).await,
+            } => run_managed(server, shutdown, session.as_mut(), adapter.as_mut()).await,
         }
     }
 }
@@ -148,9 +151,25 @@ where
     tokio::pin!(server);
     tokio::pin!(session);
 
+    let mut session_finished = false;
     let result = tokio::select! {
-        server_result = &mut server => server_result,
+        server_result = &mut server => {
+            // A completed Managed drain returns Ok before process shutdown: keep applying input
+            // and reporting state until the process is terminated.
+            if server_result.is_ok() && shutdown.mode().is_none() {
+                tokio::select! {
+                    _ = shutdown.wait_started() => server_result,
+                    _ = &mut session => {
+                        session_finished = true;
+                        Err(io::Error::other("managed session stopped unexpectedly"))
+                    }
+                }
+            } else {
+                server_result
+            }
+        }
         _ = &mut session => {
+            session_finished = true;
             if matches!(shutdown.mode(), Some(ShutdownMode::Fast)) {
                 server.await
             } else {
@@ -161,8 +180,10 @@ where
             }
         }
     };
-    let _ = session_stop.send(());
-    let _ = session.await;
+    if !session_finished {
+        let _ = session_stop.send(());
+        let _ = session.await;
+    }
     result
 }
 
@@ -197,6 +218,40 @@ mod tests {
         .await;
 
         assert_eq!(result.unwrap_err().to_string(), "server failed");
+        assert!(session_finished.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_drained_server_keeps_its_managed_session_until_process_shutdown() {
+        let shutdown = OrderlyShutdown::new(Duration::ZERO, Duration::ZERO);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let session_finished = Arc::new(AtomicBool::new(false));
+        let observed_finished = Arc::clone(&session_finished);
+        let coordinated = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                coordinate_managed_server(
+                    async { Ok(()) },
+                    async move {
+                        let _ = stop_rx.await;
+                        observed_finished.store(true, Ordering::SeqCst);
+                    },
+                    &shutdown,
+                    stop_tx,
+                )
+                .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !coordinated.is_finished(),
+            "drain keeps the runtime and session alive"
+        );
+        assert!(!session_finished.load(Ordering::SeqCst));
+
+        let _ = shutdown.begin_graceful();
+        coordinated.await.unwrap().unwrap();
         assert!(session_finished.load(Ordering::SeqCst));
     }
 }

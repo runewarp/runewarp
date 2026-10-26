@@ -36,6 +36,14 @@ _Avoid_: control channel, association SSE, Managed session
 The bidirectional stream carrying exactly one **Visitor** through one **Tunnel connection**. The **Server** assigns it, and its two directions can finish independently.
 _Avoid_: Receive slot, application stream, reverse stream
 
+**Placement withdrawal**:
+The terminal, Client-initiated removal of one **Tunnel connection** from new **Visitor** placement during graceful Client shutdown. Visitors already committed to it may finish; it never withdraws the Client identity or other connections.
+_Avoid_: drain, DRAIN_ACK, disconnect
+
+**Quiescent**:
+The state of a withdrawn **Tunnel connection** with no committed **Visitor stream** left. Idle **Visitor credit** is not work. The **Server** confirms it with `204`.
+_Avoid_: idle, drained
+
 **Visitor credit**:
 A **Client**-offered opportunity for the **Server** to start a **Visitor stream**, backed by reserved Client-instance handler capacity. Idle credit is unassigned capacity; an active Visitor retains its capacity until its stream ends.
 _Avoid_: Receive slot, backend capacity, request slot

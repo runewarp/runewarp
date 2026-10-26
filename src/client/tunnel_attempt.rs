@@ -15,10 +15,11 @@ use super::AddressWorkerDial;
 use crate::{ClientInstancePrep, PreparedClient, ServerAddress};
 
 /// Runs one authenticated Tunnel connection until remote close or process shutdown.
+///
+/// The argument is the Client-instance [`crate::OrderlyShutdown`]: Graceful withdraws the
+/// connection under its shared deadline, and Fast closes it at once.
 pub type TunnelConnectionRun = Box<
-    dyn FnOnce(
-            BoxFuture<'static, crate::ShutdownMode>,
-        ) -> BoxFuture<'static, Result<(), TunnelConnectionEnd>>
+    dyn FnOnce(crate::OrderlyShutdown) -> BoxFuture<'static, Result<(), TunnelConnectionEnd>>
         + Send,
 >;
 
@@ -55,6 +56,8 @@ enum ConnectionEndKind {
     Clean(ConnectionContext),
     Unauthorized(ConnectionContext),
     Transport(ConnectionContext),
+    /// The Server violated the withdrawal contract during graceful shutdown.
+    WithdrawalProtocolFailure,
     Unclassified,
 }
 
@@ -156,6 +159,20 @@ impl TunnelConnectionEnd {
             .flatten()
     }
 
+    /// A withdrawal protocol failure, which becomes the process error after teardown.
+    pub fn withdrawal_protocol_failure(message: impl Into<String>) -> Self {
+        Self {
+            kind: ConnectionEndKind::WithdrawalProtocolFailure,
+            message: Some(message.into()),
+        }
+    }
+
+    pub(crate) fn withdrawal_protocol_failure_message(&self) -> Option<&str> {
+        matches!(self.kind, ConnectionEndKind::WithdrawalProtocolFailure)
+            .then_some(self.message.as_deref())
+            .flatten()
+    }
+
     pub(crate) fn report_after_retry_delay(&self, delay_secs: u64) {
         match &self.kind {
             ConnectionEndKind::Clean(context) => {
@@ -181,7 +198,7 @@ impl TunnelConnectionEnd {
                     self.message.as_deref().unwrap_or_default(),
                 );
             }
-            ConnectionEndKind::Unclassified => {}
+            ConnectionEndKind::WithdrawalProtocolFailure | ConnectionEndKind::Unclassified => {}
         }
     }
 }
@@ -314,10 +331,10 @@ impl AddressWorkerDial for ClientTunnelAttempt {
             };
             TunnelAttemptOutcome::Connected {
                 configured_server_addr: configured_server_addr.clone(),
-                run: Box::new(move |process_shutdown| {
+                run: Box::new(move |shutdown| {
                     Box::pin(async move {
-                        match client.run_until_shutdown(process_shutdown).await {
-                            Ok(()) => Ok(()),
+                        match client.run_with_shutdown(&shutdown).await {
+                            Ok(withdrawal) => report_withdrawal(withdrawal, &connection_context),
                             Err(error) => {
                                 let message = error.to_string();
                                 Err(classify_connection_end(error, connection_context, message))
@@ -327,6 +344,32 @@ impl AddressWorkerDial for ClientTunnelAttempt {
                 }),
             }
         })
+    }
+}
+
+/// Report how graceful withdrawal ended. Only a protocol failure fails the process.
+fn report_withdrawal(
+    withdrawal: Option<crate::WithdrawalOutcome>,
+    context: &ConnectionContext,
+) -> Result<(), TunnelConnectionEnd> {
+    use crate::WithdrawalOutcome;
+    let address = &context.configured_server_addr;
+    match withdrawal {
+        None => Ok(()),
+        Some(WithdrawalOutcome::Confirmed) => {
+            crate::runtime_log::client_tunnel_withdrawal_confirmed(address);
+            Ok(())
+        }
+        Some(WithdrawalOutcome::Unconfirmed(reason)) => {
+            crate::runtime_log::client_tunnel_withdrawal_unconfirmed(address, reason);
+            Ok(())
+        }
+        Some(WithdrawalOutcome::ProtocolFailure(failure)) => {
+            crate::runtime_log::client_tunnel_withdrawal_failed(address, failure);
+            Err(TunnelConnectionEnd::withdrawal_protocol_failure(format!(
+                "tunnel placement withdrawal failed for {address}: {failure}"
+            )))
+        }
     }
 }
 

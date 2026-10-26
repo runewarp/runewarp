@@ -28,9 +28,25 @@ impl ClientRuntime {
         })
     }
 
+    /// Run until `shutdown_signal` resolves with the shutdown mode.
     pub async fn run<F>(self, shutdown_signal: F) -> Result<(), Box<dyn Error>>
     where
         F: Future<Output = io::Result<ShutdownMode>>,
+    {
+        self.run_with_escalation(shutdown_signal, std::future::pending())
+            .await
+    }
+
+    /// Run until `shutdown_signal`. After a graceful start, `escalation` resolving switches the
+    /// shutdown to Fast, closing every remaining Tunnel connection at once.
+    pub async fn run_with_escalation<F, E>(
+        self,
+        shutdown_signal: F,
+        escalation: E,
+    ) -> Result<(), Box<dyn Error>>
+    where
+        F: Future<Output = io::Result<ShutdownMode>>,
+        E: Future<Output = ()>,
     {
         let Self {
             settings,
@@ -44,6 +60,7 @@ impl ClientRuntime {
             Arc::clone(&instance),
             local_bind_addr,
             shutdown_signal,
+            escalation,
         )
         .await;
         instance.stop_acme().await;
@@ -51,14 +68,16 @@ impl ClientRuntime {
     }
 }
 
-async fn run_client<F>(
+async fn run_client<F, E>(
     settings: Arc<crate::ClientConfig>,
     instance: Arc<ClientInstancePrep>,
     local_bind_addr: SocketAddr,
     shutdown_signal: F,
+    escalation: E,
 ) -> Result<(), Box<dyn Error>>
 where
     F: Future<Output = io::Result<ShutdownMode>>,
+    E: Future<Output = ()>,
 {
     match settings.admission {
         ClientAdmission::Managed => {
@@ -71,6 +90,7 @@ where
                 control,
                 local_bind_addr,
                 shutdown_signal,
+                escalation,
             )
             .await
         }
@@ -80,7 +100,8 @@ where
                 Arc::clone(&instance),
                 local_bind_addr,
             );
-            let mut controller = AddressController::for_static(factory);
+            let mut controller = AddressController::for_static(factory)
+                .with_graceful_shutdown_duration(settings.graceful_shutdown_duration);
             controller.seed_configured(settings.server_addresses.clone());
             let shutdown = controller.shutdown_handle();
 
@@ -90,16 +111,45 @@ where
             let client_result = tokio::select! {
                 result = &mut runtime => result,
                 signal_result = &mut shutdown_signal => {
-                    if signal_result.is_ok() {
-                        crate::runtime_log::client_graceful_shutdown_started();
-                    }
-                    shutdown.request();
-                    let runtime_result = runtime.await;
+                    begin_shutdown(&shutdown, signal_result.as_ref().ok().copied());
+                    let runtime_result =
+                        finish_with_escalation(runtime, escalation, &shutdown).await;
                     signal_result?;
                     runtime_result
                 }
             };
             client_result.map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>)
+        }
+    }
+}
+
+/// Start Client shutdown in the signalled mode; a failed signal listener forces Fast.
+fn begin_shutdown(shutdown: &crate::client::AddressControllerShutdown, mode: Option<ShutdownMode>) {
+    let mode = mode.unwrap_or(ShutdownMode::Fast);
+    if mode == ShutdownMode::Graceful {
+        crate::runtime_log::client_graceful_shutdown_started();
+    }
+    shutdown.begin(mode);
+}
+
+/// Drive `runtime` to completion, escalating to Fast if `escalation` resolves first.
+async fn finish_with_escalation<R, E>(
+    runtime: R,
+    escalation: E,
+    shutdown: &crate::client::AddressControllerShutdown,
+) -> R::Output
+where
+    R: Future,
+    E: Future<Output = ()>,
+{
+    tokio::pin!(runtime);
+    tokio::select! {
+        result = &mut runtime => result,
+        () = escalation => {
+            if shutdown.begin(ShutdownMode::Fast) == crate::ShutdownTransition::EscalatedToFast {
+                crate::runtime_log::client_orderly_shutdown_escalated();
+            }
+            runtime.await
         }
     }
 }
@@ -135,22 +185,26 @@ impl AddressWorkerHooks for RuntimeClientReadyHooks {
     }
 }
 
-async fn run_managed_client<F>(
+async fn run_managed_client<F, E>(
     settings: Arc<crate::ClientConfig>,
     instance: Arc<ClientInstancePrep>,
     control: &crate::ControlConfig,
     local_bind_addr: SocketAddr,
     shutdown_signal: F,
+    escalation: E,
 ) -> Result<(), Box<dyn Error>>
 where
     F: Future<Output = io::Result<ShutdownMode>>,
+    E: Future<Output = ()>,
 {
     let factory = production_client_address_worker_factory(
         Arc::clone(&settings),
         Arc::clone(&instance),
         local_bind_addr,
     );
-    let (mut controller, mut adapter) = AddressController::for_managed(factory);
+    let (controller, mut adapter) = AddressController::for_managed(factory);
+    let mut controller =
+        controller.with_graceful_shutdown_duration(settings.graceful_shutdown_duration);
     let shutdown = controller.shutdown_handle();
 
     let material = crate::SessionMaterial {
@@ -182,7 +236,14 @@ where
         },
     );
     let runtime = controller.run();
-    coordinate_managed_client(runtime, session_runtime, shutdown, session_stop_tx).await
+    coordinate_managed_client(
+        runtime,
+        session_runtime,
+        shutdown,
+        session_stop_tx,
+        escalation,
+    )
+    .await
 }
 
 enum ClientSessionCompletion {
@@ -190,15 +251,17 @@ enum ClientSessionCompletion {
     ControllerStopped,
 }
 
-async fn coordinate_managed_client<Controller, Session>(
+async fn coordinate_managed_client<Controller, Session, Escalation>(
     controller: Controller,
     session: Session,
     shutdown: crate::client::AddressControllerShutdown,
     session_stop: oneshot::Sender<()>,
+    escalation: Escalation,
 ) -> Result<(), Box<dyn Error>>
 where
     Controller: Future<Output = Result<(), String>>,
     Session: Future<Output = ClientSessionCompletion>,
+    Escalation: Future<Output = ()>,
 {
     tokio::pin!(controller);
     tokio::pin!(session);
@@ -211,13 +274,10 @@ where
         completion = &mut session => {
             match completion {
                 ClientSessionCompletion::ShutdownSignal(signal_result) => {
-                    if signal_result.is_ok() {
-                        crate::runtime_log::client_graceful_shutdown_started();
-                    }
-                    shutdown.request();
-                    let runtime_result = controller.await.map_err(|error| {
-                        Box::new(io::Error::other(error)) as Box<dyn Error>
-                    });
+                    begin_shutdown(&shutdown, signal_result.as_ref().ok().copied());
+                    let runtime_result = finish_with_escalation(controller, escalation, &shutdown)
+                        .await
+                        .map_err(|error| Box::new(io::Error::other(error)) as Box<dyn Error>);
                     signal_result?;
                     runtime_result?;
                     Ok(())
@@ -281,6 +341,7 @@ mod tests {
             },
             shutdown,
             stop_tx,
+            std::future::pending(),
         )
         .await;
 
@@ -415,6 +476,7 @@ mod tests {
             ServerAddress::parse(&format!("localhost:{failing_port}")).map_err(io::Error::other)?;
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             server_addresses: vec![failing_server_address.clone(), valid_server_address.clone()],
             server_hostname: failing_server_address.hostname().clone(),
             server_port: failing_server_address.port(),

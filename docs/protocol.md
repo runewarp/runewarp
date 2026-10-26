@@ -142,7 +142,29 @@ data: {"version":1,"generation":"0123456789abcdef0123456789abcdef"}
 
 The Client waits at most **60 seconds** for a subscription's first valid state; keepalive comments do not satisfy that gate. After a stream end, failure, or **60 seconds of silence**, it waits **one second** and resubscribes while the connection remains usable and GOAWAY permits requests. A malformed or unsupported state, unexpected event type, or changed generation on the same connection closes the connection with `H3_GENERAL_PROTOCOL_ERROR`.
 
-Oversized request header sections receive bodyless `431` before request-handler work is spawned; the connection remains usable. Signaling host mismatches receive bodyless `421`; unknown paths receive `404`; another method on the events resource receives `405` with `Allow: GET`. Validly declared positive content, otherwise valid DATA content, or trailers on the bodyless event request receive `400`. Malformed messages use the applicable HTTP/3 error, including `H3_MESSAGE_ERROR` for invalid content length. Bodyless-request intake has a **5-second** deadline and returns `408` on expiry.
+Oversized request header sections receive bodyless `431` before request-handler work is spawned; the connection remains usable. Signaling host mismatches receive bodyless `421`; unknown paths receive `404`; another method on the events resource receives `405` with `Allow: GET`, and on the withdrawal resource `405` with `Allow: PUT`. Validly declared positive content, otherwise valid DATA content, or trailers on a bodyless signaling request receive `400`. Malformed messages use the applicable HTTP/3 error, including `H3_MESSAGE_ERROR` for invalid content length. Bodyless-request intake has a **5-second** deadline from request headers and returns `408` on expiry. After a withdrawal `400` or `408`, the Server stops any still-open request intake without resetting the completed response.
+
+## Placement withdrawal
+
+A Client withdraws one Tunnel connection from Visitor placement with a bodyless `PUT /v1/tunnel/withdrawal` on a fresh request stream to the Server hostname's HTTPS origin, ending the request with FIN. Withdrawal is terminal and connection-scoped: it neither withdraws the Client identity nor affects other Tunnel connections. Graceful Client shutdown is its only trigger.
+
+- **Commit:** withdrawal commits once the Server has validated the complete bodyless request. Cancelling or resetting the request stream afterwards never reverses it. A request that is cancelled, incomplete, rejected or timed out first does not commit.
+- **Placement commitment:** a Visitor commits to a connection when its WebTransport stream opens. That commitment and the withdrawal commit are serialized, so a Visitor either committed first and may finish, or is never placed there. After commit the Server opens no new Visitor stream on the connection, even on credit it already holds; pending opens still waiting for credit end, and those Visitors are dropped without re-placement. Pool placement skips withdrawn members. Later Authorization changes or pool realignment never restore eligibility.
+- **Quiescence:** the connection is quiescent when it is withdrawn with no committed Visitor stream left on the Server. The Server then sends bodyless `204` and FIN. A withdrawal before any Visitor is immediately quiescent.
+- **Duplicates:** every valid concurrent or later request joins the same transition and receives `204` at the same quiescence point; invalid duplicates receive their own status.
+- **Close:** the Server waits a fixed **5 seconds** after the first `204` completes locally, or after quiescence if every valid request was cancelled before any `204` completed, then closes the connection with `H3_NO_ERROR`. Later duplicates never restart that timer. Server shutdown deadlines and Fast escalation still close earlier.
+
+When graceful shutdown withdraws a connection, the Client immediately stops idle-credit maintenance, cancels any pending budget acquisition and returns idle permits to the Client-instance budget. Visitors the Server committed before its withdrawal commit still arrive on already-issued credit, take a permit through the no-wait budget guard and are honored. The Client confirms quiescence only on a bodyless `204` followed by response FIN; it then waits for its local Visitor leases to drain, so final bytes already in flight reach their handlers, and closes with `H3_NO_ERROR`.
+
+| Withdrawal result | Client classification |
+| --- | --- |
+| `204` with FIN and no content or trailers | Confirmed |
+| Response-less stream failure or `408` while the connection is usable | Retry once on a fresh request stream of the same connection, within the shared deadline |
+| A second response-less failure or `408` | Unconfirmed drain |
+| GOAWAY forbids the request, the connection closes (including revocation), the deadline expires or Fast shutdown supersedes it | Unconfirmed drain |
+| `400`, `404`, `405`, `421`, any other status, or a `204` carrying content or trailers | Withdrawal protocol failure |
+
+An unconfirmed drain logs a warning with the Server address and closes that connection; active Visitors on it may have been terminated. A withdrawal protocol failure logs an error and closes that connection; other connections keep draining and the process exits nonzero after teardown, reporting the first failure. The Client never opens or reconnects a Tunnel connection to withdraw. GOAWAY does not trigger withdrawal. Authorization revocation always takes effect immediately: if it closes the connection first the drain is unconfirmed, and if its cleanup leaves the connection open and quiescent the `204` still completes.
 
 ## Client-side Service selection
 
@@ -201,7 +223,9 @@ For orderly local shutdown that the runtime controls:
 - after Server-local work completes, the Server sends the WebTransport DRAIN capsule and waits for the Client to release its Visitors and send CLOSE, then closes with `H3_NO_ERROR` (`0x100`); idle Visitor credit does not prolong drain
 - when that graceful deadline expires, the **Server** force-closes remaining active **Tunnel connections**
 - **Fast shutdown** and graceful-to-fast escalation close immediately with `H3_NO_ERROR`
-- the **Client instance** stops new dial and retry work before it closes all active **Tunnel connections**
+- the **Client instance** stops new dial and retry work before it withdraws or closes active **Tunnel connections**
+- **Graceful Client shutdown** stops offering Visitor credit and withdraws every live Tunnel connection concurrently under one Client-instance-wide `client.graceful-shutdown-duration` deadline, which defaults to `60s` and starts with shutdown; see [placement withdrawal](#placement-withdrawal). Each connection closes after its confirmation; the rest close at the deadline as unconfirmed. `0s` makes graceful Client shutdown behave as fast
+- **Fast Client shutdown** skips withdrawal and closes every connection at once. Graceful-to-fast escalation cancels outstanding withdrawals, keeps confirmations already received and reports the rest unconfirmed. `SIGTERM` and the first `Ctrl-C` start graceful Client shutdown; `SIGQUIT` on Unix starts fast shutdown, and after a first `Ctrl-C`, a second `Ctrl-C` or `SIGQUIT` escalates to fast
 - both orderly shutdown modes still send the normal QUIC connection close and then wait the short fixed runtime-owned **QUIC close flush duration** before exit
 
 ## Retry behavior
@@ -221,7 +245,7 @@ Failure and reconnect logs report the chosen next retry delay as `next-retry-del
 
 When the remote **Server** exits gracefully, the **Client instance** still treats the closed **Tunnel connection** as an ordinary disconnect and keeps the same reconnect model above. There is no shutdown-specific reconnect branch.
 
-When more than one authenticated connection is live for the same **Tunnel** on one **Server** node, those connections form a **Tunnel pool**. Each new Visitor stream is placed onto the pool member with the fewest active proxied streams, with round-robin tie-breaking when load is equal. If the chosen member dies before the proxied stream is established, the Visitor connection fails immediately; the Server does not retry placement onto a different pool member.
+When more than one authenticated connection is live for the same **Tunnel** on one **Server** node, those connections form a **Tunnel pool**. Each new Visitor stream is placed onto the eligible pool member with the fewest active proxied streams; withdrawn or GOAWAY members are skipped but stay registered until they close, with round-robin tie-breaking when load is equal. If the chosen member dies before the proxied stream is established, the Visitor connection fails immediately; the Server does not retry placement onto a different pool member.
 
 ## Managed-session Control protocol
 

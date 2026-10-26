@@ -13,7 +13,7 @@ use h3::server::RequestStream;
 use http::{HeaderMap, Method, Request, Response, StatusCode, header};
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
-use tokio::time::{Instant, interval_at, timeout, timeout_at};
+use tokio::time::{Instant, interval_at, sleep, timeout, timeout_at};
 
 use crate::quic::{HANDSHAKE_TIMEOUT, peer_client_identity, with_handshake_timeout};
 use crate::{ClientIdentity, ServerHostname};
@@ -21,8 +21,8 @@ use crate::{ClientIdentity, ServerHostname};
 use super::events::{KEEPALIVE_COMMENT, ServerRuntimeGeneration, TunnelEventState};
 use super::stream::{ServerTunnelStream, TunnelStream};
 use super::{
-    OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TunnelH3Error, TunnelH3Timing,
-    close_connection,
+    OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TUNNEL_WITHDRAWAL_PATH, TunnelH3Error,
+    TunnelH3Timing, close_connection,
 };
 
 type ServerH3Connection = h3_webtransport::server::ServerConnection<h3_quinn::Connection, Bytes>;
@@ -34,8 +34,10 @@ type ServerRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 ///
 /// Serves the Tunnel event stream and opens one WebTransport stream per placed Visitor using
 /// permit-backed QUIC credit. One detached WebTransport session owns connection lifetime.
-/// Other signaling requests get bodyless statuses. Dropping the
-/// handle closes the connection immediately with `H3_NO_ERROR`.
+/// A valid placement withdrawal permanently ends new placement and is answered with `204` once
+/// no Visitor work remains; the Server closes the connection a fixed time later if the Client
+/// has not. Other signaling requests get bodyless statuses. Dropping the handle closes the
+/// connection immediately with `H3_NO_ERROR`.
 pub struct ServerTunnelH3 {
     connection: quinn::Connection,
     client_identity: ClientIdentity,
@@ -49,7 +51,8 @@ pub struct ServerTunnelH3 {
 pub enum OpenTunnelStreamError {
     /// No WebTransport stream credit arrived before the deadline.
     TimedOut,
-    /// GOAWAY was sent or the connection ended; it accepts no new Visitors.
+    /// GOAWAY was sent, the Client withdrew placement, or the connection ended; it accepts no
+    /// new Visitors.
     Closed,
 }
 
@@ -114,6 +117,15 @@ struct Shared {
     /// Ordinary request handlers, pending Visitor opens and active Tunnel streams. The session
     /// itself does not prolong graceful drain.
     requests_in_flight: Arc<watch::Sender<usize>>,
+    /// Pending Visitor opens and active Tunnel streams; quiescence waits for zero.
+    visitor_work: Arc<watch::Sender<usize>>,
+    /// Published once a valid withdrawal commits. Placement commitment reads it under the same
+    /// lock, so a Visitor either commits before withdrawal or is never placed.
+    withdrawn: watch::Sender<bool>,
+    /// Valid withdrawal requests still waiting to send their `204`.
+    withdrawal_waiters: Arc<watch::Sender<usize>>,
+    /// Published when the first `204` completes locally, starting the post-quiescence close.
+    confirmed: watch::Sender<bool>,
     #[cfg(test)]
     handlers_spawned: std::sync::atomic::AtomicUsize,
     session: watch::Sender<Option<Arc<ServerSession>>>,
@@ -184,6 +196,10 @@ impl ServerTunnelH3 {
             goaway: watch::Sender::new(false),
             subscriptions: watch::Sender::new(0),
             requests_in_flight: Arc::new(watch::Sender::new(0)),
+            visitor_work: Arc::new(watch::Sender::new(0)),
+            withdrawn: watch::Sender::new(false),
+            withdrawal_waiters: Arc::new(watch::Sender::new(0)),
+            confirmed: watch::Sender::new(false),
             #[cfg(test)]
             handlers_spawned: std::sync::atomic::AtomicUsize::new(0),
             session: watch::Sender::new(None),
@@ -208,6 +224,16 @@ impl ServerTunnelH3 {
     /// Pinned Client identity authenticated by this connection.
     pub fn client_identity(&self) -> &ClientIdentity {
         &self.client_identity
+    }
+
+    /// Whether new Visitors may be placed here: no withdrawal, GOAWAY or connection end.
+    ///
+    /// Withdrawal is permanent, so a withdrawn connection never regains eligibility, including
+    /// across Authorization changes that move it to another Tunnel pool.
+    pub fn accepts_visitors(&self) -> bool {
+        !*self.shared.withdrawn.borrow()
+            && !*self.shared.goaway.borrow()
+            && self.connection.close_reason().is_none()
     }
 
     /// Open one Server-assigned Visitor stream, waiting for permit-backed QUIC credit until
@@ -238,11 +264,15 @@ impl ServerTunnelH3 {
     ) -> Result<ServerTunnelStream, OpenFailure> {
         use h3::quic::{BidiStream, RecvStream, SendStream};
         let mut goaway = self.shared.goaway.subscribe();
-        if *goaway.borrow() || self.connection.close_reason().is_some() {
+        let mut withdrawn = self.shared.withdrawn.subscribe();
+        if !self.accepts_visitors() {
             return Err(OpenFailure::closed("connection-not-accepting"));
         }
         // Pending opens count toward graceful drain, including those awaiting session readiness.
-        let request = InFlightRequest::start(&self.shared.requests_in_flight);
+        let work = VisitorWork {
+            _request: InFlightRequest::start(&self.shared.requests_in_flight),
+            _visitor: InFlightRequest::start(&self.shared.visitor_work),
+        };
         let opening = async {
             let mut session = self.shared.session.subscribe();
             let opener = session
@@ -262,8 +292,18 @@ impl ServerTunnelH3 {
                 stream.stop_sending(Code::H3_REQUEST_REJECTED.value());
                 return Err(OpenFailure::closed("goaway-after-open"));
             }
+            // Placement commitment. Holding this read lock excludes the withdrawal commit, so
+            // credit the Server already held is never used after withdrawal commits.
+            let withdrawn = self.shared.withdrawn.borrow();
+            if *withdrawn {
+                stream.reset(Code::H3_REQUEST_REJECTED.value());
+                stream.stop_sending(Code::H3_REQUEST_REJECTED.value());
+                return Err(OpenFailure::closed("withdrawn-after-open"));
+            }
             let (send, recv) = stream.split();
-            Ok(TunnelStream::new(recv, send, Arc::new(request)))
+            let stream = TunnelStream::new(recv, send, Arc::new(work));
+            drop(withdrawn);
+            Ok(stream)
         };
         tokio::select! {
             result = timeout(deadline, opening) => result.map_err(|_| {
@@ -273,6 +313,7 @@ impl ServerTunnelH3 {
             })?,
             _ = self.connection.closed() => Err(OpenFailure::closed("connection-closed")),
             _ = async { goaway.wait_for(|closed| *closed).await.ok(); } => Err(OpenFailure::closed("goaway")),
+            _ = async { withdrawn.wait_for(|withdrawn| *withdrawn).await.ok(); } => Err(OpenFailure::closed("withdrawn")),
         }
     }
 
@@ -347,6 +388,8 @@ async fn serve_connection(
     let mut handlers = JoinSet::new();
     let period = shared.timing.request_deadline;
     let mut prefix_deadline = interval_at(Instant::now() + period, period);
+    let post_quiescence_close = close_after_quiescence(&shared);
+    tokio::pin!(post_quiescence_close);
 
     loop {
         tokio::select! {
@@ -368,6 +411,7 @@ async fn serve_connection(
                     }
                 },
             _ = connection.closed() => break,
+            _ = &mut post_quiescence_close => break,
             _ = prefix_deadline.tick() => { h3_connection.evict_pending_streams(); }
             _ = handlers.join_next(), if !handlers.is_empty() => {}
             resolved = resolving.next(), if !resolving.is_empty() => {
@@ -411,6 +455,34 @@ async fn send_goaway(h3_connection: &mut ServerH3Connection, shared: &Shared) {
     let _ = h3_connection.shutdown(1).await;
 }
 
+/// Wait until a withdrawn connection is quiescent and the Client has had the fixed
+/// post-quiescence time to close it.
+///
+/// The timer starts when the first `204` completes locally, or once every valid waiter has
+/// given up before any `204` could complete. Later duplicates never restart it. Server shutdown
+/// still closes at its own deadline, so this never extends shutdown.
+async fn close_after_quiescence(shared: &Shared) {
+    let _ = shared
+        .withdrawn
+        .subscribe()
+        .wait_for(|withdrawn| *withdrawn)
+        .await;
+    let _ = shared
+        .visitor_work
+        .subscribe()
+        .wait_for(|work| *work == 0)
+        .await;
+    let mut confirmed = shared.confirmed.subscribe();
+    let mut waiters = shared.withdrawal_waiters.subscribe();
+    while !*confirmed.borrow_and_update() && *waiters.borrow_and_update() > 0 {
+        tokio::select! {
+            _ = confirmed.changed() => {}
+            _ = waiters.changed() => {}
+        }
+    }
+    sleep(shared.timing.post_quiescence_close).await;
+}
+
 /// Accounting for one ordinary request or Visitor open, retained through its handler or both
 /// active Tunnel stream halves.
 struct InFlightRequest {
@@ -427,6 +499,14 @@ impl InFlightRequest {
 }
 
 impl super::stream::StreamResource for InFlightRequest {}
+
+/// One pending or committed Visitor: counted for both graceful drain and withdrawal quiescence.
+struct VisitorWork {
+    _request: InFlightRequest,
+    _visitor: InFlightRequest,
+}
+
+impl super::stream::StreamResource for VisitorWork {}
 
 impl Drop for InFlightRequest {
     fn drop(&mut self) {
@@ -460,11 +540,13 @@ async fn handle_request(
                     reset_malformed(&mut stream);
                 }
                 Ok(Ok(BodylessRequest::Content | BodylessRequest::Trailers)) => {
-                    send_bodyless_status(stream, StatusCode::BAD_REQUEST, shared.timing).await;
+                    send_bodyless_status(stream, StatusCode::BAD_REQUEST, None, shared.timing)
+                        .await;
                 }
                 Ok(Err(_)) => {}
                 Err(_) => {
-                    send_bodyless_status(stream, StatusCode::REQUEST_TIMEOUT, shared.timing).await;
+                    send_bodyless_status(stream, StatusCode::REQUEST_TIMEOUT, None, shared.timing)
+                        .await;
                 }
             }
         }
@@ -499,7 +581,37 @@ async fn handle_request(
                 }
             }
         }
-        Route::Status(status) => send_bodyless_status(stream, status, shared.timing).await,
+        Route::Withdrawal => {
+            let content_length = declared_content_length(http_request.headers())
+                .ok()
+                .flatten();
+            match timeout_at(request_deadline, read_bodyless_request(&mut stream)).await {
+                Ok(Ok(BodylessRequest::Complete)) => serve_withdrawal(stream, shared).await,
+                Ok(Ok(BodylessRequest::Content)) if content_length == Some(0) => {
+                    reset_malformed(&mut stream);
+                }
+                Ok(Ok(BodylessRequest::Content | BodylessRequest::Trailers)) => {
+                    reject_withdrawal(stream, StatusCode::BAD_REQUEST, shared.timing).await;
+                }
+                // Cancellation before validation never commits.
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    reject_withdrawal(stream, StatusCode::REQUEST_TIMEOUT, shared.timing).await;
+                }
+            }
+        }
+        Route::Status(status) => {
+            send_bodyless_status(stream, status, None, shared.timing).await;
+        }
+        Route::MethodNotAllowed { allow } => {
+            send_bodyless_status(
+                stream,
+                StatusCode::METHOD_NOT_ALLOWED,
+                Some(allow),
+                shared.timing,
+            )
+            .await;
+        }
         Route::Malformed => reset_malformed(&mut stream),
     }
 }
@@ -538,8 +650,13 @@ async fn read_bodyless_request(
 #[derive(Debug, Eq, PartialEq)]
 enum Route {
     Events,
+    Withdrawal,
     Session,
     Status(StatusCode),
+    /// Known resource with another method: `405` carrying `Allow`.
+    MethodNotAllowed {
+        allow: &'static str,
+    },
     /// Malformed message, answered with `H3_MESSAGE_ERROR` instead of a status.
     Malformed,
 }
@@ -575,16 +692,18 @@ fn route(request: &Request<()>, server_hostname: &ServerHostname) -> Route {
     if uri.scheme_str() != Some("https") {
         return Route::Status(StatusCode::BAD_REQUEST);
     }
-    if uri.path() != TUNNEL_EVENTS_PATH {
-        return Route::Status(StatusCode::NOT_FOUND);
-    }
-    if request.method() != Method::GET {
-        return Route::Status(StatusCode::METHOD_NOT_ALLOWED);
+    let (method, resource, allow) = match uri.path() {
+        TUNNEL_EVENTS_PATH => (Method::GET, Route::Events, "GET"),
+        TUNNEL_WITHDRAWAL_PATH => (Method::PUT, Route::Withdrawal, "PUT"),
+        _ => return Route::Status(StatusCode::NOT_FOUND),
+    };
+    if request.method() != method {
+        return Route::MethodNotAllowed { allow };
     }
     match declared_content_length(request.headers()) {
         Err(MalformedContentLength) => Route::Malformed,
         Ok(Some(length)) if length > 0 => Route::Status(StatusCode::BAD_REQUEST),
-        Ok(_) => Route::Events,
+        Ok(_) => resource,
     }
 }
 
@@ -614,14 +733,16 @@ fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, Malformed
     Ok(declared)
 }
 
+/// Send a bodyless response; returns the stream when HEADERS and FIN completed locally.
 async fn send_bodyless_status(
     mut stream: ServerRequestStream,
     status: StatusCode,
+    allow: Option<&'static str>,
     timing: TunnelH3Timing,
-) {
+) -> Option<ServerRequestStream> {
     let mut response = Response::builder().status(status);
-    if status == StatusCode::METHOD_NOT_ALLOWED {
-        response = response.header(header::ALLOW, "GET");
+    if let Some(allow) = allow {
+        response = response.header(header::ALLOW, allow);
     }
     let response = response
         .body(())
@@ -633,7 +754,47 @@ async fn send_bodyless_status(
     .await;
     if !sent {
         stream.stop_stream(Code::H3_REQUEST_CANCELLED);
+        return None;
     }
+    Some(stream)
+}
+
+/// Answer an invalid or timed-out withdrawal request, then stop any still-open request intake
+/// without resetting the completed response.
+async fn reject_withdrawal(
+    stream: ServerRequestStream,
+    status: StatusCode,
+    timing: TunnelH3Timing,
+) {
+    if let Some(mut stream) = send_bodyless_status(stream, status, None, timing).await {
+        stream.stop_sending(Code::H3_REQUEST_CANCELLED);
+    }
+}
+
+/// Commit placement withdrawal, wait for quiescence, then confirm with bodyless `204` and FIN.
+///
+/// Commit is irreversible: cancelling this request afterwards does not restore placement. Every
+/// valid request, including concurrent and later duplicates, joins the same quiescence point.
+async fn serve_withdrawal(stream: ServerRequestStream, shared: &Shared) {
+    // Register before committing so the close timer cannot start while this waiter is pending.
+    let waiter = InFlightRequest::start(&shared.withdrawal_waiters);
+    shared
+        .withdrawn
+        .send_if_modified(|withdrawn| !std::mem::replace(withdrawn, true));
+    let _ = shared
+        .visitor_work
+        .subscribe()
+        .wait_for(|work| *work == 0)
+        .await;
+    if send_bodyless_status(stream, StatusCode::NO_CONTENT, None, shared.timing)
+        .await
+        .is_some()
+    {
+        shared
+            .confirmed
+            .send_if_modified(|confirmed| !std::mem::replace(confirmed, true));
+    }
+    drop(waiter);
 }
 
 /// Serve one Tunnel event-stream subscription.
@@ -752,6 +913,55 @@ mod tests {
     }
 
     #[test]
+    fn routes_bodyless_withdrawal_puts_and_maps_other_withdrawal_requests() {
+        let uri = "https://tunnel.example.test:8443/v1/tunnel/withdrawal";
+        let mut with_content = request(Method::PUT, uri);
+        with_content
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, "1".parse().expect("valid header"));
+        let mut malformed_content = request(Method::PUT, uri);
+        malformed_content
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, "x".parse().expect("valid header"));
+        let mut zero_content = request(Method::PUT, uri);
+        zero_content
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, "0".parse().expect("valid header"));
+
+        for (request, expected) in [
+            (request(Method::PUT, uri), Route::Withdrawal),
+            (zero_content, Route::Withdrawal),
+            (
+                request(Method::POST, uri),
+                Route::MethodNotAllowed { allow: "PUT" },
+            ),
+            (
+                request(Method::GET, uri),
+                Route::MethodNotAllowed { allow: "PUT" },
+            ),
+            (
+                request(
+                    Method::PUT,
+                    "https://other.example.test/v1/tunnel/withdrawal",
+                ),
+                Route::Status(StatusCode::MISDIRECTED_REQUEST),
+            ),
+            (
+                request(
+                    Method::PUT,
+                    "https://tunnel.example.test/v1/tunnel/withdraw",
+                ),
+                Route::Status(StatusCode::NOT_FOUND),
+            ),
+            (with_content, Route::Status(StatusCode::BAD_REQUEST)),
+            (malformed_content, Route::Malformed),
+        ] {
+            let summary = format!("{} {}", request.method(), request.uri());
+            assert_eq!(route(&request, &server_hostname()), expected, "{summary}");
+        }
+    }
+
+    #[test]
     fn maps_other_requests_to_bodyless_statuses() {
         let mut with_content = request(Method::GET, "https://tunnel.example.test/v1/tunnel/events");
         with_content
@@ -782,7 +992,7 @@ mod tests {
             ),
             (
                 request(Method::PUT, "https://tunnel.example.test/v1/tunnel/events"),
-                Route::Status(StatusCode::METHOD_NOT_ALLOWED),
+                Route::MethodNotAllowed { allow: "GET" },
             ),
             (with_content, Route::Status(StatusCode::BAD_REQUEST)),
             (malformed_content, Route::Malformed),

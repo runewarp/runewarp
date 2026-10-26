@@ -104,16 +104,17 @@ impl TakenPoolMember {
 }
 
 /// Choose a member from concurrent active-load observations, preserving round-robin ties.
+/// `load` returns `None` for a member that accepts no new Visitors.
 fn least_active_index(
     len: usize,
     start: usize,
-    mut load: impl FnMut(usize) -> usize,
+    mut load: impl FnMut(usize) -> Option<usize>,
 ) -> Option<usize> {
     // Read each live member once. A second pass can observe different counts and fail to
     // find the old minimum, incorrectly treating a live Tunnel as unavailable.
     (0..len)
         .map(|offset| (start + offset) % len)
-        .map(|index| (index, load(index)))
+        .filter_map(|index| load(index).map(|active| (index, active)))
         .min_by_key(|&(_, active)| active)
         .map(|(index, _)| index)
 }
@@ -143,8 +144,13 @@ impl ActiveClientPool {
         }
 
         let start = (self.next_round_robin_offset.fetch_add(1, Ordering::Relaxed) as usize) % len;
+        // Withdrawn members stay registered for admission accounting until they close.
         let index = least_active_index(len, start, |index| {
-            members[index].active_streams.load(Ordering::Relaxed)
+            let member = &members[index];
+            member
+                .connection
+                .accepts_visitors()
+                .then(|| member.active_streams.load(Ordering::Relaxed))
         })?;
         let member = &members[index];
         Some(SelectedTunnelConnection {
@@ -580,6 +586,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn never_selects_a_withdrawn_connection_even_with_the_lowest_load() -> io::Result<()> {
+        let client_identity = generate_test_client_identity()?;
+        let withdrawn = TunnelConnectionFixture::connect(&client_identity).await?;
+        let eligible = TunnelConnectionFixture::connect(&client_identity).await?;
+        let pool = ActiveClientPool::new();
+        for fixture in [&withdrawn, &eligible] {
+            pool.register(
+                fixture.server_connection.clone(),
+                client_identity.client_identity.clone(),
+            )
+            .await;
+        }
+
+        let _withdrawal = withdrawn.client_connection.send_withdrawal().await?;
+        timeout(Duration::from_secs(1), async {
+            while withdrawn.server_connection.accepts_visitors() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "withdrawal should commit"))?;
+
+        let mut guards = Vec::new();
+        for _ in 0..3 {
+            let selected = pool
+                .select_connection()
+                .await
+                .expect("the eligible member stays selectable");
+            assert_eq!(
+                selected.connection().remote_address(),
+                eligible.server_connection.remote_address()
+            );
+            guards.push(selected.record_open_stream());
+        }
+        drop(guards);
+
+        eligible.server_connection.close(b"test churn");
+        timeout(Duration::from_secs(1), async {
+            while pool.connection_count().await != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "closed member should leave"))?;
+        assert!(
+            pool.select_connection().await.is_none(),
+            "a pool of withdrawn members has no placement target"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn closes_all_connections_and_clears_the_pool() -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
@@ -689,7 +747,6 @@ mod tests {
     struct TunnelConnectionFixture {
         _server_endpoint: Endpoint,
         _client_endpoint: Endpoint,
-        #[allow(dead_code)]
         client_connection: ClientPeer,
         server_connection: Arc<ServerTunnelH3>,
     }
@@ -806,7 +863,7 @@ mod tests {
         let selected = super::least_active_index(1, 0, |_| {
             observations += 1;
             // Another Visitor registers after the first observation, while the member stays live.
-            observations - 1
+            Some(observations - 1)
         });
         assert_eq!(selected, Some(0));
     }

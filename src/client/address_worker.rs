@@ -21,7 +21,6 @@ use super::tunnel_attempt::TunnelConnectionEnd;
 use super::tunnel_attempt::{TunnelAttemptOutcome, TunnelConnectionRun};
 use crate::ServerAddress;
 use crate::reconnect_policy::ReconnectPolicy;
-use crate::shutdown::ShutdownMode;
 use rand::RngCore;
 
 /// Dial / connect adapter for [`run_address_worker`].
@@ -147,18 +146,32 @@ where
             crate::runtime_log::client_assignment_convergence(status);
         }
 
-        let process_shutdown = Box::pin({
-            let control = control.clone();
-            let configured_server_addr = configured_server_addr.clone();
-            async move {
-                wait_for_process_shutdown_observing_retire(&control, &configured_server_addr).await;
-                ShutdownMode::Graceful
+        // The run observes process shutdown through the shared Client-instance mode and
+        // deadline. Retire logging continues alongside it until shutdown.
+        let run_result = {
+            let run = run(control.orderly_shutdown());
+            tokio::pin!(run);
+            let observe =
+                wait_for_process_shutdown_observing_retire(&control, &configured_server_addr);
+            tokio::pin!(observe);
+            let mut observing = true;
+            loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    _ = &mut observe, if observing => observing = false,
+                }
             }
-        });
-        let run_result = run(process_shutdown).await;
+        };
 
         if let Some(status) = control.observe_disconnected(&address) {
             crate::runtime_log::client_assignment_convergence(status);
+        }
+
+        // A withdrawal protocol failure fails the process after every worker finishes draining.
+        if let Err(end) = &run_result
+            && let Some(message) = end.withdrawal_protocol_failure_message()
+        {
+            return Err(message.to_owned());
         }
 
         // Retiring connections stay live until remote close or process shutdown, then exit
@@ -296,10 +309,10 @@ pub fn connected_session_until(
 ) -> TunnelAttemptOutcome {
     TunnelAttemptOutcome::Connected {
         configured_server_addr,
-        run: Box::new(move |process_shutdown| {
+        run: Box::new(move |shutdown| {
             Box::pin(async move {
                 tokio::select! {
-                    _ = process_shutdown => Ok(()),
+                    _ = shutdown.wait_started() => Ok(()),
                     _ = remote_close => Ok(()),
                 }
             })
@@ -343,7 +356,7 @@ mod tests {
                     }
                     TunnelAttemptOutcome::Connected {
                         configured_server_addr: "a.example.test:443".to_owned(),
-                        run: Box::new(move |_process_shutdown| {
+                        run: Box::new(move |_shutdown| {
                             Box::pin(async move {
                                 Err(TunnelConnectionEnd::unclassified("connection ended"))
                             })
@@ -729,6 +742,79 @@ mod tests {
             .expect("runtime join")
             .expect("shutdown drain");
         assert_eq!(dial_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_reaches_every_connection_and_a_protocol_failure_fails_last() {
+        use crate::ShutdownMode;
+
+        struct WithdrawingDial {
+            connected: Arc<AtomicUsize>,
+            /// Whether the sibling's drain was still Graceful after the failure was reported.
+            sibling_stayed_graceful: Arc<AtomicBool>,
+        }
+
+        impl AddressWorkerDial for WithdrawingDial {
+            fn establish(
+                &self,
+                address: ServerAddress,
+            ) -> BoxFuture<'static, TunnelAttemptOutcome> {
+                let connected = Arc::clone(&self.connected);
+                let sibling_stayed_graceful = Arc::clone(&self.sibling_stayed_graceful);
+                let fails = address.hostname().as_str() == "a.example.test";
+                Box::pin(async move {
+                    connected.fetch_add(1, Ordering::SeqCst);
+                    TunnelAttemptOutcome::Connected {
+                        configured_server_addr: address.hostname().to_string(),
+                        run: Box::new(move |shutdown| {
+                            Box::pin(async move {
+                                assert_eq!(shutdown.wait_started().await, ShutdownMode::Graceful);
+                                assert!(shutdown.graceful_deadline().is_some());
+                                if fails {
+                                    return Err(TunnelConnectionEnd::withdrawal_protocol_failure(
+                                        "withdrawal failed for a",
+                                    ));
+                                }
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                sibling_stayed_graceful.store(
+                                    shutdown.mode() == Some(ShutdownMode::Graceful),
+                                    Ordering::SeqCst,
+                                );
+                                Ok(())
+                            })
+                        }),
+                    }
+                })
+            }
+        }
+
+        let connected = Arc::new(AtomicUsize::new(0));
+        let sibling_stayed_graceful = Arc::new(AtomicBool::new(false));
+        let dial = Arc::new(WithdrawingDial {
+            connected: Arc::clone(&connected),
+            sibling_stayed_graceful: Arc::clone(&sibling_stayed_graceful),
+        });
+        let factory = production_address_worker_factory(dial, Arc::new(SilentAddressWorkerHooks));
+        let mut controller = AddressController::for_static(factory)
+            .with_graceful_shutdown_duration(Duration::from_secs(60));
+        controller.seed_configured([
+            ServerAddress::parse("a.example.test").unwrap(),
+            ServerAddress::parse("b.example.test").unwrap(),
+        ]);
+        let shutdown = controller.shutdown_handle();
+        let runtime = tokio::spawn(async move { controller.run().await });
+        wait_until(|| connected.load(Ordering::SeqCst) == 2).await;
+
+        shutdown.begin(ShutdownMode::Graceful);
+        let result = tokio::time::timeout(Duration::from_secs(2), runtime)
+            .await
+            .expect("runtime finishes")
+            .expect("runtime join");
+        assert_eq!(result, Err("withdrawal failed for a".to_owned()));
+        assert!(
+            sibling_stayed_graceful.load(Ordering::SeqCst),
+            "a failed sibling must not escalate another drain to Fast"
+        );
     }
 
     async fn wait_until(predicate: impl Fn() -> bool) {

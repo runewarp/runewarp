@@ -218,6 +218,8 @@ At the default `log-level = "info"`, Runewarp logs readiness, tunnel connection 
 
 If you enable `server.readiness-bind-address`, probe that TCP listener for ingress admission instead of probing the public TLS port. Runewarp drops readiness immediately when Server shutdown begins. `SIGTERM` and the first `Ctrl-C` use graceful Server shutdown; `SIGQUIT` on Unix or a second `Ctrl-C` escalates to fast Server shutdown.
 
+The Client uses the same signals. Graceful Client shutdown withdraws every Tunnel connection from placement and lets in-flight Visitors finish for up to `client.graceful-shutdown-duration` (default `60s`); a second `Ctrl-C` or `SIGQUIT` closes immediately. A warning names any connection whose drain was not confirmed, and a Server that breaks the withdrawal protocol makes the Client exit nonzero.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | What to check |

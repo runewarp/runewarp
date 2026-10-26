@@ -21,6 +21,7 @@ use tokio::sync::{mpsc, watch};
 use super::assignment_convergence::{AssignmentConvergence, AssignmentConvergenceTracker};
 use super::managed_adapter::ClientAssignmentApply;
 use crate::ServerAddress;
+use crate::shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
 
 /// Spawns one address worker for a normalized **Server address**.
 pub type AddressWorkerFactory = Arc<
@@ -44,12 +45,19 @@ pub enum MaintenanceIntent {
 pub struct AddressWorkerControl {
     maintenance: watch::Receiver<MaintenanceIntent>,
     shutdown: watch::Receiver<bool>,
+    orderly: OrderlyShutdown,
     ready_logged: Arc<AtomicBool>,
     client_ready_enabled: bool,
     convergence: Option<AssignmentConvergenceTracker>,
 }
 
 impl AddressWorkerControl {
+    /// Client-instance shutdown mode and graceful deadline shared by every worker. It starts
+    /// before [`Self::shutdown_requested`] becomes true.
+    pub fn orderly_shutdown(&self) -> OrderlyShutdown {
+        self.orderly.clone()
+    }
+
     pub fn maintenance_intent(&self) -> MaintenanceIntent {
         *self.maintenance.borrow()
     }
@@ -125,6 +133,7 @@ pub struct AddressController {
     ready_logged: Arc<AtomicBool>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
+    orderly: OrderlyShutdown,
     next_generation: u64,
     mode: ControllerMode,
     shared_worker_count: Arc<AtomicUsize>,
@@ -157,12 +166,34 @@ impl AddressControllerView {
 #[derive(Clone, Debug)]
 pub struct AddressControllerShutdown {
     shutdown_tx: watch::Sender<bool>,
+    orderly: OrderlyShutdown,
 }
 
 impl AddressControllerShutdown {
+    /// Stop immediately unless shutdown already started.
     pub fn request(self) {
-        let _ = self.shutdown_tx.send(true);
+        request_shutdown(&self.shutdown_tx, &self.orderly);
     }
+
+    /// Start or escalate Client shutdown in `mode`. Graceful withdraws every live Tunnel
+    /// connection under one deadline; Fast closes at once and supersedes Graceful.
+    pub fn begin(&self, mode: ShutdownMode) -> ShutdownTransition {
+        let transition = match mode {
+            ShutdownMode::Graceful => self.orderly.begin_graceful(),
+            ShutdownMode::Fast => self.orderly.begin_fast(),
+        };
+        let _ = self.shutdown_tx.send(true);
+        transition
+    }
+}
+
+/// Internal stops close at once, but never escalate a shutdown that already started: a failed
+/// worker must not cut short the graceful drain of the others.
+fn request_shutdown(shutdown_tx: &watch::Sender<bool>, orderly: &OrderlyShutdown) {
+    if orderly.mode().is_none() {
+        let _ = orderly.begin_fast();
+    }
+    let _ = shutdown_tx.send(true);
 }
 
 impl Default for AddressController {
@@ -180,6 +211,10 @@ impl AddressController {
             ready_logged: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
             shutdown_rx,
+            orderly: OrderlyShutdown::new(
+                std::time::Duration::ZERO,
+                crate::server::QUIC_CLOSE_FLUSH_DURATION,
+            ),
             next_generation: 1,
             mode,
             shared_worker_count: Arc::new(AtomicUsize::new(0)),
@@ -211,6 +246,12 @@ impl AddressController {
             convergence: AssignmentConvergenceTracker::new(),
         });
         (controller, adapter)
+    }
+
+    /// Set the Client-instance graceful withdrawal window. Call before seeding workers.
+    pub fn with_graceful_shutdown_duration(mut self, duration: std::time::Duration) -> Self {
+        self.orderly = OrderlyShutdown::new(duration, crate::server::QUIC_CLOSE_FLUSH_DURATION);
+        self
     }
 
     fn factory(&self) -> Option<&AddressWorkerFactory> {
@@ -407,13 +448,14 @@ impl AddressController {
     }
 
     pub fn request_shutdown(&self) {
-        let _ = self.shutdown_tx.send(true);
+        request_shutdown(&self.shutdown_tx, &self.orderly);
     }
 
     /// Cloneable handle for signaling process shutdown without borrowing the controller mutably.
     pub fn shutdown_handle(&self) -> AddressControllerShutdown {
         AddressControllerShutdown {
             shutdown_tx: self.shutdown_tx.clone(),
+            orderly: self.orderly.clone(),
         }
     }
 
@@ -549,6 +591,7 @@ impl AddressController {
         let control = AddressWorkerControl {
             maintenance: maintenance_rx,
             shutdown: self.shutdown_rx.clone(),
+            orderly: self.orderly.clone(),
             ready_logged: Arc::clone(&self.ready_logged),
             client_ready_enabled: self.client_ready_enabled(),
             convergence: self.convergence_tracker().cloned(),

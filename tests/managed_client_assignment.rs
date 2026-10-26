@@ -207,6 +207,7 @@ impl ManagedClientHarness {
 
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             server_addresses: vec![],
             server_hostname: ServerHostname::try_from("localhost").unwrap(),
             server_port: 443,

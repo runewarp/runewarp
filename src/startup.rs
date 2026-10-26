@@ -491,24 +491,27 @@ impl PreparedClient {
                 }
             }
         });
-        self.run_with_shutdown(&shutdown).await
+        // A zero graceful duration never withdraws, so there is no outcome to report.
+        self.run_with_shutdown(&shutdown).await.map(|_| ())
     }
 
+    /// Run until the connection closes or `shutdown` starts. Graceful shutdown with a nonzero
+    /// duration withdraws the connection from placement and returns that outcome.
     pub async fn run_with_shutdown(
         self,
         shutdown: &OrderlyShutdown,
-    ) -> Result<(), quinn::ConnectionError> {
+    ) -> Result<Option<crate::WithdrawalOutcome>, quinn::ConnectionError> {
         self.run_tunnel_then_maybe_stop_acme(|client| client.run_with_shutdown(shutdown))
             .await
     }
 
-    async fn run_tunnel_then_maybe_stop_acme<F, Fut>(
+    async fn run_tunnel_then_maybe_stop_acme<F, Fut, T>(
         self,
         run_tunnel: F,
-    ) -> Result<(), quinn::ConnectionError>
+    ) -> Result<T, quinn::ConnectionError>
     where
         F: FnOnce(Client) -> Fut,
-        Fut: Future<Output = Result<(), quinn::ConnectionError>>,
+        Fut: Future<Output = Result<T, quinn::ConnectionError>>,
     {
         let Self {
             client, instance, ..
@@ -1362,6 +1365,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
@@ -1408,6 +1412,7 @@ mod tests {
     fn acme_client_settings(tempdir: &tempfile::TempDir, hostname: &str) -> ClientConfig {
         ClientConfig {
             max_visitor_streams: 16_384,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             server_addresses: vec![
                 server_address("tunnel-a.example.test"),
                 server_address("tunnel-b.example.test"),
@@ -1511,6 +1516,7 @@ mod tests {
         let state_directory = tempdir.path().join("client/acme");
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
@@ -1590,6 +1596,7 @@ mod tests {
         let state_directory = blocked_parent.join("acme");
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
@@ -1713,6 +1720,7 @@ mod tests {
     async fn prepared_client_connect_rejects_empty_server_addresses_without_panicking() {
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
+            graceful_shutdown_duration: std::time::Duration::from_secs(60),
             server_addresses: Vec::new(),
             server_hostname: server_hostname("unassigned.invalid"),
             server_port: 443,

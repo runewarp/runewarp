@@ -59,15 +59,43 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
     let config = resolve_client_config_from_cli(config.clone(), runtime)
         .map_err(wrap_client_config_resolution_error)?;
     runewarp::runtime_log::install(config.log_level)?;
+    // Like the Server, only a first Ctrl-C or SIGQUIT arms graceful-to-fast escalation.
+    let escalates = std::sync::atomic::AtomicBool::new(false);
     ClientRuntime::prepare(&config, wildcard(0))
         .await
         .map_err(|error| logged_runtime_failure(Box::new(error)))?
-        .run(async {
-            let signal = super::wait_for_initial_shutdown_signal().await?;
-            Ok::<runewarp::ShutdownMode, std::io::Error>(super::shutdown_mode_for_first_signal(
-                signal,
-            ))
-        })
+        .run_with_escalation(
+            async {
+                let signal = super::wait_for_initial_shutdown_signal().await?;
+                escalates.store(
+                    super::should_escalate_to_fast(signal),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                Ok::<runewarp::ShutdownMode, std::io::Error>(
+                    super::shutdown_mode_for_first_signal(signal),
+                )
+            },
+            async {
+                if !escalates.load(std::sync::atomic::Ordering::SeqCst) {
+                    return std::future::pending().await;
+                }
+                loop {
+                    match super::wait_for_fast_shutdown_signal().await {
+                        Ok(signal) if super::should_escalate_to_fast(signal) => return,
+                        Ok(_) => {}
+                        Err(error) => {
+                            runewarp::runtime_log::warning(
+                                "client",
+                                &format!(
+                                    "fast shutdown escalation signal handling unavailable; continuing graceful shutdown: {error}"
+                                ),
+                            );
+                            return std::future::pending().await;
+                        }
+                    }
+                }
+            },
+        )
         .await
         .map_err(logged_runtime_failure)
 }

@@ -117,8 +117,8 @@ pub use startup::{
 };
 pub use trust::ClientServerTrust;
 pub use tunnel_h3::{
-    make_client_tunnel_h3_config, make_server_tunnel_h3_config,
-    make_server_tunnel_h3_config_with_resolver,
+    ProtocolFailure, UnconfirmedDrain, WithdrawalOutcome, make_client_tunnel_h3_config,
+    make_server_tunnel_h3_config, make_server_tunnel_h3_config_with_resolver,
 };
 pub use tunnel_id::TunnelId;
 

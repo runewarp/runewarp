@@ -1388,3 +1388,38 @@ fn client_visitor_capacity_rejects_out_of_bounds_and_non_integers() {
         assert!(load_client_config(&path).is_err(), "accepted {value}");
     }
 }
+
+#[test]
+fn client_graceful_shutdown_duration_defaults_to_60s() {
+    let (_directory, path) = capacity_config("");
+    assert_eq!(
+        load_client_config(&path)
+            .unwrap()
+            .graceful_shutdown_duration,
+        std::time::Duration::from_secs(60)
+    );
+}
+
+#[test]
+fn client_graceful_shutdown_duration_accepts_durations_including_zero() {
+    for (value, expected) in [("\"0s\"", 0), ("\"45s\"", 45_000), ("\"1500ms\"", 1_500)] {
+        let (_directory, path) = capacity_config(&format!("graceful-shutdown-duration = {value}"));
+        assert_eq!(
+            load_client_config(&path)
+                .unwrap()
+                .graceful_shutdown_duration,
+            std::time::Duration::from_millis(expected),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn client_graceful_shutdown_duration_rejects_invalid_values() {
+    let (_directory, path) = capacity_config("graceful-shutdown-duration = \"abc\"");
+    let message = load_client_config(&path).unwrap_err().to_string();
+    assert!(
+        message.contains("client.graceful-shutdown-duration is invalid"),
+        "{message}"
+    );
+}

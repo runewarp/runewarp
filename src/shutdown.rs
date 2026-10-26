@@ -1,8 +1,9 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::Notify;
+use tokio::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShutdownMode {
@@ -26,6 +27,8 @@ pub struct OrderlyShutdown {
 struct OrderlyShutdownInner {
     state: AtomicU8,
     notify: Notify,
+    /// When shutdown first started, in either mode.
+    started_at: OnceLock<Instant>,
     graceful_shutdown_duration: Duration,
     quic_close_flush_duration: Duration,
 }
@@ -36,6 +39,7 @@ impl OrderlyShutdown {
             inner: Arc::new(OrderlyShutdownInner {
                 state: AtomicU8::new(0),
                 notify: Notify::new(),
+                started_at: OnceLock::new(),
                 graceful_shutdown_duration,
                 quic_close_flush_duration,
             }),
@@ -60,6 +64,14 @@ impl OrderlyShutdown {
 
     pub fn graceful_shutdown_duration(&self) -> Duration {
         self.inner.graceful_shutdown_duration
+    }
+
+    /// End of the one graceful window measured from when shutdown started, if it has.
+    pub fn graceful_deadline(&self) -> Option<Instant> {
+        self.inner
+            .started_at
+            .get()
+            .map(|started_at| *started_at + self.inner.graceful_shutdown_duration)
     }
 
     pub fn quic_close_flush_duration(&self) -> Duration {
@@ -91,6 +103,10 @@ impl OrderlyShutdown {
             let current = self.inner.state.load(Ordering::SeqCst);
             if current >= new_state {
                 return ShutdownTransition::AlreadyStarted(mode_from_state(current));
+            }
+            if current == 0 {
+                // Record the start before publishing a mode so observers always see it.
+                let _ = self.inner.started_at.set(Instant::now());
             }
             if self
                 .inner
@@ -173,6 +189,22 @@ mod tests {
             .await
             .expect("wait should not block after shutdown already began");
         assert_eq!(mode, ShutdownMode::Fast);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn graceful_deadline_is_measured_once_from_the_first_transition() {
+        let shutdown = OrderlyShutdown::new(Duration::from_secs(60), Duration::from_millis(5));
+        assert_eq!(shutdown.graceful_deadline(), None);
+
+        let started = tokio::time::Instant::now();
+        shutdown.begin_graceful();
+        tokio::time::advance(Duration::from_secs(10)).await;
+        shutdown.begin_fast();
+
+        assert_eq!(
+            shutdown.graceful_deadline(),
+            Some(started + Duration::from_secs(60))
+        );
     }
 
     #[test]

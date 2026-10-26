@@ -2200,6 +2200,7 @@ client-identity = "{}"
 
     let client_settings = ClientConfig {
         max_visitor_streams: 16_384,
+        graceful_shutdown_duration: std::time::Duration::from_secs(60),
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -2371,6 +2372,7 @@ client-identity = "{}"
 
     let client_settings = ClientConfig {
         max_visitor_streams: 16_384,
+        graceful_shutdown_duration: std::time::Duration::from_secs(60),
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -2527,6 +2529,7 @@ client-identity = "{}"
 
     let client_settings = ClientConfig {
         max_visitor_streams: 16_384,
+        graceful_shutdown_duration: std::time::Duration::from_secs(60),
         server_addresses: vec![
             server_address("tunnel.example.test:1"),
             server_address("tunnel.example.test:2"),
@@ -2724,6 +2727,7 @@ client-identity = "{}"
 
     let client_settings = ClientConfig {
         max_visitor_streams: 16_384,
+        graceful_shutdown_duration: std::time::Duration::from_secs(60),
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -2867,6 +2871,7 @@ client-identity = "{}"
 
     let client_settings = ClientConfig {
         max_visitor_streams: 16_384,
+        graceful_shutdown_duration: std::time::Duration::from_secs(60),
         server_addresses: vec![server_address("tunnel.example.test")],
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
@@ -3445,4 +3450,213 @@ async fn server_shutdown_seals_placement_while_a_placed_visitor_finishes() {
     })
     .await
     .expect("Server shutdown and Visitor completion are bounded");
+}
+
+type ClientRun =
+    tokio::task::JoinHandle<Result<Option<runewarp::WithdrawalOutcome>, quinn::ConnectionError>>;
+
+/// A running Server and Client with one Visitor that has received the backend's first chunk.
+struct InFlightVisitor {
+    public_addr: SocketAddr,
+    backend_cert: CertificateDer<'static>,
+    backend_release: Arc<Notify>,
+    backend_task: tokio::task::JoinHandle<()>,
+    tls_stream: tokio_rustls::client::TlsStream<TcpStream>,
+    server_task: tokio::task::JoinHandle<io::Result<()>>,
+    client_task: ClientRun,
+}
+
+impl InFlightVisitor {
+    async fn start(shutdown: &OrderlyShutdown) -> Self {
+        let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
+        let (backend_addr, backend_started, backend_release, backend_task) =
+            spawn_staged_tls_backend(
+                private_key_from_der(&backend_key),
+                backend_cert.clone(),
+                *b"on",
+                *b"e!",
+            )
+            .await;
+        let (tunnel_cert, tunnel_key) = make_self_signed_cert("tunnel.example.test");
+        let shared_client = generate_client_identity().unwrap();
+        let authorization = ServerAuthorization::from_static_tunnels(
+            &server_hostname("tunnel.example.test"),
+            &[configured_tunnel(&["app.example.test"], &shared_client)],
+        )
+        .unwrap();
+        let server = Server::bind(ServerBindConfig {
+            public_bind_addr: localhost(0),
+            tunnel_connection_bind_addr: localhost(0),
+            readiness_bind_addr: None,
+            server_hostname: server_hostname("tunnel.example.test"),
+            authorization: authorization.clone(),
+            public_tls_config: None,
+            quic_server_config: make_authenticated_server_h3_config(
+                &tunnel_cert,
+                &tunnel_key,
+                &authorization,
+            ),
+            admission: ServerAdmission::Static,
+        })
+        .await
+        .unwrap();
+        let public_addr = server.public_addr().unwrap();
+        let tunnel_addr = server.tunnel_addr().unwrap();
+        let server_task = tokio::spawn(server.run());
+
+        let client = Client::connect(ClientConnectConfig {
+            local_bind_addr: localhost(0),
+            server_addr: tunnel_addr,
+            server_name: "tunnel.example.test".to_owned(),
+            backend_address: backend_addr.to_string(),
+            quic_client_config: make_authenticated_client_h3_config(&tunnel_cert, &shared_client),
+        })
+        .await
+        .unwrap();
+        let client_shutdown = shutdown.clone();
+        let client_task =
+            tokio::spawn(async move { client.run_with_shutdown(&client_shutdown).await });
+
+        let connector = TlsConnector::from(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store_with(&backend_cert))
+                .with_no_client_auth(),
+        ));
+        let tcp_stream = TcpStream::connect(public_addr).await.unwrap();
+        let mut tls_stream = connector
+            .connect(
+                ServerName::try_from("app.example.test").unwrap(),
+                tcp_stream,
+            )
+            .await
+            .unwrap();
+        tls_stream.write_all(b"ping").await.unwrap();
+        timeout(Duration::from_secs(1), backend_started)
+            .await
+            .expect("backend sends its first chunk")
+            .expect("staged backend signals");
+        let mut initial_bytes = [0_u8; 2];
+        tls_stream.read_exact(&mut initial_bytes).await.unwrap();
+        assert_eq!(&initial_bytes, b"on");
+
+        Self {
+            public_addr,
+            backend_cert,
+            backend_release,
+            backend_task,
+            tls_stream,
+            server_task,
+            client_task,
+        }
+    }
+
+    async fn stop(self) {
+        self.backend_task.abort();
+        self.server_task.abort();
+        let _ = self.backend_task.await;
+        let _ = self.server_task.await;
+    }
+}
+
+async fn client_outcome(task: &mut ClientRun) -> Option<runewarp::WithdrawalOutcome> {
+    timeout(Duration::from_secs(2), task)
+        .await
+        .expect("Client run finishes")
+        .expect("Client task joins")
+        .expect("Client run ends by shutdown")
+}
+
+#[tokio::test]
+async fn graceful_client_shutdown_withdraws_and_lets_an_in_flight_visitor_finish() {
+    let shutdown = OrderlyShutdown::new(Duration::from_secs(5), QUIC_CLOSE_FLUSH_DURATION);
+    let mut visitor = InFlightVisitor::start(&shutdown).await;
+
+    shutdown.begin_graceful();
+    // Once withdrawal commits, new Visitors are no longer placed on the connection. A Visitor
+    // placed before the commit would be honored, so give the request time to commit first.
+    sleep(Duration::from_millis(100)).await;
+    wait_for_tls_failure(
+        visitor.public_addr,
+        &visitor.backend_cert,
+        "app.example.test",
+    )
+    .await
+    .expect("withdrawn connection receives no new Visitors");
+    assert!(
+        timeout(Duration::from_millis(100), &mut visitor.client_task)
+            .await
+            .is_err(),
+        "the in-flight Visitor keeps the connection draining"
+    );
+
+    visitor.backend_release.notify_one();
+    let mut tail = Vec::new();
+    visitor
+        .tls_stream
+        .read_to_end(&mut tail)
+        .await
+        .expect("the Visitor finishes through the withdrawn connection");
+    assert_eq!(tail, b"e!");
+    visitor.tls_stream.shutdown().await.expect("Visitor closes");
+    assert_eq!(
+        client_outcome(&mut visitor.client_task).await,
+        Some(runewarp::WithdrawalOutcome::Confirmed)
+    );
+    visitor.stop().await;
+}
+
+#[tokio::test]
+async fn client_graceful_deadline_closes_an_unfinished_drain_as_unconfirmed() {
+    let shutdown = OrderlyShutdown::new(Duration::from_millis(200), QUIC_CLOSE_FLUSH_DURATION);
+    let mut visitor = InFlightVisitor::start(&shutdown).await;
+
+    shutdown.begin_graceful();
+    assert!(
+        timeout(Duration::from_millis(100), &mut visitor.client_task)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        client_outcome(&mut visitor.client_task).await,
+        Some(runewarp::WithdrawalOutcome::Unconfirmed(
+            runewarp::UnconfirmedDrain::Deadline
+        ))
+    );
+    let mut tail = Vec::new();
+    assert!(
+        visitor.tls_stream.read_to_end(&mut tail).await.is_err() || tail.is_empty(),
+        "the unfinished Visitor is terminated"
+    );
+    visitor.stop().await;
+}
+
+#[tokio::test]
+async fn fast_escalation_supersedes_client_withdrawal() {
+    let shutdown = OrderlyShutdown::new(Duration::from_secs(60), QUIC_CLOSE_FLUSH_DURATION);
+    let mut visitor = InFlightVisitor::start(&shutdown).await;
+
+    shutdown.begin_graceful();
+    assert!(
+        timeout(Duration::from_millis(100), &mut visitor.client_task)
+            .await
+            .is_err()
+    );
+    shutdown.begin_fast();
+    assert_eq!(
+        client_outcome(&mut visitor.client_task).await,
+        Some(runewarp::WithdrawalOutcome::Unconfirmed(
+            runewarp::UnconfirmedDrain::FastShutdown
+        ))
+    );
+    visitor.stop().await;
+}
+
+#[tokio::test]
+async fn zero_client_graceful_duration_closes_without_withdrawal() {
+    let shutdown = OrderlyShutdown::new(Duration::ZERO, QUIC_CLOSE_FLUSH_DURATION);
+    let mut visitor = InFlightVisitor::start(&shutdown).await;
+
+    shutdown.begin_graceful();
+    assert_eq!(client_outcome(&mut visitor.client_task).await, None);
+    visitor.stop().await;
 }

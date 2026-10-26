@@ -45,6 +45,24 @@ impl ClientPeer {
         let (recv, send) = stream.into_split();
         Ok((send, recv))
     }
+
+    /// Send one bodyless placement withdrawal without waiting for its delayed `204`. Hold the
+    /// returned request stream to keep waiting for that response.
+    pub(crate) async fn send_withdrawal(&self) -> io::Result<impl Sized + use<>> {
+        let mut sender = self.client.lock().await.send_request_for_test();
+        let request = http::Request::put(format!(
+            "https://tunnel.example.test{}",
+            super::TUNNEL_WITHDRAWAL_PATH
+        ))
+        .body(())
+        .map_err(io::Error::other)?;
+        let mut stream = sender
+            .send_request(request)
+            .await
+            .map_err(io::Error::other)?;
+        stream.finish().await.map_err(io::Error::other)?;
+        Ok(stream)
+    }
 }
 
 pub(crate) async fn establish_peers(

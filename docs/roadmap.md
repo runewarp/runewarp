@@ -15,9 +15,9 @@ See [architecture](architecture.md), [protocol](protocol.md), and [configuration
 
 ## Protocol evolution — Active
 
-The [HTTP/3 reverse-tunnel issue map](https://github.com/runewarp/runewarp/issues/167) tracks the remaining signaling and graceful Client-drain work. Client and Server runtimes now use ordinary HTTP/3 on the git-pinned `runewarp/h3` fork's `h3`, `h3-quinn` and `h3-webtransport`, with ALPN `h3`, required mTLS, no application 0-RTT, the Tunnel event-stream gate and Server-opened WebTransport Visitor streams. Permit-backed credit shares the Client-instance budget across connections. Graceful Server shutdown uses GOAWAY followed by WebTransport DRAIN/CLOSE and Client Visitor completion. Clients and Servers require a lockstep upgrade from the earlier receive-slot carrier and `runewarp/1`, without fallback.
+The [HTTP/3 reverse-tunnel issue map](https://github.com/runewarp/runewarp/issues/167) tracks the remaining HTTP/3 reverse-tunnel work. Client and Server runtimes now use ordinary HTTP/3 on the git-pinned `runewarp/h3` fork's `h3`, `h3-quinn` and `h3-webtransport`, with ALPN `h3`, required mTLS, no application 0-RTT, the Tunnel event-stream gate and Server-opened WebTransport Visitor streams. Permit-backed credit shares the Client-instance budget across connections. Graceful Server shutdown uses GOAWAY followed by WebTransport DRAIN/CLOSE and Client Visitor completion. Clients and Servers require a lockstep upgrade from the earlier receive-slot carrier and `runewarp/1`, without fallback.
 
-Connection-scoped placement withdrawal and graceful Client drain remain follow-up work. Managed configuration stays on the separate Managed session.
+Graceful Client shutdown withdraws every Tunnel connection from placement and lets committed Visitors finish under one Client deadline. Managed configuration stays on the separate Managed session.
 
 Generic private access, mesh, NAT traversal, CONNECT-UDP, and CONNECT-IP remain outside this committed Core track.
 

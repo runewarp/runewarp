@@ -20,6 +20,8 @@ pub(super) struct VisitorCredits {
     budget: Arc<Semaphore>,
     state: Mutex<State>,
     active: watch::Sender<usize>,
+    /// Published once idle maintenance stops, so the session task drops its pending acquisition.
+    idle_stopped: watch::Sender<bool>,
     observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
     #[cfg(test)]
     pub(super) guard_rejections: std::sync::atomic::AtomicUsize,
@@ -41,6 +43,7 @@ impl VisitorCredits {
                 closed: false,
             }),
             active: watch::Sender::new(0),
+            idle_stopped: watch::Sender::new(false),
             observer,
             #[cfg(test)]
             guard_rejections: std::sync::atomic::AtomicUsize::new(0),
@@ -140,10 +143,28 @@ impl VisitorCredits {
             .await;
     }
 
-    /// DRAIN ends idle maintenance while retaining intake and active/queued Visitor leases.
-    /// GOAWAY alone cannot do this: a committed stream can still need its reserved permit.
+    /// DRAIN or placement withdrawal ends idle maintenance while retaining intake and
+    /// active/queued Visitor leases. GOAWAY alone cannot do this: a committed stream can still
+    /// need its reserved permit.
     pub(super) fn stop_idle(&self) {
         self.release_idle(&mut self.state());
+    }
+
+    /// Placement withdrawal stops replenishment but keeps idle permits reserved: the Server may
+    /// still commit Visitors on credit it already holds until its withdrawal commit, which the
+    /// Client first observes as `204`. [`Self::stop_idle`] then releases them.
+    pub(super) fn stop_replenishing(&self) {
+        self.state().maintaining = false;
+        self.idle_stopped.send_replace(true);
+    }
+
+    /// Wait until idle maintenance has stopped.
+    pub(super) async fn idle_stopped(&self) {
+        let _ = self
+            .idle_stopped
+            .subscribe()
+            .wait_for(|stopped| *stopped)
+            .await;
     }
 
     fn release_idle(&self, state: &mut State) {
@@ -152,6 +173,7 @@ impl VisitorCredits {
         // Lower the target before releasing actual capacity to another connection.
         self.set_limit(state);
         state.idle.clear();
+        self.idle_stopped.send_replace(true);
     }
 
     pub(super) fn close(&self) {

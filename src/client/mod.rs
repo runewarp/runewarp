@@ -32,7 +32,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::tunnel_h3::{ClientTunnelH3, ClientTunnelStream, TunnelH3Error};
+use crate::tunnel_h3::{
+    ClientTunnelH3, ClientTunnelStream, TunnelH3Error, UnconfirmedDrain, WithdrawalOutcome,
+};
 use quinn::Endpoint;
 
 pub(crate) use self::stream_limits::{ClientStreamBudget, ClientStreamLimits};
@@ -226,6 +228,7 @@ impl Client {
         Err(self.connection.closed().await)
     }
 
+    /// Run until `shutdown_signal`, then close at once in either mode.
     pub async fn run_until_shutdown<Shutdown>(
         self,
         shutdown_signal: Shutdown,
@@ -248,30 +251,72 @@ impl Client {
                 }
             }
         });
-        self.run_with_shutdown(&shutdown).await
+        // A zero graceful duration never withdraws, so there is no outcome to report.
+        self.run_with_shutdown(&shutdown).await.map(|_| ())
     }
 
-    pub(crate) async fn run_with_shutdown(
+    /// Run until the connection closes or `shutdown` starts.
+    ///
+    /// Fast shutdown, or Graceful with a zero duration, closes at once and returns `None`.
+    /// Graceful withdraws this connection from placement while continuing to accept Visitors the
+    /// Server committed first, and returns the withdrawal outcome. The shared graceful deadline
+    /// or a later Fast escalation closes the connection with an unconfirmed drain.
+    pub async fn run_with_shutdown(
         mut self,
         shutdown: &OrderlyShutdown,
-    ) -> Result<(), quinn::ConnectionError> {
+    ) -> Result<Option<WithdrawalOutcome>, quinn::ConnectionError> {
         let closed = self.connection.closed();
         tokio::pin!(closed);
         let mut accepting = true;
+        let mut withdrawal = None;
         loop {
-            tokio::select! {
-                _ = shutdown.wait_started() => {
+            let withdrawing = withdrawal.is_some();
+            let outcome = tokio::select! {
+                biased;
+                // The withdrawal observes connection loss itself, so only its result counts.
+                outcome = async {
+                    withdrawal.as_mut().expect("withdrawal started").await
+                }, if withdrawing => outcome,
+                _ = shutdown.wait_for_fast(), if withdrawing => {
+                    WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::FastShutdown)
+                }
+                _ = async {
+                    match shutdown.graceful_deadline() {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                }, if withdrawing => WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::Deadline),
+                mode = shutdown.wait_started(), if !withdrawing => {
+                    if mode == ShutdownMode::Graceful
+                        && !shutdown.graceful_shutdown_duration().is_zero()
+                    {
+                        withdrawal = Some(Box::pin(self.connection.withdrawal()));
+                        continue;
+                    }
                     crate::runtime_log::client_graceful_shutdown_closing_tunnel_connection();
                     self.connection.close();
                     tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
-                    return Ok(());
+                    return Ok(None);
                 }
-                error = &mut closed => return Err(error),
-                stream = self.connection.accept_tunnel_stream(), if accepting => match stream {
-                    Some(stream) => self.spawn_stream_handler(stream),
-                    None => accepting = false,
+                error = &mut closed, if !withdrawing => return Err(error),
+                stream = self.connection.accept_tunnel_stream(), if accepting => {
+                    match stream {
+                        Some(stream) => self.spawn_stream_handler(stream),
+                        None => accepting = false,
+                    }
+                    continue;
                 }
-            }
+            };
+            // A `204` already received stays confirmed even if Fast or the deadline wins while
+            // local Visitor leases drain.
+            let outcome = if self.connection.withdrawal_confirmed() {
+                WithdrawalOutcome::Confirmed
+            } else {
+                outcome
+            };
+            self.connection.close();
+            tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
+            return Ok(Some(outcome));
         }
     }
 

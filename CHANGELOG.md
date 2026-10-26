@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- Added Client placement withdrawal and graceful Client shutdown: the Client withdraws every Tunnel connection with `PUT /v1/tunnel/withdrawal`, lets in-flight Visitors finish under the new `client.graceful-shutdown-duration` deadline (default `60s`), and escalates to fast shutdown on a second `Ctrl-C` or `SIGQUIT`. Unconfirmed drains log a warning; a Server that violates the withdrawal protocol makes the Client exit nonzero. Servers stop placing Visitors on a withdrawn connection, confirm with `204` once its Visitors finish, and close it five seconds later if the Client has not. Upgrade Servers with or before Clients: an older Server rejects withdrawal, which fails graceful Client shutdown. (#271)
+
 ### Changed
 
 - Raised the default shared Client Visitor budget to 16,384 and Server maxima to 65,536 active routed streams and 4,096 pending opens. Unix Client and Server startup raise the soft fd limit where possible and reduce effective Visitor capacities with one warning when descriptors are insufficient. Single-release recovery at saturation remains a known alpha availability limitation tracked in #267. (#266)

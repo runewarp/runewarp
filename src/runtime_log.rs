@@ -589,6 +589,56 @@ pub fn client_graceful_shutdown_closing_tunnel_connection() {
     );
 }
 
+pub fn client_orderly_shutdown_escalated() {
+    emit(
+        EventLevel::Warn,
+        "client instance orderly shutdown escalated: mode=fast",
+    );
+}
+
+pub fn client_tunnel_withdrawal_confirmed(configured_server_addr: &str) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "client tunnel withdrawal confirmed",
+            [("server-address", Cow::Borrowed(configured_server_addr))],
+        ),
+    );
+}
+
+/// Quiescence was not confirmed, so active Visitors may have been terminated.
+pub fn client_tunnel_withdrawal_unconfirmed(
+    configured_server_addr: &str,
+    reason: crate::tunnel_h3::UnconfirmedDrain,
+) {
+    emit(
+        EventLevel::Warn,
+        &event_line(
+            "client tunnel withdrawal unconfirmed",
+            [
+                ("server-address", Cow::Borrowed(configured_server_addr)),
+                ("reason", Cow::Owned(reason.to_string())),
+            ],
+        ),
+    );
+}
+
+pub fn client_tunnel_withdrawal_failed(
+    configured_server_addr: &str,
+    failure: crate::tunnel_h3::ProtocolFailure,
+) {
+    emit(
+        EventLevel::Error,
+        &event_line(
+            "client tunnel withdrawal failed",
+            [
+                ("server-address", Cow::Borrowed(configured_server_addr)),
+                ("reason", Cow::Owned(failure.to_string())),
+            ],
+        ),
+    );
+}
+
 pub fn managed_session_event(role: ManagedSessionRole, event: &ManagedSessionEvent) {
     let role = match role {
         ManagedSessionRole::Server => "server",

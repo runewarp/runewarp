@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreparedClientConfig {
     pub(crate) max_visitor_streams: usize,
+    pub(crate) graceful_shutdown_duration: String,
     pub(crate) selected_path: Option<PathBuf>,
     pub(crate) server_address: Option<String>,
     pub(crate) server_addresses: Option<Vec<String>>,
@@ -274,6 +275,7 @@ fn prepare_cli_only_client_config(
         log_level,
         RawClientConfig {
             max_visitor_streams: None,
+            graceful_shutdown_duration: None,
             server_address: if !managed && runtime.server_addresses.len() == 1 {
                 Some(runtime.server_addresses[0].clone())
             } else {
@@ -351,6 +353,9 @@ fn prepare_raw_client_config_with_defaults(
         max_visitor_streams: raw
             .max_visitor_streams
             .unwrap_or(crate::visitor_capacity::DEFAULT_VISITOR_CAPACITY),
+        graceful_shutdown_duration: raw
+            .graceful_shutdown_duration
+            .unwrap_or_else(|| "60s".to_owned()),
         selected_path,
         server_address: raw.server_address,
         server_addresses: raw.server_addresses,
@@ -763,6 +768,7 @@ hostname = "tunnel.example.test"
             LogLevel::Info,
             RawClientConfig {
                 max_visitor_streams: None,
+                graceful_shutdown_duration: None,
                 server_address: Some("tunnel.example.test".to_owned()),
                 server_addresses: None,
                 server_trust: Some("ca-file".to_owned()),
@@ -825,6 +831,7 @@ hostname = "tunnel.example.test"
             LogLevel::Off,
             RawClientConfig {
                 max_visitor_streams: None,
+                graceful_shutdown_duration: None,
                 server_address: Some("tunnel.example.test".to_owned()),
                 server_addresses: None,
                 server_trust: Some("ca-file".to_owned()),

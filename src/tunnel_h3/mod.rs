@@ -7,6 +7,8 @@
 //! - the Tunnel event stream, a Client-opened `GET /v1/tunnel/events` whose first valid `state`
 //!   event is the compatibility gate (there is no Runewarp-specific SETTINGS marker);
 //! - one draft07 WebTransport session after that gate, carrying Server-opened Visitor streams;
+//! - Client placement withdrawal, a bodyless `PUT /v1/tunnel/withdrawal` answered with a delayed
+//!   bodyless `204` once the connection is quiescent;
 //! - Server orderly shutdown through GOAWAY, with Runewarp enforcing the first-unprocessed
 //!   request-stream boundary;
 //! - bodyless status mapping for misdirected, unknown, or malformed signaling requests.
@@ -34,7 +36,7 @@ use std::time::Duration;
 use h3::error::{Code, ConnectionError, StreamError};
 use tokio::task::JoinHandle;
 
-pub use client::ClientTunnelH3;
+pub use client::{ClientTunnelH3, ProtocolFailure, UnconfirmedDrain, WithdrawalOutcome};
 pub use config::{
     make_client_tunnel_h3_config, make_server_tunnel_h3_config,
     make_server_tunnel_h3_config_with_resolver,
@@ -57,6 +59,9 @@ pub const MAX_IDLE_VISITOR_CREDIT: usize = 256;
 /// Tunnel event-stream resource on the Server hostname's HTTPS origin.
 pub const TUNNEL_EVENTS_PATH: &str = "/v1/tunnel/events";
 
+/// Placement-withdrawal resource on the Server hostname's HTTPS origin.
+pub const TUNNEL_WITHDRAWAL_PATH: &str = "/v1/tunnel/withdrawal";
+
 /// WebTransport session resource on the Server hostname's HTTPS origin.
 pub const TUNNEL_SESSION_PATH: &str = "/v1/tunnel/session";
 
@@ -75,6 +80,9 @@ pub(crate) struct TunnelH3Timing {
     pub silence_deadline: Duration,
     /// Client pause before resubscribing after a subscription ends or fails.
     pub resubscribe_delay: Duration,
+    /// Server wait for the Client to close a withdrawn, quiescent connection, measured from the
+    /// first locally completed `204`.
+    pub post_quiescence_close: Duration,
 }
 
 impl Default for TunnelH3Timing {
@@ -86,6 +94,7 @@ impl Default for TunnelH3Timing {
             initial_state_deadline: Duration::from_secs(60),
             silence_deadline: Duration::from_secs(60),
             resubscribe_delay: Duration::from_secs(1),
+            post_quiescence_close: Duration::from_secs(5),
         }
     }
 }

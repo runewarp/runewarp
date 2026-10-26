@@ -31,6 +31,7 @@ use crate::{ClientIdentity, ServerHostname, generate_client_identity};
 
 mod sessions;
 mod streams;
+mod withdrawal;
 
 const SERVER_NAME: &str = "tunnel.example.test";
 const STEP: Duration = Duration::from_secs(2);
@@ -48,6 +49,7 @@ fn fast_timing() -> TunnelH3Timing {
         initial_state_deadline: Duration::from_millis(300),
         silence_deadline: Duration::from_millis(300),
         resubscribe_delay: Duration::from_millis(20),
+        post_quiescence_close: Duration::from_millis(300),
     }
 }
 

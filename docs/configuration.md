@@ -246,6 +246,7 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 
 | Key | Required | Notes |
 | --- | --- | --- |
+| `client.graceful-shutdown-duration` | no | Client-instance-wide deadline for graceful Client shutdown, during which every live Tunnel connection withdraws from placement concurrently and in-flight Visitors may finish. Defaults to `"60s"` and starts when shutdown begins. Supports non-negative integer durations with `ms`, `s`, `m`, or `h` suffixes. `"0s"` makes graceful Client shutdown behave as fast shutdown. Connections still draining at the deadline close as unconfirmed. |
 | `client.max-visitor-streams` | no | Integer, default `16384`. Shared idle-credit and active-Visitor budget for the Client instance, across all connections; valid range `256..=1048576`, reduced at Unix startup when the fd limit cannot support it |
 | `client.server-address` | runtime or config | Ergonomic single-target **Server address** shortcut, written as `hostname[:port]`. Mutually exclusive with `client.server-addresses`. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, one `--server-address` may supply or replace this value before validation. |
 | `client.server-addresses` | static runtime or config | One or more explicit **Server addresses** for static fanout. Mutually exclusive with `client.server-address`. Each entry uses the same `hostname[:port]` rules as the singular field. Repeated `--server-address` flags replace this list before validation. |
@@ -354,7 +355,7 @@ Runewarp supports two Client trust modes:
 - `server.tunnels[].client-identity` and `server.tunnels[].client-identities` are mutually exclusive
 - every authorized Client identity must be unique across all Server Tunnels
 - `server.public-bind-address`, `server.tunnel-bind-address`, and `server.readiness-bind-address` when present must be literal socket addresses
-- `server.graceful-shutdown-duration` must be a non-negative duration string such as `"0s"`, `"60s"`, `"5m"`, or `"250ms"`
+- `server.graceful-shutdown-duration` and `client.graceful-shutdown-duration` must be non-negative duration strings such as `"0s"`, `"60s"`, `"5m"`, or `"250ms"`
 - Visitor PROXY v2 requires a non-empty CIDR-only trusted-network list; trusted networks without the protocol setting are rejected
 - `client.services[].proxy-protocol`, when present, must be `"v2"`
 - the selected or defaulted material directories and files must exist and be readable, except that omitted ACME state directories are resolved during config preparation and created only during startup after validation succeeds

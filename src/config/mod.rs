@@ -114,6 +114,9 @@ pub enum ServerCertificateConfig {
 pub struct ClientConfig {
     /// Aggregate idle-credit and active-Visitor capacity across this Client instance.
     pub max_visitor_streams: usize,
+    /// Client-instance-wide deadline for withdrawing every Tunnel connection during graceful
+    /// shutdown. Zero makes graceful shutdown behave as fast shutdown.
+    pub graceful_shutdown_duration: std::time::Duration,
     pub server_addresses: Vec<ServerAddress>,
     pub server_hostname: ServerHostname,
     pub server_port: u16,
@@ -638,6 +641,7 @@ pub(crate) fn validate_prepared_client_config(
 ) -> Result<ClientConfig, ConfigFileError> {
     let PreparedClientConfig {
         max_visitor_streams,
+        graceful_shutdown_duration,
         server_address,
         server_addresses,
         log_level,
@@ -659,6 +663,11 @@ pub(crate) fn validate_prepared_client_config(
     if !(MIN_VISITOR_CAPACITY..=MAX_VISITOR_CAPACITY).contains(&max_visitor_streams) {
         messages.push(format!("client.max-visitor-streams must be between {MIN_VISITOR_CAPACITY} and {MAX_VISITOR_CAPACITY}"));
     }
+    let graceful_shutdown_duration = validate_duration_field(
+        "client.graceful-shutdown-duration",
+        graceful_shutdown_duration.as_str(),
+        &mut messages,
+    );
 
     let managed = control.address.is_some();
     if control.section_present && control.address.is_none() {
@@ -901,6 +910,8 @@ pub(crate) fn validate_prepared_client_config(
         };
         Ok(ClientConfig {
             max_visitor_streams,
+            graceful_shutdown_duration: graceful_shutdown_duration
+                .expect("validated client.graceful-shutdown-duration"),
             server_addresses: validated_server_addresses,
             server_hostname,
             server_port,
@@ -1665,6 +1676,7 @@ pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value)
         client,
         &[
             "max-visitor-streams",
+            "graceful-shutdown-duration",
             "server-address",
             "server-addresses",
             "server-trust",
@@ -1757,6 +1769,7 @@ pub(crate) struct RawServerTunnelConfig {
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct RawClientConfig {
     pub(crate) max_visitor_streams: Option<usize>,
+    pub(crate) graceful_shutdown_duration: Option<String>,
     pub(crate) server_address: Option<String>,
     pub(crate) server_addresses: Option<Vec<String>>,
     pub(crate) server_trust: Option<String>,

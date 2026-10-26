@@ -32,6 +32,10 @@ _Avoid_: Server version, instance ID, Blue/Green
 An optional **Server runtime generation** that a **Server** advertises on its **Tunnel event stream** to name another runtime behind the same **Server address**. It carries no address, credential, or configuration. In **Managed mode**, Control sets it in the Server input; a hint naming the Server's own generation is not advertised. Static Servers never send one.
 _Avoid_: redirect, migration target, failover address
 
+**Candidate Tunnel connection**:
+A second **Tunnel connection** a **Client instance** opens to the same **Server address** while a **Replacement hint** stands. It must reach the hinted **Server runtime generation** before it offers **Visitor credit**, then becomes the address's primary while the old connection retires through **Placement withdrawal**. It never counts for **Assignment convergence** or **Client readiness**, and streams never move to it.
+_Avoid_: standby connection, failover connection, migration
+
 **Tunnel event stream**:
 The Client-opened HTTP/3 Server-Sent Events subscription on one **Tunnel connection** through which the **Server** sends full snapshots of its current state: its **Server runtime generation** and any **Replacement hint**. Its first valid snapshot is the compatibility gate; it never carries configuration.
 _Avoid_: control channel, association SSE, Managed session
@@ -41,7 +45,7 @@ The bidirectional stream carrying exactly one **Visitor** through one **Tunnel c
 _Avoid_: Receive slot, application stream, reverse stream
 
 **Placement withdrawal**:
-The terminal, Client-initiated removal of one **Tunnel connection** from new **Visitor** placement during graceful Client shutdown. Visitors already committed to it may finish; it never withdraws the Client identity or other connections.
+The terminal, Client-initiated removal of one **Tunnel connection** from new **Visitor** placement during graceful Client shutdown or after a **Candidate Tunnel connection** replaced it. Visitors already committed to it may finish; it never withdraws the Client identity or other connections.
 _Avoid_: drain, DRAIN_ACK, disconnect
 
 **Quiescent**:
@@ -254,8 +258,9 @@ _Avoid_: Duplicate hostname config, registration
 - A **Tunnel ID** identifies exactly one **Tunnel** within one Server authorization snapshot
 - Each **Tunnel connection** belongs to exactly one **Tunnel**
 - Each **Tunnel connection** belongs to exactly one **Client instance**
+- A **Server address** has at most one **Candidate Tunnel connection** at a time per **Client instance**
 - A **Client instance** establishes one or more **Tunnel connections**
-- A **Client instance** dials one or more **Server addresses**, with one **Tunnel connection** per **Server address**
+- A **Client instance** dials one or more **Server addresses**, with one **Tunnel connection** per **Server address**; a replacement briefly adds one **Candidate Tunnel connection**
 - A **Visitor** reaches a **Local backend** only through a **Tunnel**
 - A **Server address** points at exactly one **Server**
 - A **Server hostname** identifies the public edge, not an operator application

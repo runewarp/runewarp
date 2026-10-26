@@ -144,7 +144,7 @@ data: {"generation":"01928f3e-7b6a-7c3d-8e4f-0123456789ab","replacement_generati
 
 The Server writes the initial snapshot, then a new full snapshot whenever the advertised hint changes. All Tunnel connections on one Server runtime follow the same current snapshot. Each subscription holds at most one pending snapshot: a change published while a write is blocked replaces any unwritten one, so the next write carries only the latest snapshot. A blocked Server event write is cancelled after **60 seconds**. A new subscription supersedes the old one and starts with the current snapshot. Event data is capped at **4 KiB**.
 
-Static Servers never send a hint. In Managed mode, Control supplies the hint in the Server input; a value equal to the Server's own generation is not advertised (see [`managed.md`](managed.md#server-input)). Clients accept hints and take no action on them.
+Static Servers never send a hint. In Managed mode, Control supplies the hint in the Server input; a value equal to the Server's own generation is not advertised (see [`managed.md`](managed.md#server-input)). A Client acts on a hint by opening a candidate connection; see [candidate Tunnel connections](#candidate-tunnel-connections).
 
 The first-snapshot deadline starts after HTTP/3 setup. After a stream end, failure, or **60 seconds of silence**, the Client waits **one second** and resubscribes while the connection remains usable and GOAWAY permits requests. A malformed snapshot, unexpected event type, or changed generation on the same connection closes the connection with `H3_GENERAL_PROTOCOL_ERROR`.
 
@@ -154,7 +154,7 @@ Oversized request header sections receive bodyless `431` before request-handler 
 
 ## Placement withdrawal
 
-A Client withdraws one Tunnel connection from Visitor placement with a bodyless `PUT /v1/tunnel/withdrawal` on a fresh request stream to the Server hostname's HTTPS origin, ending the request with FIN. Withdrawal is terminal and connection-scoped: it neither withdraws the Client identity nor affects other Tunnel connections. Graceful Client shutdown is its only trigger.
+A Client withdraws one Tunnel connection from Visitor placement with a bodyless `PUT /v1/tunnel/withdrawal` on a fresh request stream to the Server hostname's HTTPS origin, ending the request with FIN. Withdrawal is terminal and connection-scoped: it neither withdraws the Client identity nor affects other Tunnel connections. Graceful Client shutdown and retirement of a connection replaced by a promoted candidate are its only triggers.
 
 - **Commit:** withdrawal commits once the Server has validated the complete bodyless request. Cancelling or resetting the request stream afterwards never reverses it. A request that is cancelled, incomplete, rejected or timed out first does not commit.
 - **Placement commitment:** a Visitor commits to a connection when its WebTransport stream opens. That commitment and the withdrawal commit are serialized, so a Visitor either committed first and may finish, or is never placed there. After commit the Server opens no new Visitor stream on the connection, even on credit it already holds; pending opens still waiting for credit end, and those Visitors are dropped without re-placement. Pool placement skips withdrawn members. Later Authorization changes or pool realignment never restore eligibility.
@@ -173,6 +173,27 @@ When graceful shutdown withdraws a connection, the Client immediately stops repl
 | `400`, `404`, `405`, `421`, any other status, or a `204` declaring or carrying content or trailers | Withdrawal protocol failure |
 
 An unconfirmed drain logs a warning with the Server address and closes that connection; active Visitors on it may have been terminated. A withdrawal protocol failure logs an error and closes that connection; other connections keep draining and the process exits nonzero after teardown, reporting the first failure. The Client never opens or reconnects a Tunnel connection to withdraw. GOAWAY does not trigger withdrawal. Authorization revocation always takes effect immediately: if it closes the connection first the drain is unconfirmed, and if its cleanup leaves the connection open and quiescent the `204` still completes.
+
+## Candidate Tunnel connections
+
+A **Candidate Tunnel connection** moves one Server address to another Server runtime without migrating streams. The address worker owns at most one candidate per Server address, alongside the address's primary connection. Candidates never count as Tunnel connections for Static Client readiness or Managed Assignment convergence; a promoted candidate takes over the Connected address without a state change.
+
+- **Start:** a valid primary snapshot whose `replacement_generation` differs from the primary's own generation starts one candidate attempt after a full-jitter delay from the first reconnect window. A hint naming the primary's generation is ignored.
+- **Attempt:** the candidate uses the ordinary attempt on a new UDP socket: fresh DNS resolution, trust and certificate reload, QUIC and HTTP/3, pinned-identity mTLS and the event-stream gate. Its first snapshot must name the hinted generation before the WebTransport session.
+- **Wrong generation:** any other generation, including the primary's (for example when NAT or a load balancer maps the new socket to the old runtime), closes only the candidate with `H3_NO_ERROR` and schedules a retry. The candidate opens no session and offers no credit. Hints in the candidate's own snapshots are ignored until promotion.
+- **Promote:** a validated candidate establishes its WebTransport session, reserves permit-backed credit from the shared Client-instance budget and becomes the primary. Both connections may hold credit during the short overlap.
+- **Retire:** the old connection then withdraws through [placement withdrawal](#placement-withdrawal), bounded by `client.graceful-shutdown-duration` from promotion. Visitors already on it finish there. At the deadline it closes as unconfirmed. A withdrawal protocol failure closes that connection and logs an error, but the process does not exit. If GOAWAY already forbids requests on the old connection, no withdrawal is sent; the Server's drain and WebTransport DRAIN retire it within the same deadline. A retired connection never reconnects.
+- **Retry:** failed candidates retry through the [reconnect sequence](#retry-behavior) with full jitter for as long as the same hint stands. Admission-limit closes are ordinary candidate failures. The sequence restarts after promotion or a hint change.
+- **Hint changes:** the same hint again is a no-op. A different hint aborts the current candidate and starts one for the new generation. A snapshot without a hint aborts an unpromoted candidate and has no effect after promotion.
+- **Abort:** closes the candidate with `H3_NO_ERROR`. An unpromoted candidate carried no Visitor and holds no credit, so abort affects no traffic.
+- **Subscription failure:** when the primary's subscription fails after a valid snapshot, the Client resubscribes under the one-second rule and aborts any unpromoted candidate. The resubscribed snapshot decides whether replacement restarts. The primary and its Visitors stay up.
+- **GOAWAY on the primary:** the Client stops resubscribing. The last valid hint stands, and an in-flight candidate continues and may promote.
+- **Primary loss:** connection close, revocation or idle timeout aborts the candidate, and the ordinary reconnect runs.
+- **Retiring and shutdown:** removing the address from a Managed assignment aborts its candidate, and a Retiring address starts none. Re-adding it re-adopts the primary, and the standing hint can start a candidate again. Client graceful and fast shutdown abort candidates at once. A graceful shutdown during retirement joins the in-flight withdrawal under the earlier of the two deadlines; Fast closes the retiring connection at once.
+
+A restarted runtime has a new generation, so candidates toward the old hint keep failing on the wrong generation until the hint changes or is withdrawn.
+
+At `info`, the Client logs `client tunnel candidate starting`, `promoted` and `aborted` with the `server-address`, plus the generation or abort `reason`. Rejected (`reason=wrong-generation`) and failed candidates log a warning with `next-retry-delay`. A retirement left to Server drain logs `client tunnel retired by server drain`; other retirement outcomes use the withdrawal lines.
 
 ## Client-side Service selection
 

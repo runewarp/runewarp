@@ -9,6 +9,123 @@ use runewarp::{
 use tempfile::tempdir;
 
 #[test]
+fn effective_static_client_address_lists_are_limited_across_config_and_cli_paths()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let identity_directory = directory.path().join("client-identity");
+    write_identity_material(&identity_directory)?;
+    let config_path = directory.path().join("client.toml");
+    fs::write(
+        &config_path,
+        "[client]\nserver-address = \"configured.example.test\"\n",
+    )?;
+    let other_role_path = directory.path().join("server.toml");
+    fs::write(
+        &other_role_path,
+        "[server]\nhostname = \"server.example.test\"\n",
+    )?;
+    let defaults = ClientConfigResolutionDefaults {
+        identity_directory,
+        public_cert_directory: directory.path().join("unused-public-cert"),
+    };
+    for selected in [
+        SelectedClientConfig::None,
+        SelectedClientConfig::Explicit(config_path.clone()),
+        SelectedClientConfig::Discovered(config_path),
+        SelectedClientConfig::Explicit(other_role_path),
+    ] {
+        for count in [256, 257] {
+            let runtime = ClientRuntimeArgs {
+                server_addresses: (0..count)
+                    .map(|index| format!("Edge-{index}.Example.Test."))
+                    .collect(),
+                backend_address: Some("localhost:8443".to_owned()),
+                control_address: None,
+            };
+            match resolve_selected_client_config(selected.clone(), &runtime, &defaults) {
+                Ok(config) if count == 256 => {
+                    assert_eq!(config.server_addresses.len(), 256);
+                    assert_eq!(
+                        config.server_addresses[255].hostname().as_str(),
+                        "edge-255.example.test"
+                    );
+                }
+                Ok(_) => panic!("{selected:?} must reject 257 effective static Server addresses"),
+                Err(error) if count == 257 => {
+                    let messages = error
+                        .validation_messages()
+                        .expect("an effective list exceeding the cap is a validation error");
+                    assert!(
+                        messages
+                            .iter()
+                            .any(|message| message.contains("client.server-addresses")
+                                && message.contains("at most 256")
+                                && message.contains("static")),
+                        "{selected:?}: {error}"
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_server_address_overrides_replace_invalid_file_lists_before_validation()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let identity_directory = directory.path().join("client-identity");
+    write_identity_material(&identity_directory)?;
+    let path = directory.path().join("client.toml");
+    let defaults = ClientConfigResolutionDefaults {
+        identity_directory,
+        public_cert_directory: directory.path().join("unused-public-cert"),
+    };
+    let oversized = (0..257)
+        .map(|index| format!("\"edge-{index}.example.test\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    for list in [
+        "[]".to_owned(),
+        r#"["invalid/address"]"#.to_owned(),
+        format!("[{oversized}]"),
+    ] {
+        // Both raw address keys are present and invalid until runtime overrides replace them.
+        fs::write(
+            &path,
+            format!("[client]\nserver-address = \"invalid/address\"\nserver-addresses = {list}\n"),
+        )?;
+        for addresses in [
+            vec!["Primary.Example.Test.".to_owned()],
+            vec![
+                "Primary.Example.Test.".to_owned(),
+                "backup.example.test:9443".to_owned(),
+            ],
+        ] {
+            let config = resolve_selected_client_config(
+                SelectedClientConfig::Explicit(path.clone()),
+                &ClientRuntimeArgs {
+                    server_addresses: addresses.clone(),
+                    backend_address: Some("localhost:8443".to_owned()),
+                    control_address: None,
+                },
+                &defaults,
+            )?;
+            assert_eq!(config.server_addresses.len(), addresses.len());
+            assert_eq!(
+                config.server_addresses[0].hostname().as_str(),
+                "primary.example.test"
+            );
+            if addresses.len() == 2 {
+                assert_eq!(config.server_addresses[1].port(), 9443);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<(), Box<dyn Error>>
 {
     let tempdir = tempdir()?;

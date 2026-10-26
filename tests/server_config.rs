@@ -7,6 +7,299 @@ use runewarp::{
 use tempfile::tempdir;
 
 #[test]
+fn server_config_accepts_mixed_listener_address_forms() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    initialize_manual_server_certificate(
+        &directory.path().join("server-cert"),
+        "tunnel.example.test",
+    )?;
+    let path = directory.path().join("config.toml");
+    for (bindings, public, tunnel) in [
+        (
+            r#"public-bind-address = "127.0.0.1:8443"
+tunnel-bind-addresses = ["127.0.0.1:9443", "[::1]:9443"]"#,
+            vec!["127.0.0.1:8443"],
+            vec!["127.0.0.1:9443", "[::1]:9443"],
+        ),
+        (
+            r#"public-bind-addresses = ["127.0.0.1:8443", "[::1]:8443"]
+tunnel-bind-address = "127.0.0.1:9443""#,
+            vec!["127.0.0.1:8443", "[::1]:8443"],
+            vec!["127.0.0.1:9443"],
+        ),
+        (
+            r#"public-bind-addresses = ["127.0.0.1:8443"]"#,
+            vec!["127.0.0.1:8443"],
+            vec!["0.0.0.0:443"],
+        ),
+        (
+            r#"tunnel-bind-addresses = ["127.0.0.1:9443"]"#,
+            vec!["0.0.0.0:443"],
+            vec!["127.0.0.1:9443"],
+        ),
+    ] {
+        fs::write(
+            &path,
+            format!(
+                r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+{bindings}
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#
+            ),
+        )?;
+        let config = load_server_config(&path)?;
+        let expected_public = public
+            .into_iter()
+            .map(str::parse)
+            .collect::<Result<Vec<std::net::SocketAddr>, _>>()?;
+        let expected_tunnel = tunnel
+            .into_iter()
+            .map(str::parse)
+            .collect::<Result<Vec<std::net::SocketAddr>, _>>()?;
+        assert_eq!(config.public_bind_addresses, expected_public);
+        assert_eq!(config.tunnel_connection_bind_addresses, expected_tunnel);
+    }
+    Ok(())
+}
+
+#[test]
+fn server_config_rejects_wrong_listener_address_shapes() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let path = directory.path().join("config.toml");
+    for singular in ["public-bind-address", "tunnel-bind-address"] {
+        for (key, value, expected) in [
+            (
+                singular.to_owned(),
+                r#"["127.0.0.1:443"]"#,
+                "expected a string",
+            ),
+            (
+                format!("{singular}es"),
+                r#""127.0.0.1:443""#,
+                "expected a sequence",
+            ),
+            (format!("{singular}es"), "[1]", "expected a string"),
+        ] {
+            fs::write(
+                &path,
+                format!("[server]\nhostname = \"tunnel.example.test\"\n{key} = {value}\n"),
+            )?;
+            let error = load_server_config(&path).expect_err("wrong value shapes must fail");
+            let source = std::error::Error::source(&error)
+                .expect("shape errors explain the expected type")
+                .to_string();
+            assert!(
+                source.contains(&key) && source.contains(expected),
+                "{key}: {source}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn server_config_rejects_conflicting_listener_address_keys()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    initialize_manual_server_certificate(
+        &directory.path().join("server-cert"),
+        "tunnel.example.test",
+    )?;
+    let path = directory.path().join("config.toml");
+    for singular in ["public-bind-address", "tunnel-bind-address"] {
+        for (one, many) in [
+            (r#""127.0.0.1:443""#, r#"["127.0.0.1:443"]"#),
+            (r#""127.0.0.1:443""#, "[]"),
+            (r#""invalid""#, r#"["invalid"]"#),
+            (r#""""#, "[]"),
+            ("[]", r#""wrong-shape""#),
+            ("false", "123"),
+        ] {
+            fs::write(
+                &path,
+                format!(
+                    r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+{singular} = {one}
+{singular}es = {many}
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#
+                ),
+            )?;
+            let error = load_server_config(&path)
+                .expect_err("both forms must conflict")
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "server.{singular} and server.{singular}es are mutually exclusive"
+                )),
+                "{one}, {many}: {error}"
+            );
+        }
+    }
+    fs::write(
+        &path,
+        r#"
+[server]
+public-bind-address = []
+public-bind-addresses = false
+tunnel-bind-address = 123
+tunnel-bind-addresses = "invalid"
+"#,
+    )?;
+    let error = load_server_config(&path)
+        .expect_err("both pairs must report conflicts")
+        .to_string();
+    for singular in ["public-bind-address", "tunnel-bind-address"] {
+        assert!(
+            error.contains(&format!(
+                "server.{singular} and server.{singular}es are mutually exclusive"
+            )),
+            "{error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn server_config_validates_listener_address_lists() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    initialize_manual_server_certificate(
+        &directory.path().join("server-cert"),
+        "tunnel.example.test",
+    )?;
+    let path = directory.path().join("config.toml");
+    for key in ["public-bind-addresses", "tunnel-bind-addresses"] {
+        for (value, expected) in [
+            ("[]".to_owned(), "must contain 1 to 8 distinct addresses"),
+            (
+                format!(
+                    "[{}]",
+                    (1..=9)
+                        .map(|port| format!("\"127.0.0.1:{port}\""))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                "must contain 1 to 8 distinct addresses",
+            ),
+            (
+                r#"["[::1]:443", "[0:0:0:0:0:0:0:1]:443"]"#.to_owned(),
+                "duplicate address",
+            ),
+            (
+                r#"["127.0.0.1:443", "host.example.test:443"]"#.to_owned(),
+                "must be a literal socket address",
+            ),
+            (
+                r#"["127.0.0.1:443", "127.0.0.1:99999"]"#.to_owned(),
+                "must be a literal socket address",
+            ),
+        ] {
+            fs::write(
+                &path,
+                format!(
+                    r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+{key} = {value}
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#
+                ),
+            )?;
+            let error = load_server_config(&path)
+                .expect_err("invalid address list must fail")
+                .to_string();
+            assert!(
+                error.contains(&format!("server.{key}")) && error.contains(expected),
+                "{value}: {error}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn server_config_accepts_one_and_eight_address_arrays() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    initialize_manual_server_certificate(
+        &directory.path().join("server-cert"),
+        "tunnel.example.test",
+    )?;
+    let path = directory.path().join("config.toml");
+    for count in [1, 8] {
+        let addresses = (1..=count)
+            .map(|port| format!("\"127.0.0.1:{port}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        fs::write(
+            &path,
+            format!(
+                r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+public-bind-addresses = [{addresses}]
+tunnel-bind-addresses = [{addresses}]
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#
+            ),
+        )?;
+        let config = load_server_config(&path)?;
+        assert_eq!(config.public_bind_addresses.len(), count);
+        assert_eq!(config.tunnel_connection_bind_addresses.len(), count);
+    }
+    Ok(())
+}
+
+#[test]
+fn server_config_accepts_multiple_listener_addresses() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    initialize_manual_server_certificate(
+        &directory.path().join("server-cert"),
+        "tunnel.example.test",
+    )?;
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+public-bind-addresses = ["127.0.0.1:8443", "[::1]:8443"]
+tunnel-bind-addresses = ["127.0.0.1:9443", "[::1]:9443"]
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )?;
+    let config = load_server_config(&path)?;
+    assert_eq!(
+        config.public_bind_addresses,
+        vec!["127.0.0.1:8443".parse()?, "[::1]:8443".parse()?]
+    );
+    assert_eq!(
+        config.tunnel_connection_bind_addresses,
+        vec!["127.0.0.1:9443".parse()?, "[::1]:9443".parse()?]
+    );
+    Ok(())
+}
+
+#[test]
 fn server_config_accepts_proxy_v2_with_cidr_trust() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
@@ -217,10 +510,13 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             directory: tempdir.path().join("server-cert"),
         }
     );
-    assert_eq!(settings.public_bind_address, "0.0.0.0:443".parse().unwrap());
     assert_eq!(
-        settings.tunnel_connection_bind_address,
-        "0.0.0.0:443".parse().unwrap()
+        settings.public_bind_addresses,
+        vec!["0.0.0.0:443".parse().unwrap()]
+    );
+    assert_eq!(
+        settings.tunnel_connection_bind_addresses,
+        vec!["0.0.0.0:443".parse().unwrap()]
     );
     assert_eq!(
         hostname_strings(&settings.tunnels[0].public_hostnames),
@@ -255,12 +551,12 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(
-        settings.public_bind_address,
-        "127.0.0.1:8443".parse().unwrap()
+        settings.public_bind_addresses,
+        vec!["127.0.0.1:8443".parse().unwrap()]
     );
     assert_eq!(
-        settings.tunnel_connection_bind_address,
-        "127.0.0.1:9443".parse().unwrap()
+        settings.tunnel_connection_bind_addresses,
+        vec!["127.0.0.1:9443".parse().unwrap()]
     );
     assert_eq!(settings.readiness_bind_address, None);
     assert_eq!(

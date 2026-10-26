@@ -29,8 +29,8 @@ async fn establish_candidate(
     client_connection: quinn::Connection,
     budget: Arc<Semaphore>,
     expected: ServerRuntimeGeneration,
-) -> Result<ClientTunnelH3, TunnelH3Error> {
-    ClientTunnelH3::establish_candidate_with_timing(
+) -> Result<ClientTunnel, TunnelError> {
+    ClientTunnel::establish_candidate_with_timing(
         client_connection,
         &server_hostname(),
         budget,
@@ -57,7 +57,7 @@ async fn a_candidate_offers_credit_only_once_released() {
     let budget = Arc::new(Semaphore::new(4));
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let (server, client) = tokio::join!(
-        ServerTunnelH3::establish_with_timing(
+        ServerTunnel::establish_with_timing(
             server_connection,
             server_hostname(),
             generation,
@@ -141,7 +141,7 @@ async fn the_replacement_hint_follows_snapshots_and_ignores_the_own_generation()
         (connection, stream, session)
     });
 
-    let client = ClientTunnelH3::establish_with_timing(
+    let client = ClientTunnel::establish_with_timing(
         client_connection,
         &server_hostname(),
         no_credit(),
@@ -177,7 +177,7 @@ async fn an_interrupted_subscription_pauses_the_hint_until_resubscribed() {
         (connection, second, session)
     });
 
-    let client = ClientTunnelH3::establish_with_timing(
+    let client = ClientTunnel::establish_with_timing(
         client_connection,
         &server_hostname(),
         no_credit(),
@@ -221,7 +221,7 @@ async fn goaway_keeps_the_last_hint_without_resubscribing() {
         (resubscribed, connection, session)
     });
 
-    let client = ClientTunnelH3::establish_with_timing(
+    let client = ClientTunnel::establish_with_timing(
         client_connection,
         &server_hostname(),
         no_credit(),
@@ -269,11 +269,11 @@ async fn a_failed_subscription_pauses_replacement_before_the_resubscribe_delay()
         (connection, stream, session)
     });
 
-    let client = ClientTunnelH3::establish_with_timing(
+    let client = ClientTunnel::establish_with_timing(
         client_connection,
         &server_hostname(),
         no_credit(),
-        TunnelH3Timing {
+        TunnelTiming {
             resubscribe_delay: Duration::from_secs(30),
             ..fast_timing()
         },

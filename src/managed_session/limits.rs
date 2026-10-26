@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use crate::opaque_control_token::OPAQUE_CONTROL_TOKEN_MAX_CHARS;
+use crate::server_address::MAX_CLIENT_SERVER_ADDRESSES;
 use crate::sse::{SseLimitKind, SseLimits};
 
 /// Production and injectable budgets for one Managed session.
@@ -56,7 +57,7 @@ impl Default for ManagedSessionLimits {
             max_public_hostnames_per_tunnel: 256,
             max_client_identities_total: 4_096,
             max_client_identities_per_tunnel: 64,
-            max_server_addresses: 256,
+            max_server_addresses: MAX_CLIENT_SERVER_ADDRESSES,
             state_request_deadline: Duration::from_secs(5),
             state_response_deadline: Duration::from_secs(5),
         }

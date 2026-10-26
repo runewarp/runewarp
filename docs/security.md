@@ -6,7 +6,7 @@ In the default passthrough mode, Runewarp does not terminate customer TLS on the
 
 - choose system trust or an exclusive CA bundle deliberately for every Server and Control connection
 - protect Client and Server identity keys, private CA keys, and explicit ACME state directories
-- expose only the intended public TCP, Tunnel UDP, readiness, and Control listeners
+- expose only the intended public TCP, Tunnel UDP, readiness, and Control listeners; every configured bind address opens a listener
 - account for the Server's visibility into SNI, Visitor source addresses, timing, and byte counts
 - probe `server.readiness-bind-address` rather than public TLS when readiness is configured
 - use `tls-mode = "terminate"` only when Client-side TLS termination and plaintext delivery to the Local backend are intended
@@ -91,7 +91,7 @@ The Tunnel event stream contains only the opaque Server runtime generation and a
 
 ## Admission and overload protection
 
-The Server and Client bound work at each public or authenticated trust boundary before it can consume unbounded runtime resources:
+The Server and Client bound work at each public or authenticated trust boundary before it can consume unbounded runtime resources. All Server bind addresses share these limits, authorization and Tunnel pools; adding a listener grants no extra admission capacity:
 
 - per-source Visitor limits use the canonical source only after direct or trusted-PROXY tuple resolution
 - saturation rejects the newest work and never evicts a healthy Tunnel connection
@@ -112,7 +112,7 @@ The tunnel-connection trust model is:
 
 The pinned value is the client public key, not the certificate lifetime or serial number. Handshake admission and Public-hostname routing consult one shared **Authorization snapshot**, so identity additions and removals can replace admission without rebinding the tunnel listener. Live Tunnel connections retain their authenticated Client identity, and admitted Visitor streams retain their Public hostname and serving connection, so the runtime can dispatch targeted connection closes and stream resets without disturbing unrelated work.
 
-Static fanout does not change these trust boundaries. When a Client dials multiple **Server addresses**, each **Tunnel connection** still uses the same shared Client identity, Server-certificate validation mode, and local Service-routing config.
+Static fanout is limited to 1 to 256 distinct effective Server addresses after CLI overrides, matching the Managed production ceiling and bounding assigned-address worker and endpoint fanout. Managed assignments may be empty. Static fanout does not change these trust boundaries. When a Client dials multiple **Server addresses**, each **Tunnel connection** still uses the same shared Client identity, Server-certificate validation mode, and local Service-routing config.
 
 ## Control authentication (managed mode)
 
@@ -186,7 +186,7 @@ Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode. The current ACME confi
 `[server.acme]` provisions the certificate for `server.hostname` only. When a Visitor connects to the Server hostname with ALPN `acme-tls/1`, the Server handles the challenge itself. All other application traffic addressed to the Server hostname is dropped.
 
 - when omitted, `server.acme.state-dir` defaults to the XDG state path and is created at startup
-- Runewarp warns when `server.public-bind-address` is not on TCP 443, but that warning stays advisory because the externally reachable public port may still be 443 through container or NAT mapping
+- Runewarp warns for each public bind address not on TCP 443, whether supplied through `server.public-bind-address` or `server.public-bind-addresses`, but that warning stays advisory because the externally reachable public port may still be 443 through container or NAT mapping
 - any explicit `server.acme.state-dir` should be protected like secret-bearing material
 
 ### Client ACME

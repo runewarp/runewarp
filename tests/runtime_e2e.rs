@@ -78,8 +78,8 @@ async fn forwards_tls_passthrough_end_to_end() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -579,8 +579,8 @@ async fn drops_public_tls_when_no_client_is_connected() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -637,8 +637,8 @@ async fn terminates_acme_tls_alpn_challenges_for_the_server_hostname() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -713,8 +713,8 @@ async fn acme_tls_alpn_challenges_do_not_terminate_customer_hostname_traffic() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -813,8 +813,8 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -913,8 +913,8 @@ async fn rejects_tunnel_clients_that_do_not_present_a_client_certificate() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -975,8 +975,8 @@ async fn library_constructors_expose_addresses_before_running() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -1068,8 +1068,8 @@ async fn server_bind_rejects_empty_configured_tunnels() {
     )
     .unwrap();
     let error = match Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -1119,8 +1119,8 @@ async fn latest_client_instance_serves_subsequent_visitor_connections() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -1206,8 +1206,8 @@ async fn drops_public_tls_after_the_active_client_instance_disconnects() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -1276,8 +1276,8 @@ async fn drops_public_tls_after_the_client_gracefully_shuts_down() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -1358,8 +1358,8 @@ async fn server_graceful_shutdown_stops_new_accepts_and_client_observes_a_clean_
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -1461,8 +1461,8 @@ async fn graceful_server_shutdown_keeps_already_landed_streams_until_they_finish
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -1554,8 +1554,8 @@ async fn visitor_tls_fails_when_the_local_backend_is_unreachable() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -1625,8 +1625,8 @@ async fn a_busier_tunnel_pool_member_stops_winning_new_stream_placement() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -3355,7 +3355,7 @@ fn unauthenticated_h3_client_config(roots: RootCertStore) -> quinn::ClientConfig
 #[tokio::test]
 async fn server_shutdown_seals_placement_while_a_placed_visitor_finishes() {
     timeout(Duration::from_secs(3), async {
-        use runewarp::tunnel::ClientTunnelH3;
+        use runewarp::tunnel::ClientTunnel;
         let (certificate, key) = make_self_signed_cert("tunnel.example.test");
         let identity = generate_client_identity().unwrap();
         let authorization = ServerAuthorization::from_static_tunnels(
@@ -3364,8 +3364,8 @@ async fn server_shutdown_seals_placement_while_a_placed_visitor_finishes() {
         )
         .unwrap();
         let server = Server::bind(ServerBindConfig {
-            public_bind_addr: localhost(0),
-            tunnel_connection_bind_addr: localhost(0),
+            public_bind_addrs: vec![localhost(0)],
+            tunnel_connection_bind_addrs: vec![localhost(0)],
             readiness_bind_addr: None,
             server_hostname: server_hostname("tunnel.example.test"),
             authorization: authorization.clone(),
@@ -3394,7 +3394,7 @@ async fn server_shutdown_seals_placement_while_a_placed_visitor_finishes() {
             .unwrap()
             .await
             .unwrap();
-        let mut client = ClientTunnelH3::establish(
+        let mut client = ClientTunnel::establish(
             connection,
             &server_hostname("tunnel.example.test"),
             Arc::new(tokio::sync::Semaphore::new(8)),
@@ -3487,8 +3487,8 @@ impl InFlightVisitor {
         )
         .unwrap();
         let server = Server::bind(ServerBindConfig {
-            public_bind_addr: localhost(0),
-            tunnel_connection_bind_addr: localhost(0),
+            public_bind_addrs: vec![localhost(0)],
+            tunnel_connection_bind_addrs: vec![localhost(0)],
             readiness_bind_addr: None,
             server_hostname: server_hostname("tunnel.example.test"),
             authorization: authorization.clone(),
@@ -3676,8 +3676,8 @@ impl ReplaceableServer {
     async fn start(certificate: &CertificateDer<'static>, key: &[u8]) -> Self {
         let authorization = ServerAuthorization::empty_managed();
         let server = Server::bind(ServerBindConfig {
-            public_bind_addr: localhost(0),
-            tunnel_connection_bind_addr: localhost(0),
+            public_bind_addrs: vec![localhost(0)],
+            tunnel_connection_bind_addrs: vec![localhost(0)],
             readiness_bind_addr: None,
             server_hostname: server_hostname("localhost"),
             authorization: authorization.clone(),

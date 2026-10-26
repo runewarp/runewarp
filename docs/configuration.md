@@ -188,7 +188,7 @@ identity-dir = "/etc/runewarp/client"
 backend-address = "127.0.0.1:443"
 ```
 
-Use `client.server-address` for the common one-target case. Use `client.server-addresses` when one Client instance should reconcile multiple Server addresses concurrently.
+Use `client.server-address` for the common one-target case. Use `client.server-addresses` when one Client instance should reconcile multiple Server addresses concurrently. The effective static assignment must contain 1 to 256 distinct addresses, matching the Managed Client production ceiling. This bounds per-address worker and endpoint fanout. CLI overrides replace the file values before this check.
 
 ### Client terminate mode
 
@@ -230,8 +230,10 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `server.hostname` | yes | **Server hostname** for the Runewarp edge itself. Used for TLS validation and ACME. On the runtime `runewarp server` command only, `--hostname` or `RUNEWARP_SERVER_HOSTNAME` may replace this value before validation, with `--hostname` taking precedence. |
 | `server.cert-dir` | no | Directory containing manual/private-CA Server material. Defaults to the XDG Server material path when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
 | `server.identity-dir` | managed only | Directory containing Server identity material for Control authentication. Valid only in managed mode. Defaults to the XDG Server identity path. Must resolve to a different directory than `server.cert-dir`. |
-| `server.public-bind-address` | no | Literal TCP socket address for **Visitor** TLS traffic. Defaults to `0.0.0.0:443`. |
-| `server.tunnel-bind-address` | no | Literal UDP socket address for **Client** **Tunnel connections**. Defaults to `0.0.0.0:443`. |
+| `server.public-bind-address` | no | One literal TCP socket address string for **Visitor** TLS traffic. Mutually exclusive with `server.public-bind-addresses`. Defaults to `"0.0.0.0:443"` when neither key is supplied. |
+| `server.public-bind-addresses` | no | Array of 1 to 8 distinct literal TCP socket addresses for **Visitor** TLS traffic. Mutually exclusive with `server.public-bind-address`. |
+| `server.tunnel-bind-address` | no | One literal UDP socket address string for **Client** **Tunnel connections**. Mutually exclusive with `server.tunnel-bind-addresses`. Defaults to `"0.0.0.0:443"` when neither key is supplied; every listener uses ordinary HTTP/3 with ALPN `h3`. |
+| `server.tunnel-bind-addresses` | no | Array of 1 to 8 distinct literal UDP socket addresses for **Client** **Tunnel connections**, using ALPN `h3`. Mutually exclusive with `server.tunnel-bind-address`. |
 | `server.readiness-bind-address` | no | Optional literal TCP socket address for a probe-only **Server readiness** listener. When configured, TCP accept success means the Server is ready for new ingress admission. There is no default listener. In managed mode the listener address is validated at startup, but the probe stays Unready until the first successful Server input apply. |
 | `server.graceful-shutdown-duration` | no | Operator-facing graceful drain window for the Server role. Defaults to `"60s"`. Supports non-negative integer durations with `ms`, `s`, `m`, or `h` suffixes. `"0s"` disables the longer drain window and makes graceful Server shutdown converge to fast Server behavior. |
 | `server.visitor-proxy-protocol` | no | `"v2"` requires strict PROXY v2 framing on every Visitor connection. Omission keeps direct ingress. |
@@ -242,6 +244,21 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `server.tunnels[].client-identity` | with singular authorization | Lowercase hex SHA-256 fingerprint of one authorized Client public key's SubjectPublicKeyInfo. Mutually exclusive with `server.tunnels[].client-identities`. |
 | `server.tunnels[].client-identities` | with plural authorization | One or more lowercase hex SHA-256 fingerprints of authorized Client public keys' SubjectPublicKeyInfo values. Mutually exclusive with `server.tunnels[].client-identity`. |
 
+Choose at most one key from each singular/plural pair. Singular keys accept only strings and plural keys accept only arrays. Supplying both keys in a pair is an error even if they describe the same address or either value is empty or invalid. Public and Tunnel choices are independent: a singular public address and plural Tunnel addresses, or vice versa, are valid. If neither key in a pair is supplied, that transport uses `0.0.0.0:443`.
+
+Each bind address creates its own listener on the same Server runtime. All listeners share authorization, Tunnel pools, the runtime generation, admission limits, and graceful shutdown. Limits apply across the entire runtime, rather than separately per listener. A failure to bind any Visitor, Tunnel, or readiness address fails startup and releases the earlier sockets. Addresses that differ as literals can still overlap at the operating system, for example wildcard and specific-IP binds on the same port; such conflicts fail startup too. IPv6 wildcard dual-stack behavior follows the operating system's defaults, as it does for a single string.
+
+All four bind keys are file configuration; there are no bind-address CLI flags or environment overrides. Existing single-string configurations keep their meaning. For example, bind separate IPv4 and IPv6 addresses on the same operator-selected port:
+
+```toml
+[server]
+hostname = "tunnel.example.com"
+public-bind-addresses = ["192.0.2.10:443", "[2001:db8::10]:443"]
+tunnel-bind-addresses = ["192.0.2.10:443", "[2001:db8::10]:443"]
+```
+
+The addresses must belong to the host; add the remaining certificate and Tunnel configuration as in the examples above.
+
 ### Client
 
 | Key | Required | Notes |
@@ -249,7 +266,7 @@ At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warning
 | `client.graceful-shutdown-duration` | no | Client-instance-wide deadline for graceful Client shutdown, during which every live Tunnel connection withdraws from placement concurrently and in-flight Visitors may finish. Defaults to `"60s"` and starts when shutdown begins. Supports non-negative integer durations with `ms`, `s`, `m`, or `h` suffixes. `"0s"` makes graceful Client shutdown behave as fast shutdown. Connections still draining at the deadline close as unconfirmed. |
 | `client.max-visitor-streams` | no | Integer, default `16384`. Shared idle-credit and active-Visitor budget for the Client instance, across all connections; valid range `256..=1048576`, reduced at Unix startup when the fd limit cannot support it |
 | `client.server-address` | runtime or config | Ergonomic single-target **Server address** shortcut, written as `hostname[:port]`. Mutually exclusive with `client.server-addresses`. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, one `--server-address` may supply or replace this value before validation. |
-| `client.server-addresses` | static runtime or config | One or more explicit **Server addresses** for static fanout. Mutually exclusive with `client.server-address`. Each entry uses the same `hostname[:port]` rules as the singular field. Repeated `--server-address` flags replace this list before validation. |
+| `client.server-addresses` | static runtime or config | From 1 to 256 explicit **Server addresses** for static fanout. Mutually exclusive with `client.server-address`. Each entry uses the same `hostname[:port]` rules as the singular field. Repeated `--server-address` flags replace this list before validation. |
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
 | `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG Client identity path. |
@@ -278,7 +295,7 @@ Client reconnect behavior is runtime-owned. There is no `client.reconnect-interv
 
 `runewarp server cert renew` reissues `server.crt` from the existing **Server CA**. `runewarp server cert rotate-ca` changes the trust anchor itself and requires Clients to trust a new CA.
 
-When `[server.acme]` is enabled, Runewarp warns at startup if `server.public-bind-address` is not on TCP 443. That warning is advisory rather than fatal because container and NAT deployments may still publish port 443 externally even when the internal bind port differs.
+When `[server.acme]` is enabled, Runewarp warns at startup for each public bind address that is not on TCP 443. That warning is advisory rather than fatal because container and NAT deployments may still publish port 443 externally even when the internal bind port differs.
 
 ### Client identity material
 
@@ -344,7 +361,8 @@ Runewarp supports two Client trust modes:
 - `[server.acme]` and `server.cert-dir` are mutually exclusive; when `[server.acme]` is absent, Runewarp uses the manual/private-CA path with `server.cert-dir` or its default XDG location
 - `runewarp client` must end up with at least one effective **Server address** after any allowed `--server-address` overlay in static mode
 - `client.server-address` and `client.server-addresses` are mutually exclusive
-- `client.server-addresses` must contain at least one entry when present
+- the effective static Client address assignment must contain 1 to 256 addresses, including lists supplied by repeated `--server-address` flags; CLI overrides replace file values before validation
+- `client.server-addresses` must contain at least one entry when present, and duplicate normalized Server addresses are rejected
 - `runewarp client` must end up with at least one **Service**, either from config or from the runtime `--backend-address` Catch-all overlay
 - `client.server-trust` must be either `system` or `ca-file`
 - `client.server-ca-file` may be set only when `client.server-trust = "ca-file"`
@@ -354,7 +372,10 @@ Runewarp supports two Client trust modes:
 - every `client-identity` value and every entry in `client-identities` must be lowercase hex without colons
 - `server.tunnels[].client-identity` and `server.tunnels[].client-identities` are mutually exclusive
 - every authorized Client identity must be unique across all Server Tunnels
-- `server.public-bind-address`, `server.tunnel-bind-address`, and `server.readiness-bind-address` when present must be literal socket addresses
+- `server.public-bind-address` and `server.tunnel-bind-address` accept only one literal socket address string
+- `server.public-bind-addresses` and `server.tunnel-bind-addresses` accept only arrays of 1 to 8 distinct literal socket addresses; hostnames, empty arrays, duplicates after address parsing, and larger arrays are rejected
+- each singular/plural bind pair is mutually exclusive, even if either value is empty or invalid; omitting both defaults that transport to `0.0.0.0:443`
+- `server.readiness-bind-address` when present must be one literal socket address
 - `server.graceful-shutdown-duration` and `client.graceful-shutdown-duration` must be non-negative duration strings such as `"0s"`, `"60s"`, `"5m"`, or `"250ms"`
 - Visitor PROXY v2 requires a non-empty CIDR-only trusted-network list; trusted networks without the protocol setting are rejected
 - `client.services[].proxy-protocol`, when present, must be `"v2"`
@@ -397,7 +418,7 @@ Runewarp does not validate cross-side hostname coverage at runtime:
 
 On Unix, Client and Server startup use the safe `rlimit` wrapper to raise soft `RLIMIT_NOFILE` toward hard. On macOS, its helper also respects `kern.maxfilesperproc`, which can be lower than a reported unlimited hard limit. A failed increase keeps the readable current soft limit and warns instead of failing startup. If the limit cannot be read, startup warns and retains configured capacities. Other platforms skip this adjustment.
 
-Capacity planning reserves 512 descriptors for runtime polling, QUIC, configuration and certificates, logs, ACME and transient accepts. The Client additionally reserves one UDP endpoint per configured Server address, or 256 endpoints for the Managed snapshot address cap. Each idle credit or active Visitor occupies one budget permit; only active Visitors normally need a Local backend socket. Reserving one descriptor for every permit is conservative. Static and Managed Clients use the same effective instance budget and report it at startup. Quiet connections still reserve up to 256 idle permits each.
+Capacity planning reserves 512 descriptors for runtime polling, QUIC, configuration and certificates, logs, ACME and transient accepts. The Client additionally reserves one UDP endpoint per configured static Server address, at most 256, or 256 endpoints for the Managed snapshot address cap. Each idle credit or active Visitor occupies one budget permit; only active Visitors normally need a Local backend socket. Reserving one descriptor for every permit is conservative. Static and Managed Clients use the same effective instance budget and report it at startup. Quiet connections still reserve up to 256 idle permits each.
 
 The Server accounts for three distinct Visitor socket owners: pending ClientHello intake, pending stream opens after intake releases its permit, and active routed proxies. Their fixed maxima are 4,096, 4,096 and 65,536. If their sum plus the reserve exceeds the fd limit, startup proportionally reduces all three and assigns integer-rounding leftovers to active proxies first. Per-source intake remains capped at 256 and handshakes at 256. Neither role increases a smaller configured or fixed capacity just because more descriptors are available. One warning per role startup reports configured and effective values and the fd allowance. Startup does not reject a valid Client configuration because OS sizing takes the effective budget below 256 or even to zero; such a Client offers fewer idle credits or none. Extremely small limits can leave no useful Visitor admission. Existing OS errors opening mandatory listeners or material still propagate normally.
 

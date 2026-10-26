@@ -424,7 +424,7 @@ mod tests {
 
     use super::*;
     use crate::tunnel::{
-        ServerTunnelH3,
+        ServerTunnel,
         test_support::{
             ClientPeer, ServerStreams, establish_peers, read_to_end, test_server_h3_config,
         },
@@ -1567,7 +1567,7 @@ mod tests {
         _server_endpoint: Endpoint,
         _client_endpoint: Endpoint,
         client_connection: ClientPeer,
-        server_connection: Arc<ServerTunnelH3>,
+        server_connection: Arc<ServerTunnel>,
     }
 
     impl TunnelConnectionFixture {

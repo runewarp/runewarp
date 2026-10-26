@@ -6,7 +6,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::tunnel::ServerTunnelH3;
+use crate::tunnel::ServerTunnel;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable, Aborted};
 use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock};
 
@@ -88,7 +88,7 @@ pub(crate) struct VisitorRoute {
 }
 
 impl VisitorRoute {
-    pub(crate) fn connection(&self) -> Arc<ServerTunnelH3> {
+    pub(crate) fn connection(&self) -> Arc<ServerTunnel> {
         self.connection.connection()
     }
 
@@ -454,7 +454,7 @@ impl TunnelRegistry {
 
     pub(crate) async fn register(
         &self,
-        connection: Arc<ServerTunnelH3>,
+        connection: Arc<ServerTunnel>,
     ) -> TunnelRegistrationOutcome {
         if !self.accepting_tunnel_connections.load(Ordering::SeqCst) {
             connection.close(b"server shutting down");
@@ -758,7 +758,7 @@ impl TunnelRegistry {
 
     fn tunnel_registration_context(
         &self,
-        connection: &ServerTunnelH3,
+        connection: &ServerTunnel,
     ) -> Option<(usize, ClientIdentity)> {
         let identity = connection.client_identity().clone();
         let tunnel_index = self
@@ -806,7 +806,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::tunnel::{
-        ServerTunnelH3,
+        ServerTunnel,
         test_support::{ClientPeer, establish_peers, test_server_h3_config},
     };
     use quinn::Endpoint;
@@ -2145,7 +2145,7 @@ mod tests {
         _server_endpoint: Endpoint,
         _client_endpoint: Endpoint,
         _client_connection: ClientPeer,
-        server_connection: Arc<ServerTunnelH3>,
+        server_connection: Arc<ServerTunnel>,
     }
 
     impl TunnelConnectionFixture {

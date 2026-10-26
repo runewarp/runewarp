@@ -1,7 +1,7 @@
 //! Shared H3 peers for runtime tests. Every fixture uses the production gate and WebTransport Visitor carrier.
 
 use super::{
-    ClientTunnelH3, ClientTunnelStream, ServerRuntimeGeneration, ServerTunnelH3, TunnelReadHalf,
+    ClientTunnel, ClientTunnelStream, ServerRuntimeGeneration, ServerTunnel, TunnelReadHalf,
     TunnelWriteHalf,
 };
 use std::{io, sync::Arc, time::Duration};
@@ -28,9 +28,9 @@ pub(crate) fn test_server_h3_config(
 
 #[derive(Clone)]
 pub(crate) struct ClientPeer {
-    client: Arc<Mutex<ClientTunnelH3>>,
+    client: Arc<Mutex<ClientTunnel>>,
     // Hold a Server peer for tests that return only the Client peer from their setup.
-    _server: Arc<ServerTunnelH3>,
+    _server: Arc<ServerTunnel>,
 }
 
 impl ClientPeer {
@@ -69,16 +69,16 @@ pub(crate) async fn establish_peers(
     server: quinn::Connection,
     client: quinn::Connection,
     permits: usize,
-) -> io::Result<(Arc<ServerTunnelH3>, ClientPeer)> {
+) -> io::Result<(Arc<ServerTunnel>, ClientPeer)> {
     let hostname = crate::ServerHostname::try_from("tunnel.example.test").expect("test hostname");
     let (server, client) = tokio::time::timeout(Duration::from_secs(2), async {
         tokio::join!(
-            ServerTunnelH3::establish(
+            ServerTunnel::establish(
                 server,
                 hostname.clone(),
                 ServerRuntimeGeneration::generate()
             ),
-            ClientTunnelH3::establish(client, &hostname, Arc::new(Semaphore::new(permits))),
+            ClientTunnel::establish(client, &hostname, Arc::new(Semaphore::new(permits))),
         )
     })
     .await
@@ -98,7 +98,7 @@ pub(crate) trait ServerStreams {
     async fn open_stream(&self) -> io::Result<(ServerWrite, ServerRead)>;
 }
 
-impl ServerStreams for Arc<ServerTunnelH3> {
+impl ServerStreams for Arc<ServerTunnel> {
     async fn open_stream(&self) -> io::Result<(ServerWrite, ServerRead)> {
         let (recv, send) = self
             .open_tunnel_stream(Duration::from_secs(1))

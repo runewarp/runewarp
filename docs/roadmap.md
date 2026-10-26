@@ -27,6 +27,8 @@ The [Public QUIC issue map](https://github.com/runewarp/runewarp/issues/114) inv
 
 The open questions are shared UDP listener classification, routing and trust, relay substrate, lifecycle guarantees, and operator configuration. DTLS and generic UDP forwarding remain exploratory until their routing and authorization model is equally clear.
 
+Visitor HTTP/3 QUIC passthrough needs its own UDP listener configuration key. A single-IP self-hosted deployment must share UDP 443 between Visitor QUIC and Tunnel QUIC, so routing must inspect SNI in the QUIC Initial. This is a future constraint; the current public listener accepts TCP only and the Tunnel listeners carry HTTP/3 with ALPN `h3`.
+
 ## Availability — Exploring
 
 - predictable handling of pre-establishment placement failure
@@ -46,7 +48,7 @@ The open questions are shared UDP listener classification, routing and trust, re
 - `config show`, `config init`, and `config edit` workflows
 - documented service-manager operation before any background-process CLI surface
 - structured logs and metrics for routing, rejection, reconnect, and pool health
-- clearer external/NAT port mapping, later per-hostname public ports, and IPv6 deployment support; Server listener ports are already configurable through `server.public-bind-address` and `server.tunnel-bind-address`
+- clearer external/NAT port mapping, later per-hostname public ports, and IPv6 deployment guidance; Server listeners already support multiple IPv4/IPv6 addresses and configurable ports through `server.public-bind-address` / `server.public-bind-addresses` and `server.tunnel-bind-address` / `server.tunnel-bind-addresses`
 
 ## Performance and timeouts — Exploring
 

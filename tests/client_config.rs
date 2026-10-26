@@ -12,6 +12,96 @@ fn public_hostname(hostname: &str) -> PublicHostname {
 }
 
 #[test]
+fn client_config_rejects_empty_server_addresses() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let identity = directory.path().join("identity");
+    fs::create_dir(&identity)?;
+    for name in ["client.crt", "client.key", "client-identity.txt"] {
+        fs::write(identity.join(name), "placeholder")?;
+    }
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+[client]
+server-addresses = []
+identity-dir = "identity"
+[[client.services]]
+backend-address = "localhost:8443"
+"#,
+    )?;
+    let error = load_client_config(&path)
+        .expect_err("static Clients still require at least one Server address");
+    assert!(
+        error
+            .to_string()
+            .contains("client.server-addresses must contain at least one entry"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn static_client_config_limits_server_addresses_to_256() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let identity = directory.path().join("identity");
+    fs::create_dir(&identity)?;
+    for name in ["client.crt", "client.key", "client-identity.txt"] {
+        fs::write(identity.join(name), "placeholder")?;
+    }
+    let path = directory.path().join("config.toml");
+    for count in [256, 257] {
+        let addresses = (0..count)
+            .map(|index| format!("\"Edge-{index}.Example.Test.\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        fs::write(
+            &path,
+            format!(
+                r#"
+[client]
+server-addresses = [{addresses}]
+identity-dir = "identity"
+[[client.services]]
+backend-address = "localhost:8443"
+"#
+            ),
+        )?;
+        match load_client_config(&path) {
+            Ok(config) if count == 256 => {
+                assert_eq!(config.server_addresses.len(), 256);
+                assert_eq!(
+                    config.server_addresses[0].hostname().as_str(),
+                    "edge-0.example.test"
+                );
+                assert_eq!(
+                    config.server_addresses[255].hostname().as_str(),
+                    "edge-255.example.test"
+                );
+                assert!(
+                    config
+                        .server_addresses
+                        .iter()
+                        .all(|address| address.port() == 443)
+                );
+            }
+            Ok(_) => panic!("257 distinct Server addresses must be rejected"),
+            Err(error) if count == 257 => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("client.server-addresses")
+                        && message.contains("at most 256")
+                        && message.contains("static"),
+                    "{message}"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn client_service_accepts_proxy_v2_emission() {
     let tempdir = tempdir().unwrap();
     let identity = tempdir.path().join("identity");

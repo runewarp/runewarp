@@ -6,13 +6,15 @@ This document describes Runewarp's wire behavior and runtime invariants.
 
 | Listener | Traffic | Behavior |
 | --- | --- | --- |
-| `server.public-bind-address` (default `0.0.0.0:443/tcp`) | Visitor TLS | Read ClientHello, extract SNI, and route raw bytes without terminating customer TLS |
-| `server.public-bind-address` (same TCP listener) | ACME for the **Server hostname** | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
-| `server.tunnel-bind-address` (default `0.0.0.0:443/udp`) | Client **Tunnel connections** | HTTP/3 over QUIC/TLS with ALPN `h3` |
+| `server.public-bind-address` / `server.public-bind-addresses` (default `0.0.0.0:443/tcp`) | Visitor TLS | Read ClientHello, extract SNI, and route raw bytes without terminating customer TLS |
+| `server.public-bind-address` / `server.public-bind-addresses` (same TCP listeners) | ACME for the **Server hostname** | Terminate only when SNI matches `server.hostname` and ALPN is `acme-tls/1` |
+| `server.tunnel-bind-address` / `server.tunnel-bind-addresses` (default `0.0.0.0:443/udp`) | Client **Tunnel connections** | HTTP/3 over QUIC/TLS with ALPN `h3` |
+
+Each transport has mutually exclusive singular and plural bind keys. `server.public-bind-address` and `server.tunnel-bind-address` accept only one literal socket address string; `server.public-bind-addresses` and `server.tunnel-bind-addresses` accept only arrays of 1 to 8 distinct addresses. Supplying both members of a pair is an error even when either value is empty or invalid. Public and Tunnel forms can be mixed independently; omitting both members of a pair uses `0.0.0.0:443`. Each address owns a listener; every listener shares the same Server authorization, Tunnel pools, runtime generation and admission limits. Startup binds all addresses before accepting work; any bind failure releases the earlier sockets and fails startup. Shutdown stops intake across all listeners and drains their Tunnel connections under one shared deadline. Tunnel ports are operator-selected, defaulting to UDP 443 with ALPN `h3` on every listener.
 
 ## Public TLS routing
 
-For each inbound TCP connection on the configured `server.public-bind-address`:
+For each inbound TCP connection on any configured `server.public-bind-address` or `server.public-bind-addresses` listener:
 
 1. Acquire one pre-routing admission slot before starting per-Visitor work.
 2. In direct mode, derive the canonical Visitor tuple from the socket. In strict PROXY v2 mode, verify the accepted peer against configured CIDRs and consume a bounded valid header.
@@ -78,7 +80,7 @@ Admission saturation warnings include the active-work count and limit and are li
 
 ## Tunnel connection handshake
 
-Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. During a replacement, a [candidate](#candidate-tunnel-connections) can add a second connection to the same address. Effective **Server addresses** come from `client.server-address`, `client.server-addresses`, repeated runtime `--server-address` flags, or a Control-published Managed assignment. Config validation prepares **Client admission** (static vs managed) once from Control address presence; Client startup wires one **Address controller** from that outcome. The controller owns the complete assigned Server-address lifecycle (one worker per normalized address, maintenance intent, production Retiring / reconnect-vs-exit policy, Assignment convergence, apply acknowledgment, and shutdown) so static fanout and Managed-session assignment changes cannot start duplicate dial loops for the same target. Every worker uses the same production Tunnel-connection-attempt implementation, which owns resolution, per-attempt material reload, QUIC and HTTP/3 establishment, the event-stream gate and WebTransport session, typed failure/connection-end classification, and reporting context:
+Each **Client instance** establishes one long-lived QUIC connection per effective **Server address** over UDP. During a replacement, a [candidate](#candidate-tunnel-connections) can add a second connection to the same address. Effective **Server addresses** come from `client.server-address`, `client.server-addresses`, repeated runtime `--server-address` flags, or a Control-published Managed assignment. Static configuration requires 1 to 256 distinct normalized addresses after CLI overrides; Managed assignments allow 0 to 256. Both modes use the same production ceiling to bound assigned-address fanout. Config validation prepares **Client admission** (static vs managed) once from Control address presence; Client startup wires one **Address controller** from that outcome. The controller owns the complete assigned Server-address lifecycle (one worker per normalized address, maintenance intent, production Retiring / reconnect-vs-exit policy, Assignment convergence, apply acknowledgment, and shutdown) so static fanout and Managed-session assignment changes cannot start duplicate dial loops for the same target. Every worker uses the same production Tunnel-connection-attempt implementation, which owns resolution, per-attempt material reload, QUIC and HTTP/3 establishment, the event-stream gate and WebTransport session, typed failure/connection-end classification, and reporting context:
 
 1. Resolve the hostname portion of one effective **Server address**.
 2. Dial the UDP port from that **Server address**, defaulting to `443` when the port is omitted.

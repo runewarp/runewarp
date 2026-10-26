@@ -21,7 +21,7 @@ use self::preparation::server::{
     PreparedServerAcmeConfig, PreparedServerConfig, PreparedServerTunnelConfig,
 };
 use crate::control_address::ControlAddress;
-use crate::server_address::ServerAddress;
+use crate::server_address::{MAX_CLIENT_SERVER_ADDRESSES, ServerAddress};
 use crate::server_identity::{ServerIdentity, read_server_identity};
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, validate_server_tls_material,
@@ -75,8 +75,8 @@ pub struct ServerConfig {
     pub hostname: ServerHostname,
     pub log_level: LogLevel,
     pub certificate: ServerCertificateConfig,
-    pub public_bind_address: SocketAddr,
-    pub tunnel_connection_bind_address: SocketAddr,
+    pub public_bind_addresses: Vec<SocketAddr>,
+    pub tunnel_connection_bind_addresses: Vec<SocketAddr>,
     pub readiness_bind_address: Option<SocketAddr>,
     pub graceful_shutdown_duration: std::time::Duration,
     pub visitor_proxy_protocol: Option<ProxyProtocolVersion>,
@@ -431,7 +431,9 @@ fn validate_prepared_server_config(
         hostname,
         log_level,
         public_bind_address,
+        public_bind_addresses,
         tunnel_bind_address,
+        tunnel_bind_addresses,
         readiness_bind_address,
         graceful_shutdown_duration,
         visitor_proxy_protocol,
@@ -493,14 +495,16 @@ fn validate_prepared_server_config(
         }),
     };
 
-    let public_bind_address = validate_socket_address_field(
+    let public_bind_addresses = validate_server_bind_address_pair(
         "server.public-bind-address",
         public_bind_address,
+        public_bind_addresses,
         &mut messages,
     );
-    let tunnel_connection_bind_address = validate_socket_address_field(
+    let tunnel_connection_bind_addresses = validate_server_bind_address_pair(
         "server.tunnel-bind-address",
         tunnel_bind_address,
+        tunnel_bind_addresses,
         &mut messages,
     );
     let readiness_bind_address = readiness_bind_address.and_then(|address| {
@@ -613,9 +617,8 @@ fn validate_prepared_server_config(
             hostname: hostname.expect("validated server.hostname"),
             log_level,
             certificate: certificate.expect("validated server certificate settings"),
-            public_bind_address: public_bind_address.expect("validated server.public-bind-address"),
-            tunnel_connection_bind_address: tunnel_connection_bind_address
-                .expect("validated server.tunnel-bind-address"),
+            public_bind_addresses,
+            tunnel_connection_bind_addresses,
             readiness_bind_address,
             graceful_shutdown_duration: graceful_shutdown_duration
                 .expect("validated server.graceful-shutdown-duration"),
@@ -672,6 +675,14 @@ pub(crate) fn validate_prepared_client_config(
     let managed = control.address.is_some();
     if control.section_present && control.address.is_none() {
         messages.push("control.address is required".to_owned());
+    }
+
+    if !managed
+        && server_addresses
+            .as_ref()
+            .is_some_and(|addresses| addresses.len() > MAX_CLIENT_SERVER_ADDRESSES)
+    {
+        messages.push(format!("client.server-addresses must contain at most {MAX_CLIENT_SERVER_ADDRESSES} entries in static mode"));
     }
 
     let mut validated_server_addresses = Vec::new();
@@ -1389,6 +1400,70 @@ fn validate_unique_server_addresses(
     }
 }
 
+fn validate_server_bind_address_pair(
+    singular_field: &str,
+    address: Option<String>,
+    addresses: Option<Vec<String>>,
+    messages: &mut Vec<String>,
+) -> Vec<SocketAddr> {
+    match (address, addresses) {
+        (Some(_), Some(_)) => {
+            messages.push(format!(
+                "{singular_field} and {singular_field}es are mutually exclusive"
+            ));
+            Vec::new()
+        }
+        (Some(address), None) => validate_socket_address_field(singular_field, address, messages)
+            .into_iter()
+            .collect(),
+        (None, Some(addresses)) => {
+            validate_socket_addresses_field(&format!("{singular_field}es"), addresses, messages)
+        }
+        (None, None) => unreachable!("config preparation supplies the default bind address"),
+    }
+}
+
+fn validate_socket_addresses_field(
+    field_name: &str,
+    addresses: Vec<String>,
+    messages: &mut Vec<String>,
+) -> Vec<SocketAddr> {
+    if !(1..=8).contains(&addresses.len()) {
+        messages.push(format!(
+            "{field_name} must contain 1 to 8 distinct addresses"
+        ));
+    }
+    let parsed: Vec<_> = addresses
+        .into_iter()
+        .filter_map(|address| validate_socket_address_field(field_name, address, messages))
+        .collect();
+    if let Err(message) = validate_bind_addresses(field_name, &parsed)
+        && !messages.contains(&message)
+    {
+        messages.push(message);
+    }
+    parsed
+}
+
+pub(crate) fn validate_bind_addresses(
+    field_name: &str,
+    addresses: &[SocketAddr],
+) -> Result<(), String> {
+    if !(1..=8).contains(&addresses.len()) {
+        return Err(format!(
+            "{field_name} must contain 1 to 8 distinct addresses"
+        ));
+    }
+    for (index, address) in addresses.iter().enumerate() {
+        if addresses[..index].contains(address) {
+            return Err(format!(
+                "{field_name} contains duplicate address `{address}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_socket_address_field(
     field_name: &str,
     socket_address: String,
@@ -1606,7 +1681,9 @@ pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value)
             "cert-dir",
             "acme",
             "public-bind-address",
+            "public-bind-addresses",
             "tunnel-bind-address",
+            "tunnel-bind-addresses",
             "readiness-bind-address",
             "graceful-shutdown-duration",
             "visitor-proxy-protocol",
@@ -1741,7 +1818,9 @@ pub(crate) struct RawServerConfig {
     pub(crate) identity_dir: Option<PathBuf>,
     pub(crate) acme: Option<RawServerAcmeConfig>,
     pub(crate) public_bind_address: Option<String>,
+    pub(crate) public_bind_addresses: Option<Vec<String>>,
     pub(crate) tunnel_bind_address: Option<String>,
+    pub(crate) tunnel_bind_addresses: Option<Vec<String>>,
     pub(crate) readiness_bind_address: Option<String>,
     pub(crate) graceful_shutdown_duration: Option<String>,
     pub(crate) visitor_proxy_protocol: Option<String>,

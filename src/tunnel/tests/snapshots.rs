@@ -32,11 +32,11 @@ async fn next_snapshot(stream: &mut RawClientStream) -> Option<String> {
 async fn server_with_raw_client(
     connection: (quinn::Connection, quinn::Connection),
     events: &ServerTunnelEvents,
-    timing: TunnelH3Timing,
-) -> (ServerTunnelH3, RawSendRequest, JoinHandle<()>) {
+    timing: TunnelTiming,
+) -> (ServerTunnel, RawSendRequest, JoinHandle<()>) {
     let (server_connection, client_connection) = connection;
     let (server, (send_request, driver)) = tokio::join!(
-        ServerTunnelH3::establish_with_timing(
+        ServerTunnel::establish_with_timing(
             server_connection,
             server_hostname(),
             events.clone(),
@@ -113,7 +113,7 @@ async fn a_blocked_subscription_receives_only_the_latest_snapshot() {
         .connect_with(client_config)
         .await
         .expect("handshake");
-    let timing = TunnelH3Timing {
+    let timing = TunnelTiming {
         keepalive_comment_interval: Duration::from_millis(10),
         blocked_write_deadline: Duration::from_secs(30),
         ..fast_timing()
@@ -183,7 +183,7 @@ async fn client_requests_event_streams_with_accept_text_event_stream() {
         (request, stream, connection)
     });
     let client = tokio::spawn(async move {
-        ClientTunnelH3::establish_with_timing(
+        ClientTunnel::establish_with_timing(
             client_connection,
             &server_hostname(),
             no_credit(),

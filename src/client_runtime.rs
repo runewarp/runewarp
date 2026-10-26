@@ -421,8 +421,8 @@ mod tests {
         )
         .unwrap();
         let server = Server::bind(ServerBindConfig {
-            public_bind_addr: localhost(0),
-            tunnel_connection_bind_addr: localhost(0),
+            public_bind_addrs: vec![localhost(0)],
+            tunnel_connection_bind_addrs: vec![localhost(0)],
             readiness_bind_addr: None,
             server_hostname: server_hostname("localhost"),
             authorization: authorization.clone(),

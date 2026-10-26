@@ -8,7 +8,7 @@ async fn session_opens_only_after_the_gate_and_establishment_waits_for_connect()
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let mut server = raw_server(server_connection).await;
     let client = tokio::spawn(async move {
-        ClientTunnelH3::establish_with_timing(
+        ClientTunnel::establish_with_timing(
             client_connection,
             &server_hostname(),
             no_credit(),
@@ -84,7 +84,7 @@ async fn session_request(sender: &mut RawSendRequest, path: &str) -> RawClientSt
 async fn server_accepts_session_four_rejects_duplicate_and_wrong_path_and_keeps_serving() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let server = ServerTunnelH3::establish_with_timing(
+    let server = ServerTunnel::establish_with_timing(
         server_connection,
         server_hostname(),
         ServerRuntimeGeneration::generate(),
@@ -145,7 +145,7 @@ const CLOSE_CAPSULE: &[u8] = &[0x68, 0x43, 0x04, 0, 0, 0, 0];
 async fn client_session_close_capsule_closes_tunnel_even_if_fin_is_withheld() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let _server = ServerTunnelH3::establish_with_timing(
+    let _server = ServerTunnel::establish_with_timing(
         server_connection,
         server_hostname(),
         ServerRuntimeGeneration::generate(),
@@ -179,7 +179,7 @@ async fn server_session_close_capsule_closes_tunnel_even_if_fin_is_withheld() {
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let mut server = raw_server(server_connection.clone()).await;
     let client = tokio::spawn(async move {
-        ClientTunnelH3::establish_with_timing(
+        ClientTunnel::establish_with_timing(
             client_connection,
             &server_hostname(),
             no_credit(),
@@ -216,7 +216,7 @@ async fn server_session_close_capsule_closes_tunnel_even_if_fin_is_withheld() {
 async fn stalled_classifiers_are_evicted_at_the_signaling_deadline_and_connection_keeps_serving() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let _server = ServerTunnelH3::establish_with_timing(
+    let _server = ServerTunnel::establish_with_timing(
         server_connection,
         server_hostname(),
         ServerRuntimeGeneration::generate(),
@@ -258,7 +258,7 @@ async fn a_request_below_goaway_can_finish_headers_after_a_classifier_gap() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let server = Arc::new(
-        ServerTunnelH3::establish_with_timing(
+        ServerTunnel::establish_with_timing(
             server_connection,
             server_hostname(),
             ServerRuntimeGeneration::generate(),
@@ -393,8 +393,8 @@ async fn authorization_revocation_ends_the_session_and_connection() {
     use crate::RoleAdapter;
     let fixture = Fixture::new().expect("fixture");
     let server = crate::Server::bind(crate::ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname(),
         authorization: crate::ServerAuthorization::empty_managed(),
@@ -493,7 +493,7 @@ async fn session_server(connection: quinn::Connection) -> (ServerSession, JoinHa
 async fn connection_loss_ends_the_session_on_both_runewarp_peers() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let server = ServerTunnelH3::establish(
+    let server = ServerTunnel::establish(
         server_connection.clone(),
         server_hostname(),
         ServerRuntimeGeneration::generate(),
@@ -526,7 +526,7 @@ async fn connection_loss_ends_the_session_on_both_runewarp_peers() {
     let hostname = server_hostname();
     let (session, client) = tokio::join!(
         session_server(server_connection.clone()),
-        ClientTunnelH3::establish(client_connection.clone(), &hostname, no_credit()),
+        ClientTunnel::establish(client_connection.clone(), &hostname, no_credit()),
     );
     let (session, driver) = session;
     let mut client = client.expect("Client");
@@ -659,7 +659,7 @@ backend-address = "127.0.0.1:443"
                 .expect("normal worker redials")
                 .await
                 .expect("replacement mTLS");
-            let replacement = ServerTunnelH3::establish(
+            let replacement = ServerTunnel::establish(
                 replacement,
                 crate::ServerHostname::try_from("localhost").expect("hostname"),
                 ServerRuntimeGeneration::generate(),
@@ -687,7 +687,7 @@ async fn rejected_session_fails_establishment_without_offering_visitor_credit() 
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let mut server = raw_server(server_connection.clone()).await;
     let client = tokio::spawn(async move {
-        ClientTunnelH3::establish_with_timing(
+        ClientTunnel::establish_with_timing(
             client_connection,
             &server_hostname(),
             Arc::new(Semaphore::new(1)),
@@ -719,7 +719,7 @@ async fn rejected_session_fails_establishment_without_offering_visitor_credit() 
         .expect("task");
     assert!(matches!(
         result,
-        Err(TunnelH3Error::SessionConnect(
+        Err(TunnelError::SessionConnect(
             h3_webtransport::client::ConnectError::Rejected(StatusCode::TOO_MANY_REQUESTS)
         ))
     ));
@@ -742,7 +742,7 @@ async fn transport_close_during_session_connect_preserves_the_peer_reason() {
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let mut server = raw_server(server_connection.clone()).await;
     let client = tokio::spawn(async move {
-        ClientTunnelH3::establish_with_timing(
+        ClientTunnel::establish_with_timing(
             client_connection,
             &server_hostname(),
             no_credit(),
@@ -764,7 +764,7 @@ async fn transport_close_during_session_connect_preserves_the_peer_reason() {
         .expect("attempt ends")
         .expect("task");
     match result {
-        Err(TunnelH3Error::Transport(ConnectionError::ApplicationClosed(close))) => {
+        Err(TunnelError::Transport(ConnectionError::ApplicationClosed(close))) => {
             assert_eq!(close.error_code.into_inner(), 0x1234);
             assert_eq!(&close.reason[..], b"peer transport close during CONNECT");
         }
@@ -788,7 +788,7 @@ async fn both_peers_advertise_only_draft07_and_one_session() {
     }
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let server = ServerTunnelH3::establish(
+    let server = ServerTunnel::establish(
         server_connection,
         server_hostname(),
         ServerRuntimeGeneration::generate(),
@@ -799,7 +799,7 @@ async fn both_peers_advertise_only_draft07_and_one_session() {
     drop(server);
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
     let client = tokio::spawn(async move {
-        ClientTunnelH3::establish(client_connection, &server_hostname(), no_credit()).await
+        ClientTunnel::establish(client_connection, &server_hostname(), no_credit()).await
     });
     assert_profile(advertised_settings(&server_connection).await);
     client.abort();
@@ -809,7 +809,7 @@ async fn both_peers_advertise_only_draft07_and_one_session() {
 async fn invalid_session_requests_are_bodyless_and_do_not_reserve_a_session() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let _server = ServerTunnelH3::establish(
+    let _server = ServerTunnel::establish(
         server_connection,
         server_hostname(),
         ServerRuntimeGeneration::generate(),
@@ -871,7 +871,7 @@ async fn invalid_session_requests_are_bodyless_and_do_not_reserve_a_session() {
 async fn client_connect_fin_closes_the_whole_tunnel_without_error() {
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let _server = ServerTunnelH3::establish(
+    let _server = ServerTunnel::establish(
         server_connection,
         server_hostname(),
         ServerRuntimeGeneration::generate(),
@@ -901,7 +901,7 @@ async fn client_session_close_resets_an_active_visitor_and_closes_the_tunnel() {
     use tokio::io::AsyncReadExt;
     let fixture = Fixture::new().expect("fixture");
     let (server_connection, client_connection) = fixture.connect().await.expect("handshake");
-    let server = ServerTunnelH3::establish(
+    let server = ServerTunnel::establish(
         server_connection,
         server_hostname(),
         ServerRuntimeGeneration::generate(),

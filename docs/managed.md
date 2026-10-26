@@ -249,6 +249,8 @@ Core enforces fixed production limits (injectable smaller values in tests only; 
 | State request deadline (through response headers) | **5 s** |
 | State response deadline (ended body) | **5 s** |
 
+Static Client configuration uses the same production ceiling of 256 Server addresses to bound assigned-address fanout, with a minimum of one. Managed assignments still allow an empty list.
+
 Limit violations fail the entire Managed session and reconnect; Core never partially applies an oversized snapshot. Rejection logs include only bounded metadata (limit name and counts), never full snapshots or attacker-sized payloads.
 
 ## Timing and reconnect

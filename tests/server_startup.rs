@@ -25,6 +25,231 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 mod common;
 
 #[tokio::test]
+async fn a_late_bind_failure_releases_every_earlier_listener()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    initialize_manual_server_certificate(
+        &directory.path().join("server-cert"),
+        "tunnel.example.test",
+    )?;
+    let path = directory.path().join("server.toml");
+    fs::write(
+        &path,
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )?;
+    let settings = load_server_config(&path)?;
+    for failed_transport in ["Visitor", "Tunnel", "readiness"] {
+        let public = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let public_address = public.local_addr()?;
+        let tunnel = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let tunnel_address = tunnel.local_addr()?;
+        let occupied_tcp = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let occupied_udp = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        drop(public);
+        drop(tunnel);
+        let mut settings = settings.clone();
+        let publics = if failed_transport == "Visitor" {
+            vec![public_address, occupied_tcp.local_addr()?]
+        } else {
+            vec![public_address]
+        };
+        let tunnels = if failed_transport == "Tunnel" {
+            vec![tunnel_address, occupied_udp.local_addr()?]
+        } else {
+            vec![tunnel_address]
+        };
+        if failed_transport == "readiness" {
+            settings.readiness_bind_address = Some(occupied_tcp.local_addr()?);
+        }
+        let error = match PreparedServer::bind_listeners(&settings, publics, tunnels).await {
+            Ok(_) => panic!("{failed_transport} bind should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("failed to bind server."),
+            "{error}"
+        );
+        std::net::TcpListener::bind(public_address)?;
+        // A failed startup must not retain a prior UDP listener in a detached driver.
+        std::net::UdpSocket::bind(tunnel_address)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn listeners_share_routes_and_tunnel_pools() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    initialize_manual_server_certificate(
+        &directory.path().join("server-cert"),
+        "tunnel.example.test",
+    )?;
+    let identity = generate_client_identity()?;
+    fs::write(
+        directory.path().join("client.crt"),
+        &identity.certificate_pem,
+    )?;
+    fs::write(
+        directory.path().join("client.key"),
+        &identity.private_key_pem,
+    )?;
+    fs::write(
+        directory.path().join("client-identity.txt"),
+        identity.client_identity.to_string(),
+    )?;
+    let backend_one = spawn_tls_backend(vec!["app.example.test".to_owned()], *b"one!").await;
+    let backend_two = spawn_tls_backend(vec!["app.example.test".to_owned()], *b"two!").await;
+    fs::write(
+        directory.path().join("server.toml"),
+        format!(
+            r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+public-bind-addresses = ["127.0.0.1:0", "[::1]:0"]
+tunnel-bind-addresses = ["127.0.0.1:0", "[::1]:0"]
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "{}"
+"#,
+            identity.client_identity
+        ),
+    )?;
+    let settings = load_server_config(&directory.path().join("server.toml"))?;
+    let runtime = runewarp::ServerRuntime::prepare_listeners(
+        &settings,
+        settings.public_bind_addresses.clone(),
+        settings.tunnel_connection_bind_addresses.clone(),
+    )
+    .await?;
+    let public_addresses = runtime.public_addrs()?;
+    let tunnel_addresses = runtime.tunnel_addrs()?;
+    let shutdown = runtime.shutdown();
+    let server_task = tokio::spawn(runtime.run());
+    let mut clients = Vec::new();
+    for (index, (tunnel_address, backend)) in tunnel_addresses
+        .iter()
+        .zip([&backend_one, &backend_two])
+        .enumerate()
+    {
+        let path = directory.path().join(format!("client-{index}.toml"));
+        fs::write(
+            &path,
+            format!(
+                r#"
+[client]
+server-address = "tunnel.example.test"
+server-trust = "ca-file"
+server-ca-file = "server-cert/server-ca.crt"
+identity-dir = "."
+[[client.services]]
+backend-address = "{}"
+"#,
+                backend.0
+            ),
+        )?;
+        let config = load_client_config(&path)?;
+        let bind_address = if tunnel_address.is_ipv4() {
+            "127.0.0.1:0"
+        } else {
+            "[::1]:0"
+        }
+        .parse()?;
+        let client = timeout(
+            Duration::from_secs(2),
+            PreparedClient::connect_to(&config, bind_address, *tunnel_address),
+        )
+        .await??;
+        clients.push(tokio::spawn(client.run()));
+        // A connection accepted on either Tunnel listener serves both Visitor listeners.
+        // Observe both pool members without depending on registration order or placement ties.
+        for address in &public_addresses {
+            timeout(Duration::from_secs(2), async {
+                let mut seen_one = false;
+                let mut seen_two = false;
+                loop {
+                    let response = request_tls_response_with_roots(
+                        *address,
+                        &[backend_one.1.clone(), backend_two.1.clone()],
+                        "app.example.test",
+                    )
+                    .await?;
+                    seen_one |= response == *b"one!";
+                    seen_two |= response == *b"two!";
+                    if seen_one && (index == 0 || seen_two) {
+                        return Ok::<(), io::Error>(());
+                    }
+                }
+            })
+            .await??;
+        }
+    }
+    shutdown.begin_graceful();
+    timeout(Duration::from_secs(2), server_task).await???;
+    for client in clients {
+        let _ = timeout(Duration::from_secs(2), client).await??;
+    }
+    backend_one.2.abort();
+    backend_two.2.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_binds_all_configured_listeners_and_releases_them_on_shutdown()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    initialize_manual_server_certificate(
+        &directory.path().join("server-cert"),
+        "tunnel.example.test",
+    )?;
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+public-bind-addresses = ["127.0.0.1:0", "[::1]:0"]
+tunnel-bind-addresses = ["127.0.0.1:0", "[::1]:0"]
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )?;
+    let settings = load_server_config(&path)?;
+    let runtime = runewarp::ServerRuntime::prepare_listeners(
+        &settings,
+        settings.public_bind_addresses.clone(),
+        settings.tunnel_connection_bind_addresses.clone(),
+    )
+    .await?;
+    let public_addresses = runtime.public_addrs()?;
+    let tunnel_addresses = runtime.tunnel_addrs()?;
+    assert_eq!(public_addresses.len(), 2);
+    assert_eq!(tunnel_addresses.len(), 2);
+    let shutdown = runtime.shutdown();
+    let task = tokio::spawn(runtime.run());
+    for address in &public_addresses {
+        TcpStream::connect(address).await?;
+    }
+    shutdown.begin_graceful();
+    timeout(Duration::from_secs(2), task).await???;
+    for address in public_addresses {
+        std::net::TcpListener::bind(address)?;
+    }
+    for address in tunnel_addresses {
+        std::net::UdpSocket::bind(address)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn prepared_server_binds_the_existing_runtime_from_validated_settings() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
@@ -81,10 +306,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     .unwrap();
 
     let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
-    let server = PreparedServer::bind(
+    let server = PreparedServer::bind_listeners(
         &settings,
-        settings.public_bind_address,
-        settings.tunnel_connection_bind_address,
+        settings.public_bind_addresses.clone(),
+        settings.tunnel_connection_bind_addresses.clone(),
     )
     .await
     .unwrap();
@@ -119,10 +344,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     .unwrap();
 
     let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
-    let server = PreparedServer::bind(
+    let server = PreparedServer::bind_listeners(
         &settings,
-        settings.public_bind_address,
-        settings.tunnel_connection_bind_address,
+        settings.public_bind_addresses.clone(),
+        settings.tunnel_connection_bind_addresses.clone(),
     )
     .await
     .unwrap();
@@ -163,10 +388,10 @@ readiness-bind-address = "127.0.0.1:0"
 
     let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
     assert!(settings.tunnels.is_empty());
-    let server = PreparedServer::bind(
+    let server = PreparedServer::bind_listeners(
         &settings,
-        settings.public_bind_address,
-        settings.tunnel_connection_bind_address,
+        settings.public_bind_addresses.clone(),
+        settings.tunnel_connection_bind_addresses.clone(),
     )
     .await
     .expect("managed Server must bind with empty authorization");
@@ -1530,9 +1755,22 @@ async fn request_tls_response(
     backend_cert: &CertificateDer<'static>,
     server_name: &str,
 ) -> io::Result<[u8; 4]> {
+    request_tls_response_with_roots(public_addr, std::slice::from_ref(backend_cert), server_name)
+        .await
+}
+
+async fn request_tls_response_with_roots(
+    public_addr: SocketAddr,
+    backend_certs: &[CertificateDer<'static>],
+    server_name: &str,
+) -> io::Result<[u8; 4]> {
+    let mut roots = RootCertStore::empty();
+    for certificate in backend_certs {
+        roots.add(certificate.clone()).map_err(io::Error::other)?;
+    }
     let connector = TlsConnector::from(Arc::new(
         rustls::ClientConfig::builder()
-            .with_root_certificates(root_store_with(backend_cert))
+            .with_root_certificates(roots)
             .with_no_client_auth(),
     ));
     let tcp_stream = TcpStream::connect(public_addr).await?;
@@ -1548,10 +1786,4 @@ async fn request_tls_response(
     let mut response = [0_u8; 4];
     tls_stream.read_exact(&mut response).await?;
     Ok(response)
-}
-
-fn root_store_with(certificate: &CertificateDer<'static>) -> RootCertStore {
-    let mut roots = RootCertStore::empty();
-    roots.add(certificate.clone()).unwrap();
-    roots
 }

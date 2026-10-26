@@ -4,6 +4,9 @@ use crate::{ServerHostname, ServerHostnameError};
 
 pub(crate) const DEFAULT_SERVER_PORT: u16 = 443;
 
+/// Production Server-address ceiling shared by static Client config and Managed assignments.
+pub(crate) const MAX_CLIENT_SERVER_ADDRESSES: usize = 256;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ServerAddress {
     hostname: ServerHostname,

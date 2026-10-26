@@ -37,14 +37,14 @@ use h3::error::{Code, ConnectionError, StreamError};
 use tokio::task::JoinHandle;
 
 pub use client::{
-    ClientTunnelH3, ProtocolFailure, ReplacementHint, UnconfirmedDrain, WithdrawalOutcome,
+    ClientTunnel, ProtocolFailure, ReplacementHint, UnconfirmedDrain, WithdrawalOutcome,
 };
 pub use config::{
     make_client_tunnel_h3_config, make_server_tunnel_h3_config,
     make_server_tunnel_h3_config_with_resolver,
 };
 pub use events::{ServerRuntimeGeneration, ServerTunnelEvents, TunnelEventState};
-pub use server::{OpenTunnelStreamError, ServerTunnelH3};
+pub use server::{OpenTunnelStreamError, ServerTunnel};
 pub use stream::{
     ClientTunnelStream, ServerTunnelStream, TunnelReadHalf, TunnelStream, TunnelWriteHalf,
 };
@@ -69,7 +69,7 @@ pub const TUNNEL_SESSION_PATH: &str = "/v1/tunnel/session";
 
 /// Fixed runtime-owned deadlines for Tunnel HTTP/3 signaling.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TunnelH3Timing {
+pub(crate) struct TunnelTiming {
     /// Server bound for receiving a complete signaling request: HEADERS through request FIN.
     pub request_deadline: Duration,
     /// Server interval between comment keepalives on a quiet event stream.
@@ -87,7 +87,7 @@ pub(crate) struct TunnelH3Timing {
     pub post_quiescence_close: Duration,
 }
 
-impl Default for TunnelH3Timing {
+impl Default for TunnelTiming {
     fn default() -> Self {
         Self {
             request_deadline: Duration::from_secs(5),
@@ -103,7 +103,7 @@ impl Default for TunnelH3Timing {
 
 /// Why an HTTP/3 Tunnel connection could not be established.
 #[derive(Debug)]
-pub enum TunnelH3Error {
+pub enum TunnelError {
     /// The authenticated connection exposed no pinned Client identity.
     MissingClientIdentity,
     /// QUIC connection ended during HTTP/3 establishment.
@@ -128,7 +128,7 @@ pub enum TunnelH3Error {
     WrongGeneration,
 }
 
-impl TunnelH3Error {
+impl TunnelError {
     pub(crate) fn is_unauthorized_client_identity(&self) -> bool {
         matches!(self, Self::Transport(error) if crate::quic::is_tls_access_denied(error))
     }
@@ -139,7 +139,7 @@ impl TunnelH3Error {
     }
 }
 
-impl fmt::Display for TunnelH3Error {
+impl fmt::Display for TunnelError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingClientIdentity => {
@@ -171,7 +171,7 @@ impl fmt::Display for TunnelH3Error {
     }
 }
 
-impl std::error::Error for TunnelH3Error {
+impl std::error::Error for TunnelError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Transport(error) => Some(error),

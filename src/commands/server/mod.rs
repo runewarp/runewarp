@@ -35,10 +35,10 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
     let config = resolve_server_config_from_cli(config, runtime)
         .map_err(wrap_server_config_resolution_error)?;
     runewarp::runtime_log::install(config.log_level)?;
-    let server = match ServerRuntime::prepare(
+    let server = match ServerRuntime::prepare_listeners(
         &config,
-        config.public_bind_address,
-        config.tunnel_connection_bind_address,
+        config.public_bind_addresses.clone(),
+        config.tunnel_connection_bind_addresses.clone(),
     )
     .await
     {

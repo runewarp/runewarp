@@ -364,8 +364,8 @@ impl ManagedClientHarness {
             .unwrap()
         };
         let server = Server::bind(ServerBindConfig {
-            public_bind_addr: localhost(0),
-            tunnel_connection_bind_addr: first_localhost_address(0).await,
+            public_bind_addrs: vec![localhost(0)],
+            tunnel_connection_bind_addrs: vec![first_localhost_address(0).await],
             readiness_bind_addr: None,
             server_hostname: ServerHostname::try_from("localhost").unwrap(),
             authorization: authorization.clone(),

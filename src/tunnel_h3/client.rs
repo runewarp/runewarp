@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::{Buf, Bytes};
-use futures_util::future::poll_fn;
 use h3::client::{RequestStream, SendRequest};
 use h3::error::{Code, StreamError};
 use http::{HeaderMap, Method, Request, StatusCode, header};
@@ -19,8 +18,8 @@ use crate::sse::{SseParseItem, SseParser};
 use super::events::{ServerRuntimeGeneration, TUNNEL_EVENT_SSE_LIMITS, TunnelEventState};
 use super::stream::{ClientTunnelStream, TunnelStream};
 use super::{
-    MAX_IDLE_RECEIVE_SLOTS, OwnedTask, TUNNEL_EVENTS_PATH, TunnelH3Error, TunnelH3Timing,
-    close_connection,
+    MAX_IDLE_RECEIVE_SLOTS, OwnedTask, TUNNEL_EVENTS_PATH, TUNNEL_SESSION_PATH, TunnelH3Error,
+    TunnelH3Timing, close_connection,
 };
 
 type ClientSendRequest = SendRequest<h3_quinn::OpenStreams, Bytes>;
@@ -28,15 +27,16 @@ type ClientRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 
 /// Client-owned HTTP/3 Tunnel connection whose Server passed the event-stream gate.
 ///
-/// Establishment returns only after the Server's first valid state, so a caller may offer
-/// availability as soon as it holds this handle. The subscription is then followed for the
+/// Establishment waits for the Server's first valid state and WebTransport session CONNECT, so a
+/// caller may offer availability as soon as it holds this handle. The subscription follows the
 /// connection lifetime: it resubscribes after an end, failure, or silence while the connection
 /// remains usable, and stops once GOAWAY forbids new requests. An incompatible event or a changed
 /// generation closes the connection with `H3_GENERAL_PROTOCOL_ERROR`.
 ///
-/// After the gate it keeps up to [`MAX_IDLE_RECEIVE_SLOTS`] receive slots open, each holding one
-/// permit from the Client-instance stream budget, and replenishes a slot whenever one is assigned
-/// or fails. Assigned slots are delivered by [`ClientTunnelH3::accept_tunnel_stream`].
+/// After the gate and WebTransport session establishment it keeps up to [`MAX_IDLE_RECEIVE_SLOTS`]
+/// receive slots open, each holding one permit from the Client-instance stream budget, and
+/// replenishes a slot whenever one is assigned or fails. Assigned slots are delivered by
+/// [`ClientTunnelH3::accept_tunnel_stream`].
 ///
 /// Dropping the handle closes the connection immediately with `H3_NO_ERROR`.
 pub struct ClientTunnelH3 {
@@ -49,11 +49,12 @@ pub struct ClientTunnelH3 {
     _driver: OwnedTask,
     _events: OwnedTask,
     _slots: OwnedTask,
+    _session: OwnedTask,
 }
 
 impl ClientTunnelH3 {
     /// Start HTTP/3 on an authenticated Tunnel connection to `server_hostname`, wait for the
-    /// Server's first valid event-stream state, then start offering receive slots.
+    /// Server's first valid event-stream state, establish a WebTransport session, then offer slots.
     ///
     /// `stream_budget` is the Client-instance stream-handler budget shared by every Tunnel
     /// connection; each idle or assigned slot holds one permit until its Tunnel stream drops.
@@ -103,10 +104,15 @@ impl ClientTunnelH3 {
         timing: TunnelH3Timing,
         budget_observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
     ) -> Result<Self, TunnelH3Error> {
-        let (mut driver, mut send_request) = with_handshake_timeout(
+        let (driver, send_request) = with_handshake_timeout(
             async {
                 h3::client::builder()
                     .max_field_section_size(super::config::MAX_FIELD_SECTION_SIZE)
+                    .enable_webtransport(true)
+                    .enable_extended_connect(true)
+                    .enable_datagram(true)
+                    .max_webtransport_sessions(1)
+                    .webtransport_drafts([h3::ext::WebTransportDraft::Draft07])
                     .build(h3_quinn::Connection::new(connection.clone()))
                     .await
                     .map_err(TunnelH3Error::Setup)
@@ -115,8 +121,18 @@ impl ClientTunnelH3 {
             || TunnelH3Error::SetupTimeout,
         )
         .await?;
+        let (mut driver, mut client) = h3_webtransport::client::new(
+            driver,
+            send_request,
+            h3_webtransport::client::Limits {
+                // Keep the WebTransport session limit at one regardless of fork defaults.
+                sessions: std::num::NonZeroUsize::MIN,
+                ..Default::default()
+            },
+        );
+        let mut send_request = client.send_request();
         let driver = OwnedTask::spawn(async move {
-            let _ = poll_fn(|context| driver.poll_close(context)).await;
+            let _ = driver.wait_idle().await;
         });
 
         let events_uri = format!("https://{server_hostname}{TUNNEL_EVENTS_PATH}");
@@ -139,6 +155,49 @@ impl ClientTunnelH3 {
                 return Err(TunnelH3Error::InitialStateTimeout);
             }
         };
+
+        let request = Request::builder()
+            .method(Method::CONNECT)
+            .uri(format!("https://{server_hostname}{TUNNEL_SESSION_PATH}"))
+            .body(())
+            .expect("a Server hostname forms a valid WebTransport session URI");
+        // Apply the same duration policy separately to the event gate and WebTransport CONNECT.
+        let session = match timeout(timing.initial_state_deadline, client.connect(request)).await {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => {
+                if let Some(error) = connection.close_reason() {
+                    return Err(TunnelH3Error::Transport(error));
+                }
+                close_connection(&connection, Code::H3_NO_ERROR);
+                return Err(TunnelH3Error::SessionConnect(error));
+            }
+            Err(_) => {
+                close_connection(&connection, Code::H3_NO_ERROR);
+                return Err(TunnelH3Error::SessionConnectTimeout);
+            }
+        };
+        let session_connection = connection.clone();
+        let session = OwnedTask::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = session.closed() => break,
+                    stream = session.accept_bi() => match stream {
+                        // Visitors use receive slots; reject WebTransport session streams.
+                        Some(mut stream) => {
+                            use h3::quic::{RecvStream, SendStream};
+                            stream.reset(Code::H3_REQUEST_REJECTED.value());
+                            stream.stop_sending(Code::H3_REQUEST_REJECTED.value());
+                        }
+                        // Unlike closed(), this also observes a close capsule without peer FIN.
+                        None => break,
+                    },
+                    _ = session_connection.closed() => return,
+                }
+            }
+            if session_connection.close_reason().is_none() {
+                close_connection(&session_connection, Code::H3_NO_ERROR);
+            }
+        });
 
         let (assigned_sender, assigned) = mpsc::unbounded_channel();
         let slots = OwnedTask::spawn(maintain_receive_slots(ReceiveSlotPool {
@@ -170,6 +229,7 @@ impl ClientTunnelH3 {
             _driver: driver,
             _events: events,
             _slots: slots,
+            _session: session,
         })
     }
 
@@ -203,6 +263,14 @@ impl ClientTunnelH3 {
     pub fn closed(&self) -> impl Future<Output = quinn::ConnectionError> + Send + 'static + use<> {
         let connection = self.connection.clone();
         async move { connection.closed().await }
+    }
+
+    /// Observe task completion while retaining the handle, without aborting the observer on drop.
+    #[cfg(test)]
+    pub(crate) async fn session_observer_stopped_for_test(&mut self) {
+        (&mut self._session.0)
+            .await
+            .expect("WebTransport session observer task");
     }
 }
 
@@ -419,7 +487,7 @@ impl EventFollower {
 fn forbids_new_requests(error: &StreamError) -> bool {
     matches!(
         error,
-        StreamError::RemoteClosing { .. } | StreamError::ConnectionError { .. }
+        StreamError::RemoteClosing | StreamError::ConnectionError { .. }
     )
 }
 

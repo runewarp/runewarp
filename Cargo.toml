@@ -21,6 +21,7 @@ rcgen = { version = "0.14.8", features = ["x509-parser"] }
 # Add other h3 crates only when used, at the same revision; receive slots still carry Visitors.
 h3 = { git = "https://github.com/runewarp/h3", rev = "df27106fb243baaf867d11441d11cf671ec9da7e" }
 h3-quinn = { git = "https://github.com/runewarp/h3", rev = "df27106fb243baaf867d11441d11cf671ec9da7e" }
+h3-webtransport = { git = "https://github.com/runewarp/h3", rev = "df27106fb243baaf867d11441d11cf671ec9da7e" }
 quinn = { version = "0.11.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23.35", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"

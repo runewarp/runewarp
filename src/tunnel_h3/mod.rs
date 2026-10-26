@@ -1,11 +1,12 @@
 //! Ordinary-HTTP/3 Tunnel connections.
 //!
 //! This module owns HTTP/3 on one authenticated Tunnel connection, built on the git-pinned
-//! `runewarp/h3` fork's `h3` + `h3-quinn` over Quinn and rustls:
+//! `runewarp/h3` fork's HTTP/3 and WebTransport drivers over Quinn and rustls:
 //!
 //! - ALPN `h3` with a required, pinned Client identity certificate and no application 0-RTT;
 //! - the Tunnel event stream, a Client-opened `GET /v1/tunnel/events` whose first valid `state`
 //!   event is the compatibility gate (there is no Runewarp-specific SETTINGS marker);
+//! - one draft07 WebTransport session after that gate, with Visitors still on receive slots;
 //! - Server orderly shutdown through GOAWAY, with Runewarp enforcing the first-unprocessed
 //!   request-stream boundary;
 //! - bodyless status mapping for misdirected, unknown, or malformed signaling requests.
@@ -56,6 +57,9 @@ pub const MAX_IDLE_RECEIVE_SLOTS: usize = 32;
 /// Tunnel event-stream resource on the Server hostname's HTTPS origin.
 pub const TUNNEL_EVENTS_PATH: &str = "/v1/tunnel/events";
 
+/// WebTransport session resource on the Server hostname's HTTPS origin.
+pub const TUNNEL_SESSION_PATH: &str = "/v1/tunnel/session";
+
 /// Fixed runtime-owned deadlines for Tunnel HTTP/3 signaling.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TunnelH3Timing {
@@ -99,6 +103,10 @@ pub enum TunnelH3Error {
     SetupTimeout,
     /// The event-stream request or response stream failed.
     EventStream(StreamError),
+    /// WebTransport negotiation or CONNECT failed after the event-stream gate.
+    SessionConnect(h3_webtransport::client::ConnectError),
+    /// The WebTransport session CONNECT did not finish within the establishment deadline.
+    SessionConnectTimeout,
     /// The event stream ended before delivering its first state.
     EventStreamEnded,
     /// No valid first state arrived within the initial-state deadline.
@@ -125,6 +133,10 @@ impl fmt::Display for TunnelH3Error {
             Self::Setup(_) => formatter.write_str("HTTP/3 tunnel connection setup failed"),
             Self::SetupTimeout => formatter.write_str("HTTP/3 tunnel connection setup timed out"),
             Self::EventStream(_) => formatter.write_str("tunnel event stream failed"),
+            Self::SessionConnect(_) => formatter.write_str("tunnel WebTransport session failed"),
+            Self::SessionConnectTimeout => {
+                formatter.write_str("tunnel WebTransport session timed out")
+            }
             Self::EventStreamEnded => {
                 formatter.write_str("tunnel event stream ended before its first state")
             }
@@ -144,6 +156,7 @@ impl std::error::Error for TunnelH3Error {
             Self::Transport(error) => Some(error),
             Self::Setup(error) => Some(error),
             Self::EventStream(error) => Some(error),
+            Self::SessionConnect(error) => Some(error),
             _ => None,
         }
     }

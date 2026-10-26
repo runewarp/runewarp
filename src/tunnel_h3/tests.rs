@@ -29,6 +29,7 @@ use crate::quic::StaticClientIdentityAdmission;
 use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
 use crate::{ClientIdentity, ServerHostname, generate_client_identity};
 
+mod sessions;
 mod slots;
 
 const SERVER_NAME: &str = "tunnel.example.test";
@@ -68,6 +69,10 @@ struct Fixture {
     server_endpoint: Endpoint,
     client_endpoint: Endpoint,
     client_identity: ClientIdentity,
+    server_config: quinn::ServerConfig,
+    server_certificate_pem: String,
+    client_certificate_pem: String,
+    client_key_pem: String,
 }
 
 impl Fixture {
@@ -78,7 +83,9 @@ impl Fixture {
     /// Admit only `admitted`, or the fixture's own Client identity when `None`.
     fn with_admitted(admitted: Option<ClientIdentity>) -> io::Result<Self> {
         let server =
-            generate_simple_self_signed(vec![SERVER_NAME.to_owned()]).map_err(io::Error::other)?;
+            generate_simple_self_signed(vec![SERVER_NAME.to_owned(), "localhost".to_owned()])
+                .map_err(io::Error::other)?;
+        let server_certificate_pem = server.cert.pem();
         let server_certificate = CertificateDer::from(server.cert);
         let server_key: PrivateKeyDer<'static> =
             PrivatePkcs8KeyDer::from(server.signing_key.serialize_der()).into();
@@ -90,15 +97,13 @@ impl Fixture {
             private_key_from_pem(generated.private_key_pem.as_bytes()).map_err(io::Error::other)?;
         let admitted = admitted.unwrap_or_else(|| generated.client_identity.clone());
 
-        let server_endpoint = Endpoint::server(
-            make_server_tunnel_h3_config(
-                vec![server_certificate.clone()],
-                server_key,
-                Arc::new(StaticClientIdentityAdmission::from_identities(&[admitted])),
-            )
-            .map_err(io::Error::other)?,
-            localhost(0),
-        )?;
+        let server_config = make_server_tunnel_h3_config(
+            vec![server_certificate.clone()],
+            server_key,
+            Arc::new(StaticClientIdentityAdmission::from_identities(&[admitted])),
+        )
+        .map_err(io::Error::other)?;
+        let server_endpoint = Endpoint::server(server_config.clone(), localhost(0))?;
 
         let mut roots = RootCertStore::empty();
         roots.add(server_certificate).map_err(io::Error::other)?;
@@ -112,6 +117,10 @@ impl Fixture {
             server_endpoint,
             client_endpoint,
             client_identity: generated.client_identity,
+            server_config,
+            server_certificate_pem,
+            client_certificate_pem: generated.certificate_pem,
+            client_key_pem: generated.private_key_pem,
         })
     }
 
@@ -180,7 +189,13 @@ fn application_close_code(error: &ConnectionError) -> Option<u64> {
 }
 
 async fn raw_client(connection: quinn::Connection) -> (RawSendRequest, JoinHandle<()>) {
-    let (mut driver, send_request) = h3::client::new(h3_quinn::Connection::new(connection))
+    let (mut driver, send_request) = h3::client::builder()
+        .enable_webtransport(true)
+        .enable_extended_connect(true)
+        .enable_datagram(true)
+        .max_webtransport_sessions(1)
+        .webtransport_drafts([h3::ext::WebTransportDraft::Draft07])
+        .build(h3_quinn::Connection::new(connection))
         .await
         .expect("raw h3 client");
     let driver = tokio::spawn(async move {
@@ -191,6 +206,11 @@ async fn raw_client(connection: quinn::Connection) -> (RawSendRequest, JoinHandl
 
 async fn raw_server(connection: quinn::Connection) -> RawServerConnection {
     h3::server::builder()
+        .enable_webtransport(true)
+        .enable_extended_connect(true)
+        .enable_datagram(true)
+        .max_webtransport_sessions(1)
+        .webtransport_drafts([h3::ext::WebTransportDraft::Draft07])
         .build(h3_quinn::Connection::new(connection))
         .await
         .expect("raw h3 server")
@@ -443,13 +463,14 @@ async fn client_resubscribes_after_an_end_or_silence_and_keeps_the_connection() 
         let (_, mut first) = accept_raw_request(&mut connection).await;
         respond_events(&mut first, &state).await;
         first.finish().await.expect("first subscription ends");
+        let session = accept_raw_session(&mut connection).await;
         // Second subscription goes silent after its state.
         let (_, mut second) = accept_raw_request(&mut connection).await;
         respond_events(&mut second, &state).await;
         // Third subscription proves the Client resubscribed after silence.
         let (request, mut third) = accept_raw_request(&mut connection).await;
         respond_events(&mut third, &state).await;
-        (request, connection, second, third)
+        (request, connection, second, third, session)
     });
 
     let client = ClientTunnelH3::establish_with_timing(
@@ -461,10 +482,11 @@ async fn client_resubscribes_after_an_end_or_silence_and_keeps_the_connection() 
     .await
     .expect("gate passes");
 
-    let (request, _connection, _second, _third) = timeout(Duration::from_secs(3), fake_server)
-        .await
-        .expect("Client resubscribes twice")
-        .expect("fake server task");
+    let (request, _connection, _second, _third, _session) =
+        timeout(Duration::from_secs(3), fake_server)
+            .await
+            .expect("Client resubscribes twice")
+            .expect("fake server task");
     assert_eq!(request.method(), Method::GET);
     assert_eq!(request.uri().path(), TUNNEL_EVENTS_PATH);
     assert_eq!(client.server_generation(), generation);
@@ -485,12 +507,13 @@ async fn client_closes_when_the_generation_changes_on_one_connection() {
         let mut connection = raw_server(server_connection.clone()).await;
         let (_, mut stream) = accept_raw_request(&mut connection).await;
         respond_events(&mut stream, &first_state).await;
+        let session = accept_raw_session(&mut connection).await;
         stream
             .send_data(second_state)
             .await
             .expect("changed state sent");
         let closed = server_connection.closed().await;
-        drop((stream, connection));
+        drop((stream, session, connection));
         closed
     });
 
@@ -816,7 +839,9 @@ async fn read_varint(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> u64 {
     value
 }
 
-async fn advertised_header_bound(connection: &quinn::Connection) -> u64 {
+async fn advertised_settings(
+    connection: &quinn::Connection,
+) -> std::collections::BTreeMap<u64, u64> {
     timeout(STEP, async {
         loop {
             let mut stream = connection.accept_uni().await.expect("H3 uni stream");
@@ -832,18 +857,24 @@ async fn advertised_header_bound(connection: &quinn::Connection) -> u64 {
                 .await
                 .expect("SETTINGS payload");
             let mut payload = payload.as_slice();
+            let mut settings = std::collections::BTreeMap::new();
             while !payload.is_empty() {
                 let id = read_varint(&mut payload).await;
                 let value = read_varint(&mut payload).await;
-                if id == 6 {
-                    return value;
-                }
+                assert!(settings.insert(id, value).is_none(), "no duplicate setting");
             }
-            panic!("SETTINGS_MAX_FIELD_SECTION_SIZE is required");
+            return settings;
         }
     })
     .await
     .expect("SETTINGS arrive")
+}
+
+async fn advertised_header_bound(connection: &quinn::Connection) -> u64 {
+    *advertised_settings(connection)
+        .await
+        .get(&6)
+        .expect("header bound")
 }
 
 #[tokio::test]
@@ -959,4 +990,21 @@ async fn a_stalled_header_section_does_not_block_other_requests() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(server.handlers_spawned(), 1);
     driver.abort();
+}
+
+/// Accept the mandatory session while a fake Server exercises event-stream behavior.
+async fn accept_raw_session(connection: &mut RawServerConnection) -> RawServerStream {
+    let (request, mut stream) = accept_raw_request(connection).await;
+    assert_eq!(request.method(), Method::CONNECT);
+    assert_eq!(request.uri().path(), super::TUNNEL_SESSION_PATH);
+    stream
+        .send_response(
+            Response::builder()
+                .status(StatusCode::OK)
+                .body(())
+                .expect("response"),
+        )
+        .await
+        .expect("session accepted");
+    stream
 }

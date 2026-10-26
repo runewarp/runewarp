@@ -102,7 +102,7 @@ fn server_transport_config() -> TransportConfig {
 
 fn client_transport_config() -> TransportConfig {
     let mut transport_config = base_transport_config();
-    // HTTP/3 forbids Server-opened bidirectional streams.
+    // Visitors still use receive slots; the WebTransport session receives no stream credit.
     transport_config.max_concurrent_bidi_streams(0_u8.into());
     transport_config.keep_alive_interval(Some(KEEPALIVE_INTERVAL));
     transport_config

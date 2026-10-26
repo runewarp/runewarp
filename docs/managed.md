@@ -136,7 +136,7 @@ Unknown JSON fields in a known v1 snapshot are ignored. Within `/v1/`, Control m
       "client_identities": ["4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef"]
     }
   ],
-  "replacement_generation": "fedcba9876543210fedcba9876543210"
+  "replacement_generation": "01928f3e-9c1d-7fed-9cba-9876543210fe"
 }
 ```
 
@@ -148,7 +148,7 @@ Rules (as implemented):
 - normalized Public hostnames and Client identities must be unique across the whole set
 - cardinality is bounded (see [Input and reporting limits](#input-and-reporting-limits)): at most 4,096 tunnels, 4,096 Public hostnames total / 256 per Tunnel, and 4,096 Client identities total / 64 per Tunnel
 - unknown per-tunnel JSON fields are ignored
-- `replacement_generation` is optional. It is a **Replacement hint** naming another **Server runtime generation** behind the same Server address, as 32 lowercase hexadecimal characters. `null`, another JSON type, or an invalid encoding makes the input `Rejected` and keeps the prior authorization and hint.
+- `replacement_generation` is optional. It is a **Replacement hint** naming another **Server runtime generation** behind the same Server address, in the same canonical UUIDv7 form as the Tunnel event stream (see [`protocol.md`](protocol.md#tunnel-events)). `null`, another JSON type, or an invalid encoding makes the input `Rejected` and keeps the prior authorization and hint.
 - a `replacement_generation` equal to the Server's own generation means no hint on that runtime, so Control can publish the same input to the old and new runtime. Any other value is advertised on every live Tunnel event stream of that runtime (see [`protocol.md`](protocol.md#tunnel-events)). Omitting or changing the value advertises a new full snapshot.
 
 ### Client `input`
@@ -198,7 +198,7 @@ A Server revision is acknowledged only after the atomic authorization swap, disp
 For each valid snapshot envelope whose revision is newly applied or already matches the applied revision:
 
 1. Apply a new revision, or skip apply when the revision already matches the process's applied revision.
-2. Schedule one `PUT .../state` off the downlink reconciliation critical path. The Client body is `{"revision":"<applied>"}`. The Server body is `{"revision":"<applied>","generation":"<own generation>"}`, where `generation` is its **Server runtime generation** in the Tunnel event-stream encoding.
+2. Schedule one `PUT .../state` off the downlink reconciliation critical path. The Client body is `{"revision":"<applied>"}`. The Server body is `{"revision":"<applied>","generation":"<own generation>"}`, where `generation` is its **Server runtime generation** as a canonical lowercase hyphenated UUIDv7.
 3. Maintain at most one in-flight state request and one coalesced latest pending revision; newer successful applies replace older pending reports.
 4. Treat exact `204` with an already-ended empty body as acknowledgment success. Non-204 and body-bearing responses are rejected without collecting an unbounded body.
 5. On any state-write failure or deadline miss, replace the whole Managed session while retaining the latest successfully applied revision in memory for re-acknowledgment after reconnect.
@@ -290,7 +290,7 @@ Before the first successful apply, remote and protocol failures keep the process
 
 ```text
 event: snapshot
-data: {"revision":"srv-42","input":{"tunnels":[{"id":"550e8400-e29b-41d4-a716-446655440000","public_hostnames":["app.example.com"],"client_identities":["4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef"]}],"replacement_generation":"fedcba9876543210fedcba9876543210"}}
+data: {"revision":"srv-42","input":{"tunnels":[{"id":"550e8400-e29b-41d4-a716-446655440000","public_hostnames":["app.example.com"],"client_identities":["4f7b6f7a9b0f0d2b91e92c8a5df6a44e0123456789abcdef0123456789abcdef"]}],"replacement_generation":"01928f3e-9c1d-7fed-9cba-9876543210fe"}}
 
 ```
 
@@ -316,7 +316,7 @@ PUT /v1/server/state HTTP/2
 Host: control.example.com
 Content-Type: application/json
 
-{"revision":"srv-42","generation":"0123456789abcdef0123456789abcdef"}
+{"revision":"srv-42","generation":"01928f3e-7b6a-7c3d-8e4f-0123456789ab"}
 ```
 
 ```http
@@ -335,7 +335,7 @@ Successful response: `204` with an empty body.
 | --- | --- | --- |
 | `event: patch` | Session failure → reconnect | Black-box / integration fixtures |
 | Client `server_addresses` containing an IP literal | `Rejected`; SSE stays open | `tests/managed_session_apply.rs` |
-| Server `replacement_generation` in uppercase hex | `Rejected`; prior authorization and hint retained | `tests/managed_server_authorization.rs` |
+| Server `replacement_generation` in the retired 32-hex form | `Rejected`; prior authorization and hint retained | `tests/managed_server_authorization.rs` |
 | SSE response `307` redirect | Session failure → reconnect (redirects not followed) | `tests/managed_session_downlink.rs` |
 | State response `500` | Session failure → reconnect; equal first snapshot is re-acknowledged without re-apply | `tests/managed_session_apply.rs` |
 | 60 s silence after first snapshot | Session failure → reconnect | `tests/managed_session_downlink.rs` |
@@ -361,7 +361,7 @@ Label each requirement as **Control must** (wire contract Control implements) or
 - [ ] Require unique opaque `tunnels[].id` (**Tunnel ID**) on every managed Server tunnel (same opaque-string rules as revision)
 - [ ] Use plural-only Server fields `tunnels[].public_hostnames` / `tunnels[].client_identities` and Client field `server_addresses`
 - [ ] Allow empty overall `tunnels` / `server_addresses` collections
-- [ ] Send Server `replacement_generation` only as 32 lowercase hexadecimal characters, and omit it when there is no hint
+- [ ] Send Server `replacement_generation` only as a canonical lowercase hyphenated UUIDv7, and omit it when there is no hint
 - [ ] Emit SSE comment keepalives often enough that silence stays under 60 s (20 s cadence recommended)
 - [ ] Accept state `PUT` only after the matching downlink is active on that connection
 - [ ] Respond to successful state writes with exact `204` and an already-ended empty body

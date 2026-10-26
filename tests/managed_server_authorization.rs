@@ -646,7 +646,7 @@ async fn wait_for_hint(client: &ClientTunnelH3, expected: Option<&str>) {
 
 #[tokio::test]
 async fn managed_server_advertises_replacement_hints_and_reports_its_generation() {
-    const REPLACEMENT: &str = "fedcba9876543210fedcba9876543210";
+    const REPLACEMENT: &str = "01928f3e-9c1d-7fed-9cba-9876543210fe";
     let mut harness = ManagedServerHarness::start().await;
     let identity = harness.trusted_client.client_identity.to_string();
     let tunnels = format!(
@@ -687,12 +687,13 @@ async fn managed_server_advertises_replacement_hints_and_reports_its_generation(
     wait_for_applied(&mut harness.event_rx, "rev-3").await;
     wait_for_hint(&client, Some(REPLACEMENT)).await;
 
-    // An invalid hint rejects the whole input: authorization and the advertised hint stay.
+    // An invalid hint, here the retired 32-hex form, rejects the whole input: authorization and
+    // the advertised hint stay.
     let mut state = client.event_state();
     state.mark_unchanged();
     harness.push_authorization(
         "rev-bad",
-        r#"{"tunnels":[],"replacement_generation":"FEDCBA9876543210FEDCBA9876543210"}"#,
+        r#"{"tunnels":[],"replacement_generation":"fedcba9876543210fedcba9876543210"}"#,
     );
     wait_for_rejected(&mut harness.event_rx, "rev-bad").await;
     sleep(Duration::from_millis(200)).await;
@@ -1364,12 +1365,16 @@ async fn wait_for_state_revision(metrics: &FixtureMetrics, revision: &str) -> St
         .as_str()
         .expect("generation is a string")
         .to_owned();
-    assert!(
-        generation.len() == 32
-            && generation
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "generation is 32 lowercase hex characters: {generation}"
+    let parsed = uuid::Uuid::try_parse(&generation).expect("generation is a UUID");
+    assert_eq!(
+        parsed.hyphenated().to_string(),
+        generation,
+        "generation is in canonical lowercase hyphenated form"
+    );
+    assert_eq!(
+        parsed.get_version_num(),
+        7,
+        "generation is a UUIDv7: {generation}"
     );
     generation
 }

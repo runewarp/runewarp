@@ -299,17 +299,27 @@ async fn withdrawal_releases_idle_credit_and_confirms_after_local_visitors_finis
     .await
     .expect("credit converges");
 
-    let withdrawal = tokio::spawn(client.withdrawal());
-    timeout(STEP, async {
-        while budget.available_permits() != 7 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("idle permits return to the instance budget");
-    assert_eq!(client.visitor_credit_counts(), (1, 0));
+    // Withdrawal stops replenishment, but offered credit stays reserved until the Server
+    // confirms: a Visitor it commits first must still find its permit, even if a sibling is
+    // waiting on the budget and the withdrawal request has not been sent yet.
+    let withdrawal = client.withdrawal();
+    let mut sibling = Box::pin(budget.clone().acquire_owned());
+    assert!(
+        timeout(Duration::from_millis(50), &mut sibling)
+            .await
+            .is_err()
+    );
+    assert_eq!(client.visitor_credit_counts(), (1, 7));
+    let (second_remote, second_local) = active_visitor(&server, &mut client).await;
+    assert_eq!(client.guard_rejections(), 0);
+    assert_eq!(client.visitor_credit_counts(), (2, 6));
+    drop(sibling);
+
+    let withdrawal = tokio::spawn(withdrawal);
+    wait_until_withdrawn(&server).await;
     assert!(!withdrawal.is_finished());
 
+    finish_visitor(second_remote, second_local).await;
     finish_visitor(remote, local).await;
     let outcome = timeout(STEP, withdrawal)
         .await
@@ -321,6 +331,46 @@ async fn withdrawal_releases_idle_credit_and_confirms_after_local_visitors_finis
         .await
         .expect("the Client closes the connection");
     assert_eq!(budget.available_permits(), 8);
+}
+
+#[tokio::test]
+async fn a_received_confirmation_is_recorded_before_local_visitors_finish() {
+    let (_fixture, server, mut client) = pair(4).await;
+    let (mut remote, mut local) = active_visitor(&server, &mut client).await;
+    // The Server-side Visitor ends while the Client handler still holds its lease.
+    local.shutdown().await.expect("Client FIN");
+    remote
+        .read_to_end(&mut Vec::new())
+        .await
+        .expect("Server EOF");
+    remote.shutdown().await.expect("Server FIN");
+    drop(remote);
+
+    let withdrawal = tokio::spawn(client.withdrawal());
+    timeout(STEP, async {
+        while !client.withdrawal_confirmed() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("204 is recorded at once");
+    assert!(
+        !withdrawal.is_finished(),
+        "the local lease is still draining"
+    );
+
+    local
+        .read_to_end(&mut Vec::new())
+        .await
+        .expect("Client EOF");
+    drop(local);
+    assert_eq!(
+        timeout(STEP, withdrawal)
+            .await
+            .expect("finishes")
+            .expect("task"),
+        WithdrawalOutcome::Confirmed
+    );
 }
 
 #[tokio::test]
@@ -382,6 +432,8 @@ enum Scripted {
     Reset,
     /// A `204` that carries content.
     ConfirmationWithContent,
+    /// A `204` with a prohibited nonzero `content-length` and no content.
+    ConfirmationWithLength,
 }
 
 /// A raw Server that passes the gate, accepts the session and answers withdrawals from `script`.
@@ -431,6 +483,15 @@ async fn scripted_client(
                             .expect("response");
                         stream.send_response(response).await.expect("response sent");
                         let _ = stream.send_data(Bytes::from_static(b"x")).await;
+                        let _ = stream.finish().await;
+                    }
+                    Scripted::ConfirmationWithLength => {
+                        let response = Response::builder()
+                            .status(StatusCode::NO_CONTENT)
+                            .header(header::CONTENT_LENGTH, "1")
+                            .body(())
+                            .expect("response");
+                        stream.send_response(response).await.expect("response sent");
                         let _ = stream.finish().await;
                     }
                 }
@@ -523,6 +584,10 @@ async fn client_maps_explicit_rejections_and_malformed_confirmations_to_protocol
         ),
         (
             Scripted::ConfirmationWithContent,
+            ProtocolFailure::MalformedConfirmation,
+        ),
+        (
+            Scripted::ConfirmationWithLength,
             ProtocolFailure::MalformedConfirmation,
         ),
     ] {

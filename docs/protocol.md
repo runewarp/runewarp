@@ -154,7 +154,7 @@ A Client withdraws one Tunnel connection from Visitor placement with a bodyless 
 - **Duplicates:** every valid concurrent or later request joins the same transition and receives `204` at the same quiescence point; invalid duplicates receive their own status.
 - **Close:** the Server waits a fixed **5 seconds** after the first `204` completes locally, or after quiescence if every valid request was cancelled before any `204` completed, then closes the connection with `H3_NO_ERROR`. Later duplicates never restart that timer. Server shutdown deadlines and Fast escalation still close earlier.
 
-When graceful shutdown withdraws a connection, the Client immediately stops idle-credit maintenance, cancels any pending budget acquisition and returns idle permits to the Client-instance budget. Visitors the Server committed before its withdrawal commit still arrive on already-issued credit, take a permit through the no-wait budget guard and are honored. The Client confirms quiescence only on a bodyless `204` followed by response FIN; it then waits for its local Visitor leases to drain, so final bytes already in flight reach their handlers, and closes with `H3_NO_ERROR`.
+When graceful shutdown withdraws a connection, the Client immediately stops replenishing idle credit and cancels any pending budget acquisition, but keeps the idle permits it already offered. The Server may still commit Visitors on that credit until its withdrawal commit, and the Client honors them; it never declines an assignment because its request is in flight. The Client confirms quiescence only on a bodyless `204` followed by response FIN, without content, trailers, `transfer-encoding` or a nonzero `content-length`; a `204` with such fields is stopped with `H3_MESSAGE_ERROR`. On confirmation it records the result, returns its idle permits to the Client-instance budget, waits for its local Visitor leases to drain so final bytes already in flight reach their handlers, and closes with `H3_NO_ERROR`. A deadline or Fast escalation during that local wait keeps the confirmation.
 
 | Withdrawal result | Client classification |
 | --- | --- |
@@ -162,7 +162,7 @@ When graceful shutdown withdraws a connection, the Client immediately stops idle
 | Response-less stream failure or `408` while the connection is usable | Retry once on a fresh request stream of the same connection, within the shared deadline |
 | A second response-less failure or `408` | Unconfirmed drain |
 | GOAWAY forbids the request, the connection closes (including revocation), the deadline expires or Fast shutdown supersedes it | Unconfirmed drain |
-| `400`, `404`, `405`, `421`, any other status, or a `204` carrying content or trailers | Withdrawal protocol failure |
+| `400`, `404`, `405`, `421`, any other status, or a `204` declaring or carrying content or trailers | Withdrawal protocol failure |
 
 An unconfirmed drain logs a warning with the Server address and closes that connection; active Visitors on it may have been terminated. A withdrawal protocol failure logs an error and closes that connection; other connections keep draining and the process exits nonzero after teardown, reporting the first failure. The Client never opens or reconnects a Tunnel connection to withdraw. GOAWAY does not trigger withdrawal. Authorization revocation always takes effect immediately: if it closes the connection first the drain is unconfirmed, and if its cleanup leaves the connection open and quiescent the `204` still completes.
 

@@ -50,6 +50,7 @@ pub struct ClientTunnelH3 {
     /// for its lifetime; background tasks that stop after GOAWAY must not end placed Visitors.
     send_request: ClientSendRequest,
     withdrawal_uri: String,
+    withdrawal_confirmed: Arc<watch::Sender<bool>>,
     _driver: OwnedTask,
     _events: OwnedTask,
     credits: Arc<super::credit::VisitorCredits>,
@@ -293,6 +294,7 @@ impl ClientTunnelH3 {
             assigned,
             send_request,
             withdrawal_uri: format!("https://{server_hostname}{TUNNEL_WITHDRAWAL_PATH}"),
+            withdrawal_confirmed: Arc::new(watch::Sender::new(false)),
             _driver: driver,
             _events: events,
             credits,
@@ -313,17 +315,19 @@ impl ClientTunnelH3 {
 
     /// Withdraw this connection from placement and close it.
     ///
-    /// Idle Visitor credit maintenance stops at once and idle permits return to the
-    /// Client-instance budget. Visitors the Server committed before its withdrawal commit still
-    /// arrive on already-issued credit through the no-wait budget guard. The returned future sends
-    /// bodyless `PUT /v1/tunnel/withdrawal`, retrying once on a fresh request stream after a
-    /// response-less failure or `408`. After a bodyless `204` with FIN it waits for local Visitor
-    /// leases to drain, so final bytes already in flight reach their handlers. It always ends by
-    /// closing the connection with `H3_NO_ERROR`; dropping it early leaves closing to the caller.
+    /// Idle Visitor credit replenishment stops at once, but offered credit stays reserved so
+    /// Visitors the Server commits before its withdrawal commit keep their permits. The returned
+    /// future sends bodyless `PUT /v1/tunnel/withdrawal`, retrying once on a fresh request stream
+    /// after a response-less failure or `408`. A bodyless `204` with FIN is recorded at once (see
+    /// [`Self::withdrawal_confirmed`]) and releases idle permits to the Client-instance budget;
+    /// the future then waits for local Visitor leases to drain, so final bytes already in flight
+    /// reach their handlers. It always ends by closing the connection with `H3_NO_ERROR`; dropping
+    /// it early leaves closing to the caller.
     pub fn withdrawal(&self) -> impl Future<Output = WithdrawalOutcome> + Send + 'static + use<> {
-        self.credits.stop_idle();
+        self.credits.stop_replenishing();
         let connection = self.connection.clone();
         let credits = self.credits.clone();
+        let confirmed = self.withdrawal_confirmed.clone();
         let mut send_request = self.send_request.clone();
         let uri = self.withdrawal_uri.clone();
         async move {
@@ -345,6 +349,8 @@ impl ClientTunnelH3 {
                 }
             };
             if outcome == WithdrawalOutcome::Confirmed {
+                confirmed.send_replace(true);
+                credits.stop_idle();
                 tokio::select! {
                     _ = credits.drained() => {}
                     _ = connection.closed() => {}
@@ -353,6 +359,12 @@ impl ClientTunnelH3 {
             close_connection(&connection, Code::H3_NO_ERROR);
             outcome
         }
+    }
+
+    /// Whether the Server has confirmed withdrawal quiescence with `204`, even if local Visitor
+    /// leases are still draining.
+    pub fn withdrawal_confirmed(&self) -> bool {
+        *self.withdrawal_confirmed.borrow()
     }
 
     /// Close immediately when the Client runtime stops.
@@ -530,11 +542,22 @@ async fn withdrawal_attempt(send_request: &mut ClientSendRequest, uri: &str) -> 
     if response.status() != StatusCode::NO_CONTENT {
         return WithdrawalAttempt::Status(response.status());
     }
+    // A `204` must not declare content: that is a malformed message, not a confirmation.
+    let headers = response.headers();
+    let declares_content = headers.contains_key(header::TRANSFER_ENCODING)
+        || headers
+            .get_all(header::CONTENT_LENGTH)
+            .iter()
+            .any(|value| value.as_bytes().iter().any(|byte| *byte != b'0'));
+    if declares_content {
+        stream.stop_sending(Code::H3_MESSAGE_ERROR);
+        return WithdrawalAttempt::MalformedConfirmation;
+    }
     // Confirmation needs response FIN with no content or trailers.
     loop {
         match stream.recv_data().await {
             Ok(Some(chunk)) if chunk.has_remaining() => {
-                stream.stop_sending(Code::H3_REQUEST_CANCELLED);
+                stream.stop_sending(Code::H3_MESSAGE_ERROR);
                 return WithdrawalAttempt::MalformedConfirmation;
             }
             Ok(Some(_)) => {}

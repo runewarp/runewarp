@@ -150,6 +150,14 @@ impl VisitorCredits {
         self.release_idle(&mut self.state());
     }
 
+    /// Placement withdrawal stops replenishment but keeps idle permits reserved: the Server may
+    /// still commit Visitors on credit it already holds until its withdrawal commit, which the
+    /// Client first observes as `204`. [`Self::stop_idle`] then releases them.
+    pub(super) fn stop_replenishing(&self) {
+        self.state().maintaining = false;
+        self.idle_stopped.send_replace(true);
+    }
+
     /// Wait until idle maintenance has stopped.
     pub(super) async fn idle_stopped(&self) {
         let _ = self

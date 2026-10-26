@@ -307,6 +307,13 @@ impl Client {
                     continue;
                 }
             };
+            // A `204` already received stays confirmed even if Fast or the deadline wins while
+            // local Visitor leases drain.
+            let outcome = if self.connection.withdrawal_confirmed() {
+                WithdrawalOutcome::Confirmed
+            } else {
+                outcome
+            };
             self.connection.close();
             tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
             return Ok(Some(outcome));

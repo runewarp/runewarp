@@ -237,6 +237,7 @@ Runewarp uses symmetric close behavior:
 - errors, aborts, or dropping an unfinished write half reset the stream; connection loss terminates all its streams
 - proxy writes flush before waiting for the peer and finish their write direction after copying to EOF
 - each TCP/Tunnel proxy direction owns its halves and completes independently; a failure in one direction does not cancel copying in the other, and the proxy returns its error after both directions finish
+- a Visitor remains in flight until both TCP directions finish; receiving the backend response or its TLS close notification does not close the Visitor's TCP write direction, which can keep graceful shutdown or Managed drain waiting until the deadline
 - no peer depends on a received STOP_SENDING or RESET_STREAM code; any stop or reset ends that direction or stream
 
 When a QUIC connection drops, all streams on that connection are lost. They are not migrated elsewhere.

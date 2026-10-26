@@ -790,7 +790,17 @@ async fn managed_server_state_document_reports_tunnel_connections_and_visitors()
 
 #[tokio::test]
 async fn managed_server_drain_finishes_visitors_and_keeps_reporting_without_resuming() {
-    let mut harness = ManagedServerHarness::start_with_graceful_drain(Duration::from_secs(5)).await;
+    assert_server_drain_finishes_at_visitor_completion(true).await;
+}
+
+#[tokio::test]
+async fn graceful_server_shutdown_finishes_promptly_after_visitor_completion() {
+    assert_server_drain_finishes_at_visitor_completion(false).await;
+}
+
+async fn assert_server_drain_finishes_at_visitor_completion(managed_drain: bool) {
+    let mut harness =
+        ManagedServerHarness::start_with_graceful_drain(Duration::from_secs(30)).await;
     let (backend_addr, backend_started, backend_release, backend_task) = spawn_staged_tls_backend(
         &harness.app_backend_cert,
         &harness.app_backend_key,
@@ -840,27 +850,32 @@ async fn managed_server_drain_finishes_visitors_and_keeps_reporting_without_resu
         .expect("staged backend signals");
     let mut initial = [0_u8; 2];
     tls_stream.read_exact(&mut initial).await.unwrap();
+    assert_eq!(&initial, b"on");
     wait_for_state_document(&harness.control.metrics, "one Visitor", |body| {
         body["visitors"] == json!(1) && body["tunnels"]["t1"] == json!(1)
     })
     .await;
 
-    harness.push_authorization(
-        "rev-drain",
-        &format!(r#"{{"tunnels":{tunnels},"drain":true}}"#),
-    );
-    wait_for_applied(&mut harness.event_rx, "rev-drain").await;
+    if managed_drain {
+        harness.push_authorization(
+            "rev-drain",
+            &format!(r#"{{"tunnels":{tunnels},"drain":true}}"#),
+        );
+        wait_for_applied(&mut harness.event_rx, "rev-drain").await;
+        wait_for_state_document(
+            &harness.control.metrics,
+            "draining with a Visitor",
+            |body| {
+                body["revision"] == json!("rev-drain")
+                    && body["draining"] == json!(true)
+                    && body["visitors"] == json!(1)
+            },
+        )
+        .await;
+    } else {
+        harness.begin_graceful();
+    }
     wait_for_readiness_closed(harness.readiness_addr).await;
-    wait_for_state_document(
-        &harness.control.metrics,
-        "draining with a Visitor",
-        |body| {
-            body["revision"] == json!("rev-drain")
-                && body["draining"] == json!(true)
-                && body["visitors"] == json!(1)
-        },
-    )
-    .await;
     let mut server_task = harness
         .server_task
         .take()
@@ -886,35 +901,56 @@ async fn managed_server_drain_finishes_visitors_and_keeps_reporting_without_resu
         "a draining Server refuses new Tunnel connections"
     );
 
-    // The in-flight Visitor finishes, then the drain completes without the process exiting.
+    // Finishing the backend response alone leaves the Visitor's TCP write direction open.
     backend_release.notify_one();
     let mut rest = [0_u8; 2];
     tls_stream.read_exact(&mut rest).await.unwrap();
     assert_eq!(&rest, b"e!");
-    // The graceful bound is 5 s from the drain request; the drain never outlives it.
-    timeout(Duration::from_secs(6), &mut server_task)
+    timeout(Duration::from_secs(2), backend_task)
         .await
-        .expect("drain completes within the graceful bound")
+        .expect("backend finishes its response")
+        .expect("backend task");
+    assert!(
+        timeout(Duration::from_millis(100), &mut server_task)
+            .await
+            .is_err(),
+        "an open Visitor write direction is still in flight after the response finishes"
+    );
+    tls_stream
+        .shutdown()
+        .await
+        .expect("Visitor closes its write direction");
+    let mut tail = Vec::new();
+    timeout(Duration::from_secs(2), tls_stream.read_to_end(&mut tail))
+        .await
+        .expect("Visitor reaches EOF")
+        .expect("Visitor tail survives drain");
+    assert!(tail.is_empty());
+    // Leave a wide gap from the 30 s safety deadline: quiescence should end the drain.
+    timeout(Duration::from_secs(3), &mut server_task)
+        .await
+        .expect("drain completes at quiescence without waiting for the deadline")
         .expect("server task")
         .expect("drain is not a failure");
-    wait_for_state_document(&harness.control.metrics, "quiescent", |body| {
-        body["draining"] == json!(true)
-            && body["visitors"] == json!(0)
-            && body["tunnels"]["t1"] == json!(0)
-    })
-    .await;
+    if managed_drain {
+        wait_for_state_document(&harness.control.metrics, "quiescent", |body| {
+            body["draining"] == json!(true)
+                && body["visitors"] == json!(0)
+                && body["tunnels"]["t1"] == json!(0)
+        })
+        .await;
 
-    // A later input without drain applies and reports, but serving never resumes.
-    harness.push_authorization("rev-after", &format!(r#"{{"tunnels":{tunnels}}}"#));
-    wait_for_applied(&mut harness.event_rx, "rev-after").await;
-    wait_for_state_document(&harness.control.metrics, "still draining", |body| {
-        body["revision"] == json!("rev-after") && body["draining"] == json!(true)
-    })
-    .await;
-    assert!(TcpStream::connect(harness.readiness_addr).await.is_err());
-    assert!(TcpStream::connect(harness.public_addr).await.is_err());
+        // A later input without drain applies and reports, but serving never resumes.
+        harness.push_authorization("rev-after", &format!(r#"{{"tunnels":{tunnels}}}"#));
+        wait_for_applied(&mut harness.event_rx, "rev-after").await;
+        wait_for_state_document(&harness.control.metrics, "still draining", |body| {
+            body["revision"] == json!("rev-after") && body["draining"] == json!(true)
+        })
+        .await;
+        assert!(TcpStream::connect(harness.readiness_addr).await.is_err());
+        assert!(TcpStream::connect(harness.public_addr).await.is_err());
+    }
 
-    backend_task.abort();
     harness.shutdown().await;
 }
 

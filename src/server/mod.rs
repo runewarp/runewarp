@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod listener_tests;
+
 mod active_client;
 mod admission;
 mod authorization;
@@ -74,8 +77,10 @@ impl FatalSignal {
 }
 
 pub struct ServerBindConfig {
-    pub public_bind_addr: SocketAddr,
-    pub tunnel_connection_bind_addr: SocketAddr,
+    /// One to eight distinct Visitor TCP addresses, sharing all runtime limits.
+    pub public_bind_addrs: Vec<SocketAddr>,
+    /// One to eight distinct Tunnel UDP addresses, sharing authorization and pools.
+    pub tunnel_connection_bind_addrs: Vec<SocketAddr>,
     pub readiness_bind_addr: Option<SocketAddr>,
     pub server_hostname: ServerHostname,
     /// Shared authorization snapshot consulted by Public-hostname routing.
@@ -87,8 +92,8 @@ pub struct ServerBindConfig {
 }
 
 pub struct Server {
-    public_listener: TcpListener,
-    tunnel_endpoint: Endpoint,
+    public_listeners: Vec<TcpListener>,
+    tunnel_endpoints: Vec<Endpoint>,
     readiness_probe: Option<ReadinessProbe>,
     tunnel_registry: TunnelRegistry,
     visitor_intake: VisitorIntake,
@@ -290,31 +295,44 @@ impl Server {
             visitor_proxy_protocol,
             visitor_proxy_trusted_networks,
         )?;
-        let public_listener =
-            TcpListener::bind(config.public_bind_addr)
-                .await
+        crate::config::validate_bind_addresses(
+            "server.public-bind-address",
+            &config.public_bind_addrs,
+        )
+        .and_then(|()| {
+            crate::config::validate_bind_addresses(
+                "server.tunnel-bind-address",
+                &config.tunnel_connection_bind_addrs,
+            )
+        })
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+        // Bind everything before starting readiness or accepting any work. Dropping these
+        // collections on an error releases every earlier socket reservation.
+        let mut public_listeners = Vec::new();
+        for address in config.public_bind_addrs {
+            let listener = TcpListener::bind(address).await.map_err(|source| {
+                io::Error::new(
+                    source.kind(),
+                    format!("failed to bind server.public-bind-address {address}: {source}"),
+                )
+            })?;
+            public_listeners.push(listener);
+        }
+        let mut tunnel_sockets = Vec::new();
+        for address in config.tunnel_connection_bind_addrs {
+            let socket = std::net::UdpSocket::bind(address)
+                .and_then(|socket| {
+                    socket.set_nonblocking(true)?;
+                    Ok(socket)
+                })
                 .map_err(|source| {
                     io::Error::new(
                         source.kind(),
-                        format!(
-                            "failed to bind server.public-bind-address {}: {}",
-                            config.public_bind_addr, source
-                        ),
+                        format!("failed to bind server.tunnel-bind-address {address}: {source}"),
                     )
                 })?;
-        let tunnel_endpoint = Endpoint::server(
-            config.quic_server_config,
-            config.tunnel_connection_bind_addr,
-        )
-        .map_err(|source| {
-            io::Error::new(
-                source.kind(),
-                format!(
-                    "failed to bind server.tunnel-bind-address {}: {}",
-                    config.tunnel_connection_bind_addr, source
-                ),
-            )
-        })?;
+            tunnel_sockets.push(socket);
+        }
         let initially_ready = config.admission == ServerAdmission::Static;
         let fatal = FatalSignal::default();
         let readiness_probe = match config.readiness_bind_addr {
@@ -323,6 +341,24 @@ impl Server {
             }
             None => None,
         };
+        // No QUIC driver starts until every TCP, UDP and readiness bind succeeded.
+        let mut tunnel_endpoints = Vec::new();
+        for socket in tunnel_sockets {
+            match Endpoint::new(
+                quinn::EndpointConfig::default(),
+                Some(config.quic_server_config.clone()),
+                socket,
+                Arc::new(quinn::TokioRuntime),
+            ) {
+                Ok(endpoint) => tunnel_endpoints.push(endpoint),
+                Err(error) => {
+                    if let Some(probe) = readiness_probe {
+                        probe.close().await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
         if let Some(readiness_probe) = readiness_probe.as_ref() {
             runtime_log::server_readiness_listener_enabled(readiness_probe.bind_address());
             if initially_ready {
@@ -344,8 +380,8 @@ impl Server {
         );
 
         Ok(Self {
-            public_listener,
-            tunnel_endpoint,
+            public_listeners,
+            tunnel_endpoints,
             readiness_probe,
             tunnel_registry,
             visitor_intake,
@@ -359,11 +395,27 @@ impl Server {
     }
 
     pub fn public_addr(&self) -> io::Result<SocketAddr> {
-        self.public_listener.local_addr()
+        self.public_listeners[0].local_addr()
     }
 
     pub fn tunnel_addr(&self) -> io::Result<SocketAddr> {
-        self.tunnel_endpoint.local_addr()
+        self.tunnel_endpoints[0].local_addr()
+    }
+
+    /// Bound Visitor addresses in configuration order. `public_addr` returns the first.
+    pub fn public_addrs(&self) -> io::Result<Vec<SocketAddr>> {
+        self.public_listeners
+            .iter()
+            .map(TcpListener::local_addr)
+            .collect()
+    }
+
+    /// Bound Tunnel addresses in configuration order. `tunnel_addr` returns the first.
+    pub fn tunnel_addrs(&self) -> io::Result<Vec<SocketAddr>> {
+        self.tunnel_endpoints
+            .iter()
+            .map(Endpoint::local_addr)
+            .collect()
     }
 
     pub fn readiness_addr(&self) -> Option<SocketAddr> {
@@ -442,8 +494,8 @@ impl Server {
 
     async fn serve(self, shutdown: &OrderlyShutdown) -> io::Result<()> {
         let Self {
-            public_listener,
-            tunnel_endpoint,
+            public_listeners,
+            tunnel_endpoints,
             readiness_probe,
             tunnel_registry,
             visitor_intake,
@@ -454,6 +506,8 @@ impl Server {
             tunnel_events,
             drain: _,
         } = self;
+        let mut public_cursor = 0;
+        let mut tunnel_cursor = 0;
         let mut accept_backoff = AcceptBackoff::default();
         let mut public_accept_not_before = None;
         let mut handshakes = JoinSet::new();
@@ -467,8 +521,12 @@ impl Server {
                 async {
                     let _ = shutdown.wait_started().await;
                 },
-                accept_public_connection(&public_listener, public_accept_not_before),
-                tunnel_endpoint.accept(),
+                accept_public_connections(
+                    &public_listeners,
+                    &mut public_cursor,
+                    public_accept_not_before,
+                ),
+                accept_tunnel_connections(&tunnel_endpoints, &mut tunnel_cursor),
             )
             .await
             {
@@ -523,8 +581,8 @@ impl Server {
             runtime_log::server_readiness_lost(readiness_probe.bind_address());
             readiness_probe.close().await;
         }
-        drop(public_listener);
-        drop(tunnel_endpoint);
+        drop(public_listeners);
+        drop(tunnel_endpoints);
         handshakes.abort_all();
         while handshakes.join_next().await.is_some() {}
 
@@ -558,12 +616,42 @@ impl Server {
     }
 }
 
-async fn accept_public_connection(
-    listener: &TcpListener,
+// Poll every listener without spawning accept tasks or buffering accepted work ahead
+// of admission. Rotate after each accept so a busy address cannot starve its siblings.
+async fn accept_public_connections(
+    listeners: &[TcpListener],
+    cursor: &mut usize,
     not_before: Option<tokio::time::Instant>,
 ) -> io::Result<(tokio::net::TcpStream, SocketAddr)> {
     wait_before_public_accept(not_before).await;
-    listener.accept().await
+    std::future::poll_fn(|cx| {
+        for offset in 0..listeners.len() {
+            let index = (*cursor + offset) % listeners.len();
+            if let std::task::Poll::Ready(result) = listeners[index].poll_accept(cx) {
+                *cursor = (index + 1) % listeners.len();
+                return std::task::Poll::Ready(result);
+            }
+        }
+        std::task::Poll::Pending
+    })
+    .await
+}
+
+async fn accept_tunnel_connections(
+    endpoints: &[Endpoint],
+    cursor: &mut usize,
+) -> Option<quinn::Incoming> {
+    // Quinn's accept future owns a Notify registration. Keep the futures alive
+    // across Pending polls so incoming packets can wake this accept loop.
+    let accepts = endpoints
+        .iter()
+        .cycle()
+        .skip(*cursor)
+        .take(endpoints.len())
+        .map(|endpoint| Box::pin(endpoint.accept()));
+    let (incoming, index, _) = futures_util::future::select_all(accepts).await;
+    *cursor = (*cursor + index + 1) % endpoints.len();
+    incoming
 }
 
 async fn wait_before_public_accept(not_before: Option<tokio::time::Instant>) {

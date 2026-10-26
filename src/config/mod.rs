@@ -75,8 +75,8 @@ pub struct ServerConfig {
     pub hostname: ServerHostname,
     pub log_level: LogLevel,
     pub certificate: ServerCertificateConfig,
-    pub public_bind_address: SocketAddr,
-    pub tunnel_connection_bind_address: SocketAddr,
+    pub public_bind_addresses: Vec<SocketAddr>,
+    pub tunnel_connection_bind_addresses: Vec<SocketAddr>,
     pub readiness_bind_address: Option<SocketAddr>,
     pub graceful_shutdown_duration: std::time::Duration,
     pub visitor_proxy_protocol: Option<ProxyProtocolVersion>,
@@ -493,12 +493,12 @@ fn validate_prepared_server_config(
         }),
     };
 
-    let public_bind_address = validate_socket_address_field(
+    let public_bind_addresses = validate_socket_addresses_field(
         "server.public-bind-address",
         public_bind_address,
         &mut messages,
     );
-    let tunnel_connection_bind_address = validate_socket_address_field(
+    let tunnel_connection_bind_addresses = validate_socket_addresses_field(
         "server.tunnel-bind-address",
         tunnel_bind_address,
         &mut messages,
@@ -613,9 +613,8 @@ fn validate_prepared_server_config(
             hostname: hostname.expect("validated server.hostname"),
             log_level,
             certificate: certificate.expect("validated server certificate settings"),
-            public_bind_address: public_bind_address.expect("validated server.public-bind-address"),
-            tunnel_connection_bind_address: tunnel_connection_bind_address
-                .expect("validated server.tunnel-bind-address"),
+            public_bind_addresses,
+            tunnel_connection_bind_addresses,
             readiness_bind_address,
             graceful_shutdown_duration: graceful_shutdown_duration
                 .expect("validated server.graceful-shutdown-duration"),
@@ -1389,6 +1388,63 @@ fn validate_unique_server_addresses(
     }
 }
 
+fn validate_socket_addresses_field(
+    field_name: &str,
+    addresses: Vec<String>,
+    messages: &mut Vec<String>,
+) -> Vec<SocketAddr> {
+    if !(1..=8).contains(&addresses.len()) {
+        messages.push(format!(
+            "{field_name} must contain 1 to 8 distinct addresses"
+        ));
+    }
+    let parsed: Vec<_> = addresses
+        .into_iter()
+        .filter_map(|address| validate_socket_address_field(field_name, address, messages))
+        .collect();
+    if let Err(message) = validate_bind_addresses(field_name, &parsed)
+        && !messages.contains(&message)
+    {
+        messages.push(message);
+    }
+    parsed
+}
+
+pub(crate) fn validate_bind_addresses(
+    field_name: &str,
+    addresses: &[SocketAddr],
+) -> Result<(), String> {
+    if !(1..=8).contains(&addresses.len()) {
+        return Err(format!(
+            "{field_name} must contain 1 to 8 distinct addresses"
+        ));
+    }
+    for (index, address) in addresses.iter().enumerate() {
+        if addresses[..index].contains(address) {
+            return Err(format!(
+                "{field_name} contains duplicate address `{address}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn deserialize_socket_addresses<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Addresses {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(Some(match Addresses::deserialize(deserializer)? {
+        Addresses::One(address) => vec![address],
+        Addresses::Many(addresses) => addresses,
+    }))
+}
+
 fn validate_socket_address_field(
     field_name: &str,
     socket_address: String,
@@ -1740,8 +1796,10 @@ pub(crate) struct RawServerConfig {
     pub(crate) cert_dir: Option<PathBuf>,
     pub(crate) identity_dir: Option<PathBuf>,
     pub(crate) acme: Option<RawServerAcmeConfig>,
-    pub(crate) public_bind_address: Option<String>,
-    pub(crate) tunnel_bind_address: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_socket_addresses")]
+    pub(crate) public_bind_address: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_socket_addresses")]
+    pub(crate) tunnel_bind_address: Option<Vec<String>>,
     pub(crate) readiness_bind_address: Option<String>,
     pub(crate) graceful_shutdown_duration: Option<String>,
     pub(crate) visitor_proxy_protocol: Option<String>,

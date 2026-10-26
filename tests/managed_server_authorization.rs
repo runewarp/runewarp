@@ -264,10 +264,10 @@ tunnel-bind-address = "127.0.0.1:0"
         let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
         assert!(settings.tunnels.is_empty());
 
-        let server = PreparedServer::bind(
+        let server = PreparedServer::bind_listeners(
             &settings,
-            settings.public_bind_address,
-            settings.tunnel_connection_bind_address,
+            settings.public_bind_addresses.clone(),
+            settings.tunnel_connection_bind_addresses.clone(),
         )
         .await
         .expect("managed Server must bind with empty authorization");

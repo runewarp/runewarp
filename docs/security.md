@@ -6,7 +6,7 @@ In the default passthrough mode, Runewarp does not terminate customer TLS on the
 
 - choose system trust or an exclusive CA bundle deliberately for every Server and Control connection
 - protect Client and Server identity keys, private CA keys, and explicit ACME state directories
-- expose only the intended public TCP, Tunnel UDP, readiness, and Control listeners
+- expose only the intended public TCP, Tunnel UDP, readiness, and Control listeners; every configured bind address opens a listener
 - account for the Server's visibility into SNI, Visitor source addresses, timing, and byte counts
 - probe `server.readiness-bind-address` rather than public TLS when readiness is configured
 - use `tls-mode = "terminate"` only when Client-side TLS termination and plaintext delivery to the Local backend are intended
@@ -91,7 +91,7 @@ The Tunnel event stream contains only the opaque Server runtime generation and a
 
 ## Admission and overload protection
 
-The Server and Client bound work at each public or authenticated trust boundary before it can consume unbounded runtime resources:
+The Server and Client bound work at each public or authenticated trust boundary before it can consume unbounded runtime resources. All Server bind addresses share these limits, authorization and Tunnel pools; adding a listener grants no extra admission capacity:
 
 - per-source Visitor limits use the canonical source only after direct or trusted-PROXY tuple resolution
 - saturation rejects the newest work and never evicts a healthy Tunnel connection

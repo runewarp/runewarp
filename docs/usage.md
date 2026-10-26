@@ -166,8 +166,8 @@ Run the **Server** on a machine with a public IP so **Visitors** and **Client in
 
 - create an A record for the **Server hostname** that points to that machine's public IP
 - use each **Public hostname** as a CNAME to the **Server hostname** as the standard DNS pattern
-- allow Visitor and ACME traffic to reach `server.public-bind-address` over TCP (TCP 443 by default)
-- allow Clients to reach `server.tunnel-bind-address` over UDP (UDP 443 by default)
+- allow Visitor and ACME traffic to reach each `server.public-bind-address` over TCP (TCP 443 by default)
+- allow Clients to reach each `server.tunnel-bind-address` over UDP (UDP 443 by default)
 - if you deploy behind NAT, a load balancer, or port mapping, preserve both transports and map their external ports to the configured listeners
 
 Pointing a **Public hostname** directly at the same public IP can also work, but a CNAME to the **Server hostname** is usually clearer.

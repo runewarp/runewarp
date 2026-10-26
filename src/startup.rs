@@ -50,6 +50,30 @@ impl PreparedServer {
         public_bind_addr: SocketAddr,
         tunnel_connection_bind_addr: SocketAddr,
     ) -> Result<Self, ServerStartupError> {
+        Self::bind_listeners(
+            config,
+            vec![public_bind_addr],
+            vec![tunnel_connection_bind_addr],
+        )
+        .await
+    }
+
+    /// Prepare all listeners as one Server runtime with shared admission and shutdown.
+    pub async fn bind_listeners(
+        config: &ServerConfig,
+        public_bind_addrs: Vec<SocketAddr>,
+        tunnel_bind_addrs: Vec<SocketAddr>,
+    ) -> Result<Self, ServerStartupError> {
+        crate::config::validate_bind_addresses("server.public-bind-address", &public_bind_addrs)
+            .and_then(|()| {
+                crate::config::validate_bind_addresses(
+                    "server.tunnel-bind-address",
+                    &tunnel_bind_addrs,
+                )
+            })
+            .map_err(|message| {
+                ServerStartupError::Bind(io::Error::new(io::ErrorKind::InvalidInput, message))
+            })?;
         prepare_default_server_acme_state_dir(config)?;
         let authorization = match config.admission {
             crate::ServerAdmission::Static => {
@@ -74,7 +98,9 @@ impl PreparedServer {
                 state_directory,
                 ..
             } => {
-                if should_warn_server_acme_non_standard_public_port(config, public_bind_addr) {
+                for public_bind_addr in public_bind_addrs.iter().copied().filter(|address| {
+                    should_warn_server_acme_non_standard_public_port(config, *address)
+                }) {
                     runtime_log::acme(
                         AcmeRole::Server {
                             server_hostname: config.hostname.as_str(),
@@ -103,8 +129,8 @@ impl PreparedServer {
         };
         let server = Server::bind_with_proxy(
             ServerBindConfig {
-                public_bind_addr,
-                tunnel_connection_bind_addr,
+                public_bind_addrs,
+                tunnel_connection_bind_addrs: tunnel_bind_addrs,
                 readiness_bind_addr: config.readiness_bind_address,
                 server_hostname: config.hostname.clone(),
                 authorization,
@@ -135,6 +161,14 @@ impl PreparedServer {
 
     pub fn tunnel_addr(&self) -> io::Result<SocketAddr> {
         self.server.tunnel_addr()
+    }
+
+    pub fn public_addrs(&self) -> io::Result<Vec<SocketAddr>> {
+        self.server.public_addrs()
+    }
+
+    pub fn tunnel_addrs(&self) -> io::Result<Vec<SocketAddr>> {
+        self.server.tunnel_addrs()
     }
 
     pub fn readiness_addr(&self) -> Option<SocketAddr> {
@@ -1354,8 +1388,8 @@ mod tests {
                 state_directory: state_directory.clone(),
                 state_directory_was_defaulted: true,
             },
-            public_bind_address: "127.0.0.1:443".parse()?,
-            tunnel_connection_bind_address: "127.0.0.1:443".parse()?,
+            public_bind_addresses: vec!["127.0.0.1:443".parse()?],
+            tunnel_connection_bind_addresses: vec!["127.0.0.1:443".parse()?],
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             visitor_proxy_protocol: None,
@@ -1382,8 +1416,8 @@ mod tests {
                 state_directory: PathBuf::from("/tmp/server-acme"),
                 state_directory_was_defaulted: false,
             },
-            public_bind_address: "127.0.0.1:443".parse().unwrap(),
-            tunnel_connection_bind_address: "127.0.0.1:443".parse().unwrap(),
+            public_bind_addresses: vec!["127.0.0.1:443".parse().unwrap()],
+            tunnel_connection_bind_addresses: vec!["127.0.0.1:443".parse().unwrap()],
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             visitor_proxy_protocol: None,
@@ -1613,8 +1647,8 @@ mod tests {
                 state_directory: state_directory.clone(),
                 state_directory_was_defaulted: true,
             },
-            public_bind_address: "127.0.0.1:443".parse()?,
-            tunnel_connection_bind_address: "127.0.0.1:443".parse()?,
+            public_bind_addresses: vec!["127.0.0.1:443".parse()?],
+            tunnel_connection_bind_addresses: vec!["127.0.0.1:443".parse()?],
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             visitor_proxy_protocol: None,
@@ -1832,8 +1866,8 @@ mod tests {
             certificate: ServerCertificateConfig::Manual {
                 directory: certificate_directory.to_path_buf(),
             },
-            public_bind_address: "127.0.0.1:0".parse().unwrap(),
-            tunnel_connection_bind_address: "127.0.0.1:0".parse().unwrap(),
+            public_bind_addresses: vec!["127.0.0.1:0".parse().unwrap()],
+            tunnel_connection_bind_addresses: vec!["127.0.0.1:0".parse().unwrap()],
             readiness_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             visitor_proxy_protocol: None,

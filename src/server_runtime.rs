@@ -30,6 +30,15 @@ impl ServerRuntime {
         public_bind_addr: SocketAddr,
         tunnel_bind_addr: SocketAddr,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::prepare_listeners(config, vec![public_bind_addr], vec![tunnel_bind_addr]).await
+    }
+
+    /// Prepare all listeners as one Server runtime with shared admission and shutdown.
+    pub async fn prepare_listeners(
+        config: &ServerConfig,
+        public_bind_addrs: Vec<SocketAddr>,
+        tunnel_bind_addrs: Vec<SocketAddr>,
+    ) -> Result<Self, Box<dyn Error>> {
         let session = if let Some(control) = config.control.as_ref() {
             let identity = config.identity.as_ref().ok_or_else(|| {
                 io::Error::other("managed Server admission requires Server identity")
@@ -50,9 +59,14 @@ impl ServerRuntime {
             None
         };
 
-        let server = PreparedServer::bind(config, public_bind_addr, tunnel_bind_addr).await?;
-        crate::runtime_log::server_public_listener_ready(server.public_addr()?);
-        crate::runtime_log::server_tunnel_listener_ready(server.tunnel_addr()?);
+        let server =
+            PreparedServer::bind_listeners(config, public_bind_addrs, tunnel_bind_addrs).await?;
+        for address in server.public_addrs()? {
+            crate::runtime_log::server_public_listener_ready(address);
+        }
+        for address in server.tunnel_addrs()? {
+            crate::runtime_log::server_tunnel_listener_ready(address);
+        }
 
         let mode = if let Some(session) = session {
             let adapter = server
@@ -82,6 +96,14 @@ impl ServerRuntime {
 
     pub fn tunnel_addr(&self) -> io::Result<SocketAddr> {
         self.server.tunnel_addr()
+    }
+
+    pub fn public_addrs(&self) -> io::Result<Vec<SocketAddr>> {
+        self.server.public_addrs()
+    }
+
+    pub fn tunnel_addrs(&self) -> io::Result<Vec<SocketAddr>> {
+        self.server.tunnel_addrs()
     }
 
     pub fn readiness_addr(&self) -> Option<SocketAddr> {

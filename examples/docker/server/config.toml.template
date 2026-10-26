@@ -1,4 +1,8 @@
 [server]
+# Bind keys accept one address or 1 to 8 distinct addresses, all sharing Server limits.
+# Defaults are "0.0.0.0:443" for public TCP and Tunnel UDP.
+# public-bind-address = ["192.0.2.10:443", "[2001:db8::10]:443"]
+# tunnel-bind-address = ["192.0.2.10:443", "[2001:db8::10]:443"]
 hostname = "tunnel.example.test"
 
 [[server.tunnels]]

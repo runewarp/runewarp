@@ -42,8 +42,8 @@ async fn prepared_client_connects_from_validated_settings() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -124,8 +124,8 @@ async fn prepared_client_uses_the_configured_server_address_port() {
     let server = Server::bind(ServerBindConfig {
         // Bind dual-stack wildcard listeners so `localhost` resolution order does not make
         // this port-selection test flaky across environments.
-        public_bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
-        tunnel_connection_bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        public_bind_addrs: vec![SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))],
+        tunnel_connection_bind_addrs: vec![SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))],
         readiness_bind_addr: None,
         server_hostname: server_hostname("localhost"),
         authorization: authorization.clone(),
@@ -216,8 +216,8 @@ async fn prepared_client_rejects_settings_without_services() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -496,8 +496,8 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -622,8 +622,8 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -729,8 +729,8 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -837,8 +837,8 @@ async fn shared_client_instance_prep_survives_reconnect_style_redials() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),
@@ -976,8 +976,8 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
     )
     .unwrap();
     let server = Server::bind(ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname("tunnel.example.test"),
         authorization: authorization.clone(),

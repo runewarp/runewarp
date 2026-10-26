@@ -393,8 +393,8 @@ async fn authorization_revocation_ends_the_session_and_connection() {
     use crate::RoleAdapter;
     let fixture = Fixture::new().expect("fixture");
     let server = crate::Server::bind(crate::ServerBindConfig {
-        public_bind_addr: localhost(0),
-        tunnel_connection_bind_addr: localhost(0),
+        public_bind_addrs: vec![localhost(0)],
+        tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
         server_hostname: server_hostname(),
         authorization: crate::ServerAuthorization::empty_managed(),

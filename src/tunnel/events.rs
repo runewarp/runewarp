@@ -31,7 +31,8 @@ pub(crate) const KEEPALIVE_COMMENT: &[u8] = b": keepalive\n\n";
 ///
 /// A Server mints a fresh UUIDv7 at startup. It is neither a credential nor enrollment identity;
 /// Clients only compare values to tell one runtime generation of the same Server from another.
-/// UUIDv7 embeds its mint time, so generations sort by Server start time and reveal it.
+/// UUIDv7 embeds its millisecond mint time, which it reveals. Generations from different processes
+/// sort by that timestamp only to the millisecond; Core never relies on their order.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub struct ServerRuntimeGeneration(Uuid);
 

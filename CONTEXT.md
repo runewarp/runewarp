@@ -25,7 +25,7 @@ A live session opened by one **Client instance** and accepted under one **Tunnel
 _Avoid_: Tunnel, route
 
 **Server runtime generation**:
-An opaque value identifying one running process of a **Server**. A new UUIDv7 is minted at every start, so values sort by start time; it is not a credential, certificate, or enrollment identity, and only distinguishes one incarnation of the same Server from another.
+An opaque value identifying one running process of a **Server**. A new UUIDv7 is minted at every start and embeds its millisecond start time; it is not a credential, certificate, or enrollment identity, and only distinguishes one incarnation of the same Server from another.
 _Avoid_: Server version, instance ID, Blue/Green
 
 **Replacement hint**:

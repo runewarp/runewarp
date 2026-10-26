@@ -1635,34 +1635,33 @@ mod tests {
 
     #[test]
     fn candidate_lifecycle_lines_are_concise() {
+        let generation = crate::tunnel::ServerRuntimeGeneration::generate().to_string();
         let output = capture(LogLevel::Info, || {
-            client_tunnel_candidate_starting(
-                "a.example.test:443",
-                "fedcba9876543210fedcba9876543210",
-            );
+            client_tunnel_candidate_starting("a.example.test:443", &generation);
             client_tunnel_candidate_rejected("a.example.test:443", 2);
             client_tunnel_candidate_failed(
                 "a.example.test:443",
                 3,
                 "failed to connect: connection refused",
             );
-            client_tunnel_candidate_promoted(
-                "a.example.test:443",
-                "fedcba9876543210fedcba9876543210",
-            );
+            client_tunnel_candidate_promoted("a.example.test:443", &generation);
             client_tunnel_candidate_aborted("a.example.test:443", "hint-withdrawn");
             client_tunnel_retired_by_server_drain("a.example.test:443");
         });
 
         for line in [
-            "INFO client tunnel candidate starting: server-address=a.example.test:443 replacement-generation=fedcba9876543210fedcba9876543210",
-            "WARN client tunnel candidate rejected: server-address=a.example.test:443 reason=wrong-generation next-retry-delay=2s",
-            "WARN client tunnel candidate failed: server-address=a.example.test:443 next-retry-delay=3s: failed to connect",
-            "INFO client tunnel candidate promoted: server-address=a.example.test:443 server-generation=fedcba9876543210fedcba9876543210",
-            "INFO client tunnel candidate aborted: server-address=a.example.test:443 reason=hint-withdrawn",
-            "INFO client tunnel retired by server drain: server-address=a.example.test:443",
+            format!(
+                "INFO client tunnel candidate starting: server-address=a.example.test:443 replacement-generation={generation}"
+            ),
+            "WARN client tunnel candidate rejected: server-address=a.example.test:443 reason=wrong-generation next-retry-delay=2s".to_owned(),
+            "WARN client tunnel candidate failed: server-address=a.example.test:443 next-retry-delay=3s: failed to connect".to_owned(),
+            format!(
+                "INFO client tunnel candidate promoted: server-address=a.example.test:443 server-generation={generation}"
+            ),
+            "INFO client tunnel candidate aborted: server-address=a.example.test:443 reason=hint-withdrawn".to_owned(),
+            "INFO client tunnel retired by server drain: server-address=a.example.test:443".to_owned(),
         ] {
-            assert!(output.contains(line), "{line}\n{output}");
+            assert!(output.contains(&line), "{line}\n{output}");
         }
         assert!(!output.contains("connection refused"));
     }

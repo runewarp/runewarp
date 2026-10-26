@@ -944,6 +944,56 @@ backend-address = "127.0.0.1:443"
     }
 
     #[test]
+    fn only_a_shutdown_withdrawal_protocol_failure_fails_the_process() {
+        use crate::{ProtocolFailure, UnconfirmedDrain, WithdrawalOutcome};
+        let failure = WithdrawalOutcome::ProtocolFailure(ProtocolFailure::Status(404));
+
+        let shutdown = report_drain(
+            Some(ConnectionDrain::Shutdown(failure)),
+            &connection_context(),
+        );
+        assert!(
+            shutdown
+                .err()
+                .and_then(|end| end.withdrawal_protocol_failure_message().map(str::to_owned))
+                .is_some()
+        );
+        for outcome in [
+            failure,
+            WithdrawalOutcome::Confirmed,
+            WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::Deadline),
+            WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::RequestsForbidden),
+        ] {
+            assert!(
+                report_drain(
+                    Some(ConnectionDrain::Retirement(outcome)),
+                    &connection_context()
+                )
+                .is_ok(),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_generation_candidate_is_a_typed_retryable_failure() {
+        let error = crate::ClientStartupError::Connect(crate::ClientConnectError::Tunnel(
+            crate::tunnel::TunnelH3Error::WrongGeneration,
+        ));
+
+        let outcome =
+            classify_connect_failure(error, attempt_context(), "127.0.0.1:443".parse().unwrap());
+
+        assert!(matches!(
+            outcome,
+            TunnelAttemptOutcome::Retryable(TunnelAttemptFailure {
+                kind: AttemptFailureKind::WrongGeneration,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn local_material_failure_is_fatal() {
         let outcome = classify_connect_failure(
             crate::ClientStartupError::InvalidSettings("invalid material".to_owned()),

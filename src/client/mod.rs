@@ -431,6 +431,7 @@ fn services_and_configs_for_route_mode(
 mod tests {
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use quinn::Endpoint;
@@ -524,6 +525,286 @@ mod tests {
             io::Error::other(format!("accept task failed: {join_error}"))
         })??;
         Ok(())
+    }
+
+    /// A Server peer and a routed Client on one Tunnel connection, sharing `budget`.
+    async fn retirement_pair(
+        budget: Arc<super::ClientStreamBudget>,
+    ) -> (crate::tunnel::ServerTunnelH3, Client) {
+        let identity = generate_test_client_identity().unwrap();
+        let (certificate, private_key) = make_self_signed_cert("tunnel.example.test").unwrap();
+        let endpoint = Endpoint::server(
+            test_server_h3_config(
+                vec![certificate.clone()],
+                private_key_from_der(&private_key),
+                std::slice::from_ref(&identity.client_identity),
+            )
+            .unwrap(),
+            localhost(0),
+        )
+        .unwrap();
+        let config = super::RoutedClientConnectConfig {
+            local_bind_addr: localhost(0),
+            server_addr: endpoint.local_addr().unwrap(),
+            server_name: "tunnel.example.test".to_owned(),
+            services: vec![crate::ServiceConfig {
+                public_hostnames: None,
+                backend_address: "127.0.0.1:9".to_owned(),
+                tls_mode: crate::ClientTlsMode::Passthrough,
+                proxy_protocol: None,
+            }],
+            quic_client_config: make_client_tunnel_h3_config(
+                root_store_with(&certificate).unwrap(),
+                client_certificate_chain(&identity).unwrap(),
+                client_private_key(&identity).unwrap(),
+            )
+            .unwrap(),
+            termination_tls_configs: super::TerminationTlsConfigs::empty(),
+            stream_budget: budget,
+            expected_generation: None,
+        };
+        let server = async {
+            let connection = endpoint.accept().await.unwrap().await.unwrap();
+            crate::tunnel::ServerTunnelH3::establish(
+                connection,
+                crate::ServerHostname::try_from("tunnel.example.test").unwrap(),
+                crate::tunnel::ServerRuntimeGeneration::generate(),
+            )
+            .await
+            .unwrap()
+        };
+        let (server, client) = tokio::join!(server, Client::connect_with_services(config));
+        (server, client.unwrap())
+    }
+
+    fn budget(permits: usize) -> Arc<super::ClientStreamBudget> {
+        Arc::new(super::ClientStreamBudget::new(super::ClientStreamLimits {
+            max_stream_handlers: permits,
+            ..super::ClientStreamLimits::default()
+        }))
+    }
+
+    fn shutdown(graceful: Duration) -> crate::OrderlyShutdown {
+        crate::OrderlyShutdown::new(graceful, Duration::ZERO)
+    }
+
+    /// Run `client` with a retirement trigger; returns the trigger and the running task.
+    fn run_retirable(
+        client: Client,
+        shutdown: crate::OrderlyShutdown,
+    ) -> (
+        tokio::sync::oneshot::Sender<tokio::time::Instant>,
+        tokio::task::JoinHandle<Result<Option<super::ConnectionDrain>, quinn::ConnectionError>>,
+    ) {
+        let (retire, retirement) = tokio::sync::oneshot::channel();
+        let task =
+            tokio::spawn(async move { client.run_with_control(&shutdown, Some(retirement)).await });
+        (retire, task)
+    }
+
+    async fn wait_for_permits(budget: &super::ClientStreamBudget, permits: usize) {
+        timeout(Duration::from_secs(2), async {
+            while budget.semaphore().available_permits() != permits {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("permits settle");
+    }
+
+    #[tokio::test]
+    async fn retirement_withdraws_and_returns_every_permit_once_confirmed() {
+        let budget = budget(8);
+        let (_server, client) = retirement_pair(budget.clone()).await;
+        wait_for_permits(&budget, 0).await;
+        let (retire, task) = run_retirable(client, shutdown(Duration::from_secs(30)));
+
+        retire
+            .send(tokio::time::Instant::now() + Duration::from_secs(10))
+            .unwrap();
+        let drain = timeout(Duration::from_secs(2), task)
+            .await
+            .expect("retirement finishes")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            drain,
+            Some(super::ConnectionDrain::Retirement(
+                crate::WithdrawalOutcome::Confirmed
+            ))
+        );
+        wait_for_permits(&budget, 8).await;
+    }
+
+    #[tokio::test]
+    async fn the_retirement_deadline_closes_an_unconfirmed_connection() {
+        let budget = budget(8);
+        let (server, client) = retirement_pair(budget.clone()).await;
+        // A committed Visitor that never sends its header keeps the connection from quiescing.
+        let _visitor = server
+            .open_tunnel_stream(Duration::from_secs(1))
+            .await
+            .unwrap();
+        let (retire, task) = run_retirable(client, shutdown(Duration::from_secs(30)));
+
+        let started = tokio::time::Instant::now();
+        retire.send(started + Duration::from_millis(300)).unwrap();
+        let drain = timeout(Duration::from_secs(2), task)
+            .await
+            .expect("deadline ends retirement")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            drain,
+            Some(super::ConnectionDrain::Retirement(
+                crate::WithdrawalOutcome::Unconfirmed(crate::UnconfirmedDrain::Deadline)
+            ))
+        );
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        timeout(Duration::from_secs(2), server.closed())
+            .await
+            .expect("connection closes");
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_joins_an_in_flight_retirement() {
+        let budget = budget(8);
+        let (server, client) = retirement_pair(budget.clone()).await;
+        let visitor = server
+            .open_tunnel_stream(Duration::from_secs(1))
+            .await
+            .unwrap();
+        let shutdown = shutdown(Duration::from_secs(30));
+        let (retire, task) = run_retirable(client, shutdown.clone());
+        retire
+            .send(tokio::time::Instant::now() + Duration::from_secs(30))
+            .unwrap();
+        timeout(Duration::from_secs(2), async {
+            while server.accepts_visitors() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retirement withdrawal commits");
+
+        let _ = shutdown.begin_graceful();
+        // The one in-flight withdrawal serves both and confirms once the Visitor ends.
+        drop(visitor);
+        let drain = timeout(Duration::from_secs(2), task)
+            .await
+            .expect("joined drain finishes")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            drain,
+            Some(super::ConnectionDrain::Retirement(
+                crate::WithdrawalOutcome::Confirmed
+            ))
+        );
+        wait_for_permits(&budget, 8).await;
+    }
+
+    #[tokio::test]
+    async fn a_shorter_shutdown_deadline_bounds_an_in_flight_retirement() {
+        let budget = budget(8);
+        let (server, client) = retirement_pair(budget.clone()).await;
+        let _visitor = server
+            .open_tunnel_stream(Duration::from_secs(1))
+            .await
+            .unwrap();
+        let shutdown = shutdown(Duration::from_millis(200));
+        let (retire, task) = run_retirable(client, shutdown.clone());
+        retire
+            .send(tokio::time::Instant::now() + Duration::from_secs(30))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let _ = shutdown.begin_graceful();
+        let drain = timeout(Duration::from_secs(2), task)
+            .await
+            .expect("shutdown deadline ends retirement")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            drain,
+            Some(super::ConnectionDrain::Retirement(
+                crate::WithdrawalOutcome::Unconfirmed(crate::UnconfirmedDrain::Deadline)
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn fast_shutdown_closes_a_retiring_connection_at_once() {
+        let budget = budget(8);
+        let (server, client) = retirement_pair(budget.clone()).await;
+        let _visitor = server
+            .open_tunnel_stream(Duration::from_secs(1))
+            .await
+            .unwrap();
+        let shutdown = shutdown(Duration::from_secs(30));
+        let (retire, task) = run_retirable(client, shutdown.clone());
+        retire
+            .send(tokio::time::Instant::now() + Duration::from_secs(30))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let _ = shutdown.begin_fast();
+        let drain = timeout(Duration::from_secs(2), task)
+            .await
+            .expect("Fast ends retirement")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            drain,
+            Some(super::ConnectionDrain::Retirement(
+                crate::WithdrawalOutcome::Unconfirmed(crate::UnconfirmedDrain::FastShutdown)
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn after_goaway_retirement_sends_no_withdrawal_and_leaves_closing_to_the_server() {
+        let budget = budget(8);
+        let (server, client) = retirement_pair(budget.clone()).await;
+        let server = Arc::new(server);
+        let visitor = server
+            .open_tunnel_stream(Duration::from_secs(1))
+            .await
+            .unwrap();
+        let draining = tokio::spawn({
+            let server = Arc::clone(&server);
+            async move { server.shutdown(Duration::from_secs(10)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (retire, task) = run_retirable(client, shutdown(Duration::from_secs(30)));
+
+        retire
+            .send(tokio::time::Instant::now() + Duration::from_secs(30))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !task.is_finished(),
+            "the connection stays open for the Server drain"
+        );
+
+        drop(visitor);
+        let drain = timeout(Duration::from_secs(5), task)
+            .await
+            .expect("Server drain closes the connection")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            drain,
+            Some(super::ConnectionDrain::Retirement(
+                crate::WithdrawalOutcome::Unconfirmed(crate::UnconfirmedDrain::RequestsForbidden)
+            ))
+        );
+        draining.await.unwrap();
     }
 
     fn generate_test_client_identity() -> io::Result<GeneratedClientIdentity> {

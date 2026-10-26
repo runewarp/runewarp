@@ -428,6 +428,48 @@ impl PreparedClient {
         server_address: &ServerAddress,
         server_addr: SocketAddr,
     ) -> Result<Self, ClientStartupError> {
+        Self::connect_with_generation(
+            config,
+            instance,
+            local_bind_addr,
+            server_address,
+            server_addr,
+            None,
+        )
+        .await
+    }
+
+    /// Opens one candidate Tunnel connection that must reach `expected_generation`.
+    ///
+    /// Behaves like [`Self::connect_to_server_address`], except that a first event-stream
+    /// snapshot naming another generation fails the attempt before any Visitor credit.
+    pub(crate) async fn connect_candidate_to_server_address(
+        config: &ClientConfig,
+        instance: &Arc<ClientInstancePrep>,
+        local_bind_addr: SocketAddr,
+        server_address: &ServerAddress,
+        server_addr: SocketAddr,
+        expected_generation: crate::tunnel::ServerRuntimeGeneration,
+    ) -> Result<Self, ClientStartupError> {
+        Self::connect_with_generation(
+            config,
+            instance,
+            local_bind_addr,
+            server_address,
+            server_addr,
+            Some(expected_generation),
+        )
+        .await
+    }
+
+    async fn connect_with_generation(
+        config: &ClientConfig,
+        instance: &Arc<ClientInstancePrep>,
+        local_bind_addr: SocketAddr,
+        server_address: &ServerAddress,
+        server_addr: SocketAddr,
+        expected_generation: Option<crate::tunnel::ServerRuntimeGeneration>,
+    ) -> Result<Self, ClientStartupError> {
         let loaded_roots = load_root_store(&config.server_trust)?;
         let (cert_chain, private_key) = load_client_identity_material(&config.identity_directory)?;
         let quic_client_config =
@@ -441,6 +483,7 @@ impl PreparedClient {
             quic_client_config,
             termination_tls_configs: instance.termination_tls_configs(),
             stream_budget: instance.stream_budget(),
+            expected_generation,
         })
         .await
         .map_err(ClientStartupError::Connect)?;
@@ -502,6 +545,24 @@ impl PreparedClient {
         shutdown: &OrderlyShutdown,
     ) -> Result<Option<crate::WithdrawalOutcome>, quinn::ConnectionError> {
         self.run_tunnel_then_maybe_stop_acme(|client| client.run_with_shutdown(shutdown))
+            .await
+    }
+
+    /// Replacement hint the address worker may act on for this connection.
+    pub(crate) fn replacement_hint(
+        &self,
+    ) -> tokio::sync::watch::Receiver<crate::tunnel::ReplacementHint> {
+        self.client.replacement_hint()
+    }
+
+    /// Run like [`Self::run_with_shutdown`], retiring the connection when `retirement` yields a
+    /// deadline.
+    pub(crate) async fn run_with_control(
+        self,
+        shutdown: &OrderlyShutdown,
+        retirement: Option<tokio::sync::oneshot::Receiver<tokio::time::Instant>>,
+    ) -> Result<Option<crate::client::ConnectionDrain>, quinn::ConnectionError> {
+        self.run_tunnel_then_maybe_stop_acme(|client| client.run_with_control(shutdown, retirement))
             .await
     }
 

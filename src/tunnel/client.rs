@@ -403,6 +403,25 @@ impl ClientTunnelH3 {
     /// reach their handlers. It always ends by closing the connection with `H3_NO_ERROR`; dropping
     /// it early leaves closing to the caller.
     pub fn withdrawal(&self) -> impl Future<Output = WithdrawalOutcome> + Send + 'static + use<> {
+        self.withdraw(false)
+    }
+
+    /// Withdraw this connection from placement after a candidate replaced it.
+    ///
+    /// Behaves like [`Self::withdrawal`], except when GOAWAY already forbids requests: no
+    /// withdrawal is sent and the connection stays open, because the Server's own drain and
+    /// WebTransport DRAIN retire it. The future then resolves with
+    /// [`UnconfirmedDrain::RequestsForbidden`] once the connection closes.
+    pub fn retirement_withdrawal(
+        &self,
+    ) -> impl Future<Output = WithdrawalOutcome> + Send + 'static + use<> {
+        self.withdraw(true)
+    }
+
+    fn withdraw(
+        &self,
+        leave_goaway_to_server_drain: bool,
+    ) -> impl Future<Output = WithdrawalOutcome> + Send + 'static + use<> {
         self.credits.stop_replenishing();
         let connection = self.connection.clone();
         let credits = self.credits.clone();
@@ -427,6 +446,12 @@ impl ClientTunnelH3 {
                     WithdrawalStep::Done(outcome) => break outcome,
                 }
             };
+            if leave_goaway_to_server_drain
+                && outcome == WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::RequestsForbidden)
+            {
+                connection.closed().await;
+                return outcome;
+            }
             if outcome == WithdrawalOutcome::Confirmed {
                 confirmed.send_replace(true);
                 credits.stop_idle();

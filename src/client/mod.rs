@@ -22,8 +22,8 @@ pub(crate) use address_worker::{wait_for_retry_delay, wait_for_shutdown};
 pub use assignment_convergence::AssignmentConvergence;
 pub use managed_adapter::ClientAssignmentAdapter;
 pub use tunnel_attempt::{
-    ClientTunnelAttempt, TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionEnd,
-    TunnelConnectionRun,
+    ClientTunnelAttempt, TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionControl,
+    TunnelConnectionEnd, TunnelConnectionRun,
 };
 
 use std::fmt;
@@ -33,9 +33,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::tunnel::{
-    ClientTunnelH3, ClientTunnelStream, TunnelH3Error, UnconfirmedDrain, WithdrawalOutcome,
+    ClientTunnelH3, ClientTunnelStream, ReplacementHint, ServerRuntimeGeneration, TunnelH3Error,
+    UnconfirmedDrain, WithdrawalOutcome,
 };
 use quinn::Endpoint;
+use tokio::sync::{oneshot, watch};
+use tokio::time::Instant;
 
 pub(crate) use self::stream_limits::{ClientStreamBudget, ClientStreamLimits};
 pub(crate) use self::termination_tls::TerminationTlsConfigs;
@@ -71,6 +74,17 @@ pub(crate) struct RoutedClientConnectConfig {
     pub(crate) quic_client_config: quinn::ClientConfig,
     pub(crate) termination_tls_configs: TerminationTlsConfigs,
     pub(crate) stream_budget: Arc<ClientStreamBudget>,
+    /// A candidate attempt requires the Server to report this runtime generation.
+    pub(crate) expected_generation: Option<ServerRuntimeGeneration>,
+}
+
+/// Why a connection run withdrew its connection from placement, and how that ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConnectionDrain {
+    /// Graceful Client shutdown withdrew the connection.
+    Shutdown(WithdrawalOutcome),
+    /// A promoted candidate replaced the connection, which then retired.
+    Retirement(WithdrawalOutcome),
 }
 
 enum ClientRouteMode {
@@ -142,6 +156,7 @@ impl Client {
             ClientRouteMode::CatchAll {
                 backend_address: config.backend_address,
             },
+            None,
         )
         .await
     }
@@ -159,6 +174,7 @@ impl Client {
                 termination_tls_configs: config.termination_tls_configs,
                 stream_budget: config.stream_budget,
             },
+            config.expected_generation,
         )
         .await
     }
@@ -169,6 +185,7 @@ impl Client {
         server_name: String,
         quic_client_config: quinn::ClientConfig,
         route_mode: ClientRouteMode,
+        expected_generation: Option<ServerRuntimeGeneration>,
     ) -> Result<Self, ClientConnectError> {
         let hostname = crate::ServerHostname::try_from(server_name.as_str()).map_err(|_| {
             ClientConnectError::Connect(quinn::ConnectError::InvalidServerName(server_name.clone()))
@@ -201,7 +218,7 @@ impl Client {
                     }
                 })
             },
-            None,
+            expected_generation,
         )
         .await
         .map_err(ClientConnectError::Tunnel)?;
@@ -220,6 +237,11 @@ impl Client {
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.endpoint.local_addr()
+    }
+
+    /// Replacement hint the address worker may act on for this connection.
+    pub fn replacement_hint(&self) -> watch::Receiver<ReplacementHint> {
+        self.connection.replacement_hint()
     }
 
     pub async fn run(mut self) -> Result<(), quinn::ConnectionError> {
@@ -263,15 +285,46 @@ impl Client {
     /// Server committed first, and returns the withdrawal outcome. The shared graceful deadline
     /// or a later Fast escalation closes the connection with an unconfirmed drain.
     pub async fn run_with_shutdown(
-        mut self,
+        self,
         shutdown: &OrderlyShutdown,
     ) -> Result<Option<WithdrawalOutcome>, quinn::ConnectionError> {
+        Ok(self
+            .run_with_control(shutdown, None)
+            .await?
+            .map(|drain| match drain {
+                ConnectionDrain::Shutdown(outcome) | ConnectionDrain::Retirement(outcome) => {
+                    outcome
+                }
+            }))
+    }
+
+    /// Like [`Self::run_with_shutdown`], and retire the connection when `retirement` yields a
+    /// deadline.
+    ///
+    /// Retirement withdraws the connection from placement as graceful shutdown does, bounded by
+    /// that deadline. Under GOAWAY no withdrawal is sent and the Server's drain retires the
+    /// connection. A later graceful shutdown joins the retirement under the earlier of the two
+    /// deadlines; Fast closes at once.
+    pub(crate) async fn run_with_control(
+        mut self,
+        shutdown: &OrderlyShutdown,
+        mut retirement: Option<oneshot::Receiver<Instant>>,
+    ) -> Result<Option<ConnectionDrain>, quinn::ConnectionError> {
         let closed = self.connection.closed();
         tokio::pin!(closed);
         let mut accepting = true;
-        let mut withdrawal = None;
+        let mut withdrawal: Option<
+            std::pin::Pin<Box<dyn Future<Output = WithdrawalOutcome> + Send>>,
+        > = None;
+        let mut retirement_deadline = None;
+        let mut joined_shutdown = false;
         loop {
             let withdrawing = withdrawal.is_some();
+            let retiring = retirement_deadline.is_some();
+            let deadline = match (retirement_deadline, shutdown.graceful_deadline()) {
+                (Some(retirement), Some(shutdown)) => Some(Instant::min(retirement, shutdown)),
+                (retirement, shutdown) => retirement.or(shutdown),
+            };
             let outcome = tokio::select! {
                 biased;
                 // The withdrawal observes connection loss itself, so only its result counts.
@@ -282,11 +335,16 @@ impl Client {
                     WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::FastShutdown)
                 }
                 _ = async {
-                    match shutdown.graceful_deadline() {
+                    match deadline {
                         Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending().await,
                     }
                 }, if withdrawing => WithdrawalOutcome::Unconfirmed(UnconfirmedDrain::Deadline),
+                // Graceful shutdown joins an in-flight retirement; only its deadline applies.
+                _ = shutdown.wait_started(), if retiring && !joined_shutdown => {
+                    joined_shutdown = true;
+                    continue;
+                }
                 mode = shutdown.wait_started(), if !withdrawing => {
                     if mode == ShutdownMode::Graceful
                         && !shutdown.graceful_shutdown_duration().is_zero()
@@ -298,6 +356,16 @@ impl Client {
                     self.connection.close();
                     tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
                     return Ok(None);
+                }
+                deadline = async {
+                    retirement.as_mut().expect("retirement pending").await
+                }, if !withdrawing && retirement.is_some() => {
+                    retirement = None;
+                    if let Ok(deadline) = deadline {
+                        retirement_deadline = Some(deadline);
+                        withdrawal = Some(Box::pin(self.connection.retirement_withdrawal()));
+                    }
+                    continue;
                 }
                 error = &mut closed, if !withdrawing => return Err(error),
                 stream = self.connection.accept_tunnel_stream(), if accepting => {
@@ -317,7 +385,11 @@ impl Client {
             };
             self.connection.close();
             tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
-            return Ok(Some(outcome));
+            return Ok(Some(if retiring {
+                ConnectionDrain::Retirement(outcome)
+            } else {
+                ConnectionDrain::Shutdown(outcome)
+            }));
         }
     }
 

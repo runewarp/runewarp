@@ -10,24 +10,69 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use futures_util::future::BoxFuture;
+use tokio::sync::{oneshot, watch};
+use tokio::time::Instant;
 
-use super::AddressWorkerDial;
+use super::{AddressWorkerDial, ConnectionDrain};
+use crate::tunnel::{ReplacementHint, ServerRuntimeGeneration};
 use crate::{ClientInstancePrep, PreparedClient, ServerAddress};
 
-/// Runs one authenticated Tunnel connection until remote close or process shutdown.
-///
-/// The argument is the Client-instance [`crate::OrderlyShutdown`]: Graceful withdraws the
-/// connection under its shared deadline, and Fast closes it at once.
+/// Runs one authenticated Tunnel connection until remote close, process shutdown, or retirement.
 pub type TunnelConnectionRun = Box<
-    dyn FnOnce(crate::OrderlyShutdown) -> BoxFuture<'static, Result<(), TunnelConnectionEnd>>
+    dyn FnOnce(TunnelConnectionControl) -> BoxFuture<'static, Result<(), TunnelConnectionEnd>>
         + Send,
 >;
+
+/// What a [`TunnelConnectionRun`] observes besides its own connection.
+///
+/// The Client-instance [`crate::OrderlyShutdown`] withdraws the connection under its shared
+/// deadline on Graceful and closes it at once on Fast. Retirement asks the connection to
+/// withdraw after a promoted candidate replaced it, bounded by its own deadline.
+pub struct TunnelConnectionControl {
+    shutdown: crate::OrderlyShutdown,
+    retirement: Option<oneshot::Receiver<Instant>>,
+}
+
+impl TunnelConnectionControl {
+    pub(crate) fn new(
+        shutdown: crate::OrderlyShutdown,
+        retirement: oneshot::Receiver<Instant>,
+    ) -> Self {
+        Self {
+            shutdown,
+            retirement: Some(retirement),
+        }
+    }
+
+    /// Client-instance shutdown mode and graceful deadline.
+    pub fn shutdown(&self) -> &crate::OrderlyShutdown {
+        &self.shutdown
+    }
+
+    /// Resolve with the retirement deadline once the address worker retires this connection;
+    /// pending forever when it never does.
+    pub async fn retired(&mut self) -> Instant {
+        if let Some(retirement) = self.retirement.as_mut()
+            && let Ok(deadline) = retirement.await
+        {
+            return deadline;
+        }
+        self.retirement = None;
+        std::future::pending().await
+    }
+
+    fn into_parts(self) -> (crate::OrderlyShutdown, Option<oneshot::Receiver<Instant>>) {
+        (self.shutdown, self.retirement)
+    }
+}
 
 /// Typed result of one production Tunnel-connection attempt.
 pub enum TunnelAttemptOutcome {
     Connected {
         configured_server_addr: String,
         run: TunnelConnectionRun,
+        /// Replacement hint the address worker follows while this connection is its primary.
+        hints: watch::Receiver<ReplacementHint>,
     },
     Retryable(TunnelAttemptFailure),
     FatalLocalMaterial(String),
@@ -43,6 +88,8 @@ enum AttemptFailureKind {
     Resolution(AttemptContext),
     Unauthorized(AttemptContext),
     Transport(AttemptContext, SocketAddr),
+    /// A candidate reached a Server runtime generation other than the hinted one.
+    WrongGeneration,
     Unclassified,
 }
 
@@ -115,7 +162,20 @@ impl TunnelAttemptFailure {
                     &self.message,
                 );
             }
-            AttemptFailureKind::Unclassified => {}
+            AttemptFailureKind::WrongGeneration | AttemptFailureKind::Unclassified => {}
+        }
+    }
+
+    /// Report a failed candidate attempt. The primary connection is unaffected.
+    pub(crate) fn report_candidate_after_retry_delay(&self, server_address: &str, delay_secs: u64) {
+        if matches!(self.kind, AttemptFailureKind::WrongGeneration) {
+            crate::runtime_log::client_tunnel_candidate_rejected(server_address, delay_secs);
+        } else {
+            crate::runtime_log::client_tunnel_candidate_failed(
+                server_address,
+                delay_secs,
+                &self.message,
+            );
         }
     }
 
@@ -140,6 +200,13 @@ impl TunnelAttemptFailure {
     ) -> Self {
         Self {
             kind: AttemptFailureKind::Transport(context, resolved_server_addr),
+            message,
+        }
+    }
+
+    fn wrong_generation(message: String) -> Self {
+        Self {
+            kind: AttemptFailureKind::WrongGeneration,
             message,
         }
     }
@@ -262,19 +329,45 @@ impl ClientTunnelAttempt {
 
 impl AddressWorkerDial for ClientTunnelAttempt {
     fn establish(&self, address: ServerAddress) -> BoxFuture<'static, TunnelAttemptOutcome> {
+        Box::pin(self.attempt(address, None))
+    }
+
+    fn establish_candidate(
+        &self,
+        address: ServerAddress,
+        expected_generation: ServerRuntimeGeneration,
+    ) -> BoxFuture<'static, TunnelAttemptOutcome> {
+        Box::pin(self.attempt(address, Some(expected_generation)))
+    }
+}
+
+impl ClientTunnelAttempt {
+    /// One attempt for `address`: a primary, or a candidate when `expected_generation` is set.
+    ///
+    /// Candidates share resolution, material reload, QUIC/H3, mTLS and the event-stream gate, but
+    /// leave primary reconnect reporting and phase tracking alone; the address worker logs them.
+    fn attempt(
+        &self,
+        address: ServerAddress,
+        expected_generation: Option<ServerRuntimeGeneration>,
+    ) -> impl std::future::Future<Output = TunnelAttemptOutcome> + Send + 'static + use<> {
         let settings = Arc::clone(&self.settings);
         let instance = Arc::clone(&self.instance);
         let local_bind_addr = self.local_bind_addr;
         let resolver = Arc::clone(&self.resolver);
         let connected_once = Arc::clone(&self.connected_once);
         let establish_attempts = Arc::clone(&self.establish_attempts);
-        Box::pin(async move {
+        let candidate = expected_generation.is_some();
+        async move {
             let phase = client_tunnel_phase(connected_once.load(Ordering::SeqCst));
-            let attempt_number = establish_attempts.fetch_add(1, Ordering::SeqCst);
-            let attempt_kind = client_tunnel_attempt_kind(attempt_number == 0);
-            let configured_server_addr =
-                configured_server_addr(address.hostname().as_str(), address.port());
-            let unresolved_context = AttemptContext {
+            let attempt_kind = if candidate {
+                crate::runtime_log::ClientTunnelAttemptKind::Retry
+            } else {
+                let attempt_number = establish_attempts.fetch_add(1, Ordering::SeqCst);
+                client_tunnel_attempt_kind(attempt_number == 0)
+            };
+            let configured_server_addr = display_server_address(&address);
+            let context = AttemptContext {
                 phase,
                 attempt_kind,
                 configured_server_addr: configured_server_addr.clone(),
@@ -286,55 +379,69 @@ impl AddressWorkerDial for ClientTunnelAttempt {
                 Err(error) => {
                     let message = error.to_string();
                     return TunnelAttemptOutcome::Retryable(TunnelAttemptFailure::resolution(
-                        unresolved_context,
-                        message,
+                        context, message,
                     ));
                 }
             };
-            let context = AttemptContext {
-                phase,
-                attempt_kind,
-                configured_server_addr: configured_server_addr.clone(),
-            };
 
-            crate::runtime_log::client_tunnel_connecting(
-                phase,
-                attempt_kind,
-                &configured_server_addr,
-                resolved_server_addr,
-            );
-            let client = match PreparedClient::connect_to_server_address(
-                &settings,
-                &instance,
-                local_bind_addr,
-                &address,
-                resolved_server_addr,
-            )
-            .await
-            {
+            let connected = match expected_generation {
+                None => {
+                    crate::runtime_log::client_tunnel_connecting(
+                        phase,
+                        attempt_kind,
+                        &configured_server_addr,
+                        resolved_server_addr,
+                    );
+                    PreparedClient::connect_to_server_address(
+                        &settings,
+                        &instance,
+                        local_bind_addr,
+                        &address,
+                        resolved_server_addr,
+                    )
+                    .await
+                }
+                Some(expected_generation) => {
+                    PreparedClient::connect_candidate_to_server_address(
+                        &settings,
+                        &instance,
+                        local_bind_addr,
+                        &address,
+                        resolved_server_addr,
+                        expected_generation,
+                    )
+                    .await
+                }
+            };
+            let client = match connected {
                 Ok(client) => client,
                 Err(error) => {
                     return classify_connect_failure(error, context, resolved_server_addr);
                 }
             };
 
-            connected_once.store(true, Ordering::SeqCst);
-            establish_attempts.store(0, Ordering::SeqCst);
-            crate::runtime_log::client_tunnel_connected(
-                phase,
-                &configured_server_addr,
-                resolved_server_addr,
-            );
+            if !candidate {
+                connected_once.store(true, Ordering::SeqCst);
+                establish_attempts.store(0, Ordering::SeqCst);
+                crate::runtime_log::client_tunnel_connected(
+                    phase,
+                    &configured_server_addr,
+                    resolved_server_addr,
+                );
+            }
             let connection_context = ConnectionContext {
                 configured_server_addr: configured_server_addr.clone(),
                 resolved_server_addr,
             };
+            let hints = client.replacement_hint();
             TunnelAttemptOutcome::Connected {
-                configured_server_addr: configured_server_addr.clone(),
-                run: Box::new(move |shutdown| {
+                configured_server_addr,
+                hints,
+                run: Box::new(move |control| {
                     Box::pin(async move {
-                        match client.run_with_shutdown(&shutdown).await {
-                            Ok(withdrawal) => report_withdrawal(withdrawal, &connection_context),
+                        let (shutdown, retirement) = control.into_parts();
+                        match client.run_with_control(&shutdown, retirement).await {
+                            Ok(drain) => report_drain(drain, &connection_context),
                             Err(error) => {
                                 let message = error.to_string();
                                 Err(classify_connection_end(error, connection_context, message))
@@ -343,7 +450,32 @@ impl AddressWorkerDial for ClientTunnelAttempt {
                     })
                 }),
             }
-        })
+        }
+    }
+}
+
+/// Report how a withdrawal ended. Only a graceful-shutdown protocol failure fails the process;
+/// retirement happens outside shutdown, so its failure only closes that connection.
+fn report_drain(
+    drain: Option<ConnectionDrain>,
+    context: &ConnectionContext,
+) -> Result<(), TunnelConnectionEnd> {
+    use crate::{UnconfirmedDrain, WithdrawalOutcome};
+    match drain {
+        None => Ok(()),
+        Some(ConnectionDrain::Shutdown(outcome)) => report_withdrawal(Some(outcome), context),
+        Some(ConnectionDrain::Retirement(WithdrawalOutcome::Unconfirmed(
+            UnconfirmedDrain::RequestsForbidden,
+        ))) => {
+            crate::runtime_log::client_tunnel_retired_by_server_drain(
+                &context.configured_server_addr,
+            );
+            Ok(())
+        }
+        Some(ConnectionDrain::Retirement(outcome)) => {
+            let _ = report_withdrawal(Some(outcome), context);
+            Ok(())
+        }
     }
 }
 
@@ -405,6 +537,11 @@ fn client_tunnel_attempt_kind(
     }
 }
 
+/// Operator-facing `host:port` form of a Server address, bracketing IPv6 literals.
+pub(crate) fn display_server_address(address: &ServerAddress) -> String {
+    configured_server_addr(address.hostname().as_str(), address.port())
+}
+
 fn configured_server_addr(server_hostname: &str, server_port: u16) -> String {
     if server_hostname.contains(':') && !server_hostname.starts_with('[') {
         format!("[{server_hostname}]:{server_port}")
@@ -436,8 +573,14 @@ fn classify_connect_failure(
         return TunnelAttemptOutcome::FatalLocalMaterial(error.to_string());
     };
     let unauthorized = connect_error.is_unauthorized_client_identity();
+    let wrong_generation = matches!(
+        &connect_error,
+        crate::ClientConnectError::Tunnel(error) if error.is_wrong_generation()
+    );
     let message = connect_error.to_string();
-    TunnelAttemptOutcome::Retryable(if unauthorized {
+    TunnelAttemptOutcome::Retryable(if wrong_generation {
+        TunnelAttemptFailure::wrong_generation(message)
+    } else if unauthorized {
         TunnelAttemptFailure::unauthorized(context, message)
     } else {
         TunnelAttemptFailure::transport(context, resolved_server_addr, message)

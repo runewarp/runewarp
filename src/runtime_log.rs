@@ -639,6 +639,101 @@ pub fn client_tunnel_withdrawal_failed(
     );
 }
 
+/// A candidate attempt starts toward the hinted Server runtime generation.
+pub fn client_tunnel_candidate_starting(
+    configured_server_addr: &str,
+    replacement_generation: &str,
+) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "client tunnel candidate starting",
+            [
+                ("server-address", Cow::Borrowed(configured_server_addr)),
+                (
+                    "replacement-generation",
+                    Cow::Borrowed(replacement_generation),
+                ),
+            ],
+        ),
+    );
+}
+
+/// A candidate reached another Server runtime generation and was closed.
+pub fn client_tunnel_candidate_rejected(configured_server_addr: &str, next_retry_delay_secs: u64) {
+    emit(
+        EventLevel::Warn,
+        &event_line(
+            "client tunnel candidate rejected",
+            [
+                ("server-address", Cow::Borrowed(configured_server_addr)),
+                ("reason", Cow::Borrowed("wrong-generation")),
+            ]
+            .into_iter()
+            .chain(next_retry_delay_field(next_retry_delay_secs)),
+        ),
+    );
+}
+
+pub fn client_tunnel_candidate_failed(
+    configured_server_addr: &str,
+    next_retry_delay_secs: u64,
+    error: &str,
+) {
+    let fields = || {
+        [("server-address", Cow::Borrowed(configured_server_addr))]
+            .into_iter()
+            .chain(next_retry_delay_field(next_retry_delay_secs))
+    };
+    emit_runtime_failure_with_debug_detail(
+        EventLevel::Warn,
+        &event_line_with_summary(
+            "client tunnel candidate failed",
+            fields(),
+            summarize_error(error),
+        ),
+        event_line_with_summary("client tunnel candidate failed detail", fields(), error),
+        error,
+    );
+}
+
+pub fn client_tunnel_candidate_promoted(configured_server_addr: &str, server_generation: &str) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "client tunnel candidate promoted",
+            [
+                ("server-address", Cow::Borrowed(configured_server_addr)),
+                ("server-generation", Cow::Borrowed(server_generation)),
+            ],
+        ),
+    );
+}
+
+pub fn client_tunnel_candidate_aborted(configured_server_addr: &str, reason: &str) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "client tunnel candidate aborted",
+            [
+                ("server-address", Cow::Borrowed(configured_server_addr)),
+                ("reason", Cow::Borrowed(reason)),
+            ],
+        ),
+    );
+}
+
+/// GOAWAY forbade retirement withdrawal, so the Server's drain retired the connection.
+pub fn client_tunnel_retired_by_server_drain(configured_server_addr: &str) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "client tunnel retired by server drain",
+            [("server-address", Cow::Borrowed(configured_server_addr))],
+        ),
+    );
+}
+
 pub fn managed_session_event(role: ManagedSessionRole, event: &ManagedSessionEvent) {
     let role = match role {
         ManagedSessionRole::Server => "server",
@@ -1418,11 +1513,14 @@ mod tests {
         AcmeEvent, AcmeRole, ClientRouteOutcome, ClientTunnelAttemptKind, ClientTunnelPhase,
         EventLevel, InstallOutcome, ServerRouteOutcome, acme, build_subscriber,
         client_graceful_shutdown_closing_tunnel_connection, client_graceful_shutdown_started,
-        client_ready, client_route, client_trust_store_warning, client_tunnel_closed,
+        client_ready, client_route, client_trust_store_warning, client_tunnel_candidate_aborted,
+        client_tunnel_candidate_failed, client_tunnel_candidate_promoted,
+        client_tunnel_candidate_rejected, client_tunnel_candidate_starting, client_tunnel_closed,
         client_tunnel_connect_failed, client_tunnel_connected, client_tunnel_connecting,
-        client_tunnel_disconnected, client_tunnel_resolution_failed, client_tunnel_retiring,
-        client_tunnel_unauthorized, emit, emit_server_tunnel_connection_dropped, install,
-        installed_level, managed_session_event, server_admission_saturated,
+        client_tunnel_disconnected, client_tunnel_resolution_failed,
+        client_tunnel_retired_by_server_drain, client_tunnel_retiring, client_tunnel_unauthorized,
+        emit, emit_server_tunnel_connection_dropped, install, installed_level,
+        managed_session_event, server_admission_saturated,
         server_graceful_shutdown_deadline_expired,
         server_orderly_shutdown_closing_tunnel_connections, server_orderly_shutdown_escalated,
         server_orderly_shutdown_started, server_public_listener_ready, server_readiness_gained,
@@ -1533,6 +1631,40 @@ mod tests {
             "WARN client route unavailable: public-hostname=api.example.test reason=no-matching-service"
         ));
         assert!(output.contains("client warning: tunnel connection lost"));
+    }
+
+    #[test]
+    fn candidate_lifecycle_lines_are_concise() {
+        let output = capture(LogLevel::Info, || {
+            client_tunnel_candidate_starting(
+                "a.example.test:443",
+                "fedcba9876543210fedcba9876543210",
+            );
+            client_tunnel_candidate_rejected("a.example.test:443", 2);
+            client_tunnel_candidate_failed(
+                "a.example.test:443",
+                3,
+                "failed to connect: connection refused",
+            );
+            client_tunnel_candidate_promoted(
+                "a.example.test:443",
+                "fedcba9876543210fedcba9876543210",
+            );
+            client_tunnel_candidate_aborted("a.example.test:443", "hint-withdrawn");
+            client_tunnel_retired_by_server_drain("a.example.test:443");
+        });
+
+        for line in [
+            "INFO client tunnel candidate starting: server-address=a.example.test:443 replacement-generation=fedcba9876543210fedcba9876543210",
+            "WARN client tunnel candidate rejected: server-address=a.example.test:443 reason=wrong-generation next-retry-delay=2s",
+            "WARN client tunnel candidate failed: server-address=a.example.test:443 next-retry-delay=3s: failed to connect",
+            "INFO client tunnel candidate promoted: server-address=a.example.test:443 server-generation=fedcba9876543210fedcba9876543210",
+            "INFO client tunnel candidate aborted: server-address=a.example.test:443 reason=hint-withdrawn",
+            "INFO client tunnel retired by server drain: server-address=a.example.test:443",
+        ] {
+            assert!(output.contains(line), "{line}\n{output}");
+        }
+        assert!(!output.contains("connection refused"));
     }
 
     #[test]

@@ -216,6 +216,10 @@ _Avoid_: Server certificate, Server identity
 The authenticated live relationship between one **Server** or **Client instance** and **Control** for receiving versioned snapshots and sending **State documents**. It is separate from **Server readiness**, Visitor traffic, and **Tunnel connections**.
 _Avoid_: Tunnel connection, data path, control channel
 
+**Managed session incarnation**:
+The Control-issued identity of one admitted **Managed session**, distinct from a **Server runtime generation** and authentication credentials. Reconnecting creates a different incarnation even when the same runtime continues serving.
+_Avoid_: Process generation, authorization token, WebTransport session ID
+
 **State document**:
 The full current state a Managed peer sends to **Control** with `PUT .../state`: the applied revision plus the role's facts. A **Server** reports its **Server runtime generation**, whether it is draining, open **Tunnel connections** per **Tunnel ID**, and in-flight Visitors; a **Client instance** reports the generations of its connections carrying credit per assigned **Server address**. Every document is complete; there are no deltas.
 _Avoid_: acknowledgment, heartbeat, status report

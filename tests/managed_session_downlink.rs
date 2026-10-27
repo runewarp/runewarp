@@ -53,6 +53,7 @@ const REDIRECT_TARGET: &str = "/v1/client/events/redirect-target";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SseBehavior {
     SuccessSnapshot,
+    SessionHeaders(&'static [&'static str]),
     DelayedHeadersThenSnapshot,
     SnapshotAtDeadline,
     Redirect,
@@ -319,6 +320,10 @@ async fn handle_request(
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, "text/event-stream")
+                .header(
+                    "runewarp-session-id",
+                    "01928f3e-7b6a-7c3d-8e4f-0123456789ab",
+                )
                 .body(body)
                 .unwrap())
         }
@@ -334,6 +339,10 @@ async fn handle_request(
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, "text/event-stream")
+                .header(
+                    "runewarp-session-id",
+                    "01928f3e-7b6a-7c3d-8e4f-0123456789ab",
+                )
                 .body(body)
                 .unwrap())
         }
@@ -341,6 +350,10 @@ async fn handle_request(
             .status(StatusCode::FOUND)
             .header(LOCATION, REDIRECT_TARGET)
             .header(CONTENT_TYPE, "text/event-stream")
+            .header(
+                "runewarp-session-id",
+                "01928f3e-7b6a-7c3d-8e4f-0123456789ab",
+            )
             .body(empty_body())
             .unwrap()),
         SseBehavior::WrongContentType => Ok(Response::builder()
@@ -358,10 +371,14 @@ async fn handle_request(
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, "text/event-stream")
+                .header(
+                    "runewarp-session-id",
+                    "01928f3e-7b6a-7c3d-8e4f-0123456789ab",
+                )
                 .body(body)
                 .unwrap())
         }
-        SseBehavior::SuccessSnapshot => {
+        SseBehavior::SuccessSnapshot | SseBehavior::SessionHeaders(_) => {
             metrics.begin_sse();
             let metrics_drop = metrics.clone();
             let body = boxed_stream(HoldAfterSnapshotStream {
@@ -369,11 +386,17 @@ async fn handle_request(
                 sent_snapshot: false,
                 metrics: Some(metrics_drop),
             });
-            Ok(Response::builder()
+            let mut response = Response::builder()
                 .status(StatusCode::OK)
-                .header(CONTENT_TYPE, "text/event-stream")
-                .body(body)
-                .unwrap())
+                .header(CONTENT_TYPE, "text/event-stream");
+            let ids = match behavior {
+                SseBehavior::SessionHeaders(ids) => ids,
+                _ => &["01928f3e-7b6a-7c3d-8e4f-0123456789ab"][..],
+            };
+            for id in ids {
+                response = response.header("runewarp-session-id", *id);
+            }
+            Ok(response.body(body).unwrap())
         }
     }
 }
@@ -1193,4 +1216,61 @@ async fn reloading_identity_files_presents_new_client_certificate() {
 
     handle.stop().await;
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn invalid_session_incarnations_fail_before_snapshot_or_apply_for_both_roles() {
+    for role in [ManagedSessionRole::Client, ManagedSessionRole::Server] {
+        for headers in [
+            &[][..],
+            &["not-a-uuid"][..],
+            &["01928F3E-7B6A-7C3D-8E4F-0123456789AB"][..],
+            &["01928f3e-7b6a-4c3d-8e4f-0123456789ab"][..],
+            &["01928f3e-7b6a-7c3d-ce4f-0123456789ab"][..],
+            &["01928f3e7b6a7c3d8e4f0123456789ab"][..],
+            &[
+                "01928f3e-7b6a-7c3d-8e4f-0123456789ab",
+                "01928f3e-7b6a-7c3d-8e4f-0123456789ab",
+            ][..],
+            &["01928f3e-7b6a-7c3d-8e4f-0123456789ab, 01928f3e-7b6a-7c3d-8e4f-0123456789ab"][..],
+        ] {
+            let material = generate_control_mtls_material("session-incarnation");
+            let fixture =
+                ControlFixture::start(&material, SseBehavior::SessionHeaders(headers)).await;
+            let dir = tempdir().unwrap();
+            let paths = write_control_ca_and_certs(dir.path(), &material);
+            let material = session_material(
+                "localhost",
+                &paths.ca_cert,
+                &paths.client_cert,
+                &paths.client_key,
+            );
+            let mut handle = match role {
+                ManagedSessionRole::Client => {
+                    spawn_client_session(fixture.control_address(), material).await
+                }
+                ManagedSessionRole::Server => {
+                    spawn_server_session(fixture.control_address(), material).await
+                }
+            };
+            let first = tokio::time::timeout(Duration::from_secs(5), handle.event_rx.recv())
+                .await
+                .unwrap();
+            assert!(
+                matches!(first, Some(ManagedSessionEvent::Reconnecting { .. })),
+                "{role:?} accepted {headers:?}: {first:?}"
+            );
+            assert!(
+                !fixture
+                    .metrics
+                    .request_paths
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|path| path.ends_with("/state"))
+            );
+            handle.stop().await;
+            fixture.shutdown().await;
+        }
+    }
 }

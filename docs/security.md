@@ -128,6 +128,8 @@ The Managed-session protocol, endpoints, and Control interoperability checklist 
 
 **Server identity** is not the **Server certificate**. The Server certificate still identifies the tunnel endpoint to Clients. Server identity is a pinned public-key identity presented only to Control.
 
+The successful Managed downlink must carry exactly one canonical UUIDv7 `runewarp-session-id`. Core validates it before accepting snapshots and echoes it on every state PUT for that downlink. Control compares the incarnation before report mutation alongside the existing identity, role and source-connection checks. The ID prevents delayed reports from reaching a replacement session when a source tuple is reused; it does not replace mTLS, grant authority, or establish process identity. UUIDv7 reveals its mint time, so the ID is correlation metadata rather than a secret. Both runtime roles and Control require a coordinated compatible upgrade.
+
 Identity and trust material are loaded when establishing each new Managed-session connection. Post-start reload failures remain recoverable in-process through the existing reconnect policy.
 
 ## Certificate and identity lifecycle

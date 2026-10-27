@@ -1721,11 +1721,22 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "text/event-stream")
+            .header(
+                "runewarp-session-id",
+                "01928f3e-7b6a-7c3d-8e4f-0123456789ab",
+            )
             .body(body)
             .unwrap());
     }
 
     if path == SERVER_STATE_PATH {
+        let ids: Vec<_> = request
+            .headers()
+            .get_all("runewarp-session-id")
+            .iter()
+            .map(|id| id.to_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["01928f3e-7b6a-7c3d-8e4f-0123456789ab"]);
         metrics.begin_stream();
         let body = request.collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);

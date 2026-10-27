@@ -10,7 +10,7 @@ This document describes what Core implements today. Product policy (lifecycle la
 
 - **Audience:** Control implementers and Core runtime integrators
 - **Session:** one mutually authenticated HTTP/2 connection per Server or Client runtime
-- **Downlink:** one role-specific SSE stream carrying versioned full snapshots
+- **Downlink:** one role-specific SSE stream carrying versioned full snapshots, with one required `runewarp-session-id` response header echoed on every state PUT
 - **State document:** a full role state document carrying the applied revision, sent after each successfully handled snapshot and when a reported fact changes, at most once per second; no periodic heartbeat
 - **Role inputs:** Server authorization and Client Server-address assignment use separate schemas
 - **Failure model:** protocol or reporting failure replaces the session; reconnect retains last-applied in-memory state after the first successful apply
@@ -86,21 +86,30 @@ Each Managed session:
 1. Dials the Control hostname over TLS with ALPN `h2` only (no HTTP/1.1 fallback).
 2. Presents the role identity certificate and validates Control through the configured trust mode.
 3. Opens exactly one role-specific SSE downlink on that connection.
-4. After the downlink is active, sends its state document with `PUT` on additional HTTP/2 streams of the same connection.
-5. On any downlink or state-document failure, closes the entire HTTP/2 connection before reconnecting.
+4. Validates exactly one canonical UUIDv7 `runewarp-session-id` response header before reading snapshots or applying input.
+5. Sends every state document with that exact ID on additional HTTP/2 streams of the same connection.
+6. On any downlink or state-document failure, closes the entire HTTP/2 connection before reconnecting.
 
-Core does not follow redirects, honor `Retry-After`, or attach session IDs / runtime-instance IDs / hostname selectors to requests. The credential and role path select the input.
+Core does not follow redirects, honor `Retry-After`, or attach runtime-instance IDs or hostname selectors to requests. The credential and role path select the input. The session incarnation only correlates reports to the accepted downlink.
 
 ## Endpoints
 
 | Role | Method | Path | Success | Notes |
 | --- | --- | --- | --- | --- |
-| Server | `GET` | `/v1/server/events` | `200` + `Content-Type: text/event-stream` (optional charset) | Core sends `Accept: text/event-stream`, which Control ignores; empty body |
+| Server | `GET` | `/v1/server/events` | `200` + `Content-Type: text/event-stream` (optional charset) + one `runewarp-session-id` | Core sends `Accept: text/event-stream`, which Control ignores; empty body |
 | Client | `GET` | `/v1/client/events` | same | same |
-| Server | `PUT` | `/v1/server/state` | `204` with empty body | `Content-Type: application/json`; Server state document |
-| Client | `PUT` | `/v1/client/state` | same | `Content-Type: application/json`; Client state document |
+| Server | `PUT` | `/v1/server/state` | `204` with empty body | `Content-Type: application/json` + one `runewarp-session-id`; Server state document |
+| Client | `PUT` | `/v1/client/state` | same | `Content-Type: application/json` + one `runewarp-session-id`; Client state document |
 
 SSE status `204`, redirects, other non-success statuses, missing `Content-Type`, and wrong media types all fail the session and trigger reconnect. A state write that is not exact `204` with an already-ended empty body also fails the session and triggers reconnect.
+
+## Session incarnation
+
+Control mints a fresh UUIDv7 for every admitted Server or Client downlink, including reconnects on the same process or HTTP/2 connection and after Control restart. It sends exactly one `runewarp-session-id` response header on a successful events GET. The value must be lowercase, hyphenated, 36-character UUIDv7 with the RFC variant, for example `01928f3e-7b6a-7c3d-8e4f-0123456789ab`. Missing, duplicate, comma-joined, uppercase, other-version and other noncanonical forms fail the connection before Core accepts snapshots, applies input or sends state. Validation remains inside the existing 60-second connection/first-snapshot deadline and reconnect policy. There is no compatibility fallback.
+
+Every state PUT echoes exactly one `runewarp-session-id` for that successful downlink, including fact changes, repeated revisions and the first report after reconnect. The connection owns this value; retaining an applied revision never retains the old ID. Control must atomically compare the exact incarnation before revision, generation or report mutation, while preserving identity, role and source-connection checks. A missing, malformed, duplicate, stale or nonmatching request ID receives an ended empty `409` without modifying or closing the current session. Ordinary malformed-report handling may use `400`; a stale ID must never close a current recipient for an unknown revision.
+
+The incarnation identifies a session, not a process. It grants no authentication, authorization, timestamp ordering, replacement or rollout authority. It belongs in HTTP headers, outside the revisioned input and report bodies, so snapshot revisions remain unchanged. UUIDv7 reveals its mint time and must not be treated as a secret. Compatible Control, Server and Client versions must upgrade together; older peers cannot bypass the requirement. Static mode has no Managed-session handshake and keeps its existing behavior.
 
 ## SSE framing
 
@@ -224,7 +233,7 @@ Both documents put `revision` first, then the role facts in the order shown. The
 
 Sending rules:
 
-1. Send a document after each valid snapshot envelope whose revision is newly applied or already matches the applied revision, and whenever a reported fact changes. Before a connection reports its first revision, fact changes send nothing; that connection's first snapshot sends the full document.
+1. Echo the current downlink's `runewarp-session-id` on every request. Send a document after each valid snapshot envelope whose revision is newly applied or already matches the applied revision, and whenever a reported fact changes. Before a connection reports its first revision, fact changes send nothing; that connection's first snapshot sends the full document.
 2. Every document is complete, so the first request on every new session gives Control the full current facts without polling.
 3. Keep at most one request in flight and at most one pending. The pending document is rendered when its request starts, so a newer change replaces an unsent one.
 4. Start at most one request per second on a connection. Bursts of fact changes coalesce into the next request.
@@ -317,7 +326,7 @@ Service selection, Services, Local backends, and TLS mode remain Client-local co
 | Condition | Outcome |
 | --- | --- |
 | Invalid local config / missing initial identity material / listener bind failure | Exit nonzero at startup |
-| SSE / silence / first-snapshot / malformed or unknown event / connection loss | Close HTTP/2 connection; reconnect in-process |
+| SSE / invalid session-incarnation header / silence / first-snapshot / malformed or unknown event / connection loss | Close HTTP/2 connection; reconnect in-process |
 | Invalid snapshot input or apply error | `Rejected`; SSE stays open; prior live state retained |
 | State `PUT` failure | Close HTTP/2 connection; reconnect in-process; report the new connection's first snapshot |
 | Post-start TLS material reload failure | Recoverable in-process via reconnect |
@@ -358,6 +367,7 @@ data: {"revision":"cli-7","input":{"server_addresses":["tunnel.example.com"]}}
 ```http
 PUT /v1/server/state HTTP/2
 Host: control.example.com
+runewarp-session-id: 01928f3e-7b6a-7c3d-8e4f-0123456789ab
 Content-Type: application/json
 
 {"revision":"srv-42","generation":"01928f3e-7b6a-7c3d-8e4f-0123456789ab","draining":false,"tunnels":{"550e8400-e29b-41d4-a716-446655440000":2},"visitors":17}
@@ -366,6 +376,7 @@ Content-Type: application/json
 ```http
 PUT /v1/client/state HTTP/2
 Host: control.example.com
+runewarp-session-id: 01928f3e-7b6a-7c3d-8e4f-0123456789ab
 Content-Type: application/json
 
 {"revision":"cli-7","servers":{"tunnel.example.com:443":["01928f3e-7b6a-7c3d-8e4f-0123456789ab"]}}
@@ -399,6 +410,8 @@ Label each requirement as **Control must** (wire contract Control implements) or
 - [ ] Expose exact paths `/v1/server/events`, `/v1/client/events`, `/v1/server/state`, `/v1/client/state`
 - [ ] Accept exactly one SSE downlink per connection for the matching role path
 - [ ] Respond to SSE with status `200` and `Content-Type: text/event-stream`, ignoring `Accept`
+- [ ] Mint one fresh canonical UUIDv7 `runewarp-session-id` per accepted downlink and require its exact echo alongside identity/source binding on every state PUT
+- [ ] Reject missing, malformed, duplicate or stale request IDs with empty ended `409` before mutation or unknown-revision closure of the current session
 - [ ] Emit `event: snapshot` full documents only (no v1 patches)
 - [ ] Send a current full snapshot as the first data event on every connection
 - [ ] Use non-empty opaque `revision` values that identify immutable complete inputs (max 128 Unicode scalars; no ASCII whitespace or controls)
@@ -418,6 +431,7 @@ Label each requirement as **Control must** (wire contract Control implements) or
 ### Core does
 
 - [ ] Open one Managed session per runtime with one SSE downlink and full state documents
+- [ ] Validate one canonical response incarnation before snapshot acceptance and echo that downlink's ID on every state report, including after reconnect
 - [ ] Fail the session on malformed/unknown SSE events, size/cardinality limit violations, and reconnect with the shared backoff policy
 - [ ] Ignore unknown JSON fields in known v1 snapshots
 - [ ] Skip apply on equal already-applied revisions and report the snapshot again

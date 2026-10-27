@@ -60,6 +60,7 @@ enum StateBehavior {
 struct FixtureMetrics {
     tls_accepts: AtomicUsize,
     request_paths: Mutex<Vec<String>>,
+    session_ids: Mutex<Vec<String>>,
     state_bodies: Mutex<Vec<Value>>,
     state_raw_bodies: Mutex<Vec<Bytes>>,
     state_statuses: Mutex<Vec<u16>>,
@@ -73,6 +74,7 @@ impl FixtureMetrics {
         Self {
             tls_accepts: AtomicUsize::new(0),
             request_paths: Mutex::new(Vec::new()),
+            session_ids: Mutex::new(Vec::new()),
             state_bodies: Mutex::new(Vec::new()),
             state_raw_bodies: Mutex::new(Vec::new()),
             state_statuses: Mutex::new(Vec::new()),
@@ -150,6 +152,7 @@ impl ControlFixture {
                         return;
                     };
                     metrics.tls_accepts.fetch_add(1, Ordering::SeqCst);
+                    let session_id = uuid::Uuid::now_v7().to_string();
                     let service = service_fn({
                         let metrics = metrics.clone();
                         let snapshots = snapshots.clone();
@@ -158,7 +161,11 @@ impl ControlFixture {
                             let metrics = metrics.clone();
                             let snapshots = snapshots.clone();
                             let behavior = behavior.clone();
-                            async move { handle_request(request, metrics, snapshots, behavior).await }
+                            let session_id = session_id.clone();
+                            async move {
+                                handle_request(request, metrics, snapshots, behavior, session_id)
+                                    .await
+                            }
                         }
                     });
                     let io = TokioIo::new(tls);
@@ -258,6 +265,7 @@ async fn handle_request(
     metrics: Arc<FixtureMetrics>,
     snapshots: Arc<AsyncMutex<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     behavior: Arc<Mutex<StateBehavior>>,
+    session_id: String,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let path = request.uri().path().to_owned();
     let method = request.method().clone();
@@ -268,6 +276,7 @@ async fn handle_request(
         .push(format!("{method} {path}"));
 
     if path == CLIENT_EVENTS_PATH || path == SERVER_EVENTS_PATH {
+        metrics.session_ids.lock().unwrap().push(session_id.clone());
         metrics.begin_stream();
         let metrics_drop = metrics.clone();
         let body = boxed_stream(SnapshotFeedStream {
@@ -278,11 +287,23 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "text/event-stream")
+            .header("runewarp-session-id", session_id)
             .body(body)
             .unwrap());
     }
 
     if path == CLIENT_STATE_PATH || path == SERVER_STATE_PATH {
+        let ids: Vec<_> = request
+            .headers()
+            .get_all("runewarp-session-id")
+            .iter()
+            .map(|id| id.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [session_id.as_str()],
+            "every report belongs to its downlink incarnation"
+        );
         metrics.begin_stream();
         let body = request.collect().await.unwrap().to_bytes();
         let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
@@ -853,6 +874,12 @@ async fn state_acknowledgment_failure_reconnects_and_reacks_equal_snapshot() {
     })
     .await
     .expect("fresh first snapshot should be re-acknowledged after reconnect");
+
+    {
+        let ids = metrics.session_ids.lock().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "reconnect has a fresh downlink incarnation");
+    }
 
     let _ = stop_tx.send(());
     let _ = runner.await;

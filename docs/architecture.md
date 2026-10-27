@@ -166,7 +166,7 @@ In **Static mode**, the Server loads one startup-only **Authorization snapshot**
 
 Static and Managed Client address workers cross the same production Tunnel-connection-attempt module. That module owns ordered DNS selection, per-attempt trust and Client-identity reload, QUIC and HTTP/3 establishment, the event-stream gate and WebTransport session CONNECT, typed attempt and connection-end classification, and lifecycle reporting context. DNS is its only internal seam: the runtime uses the system resolver and deterministic tests use scripted results. The Address worker remains the sole owner of retry jitter, delay reporting, waiting, and reset.
 
-Each Managed runtime maintains one mutually authenticated HTTP/2 **Managed session**. The full apply, readiness, convergence, Retiring, Control-loss, and drain contract is in [`managed.md`](managed.md).
+Each Managed runtime maintains one mutually authenticated HTTP/2 **Managed session**. Its successful downlink supplies a Control-issued UUIDv7 incarnation in `runewarp-session-id`, validated before snapshot acceptance and echoed on every state PUT. Reconnect replaces the incarnation while preserving last-applied input in memory. The full apply, readiness, convergence, Retiring, Control-loss, and drain contract is in [`managed.md`](managed.md).
 
 ## Operational boundaries
 

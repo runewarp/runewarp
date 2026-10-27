@@ -37,6 +37,7 @@ pub(crate) enum ConnectionError {
     ServerName(String),
     Http(hyper::Error),
     SseRejected,
+    SessionIdRejected,
     StateRejected,
     StateRequestTimeout,
     StateResponseTimeout,
@@ -54,6 +55,9 @@ impl fmt::Display for ConnectionError {
             Self::Http(error) => write!(formatter, "control HTTP/2 error: {error}"),
             Self::SseRejected => {
                 formatter.write_str("control SSE response was not status 200 event-stream")
+            }
+            Self::SessionIdRejected => {
+                formatter.write_str("control SSE response requires one canonical UUIDv7 session ID")
             }
             Self::StateRejected => {
                 formatter.write_str("control state response was not status 204 with an empty body")
@@ -77,6 +81,7 @@ impl std::error::Error for ConnectionError {
             Self::Alpn
             | Self::ServerName(_)
             | Self::SseRejected
+            | Self::SessionIdRejected
             | Self::StateRejected
             | Self::StateRequestTimeout
             | Self::StateResponseTimeout => None,
@@ -95,6 +100,7 @@ pub(crate) struct ManagedSessionConnection {
     body: Incoming,
     authority: String,
     role: ManagedSessionRole,
+    session_id: http::HeaderValue,
 }
 
 impl Drop for ManagedSessionConnection {
@@ -172,6 +178,7 @@ impl ManagedSessionConnection {
         let mut sender = self.sender.clone();
         let authority = self.authority.clone();
         let role = self.role;
+        let session_id = self.session_id.clone();
         let request_deadline = limits.state_request_deadline;
         let response_deadline = limits.state_response_deadline;
         Box::pin(async move {
@@ -189,6 +196,7 @@ impl ManagedSessionConnection {
                 &authority,
                 role,
                 payload,
+                session_id,
                 request_deadline,
                 response_deadline,
             )
@@ -202,6 +210,7 @@ async fn put_applied_revision_on_sender(
     authority: &str,
     role: ManagedSessionRole,
     payload: Vec<u8>,
+    session_id: http::HeaderValue,
     request_deadline: Duration,
     response_deadline: Duration,
 ) -> Result<(), ConnectionError> {
@@ -216,6 +225,7 @@ async fn put_applied_revision_on_sender(
         .method("PUT")
         .uri(uri)
         .header(http::header::CONTENT_TYPE, "application/json")
+        .header("runewarp-session-id", session_id)
         .body(body)
         .expect("state request is valid by construction");
 
@@ -284,11 +294,36 @@ where
         return Err(ConnectionError::SseRejected);
     }
 
+    let Some(session_id) = session_id(response.headers()) else {
+        conn_handle.abort();
+        return Err(ConnectionError::SessionIdRejected);
+    };
+
     Ok(ManagedSessionConnection {
         sender,
         conn: Some(conn_handle),
         body: response.into_body(),
         authority,
         role,
+        session_id,
     })
+}
+
+// Incarnations identify one successful downlink. UUID time bits confer no
+// ordering or authority; retain the exact canonical value for every report.
+fn session_id(headers: &http::HeaderMap) -> Option<http::HeaderValue> {
+    let mut values = headers.get_all("runewarp-session-id").iter();
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let text = value.to_str().ok()?;
+    let id = uuid::Uuid::parse_str(text).ok()?;
+    if id.get_version_num() != 7
+        || id.get_variant() != uuid::Variant::RFC4122
+        || id.hyphenated().to_string() != text
+    {
+        return None;
+    }
+    Some(value.clone())
 }

@@ -17,18 +17,6 @@ pub(crate) const ACME_TLS_ALPN: &[u8] = b"acme-tls/1";
 
 pub(crate) type ManagedAcmeState = AcmeState<io::Error>;
 
-pub(crate) fn build_acme_state(
-    server_hostname: &str,
-    email: &str,
-    state_directory: &Path,
-) -> ManagedAcmeState {
-    AcmeConfig::new([server_hostname])
-        .contact_push(format!("mailto:{email}"))
-        .directory_lets_encrypt(true)
-        .cache(DirCache::new(state_directory.to_path_buf()))
-        .state()
-}
-
 /// Builds an ACME state for the given hostname set.
 /// Runewarp reuses the same state directory so the Let's Encrypt account cache can
 /// still be shared across independently managed hostnames.
@@ -58,10 +46,6 @@ pub(crate) struct ManagedAcmeRuntime {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AcmeLifecycle {
-    Server {
-        server_hostname: String,
-        next_deployment: NextDeployment,
-    },
     Client {
         public_hostname: String,
         next_deployment: NextDeployment,
@@ -80,23 +64,6 @@ enum CachedCertificateInspection {
 }
 
 impl AcmeLifecycle {
-    pub(crate) async fn server(server_hostname: &str, state_directory: &Path) -> Self {
-        let inspection = inspect_cached_certificate(
-            &[server_hostname.to_owned()],
-            state_directory,
-            OffsetDateTime::now_utc(),
-        )
-        .await;
-        emit_startup_inspection(
-            std::iter::once(AcmeRole::Server { server_hostname }),
-            &inspection,
-        );
-        Self::Server {
-            server_hostname: server_hostname.to_owned(),
-            next_deployment: next_deployment_for_inspection(&inspection),
-        }
-    }
-
     pub(crate) async fn client(public_hostname: &str, state_directory: &Path) -> Self {
         let inspection = inspect_cached_certificate(
             &[public_hostname.to_owned()],
@@ -141,14 +108,6 @@ impl AcmeLifecycle {
 
     fn emit(&self, event: AcmeEvent<'_>) {
         match self {
-            Self::Server {
-                server_hostname, ..
-            } => runtime_log::acme(
-                AcmeRole::Server {
-                    server_hostname: server_hostname.as_str(),
-                },
-                event,
-            ),
             Self::Client {
                 public_hostname, ..
             } => runtime_log::acme(
@@ -162,10 +121,7 @@ impl AcmeLifecycle {
 
     fn next_deployment(&self) -> NextDeployment {
         match self {
-            Self::Server {
-                next_deployment, ..
-            }
-            | Self::Client {
+            Self::Client {
                 next_deployment, ..
             } => next_deployment.clone(),
         }
@@ -173,10 +129,7 @@ impl AcmeLifecycle {
 
     fn set_next_deployment(&mut self, next: NextDeployment) {
         match self {
-            Self::Server {
-                next_deployment, ..
-            }
-            | Self::Client {
+            Self::Client {
                 next_deployment, ..
             } => *next_deployment = next,
         }
@@ -410,8 +363,8 @@ mod tests {
 
     #[test]
     fn deployed_new_certificate_switches_from_first_issuance_to_renewal() {
-        let mut lifecycle = AcmeLifecycle::Server {
-            server_hostname: "tunnel.example.test".to_owned(),
+        let mut lifecycle = AcmeLifecycle::Client {
+            public_hostname: "tunnel.example.test".to_owned(),
             next_deployment: NextDeployment::FirstIssuance,
         };
 
@@ -419,8 +372,8 @@ mod tests {
 
         assert_eq!(
             lifecycle,
-            AcmeLifecycle::Server {
-                server_hostname: "tunnel.example.test".to_owned(),
+            AcmeLifecycle::Client {
+                public_hostname: "tunnel.example.test".to_owned(),
                 next_deployment: NextDeployment::Renewal,
             }
         );

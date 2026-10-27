@@ -39,6 +39,33 @@ impl ServerRuntime {
         public_bind_addrs: Vec<SocketAddr>,
         tunnel_bind_addrs: Vec<SocketAddr>,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::prepare_with_certificate_options(config, public_bind_addrs, tunnel_bind_addrs, None)
+            .await
+    }
+
+    /// Prepare the process runtime with an external consumed-route observer and explicit
+    /// certificate lifetime/recovery policy. The returned controller uses these listeners.
+    pub async fn prepare_listeners_with_acme(
+        config: &ServerConfig,
+        public_bind_addrs: Vec<SocketAddr>,
+        tunnel_bind_addrs: Vec<SocketAddr>,
+        options: crate::server_certificate::ServerAcmeOptions,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::prepare_with_certificate_options(
+            config,
+            public_bind_addrs,
+            tunnel_bind_addrs,
+            Some(options),
+        )
+        .await
+    }
+
+    async fn prepare_with_certificate_options(
+        config: &ServerConfig,
+        public_bind_addrs: Vec<SocketAddr>,
+        tunnel_bind_addrs: Vec<SocketAddr>,
+        options: Option<crate::server_certificate::ServerAcmeOptions>,
+    ) -> Result<Self, Box<dyn Error>> {
         let session = if let Some(control) = config.control.as_ref() {
             let identity = config.identity.as_ref().ok_or_else(|| {
                 io::Error::other("managed Server admission requires Server identity")
@@ -59,8 +86,20 @@ impl ServerRuntime {
             None
         };
 
-        let server =
-            PreparedServer::bind_listeners(config, public_bind_addrs, tunnel_bind_addrs).await?;
+        let server = match options {
+            Some(options) => {
+                PreparedServer::bind_listeners_with_acme(
+                    config,
+                    public_bind_addrs,
+                    tunnel_bind_addrs,
+                    options,
+                )
+                .await?
+            }
+            None => {
+                PreparedServer::bind_listeners(config, public_bind_addrs, tunnel_bind_addrs).await?
+            }
+        };
         for address in server.public_addrs()? {
             crate::runtime_log::server_public_listener_ready(address);
         }
@@ -112,6 +151,12 @@ impl ServerRuntime {
 
     pub fn shutdown(&self) -> OrderlyShutdown {
         self.shutdown.clone()
+    }
+
+    pub fn certificate_controller(
+        &self,
+    ) -> Option<crate::server_certificate::ServerCertificateController> {
+        self.server.certificate_controller()
     }
 
     pub async fn run(self) -> io::Result<()> {

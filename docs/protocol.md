@@ -41,6 +41,8 @@ It must not include HTTP headers, bodies, decrypted application plaintext, or th
 
 Runtime tunnel failures keep full detail at debug level while operator-facing warning lines remain concise.
 
+Server ACME uses independent ordinary-serving and challenge resolvers from initial bind. Ordinary Tunnel handshakes require a validated serving certificate; its snapshot never answers `acme-tls/1`. The challenge path serves only the process-held owner, including its fresh route-observation proof before ACME polling begins. First boot without a usable certificate stays unready. Certificate maintenance stops new handshakes and Visitor placement when finite recovery or certificate safety is exhausted. This adds no Tunnel or Managed wire fields and preserves customer TLS passthrough. See [Server certificate ownership](server-certificates.md).
+
 ## Drop conditions
 
 | Condition | Result |

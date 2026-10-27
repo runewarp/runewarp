@@ -13,7 +13,7 @@ use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls_acme::CertCache;
-use rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY;
+
 use rustls_acme::caches::DirCache;
 use tempfile::tempdir;
 use time::OffsetDateTime;
@@ -1624,7 +1624,7 @@ async fn prepared_server_loads_cached_acme_certificates_from_state_directory() {
     DirCache::new(tempdir.path().join("acme-state"))
         .store_cert(
             &["tunnel.example.test".to_owned()],
-            LETS_ENCRYPT_PRODUCTION_DIRECTORY,
+            "https://localhost:1/directory",
             cached_server_pem.as_bytes(),
         )
         .await
@@ -1686,9 +1686,48 @@ backend-address = "127.0.0.1:1"
     .unwrap();
 
     let server_settings = load_server_config(&tempdir.path().join("server.toml")).unwrap();
-    let server = PreparedServer::bind(&server_settings, localhost(0), localhost(0))
-        .await
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            tempdir.path().join("acme-state"),
+            fs::Permissions::from_mode(0o700),
+        )
         .unwrap();
+    }
+    let mut roots = RootCertStore::empty();
+    roots.add(cached_server_cert.cert.der().clone()).unwrap();
+    let validation = runewarp::server_certificate::CertificateValidation::new(
+        "tunnel.example.test".try_into().unwrap(),
+        Arc::new(roots),
+        Duration::from_secs(3600),
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    let client_tls = Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth(),
+    );
+    let mut options = runewarp::server_certificate::ServerAcmeOptions::new(
+        validation,
+        "https://localhost:1/directory",
+        client_tls,
+        Arc::new(
+            runewarp::server_certificate::TcpChallengeRoute::at(localhost(1), "unavailable-route")
+                .unwrap(),
+        ),
+    )
+    .unwrap();
+    options.request_ownership_on_start = true;
+    let server = PreparedServer::bind_listeners_with_acme(
+        &server_settings,
+        vec![localhost(0)],
+        vec![localhost(0)],
+        options,
+    )
+    .await
+    .unwrap();
     let tunnel_addr = server.tunnel_addr().unwrap();
     let server_task = tokio::spawn(server.run());
 

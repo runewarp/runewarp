@@ -278,7 +278,7 @@ Any downlink or state-document failure closes the whole connection. That connect
 
 ## Managed Server behavior
 
-1. Startup validates local credentials and binds listeners, but **Server readiness** stays unavailable and no Tunnel or Visitor work is admitted until the first successful Server input apply.
+1. Startup validates local credentials and binds listeners, but **Server readiness** stays unavailable and no Tunnel or Visitor work is admitted until the first successful Server input apply. Server ACME additionally requires a usable validated Server certificate.
 2. Authorization replacement is one Server operation on managed authorization: a candidate is validated beside the live **Authorization snapshot**, then committed atomically across Public-hostname routing and Client-identity handshake admission, Tunnel-ID-keyed pool realignment, selective live-work revocation, and first-success **Server readiness**. Static authorization is startup-only and has no Tunnel IDs. Config validation prepares Server admission (static vs managed) once; startup builds Authorization and readiness from that outcome. The Managed Server role adapter supplies validated input and observes success or failure; it does not coordinate those phases.
 3. A valid empty `tunnels` collection may keep **Server readiness** available while authorizing no work.
 4. Live continuity uses **Tunnel ID** for pool identity, plus Client identity and Public hostname facts for admission and revocation:
@@ -287,7 +287,7 @@ Any downlink or state-document failure closes the whole connection. That connect
    - removing a Client identity denies new handshakes and closes that identity's live Tunnel connections and streams
    - removing only a Public hostname resets matching Visitor streams
    - unrelated authorized work survives
-5. After the first successful apply, Control loss retains the last authorization and readiness while the session reconnects.
+5. After the first successful apply, Control loss retains the last authorization and readiness while the session reconnects, subject to the independent Server ACME certificate safety gate.
 6. The Server role runtime owns Server and Managed-session completion together. **Graceful shutdown** drops readiness immediately but keeps the Managed session, snapshot application, and state documents active through bounded drain so Authorization changes still apply; the session ends when the HTTP/2 connection closes at final process exit. **Fast shutdown** may close the session immediately.
 7. A [Managed drain](#managed-drain) runs the graceful shutdown steps without ending the process.
 8. A pre-commit failure retains prior authorization. An unrecoverable failure after commit begins never restores revoked authorization: readiness drops and the process exits nonzero.
@@ -303,6 +303,8 @@ Control drains a Managed Server by publishing an input with `drain: true`. The d
 5. keeps running, applying input, and sending state documents until the process is terminated. `tunnels` falls to `0` per Tunnel as connections close, and `visitors` reaching `0` marks quiescence.
 
 Drain is one-way for the life of the process. A later input without `drain` updates authorization and the replacement hint as usual, but the Server never reopens its listeners or readiness. Process shutdown during a drain joins it under the drain's original deadline; a second signal still escalates to Fast shutdown. Static Servers have no Control and never drain this way.
+
+With Server ACME, completion of drain stops local ACME polling and challenge handling, but process-held certificate ownership is retained until actual exit. A replacement must acquire that lock and observe its consumed Server-hostname challenge route before driving ACME. A retained validated serving snapshot can support overlap; it transfers no authorization or order state. Finite certificate recovery can fast-stop the replacement without reviving the drained process. Certificate controls and caller budget obligations are described in [Server certificate ownership](server-certificates.md); they add no fields to Managed inputs or reports.
 
 ## Managed Client behavior
 

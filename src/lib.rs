@@ -22,6 +22,7 @@ mod server;
 mod server_address;
 mod server_admission;
 mod server_cert;
+pub mod server_certificate;
 mod server_identity;
 mod server_runtime;
 mod shutdown;
@@ -105,6 +106,7 @@ pub use server_cert::{
     SERVER_CA_FILENAME, initialize_manual_server_certificate, inspect_manual_server_certificate,
     renew_manual_server_certificate, rotate_manual_server_certificate_authority,
 };
+pub use server_certificate::CertificateOwner;
 pub use server_identity::{
     ParseServerIdentityError, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_FILENAME,
     SERVER_IDENTITY_KEY_FILENAME, ServerIdentity, ServerIdentityMaterialError,

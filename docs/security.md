@@ -181,7 +181,7 @@ Visitors must trust `public-ca.crt`; it stays stable across additional `init` ca
 
 ## ACME scope
 
-Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode. The current ACME config surface is fixed to Let's Encrypt.
+Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode. The CLI ACME configuration is fixed to Let's Encrypt. The Server runtime controller interface also accepts an explicit HTTPS CA transport and trust policy.
 
 ### Server ACME
 
@@ -190,6 +190,10 @@ Runewarp uses `rustls-acme` in **TLS-ALPN-01 only** mode. The current ACME confi
 - when omitted, `server.acme.state-dir` defaults to the XDG state path and is created at startup
 - Runewarp warns for each public bind address not on TCP 443, whether supplied through `server.public-bind-address` or `server.public-bind-addresses`, but that warning stays advisory because the externally reachable public port may still be 443 through container or NAT mapping
 - any explicit `server.acme.state-dir` should be protected like secret-bearing material
+
+Server ACME requires one stable local process-held owner lock and private atomic durable cache generations. Passive serving opens only the separate immutable certificate/key export, validates hostname, key match, trusted chain, time and remaining lifetime, and never drives ACME or writes owner state. A replacement retains that validated certificate until a durable independently validated active candidate is available. A certificate snapshot never answers a challenge.
+
+Before ACME starts, the owner proves that the exact Server-hostname TCP `acme-tls/1` route reaches its fresh ephemeral TLS proof. That proof has no CA authorization extension and is never used for ordinary Tunnel serving. Routed callers supply an external consumed-route observer; config writes and Visitor/Tunnel promotion cannot substitute for that observation. Ownership lasts until process exit, including after drain or cancellation. In-flight orders may be abandoned and retried. Finite recovery and certificate safety checks terminate admission rather than reviving a drained Server. Upgrade nonparticipating older binaries sequentially before overlap. See [Server certificate ownership](server-certificates.md) for filesystem assumptions, defaults, controls and limits.
 
 ### Client ACME
 

@@ -30,6 +30,7 @@ pub(crate) struct VisitorIntake {
     admission_policy: ServerAdmissionPolicy,
     visitor_proxy_protocol: Option<ProxyProtocolVersion>,
     visitor_proxy_trusted_networks: Vec<TrustedNetwork>,
+    certificate: Option<crate::server_certificate::ServerCertificateController>,
 }
 
 impl VisitorIntake {
@@ -65,7 +66,16 @@ impl VisitorIntake {
             admission_policy,
             visitor_proxy_protocol,
             visitor_proxy_trusted_networks,
+            certificate: None,
         })
+    }
+
+    pub(crate) fn with_certificate(
+        mut self,
+        certificate: Option<crate::server_certificate::ServerCertificateController>,
+    ) -> Self {
+        self.certificate = certificate;
+        self
     }
 
     #[cfg(test)]
@@ -211,6 +221,14 @@ impl VisitorIntake {
                 );
                 Ok(())
             };
+        }
+
+        if self
+            .certificate
+            .as_ref()
+            .is_some_and(|certificate| !certificate.status().serving)
+        {
+            return Ok(());
         }
 
         let selected_tunnel_connection = match self

@@ -144,6 +144,7 @@ impl ReadinessProbe {
         bind_addr: SocketAddr,
         initially_ready: bool,
         fatal: FatalSignal,
+        certificate: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> io::Result<Self> {
         // Reserve the readiness port at startup. For managed admission, keep the
         // socket bound without listen() so probes stay Unready and no other
@@ -159,8 +160,8 @@ impl ReadinessProbe {
             )
         })?;
         let bind_address = socket.local_addr()?;
-        let gate = ReadinessGate::new(initially_ready);
-        let task = if initially_ready {
+        let gate = ReadinessGate::with_certificate(initially_ready, certificate);
+        let task = if gate.is_ready() {
             let listener = socket.listen(128).map_err(|source| {
                 io::Error::new(
                     source.kind(),
@@ -248,6 +249,21 @@ impl Server {
         visitor_proxy_protocol: Option<crate::ProxyProtocolVersion>,
         visitor_proxy_trusted_networks: Vec<crate::TrustedNetwork>,
     ) -> io::Result<Self> {
+        Self::bind_with_proxy_and_certificate(
+            config,
+            visitor_proxy_protocol,
+            visitor_proxy_trusted_networks,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn bind_with_proxy_and_certificate(
+        config: ServerBindConfig,
+        visitor_proxy_protocol: Option<crate::ProxyProtocolVersion>,
+        visitor_proxy_trusted_networks: Vec<crate::TrustedNetwork>,
+        certificate: Option<crate::server_certificate::ServerCertificateController>,
+    ) -> io::Result<Self> {
         let mut limits = ServerAdmissionLimits::default();
         let effective = crate::fd_capacity::server([
             limits.max_pending_visitors,
@@ -264,6 +280,7 @@ impl Server {
             limits,
             visitor_proxy_protocol,
             visitor_proxy_trusted_networks,
+            certificate,
         )
         .await
     }
@@ -273,6 +290,7 @@ impl Server {
         admission_limits: ServerAdmissionLimits,
         visitor_proxy_protocol: Option<crate::ProxyProtocolVersion>,
         visitor_proxy_trusted_networks: Vec<crate::TrustedNetwork>,
+        certificate: Option<crate::server_certificate::ServerCertificateController>,
     ) -> io::Result<Self> {
         if config.admission == ServerAdmission::Static
             && config.authorization.current_tunnel_count() == 0
@@ -294,7 +312,8 @@ impl Server {
             admission_policy.clone(),
             visitor_proxy_protocol,
             visitor_proxy_trusted_networks,
-        )?;
+        )?
+        .with_certificate(certificate.clone());
         crate::config::validate_bind_addresses(
             "server.public-bind-address",
             &config.public_bind_addrs,
@@ -336,9 +355,17 @@ impl Server {
         let initially_ready = config.admission == ServerAdmission::Static;
         let fatal = FatalSignal::default();
         let readiness_probe = match config.readiness_bind_addr {
-            Some(bind_addr) => {
-                Some(ReadinessProbe::bind(bind_addr, initially_ready, fatal.clone()).await?)
-            }
+            Some(bind_addr) => Some(
+                ReadinessProbe::bind(
+                    bind_addr,
+                    initially_ready,
+                    fatal.clone(),
+                    certificate
+                        .as_ref()
+                        .map(crate::server_certificate::ServerCertificateController::readiness),
+                )
+                .await?,
+            ),
             None => None,
         };
         // No QUIC driver starts until every TCP, UDP and readiness bind succeeded.
@@ -361,7 +388,7 @@ impl Server {
         }
         if let Some(readiness_probe) = readiness_probe.as_ref() {
             runtime_log::server_readiness_listener_enabled(readiness_probe.bind_address());
-            if initially_ready {
+            if readiness_probe.gate().is_ready() {
                 runtime_log::server_readiness_gained(readiness_probe.bind_address());
             }
         }

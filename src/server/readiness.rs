@@ -15,21 +15,36 @@ use tokio::sync::Notify;
 pub(crate) struct ReadinessGate {
     ready: Arc<AtomicBool>,
     notify: Arc<Notify>,
+    certificate: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl ReadinessGate {
+    #[cfg(test)]
     pub(crate) fn new(initially_ready: bool) -> Self {
+        Self::with_certificate(initially_ready, None)
+    }
+
+    pub(crate) fn with_certificate(
+        initially_ready: bool,
+        certificate: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> Self {
         Self {
             ready: Arc::new(AtomicBool::new(initially_ready)),
             notify: Arc::new(Notify::new()),
+            certificate,
         }
     }
 
     pub(crate) fn is_ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst)
+            && self
+                .certificate
+                .as_ref()
+                .is_none_or(|certificate| *certificate.borrow())
     }
 
     pub(crate) async fn wait_until_ready(&self) {
+        let mut certificate = self.certificate.clone();
         loop {
             if self.is_ready() {
                 return;
@@ -40,7 +55,10 @@ impl ReadinessGate {
             if self.is_ready() {
                 return;
             }
-            notified.await;
+            tokio::select! {
+                _ = notified => {},
+                _ = async { match certificate.as_mut() { Some(certificate) => { let _ = certificate.changed().await; }, None => std::future::pending().await } } => {}
+            }
         }
     }
 
@@ -51,6 +69,7 @@ impl ReadinessGate {
 
     pub(crate) fn mark_not_ready(&self) {
         self.ready.store(false, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 }
 

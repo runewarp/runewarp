@@ -66,6 +66,8 @@ runewarp server cert init --hostname tunnel.example.com
 
 When `server.hostname` is already set in config, or when `RUNEWARP_SERVER_HOSTNAME` is set in the environment, `runewarp server cert init` and `runewarp server cert rotate-ca` can omit `--hostname`. `runewarp server cert renew` does not read `RUNEWARP_SERVER_HOSTNAME`; it reuses the existing certificate state.
 
+Server ACME first boot remains unready until one exclusive owner has working Server-hostname TCP 443 challenge routing and a durable validated certificate. Protect the state directory with mode `0700`. Before overlapping processes, upgrade older nonparticipating binaries sequentially and confirm an immutable durable serving export. The [Server certificate guide](server-certificates.md) explains takeover, external route observation and finite recovery.
+
 ### 3. Create the Client identity
 
 Create the Client keypair, certificate, and durable `client-identity`:

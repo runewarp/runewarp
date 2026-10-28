@@ -104,6 +104,22 @@ _Avoid_: public CA, app CA
 The automatic certificate path where the **Server** provisions and renews a certificate for the **Server hostname**.
 _Avoid_: Client ACME, Public hostname ACME
 
+**Certificate owner**:
+The one cooperating **Server** process allowed to drive **Server ACME** and publish durable Server certificate state on its worker. Ownership lasts until that process exits.
+_Avoid_: Renewal lease, rollout leader, account owner
+
+**Serving snapshot**:
+An immutable, validated **Server certificate** and matching private key used for ordinary Tunnel TLS while certificate acquisition or renewal is unavailable. It contains no ACME account or **Authorization snapshot** material and is never an ACME challenge certificate.
+_Avoid_: ACME state transfer, authorization export, passive ACME manager
+
+**Consumed challenge route**:
+An observed **Server hostname** TCP TLS-ALPN path reaching the intended **Certificate owner**. It is distinct from desired ingress configuration, Visitor placement and Tunnel selection.
+_Avoid_: Promotion, routing intent, challenge readiness flag
+
+**Certificate maintenance**:
+The terminal Server condition that stops new admission when certificate safety or finite certificate recovery is exhausted. It never resumes a drained Server.
+_Avoid_: Paused rollout, certificate fallback, rollback
+
 **Public hostname CA**:
 The operator-managed private certificate authority used to issue **Public hostname certificates** for Services in **Terminate mode** on the manual Client certificate path.
 _Avoid_: Server CA, public CA
@@ -233,7 +249,7 @@ The set of live **Tunnel connections** and their serving **Client instances** cu
 _Avoid_: Tunnel, cluster
 
 **Server readiness**:
-The externally observable ingress-admission signal for a **Server**. When **Server readiness** succeeds, new load-balanced visitor traffic may be admitted. When it fails, no new load-balanced visitor traffic should land there. In **Managed mode**, readiness stays unavailable until the first successful Server input apply, then remains available through later Control loss while the last applied authorization is retained.
+The externally observable ingress-admission signal for a **Server**. When **Server readiness** succeeds, new load-balanced visitor traffic may be admitted. When it fails, no new load-balanced visitor traffic should land there. In **Managed mode**, readiness stays unavailable until the first successful Server input apply, then remains available through later Control loss while the last applied authorization is retained and any required **Server ACME** certificate remains usable.
 _Avoid_: Graceful shutdown, tunnel coverage, health
 
 **Graceful shutdown**:

@@ -126,6 +126,7 @@ A simple, open-source client/server tunneling tool whose config model and simple
 - [Configuration reference](docs/configuration.md) — config shapes, keys, defaults, and validation
 - [Architecture](docs/architecture.md) — system structure, data paths, and current limits
 - [Security](docs/security.md) — trust boundaries, visibility, certificates, and deployment trade-offs
+- [Server certificate ownership](docs/server-certificates.md) for passive serving, exclusive renewal, consumed challenge routing and recovery
 
 ### Protocol specifications
 

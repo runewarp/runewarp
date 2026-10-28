@@ -13,13 +13,12 @@ use rustls::pki_types::CertificateDer;
 use tokio::net::lookup_host;
 use tokio::task::JoinHandle;
 
-use crate::acme::{
-    AcmeLifecycle, ManagedAcmeRuntime, build_acme_state, build_client_acme_state, run_acme_state,
-};
+use crate::acme::{AcmeLifecycle, ManagedAcmeRuntime, build_client_acme_state, run_acme_state};
 use crate::client_public_cert::{
     CLIENT_PUBLIC_CERT_FILENAME, CLIENT_PUBLIC_KEY_FILENAME, client_public_cert_leaf_dir,
 };
 use crate::runtime_log::{self, AcmeEvent, AcmeRole};
+use crate::server_certificate::{ServerAcmeOptions, ServerCertificateController};
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, TlsMaterialError, load_certificate_chain,
     load_private_key,
@@ -40,7 +39,7 @@ pub struct PreparedServer {
     server: Server,
     graceful_shutdown_duration: std::time::Duration,
     trusted_client_identities: Vec<ClientIdentity>,
-    acme_runtime: Option<ManagedAcmeRuntime>,
+    acme_runtime: Option<ServerCertificateController>,
     managed: bool,
 }
 
@@ -64,6 +63,31 @@ impl PreparedServer {
         public_bind_addrs: Vec<SocketAddr>,
         tunnel_bind_addrs: Vec<SocketAddr>,
     ) -> Result<Self, ServerStartupError> {
+        Self::bind_with_acme_options(config, public_bind_addrs, tunnel_bind_addrs, None).await
+    }
+
+    /// Bind the actual Server listeners with caller-owned certificate and route policy.
+    pub async fn bind_listeners_with_acme(
+        config: &ServerConfig,
+        public_bind_addrs: Vec<SocketAddr>,
+        tunnel_bind_addrs: Vec<SocketAddr>,
+        options: ServerAcmeOptions,
+    ) -> Result<Self, ServerStartupError> {
+        if !matches!(config.certificate, ServerCertificateConfig::Acme { .. }) {
+            return Err(ServerStartupError::Bind(io::Error::other(
+                "ACME controller requires Server ACME configuration",
+            )));
+        }
+        Self::bind_with_acme_options(config, public_bind_addrs, tunnel_bind_addrs, Some(options))
+            .await
+    }
+
+    async fn bind_with_acme_options(
+        config: &ServerConfig,
+        public_bind_addrs: Vec<SocketAddr>,
+        tunnel_bind_addrs: Vec<SocketAddr>,
+        acme_options: Option<ServerAcmeOptions>,
+    ) -> Result<Self, ServerStartupError> {
         crate::config::validate_bind_addresses("server.public-bind-address", &public_bind_addrs)
             .and_then(|()| {
                 crate::config::validate_bind_addresses(
@@ -74,7 +98,12 @@ impl PreparedServer {
             .map_err(|message| {
                 ServerStartupError::Bind(io::Error::new(io::ErrorKind::InvalidInput, message))
             })?;
-        prepare_default_server_acme_state_dir(config)?;
+        if acme_options
+            .as_ref()
+            .is_none_or(|options| options.request_ownership_on_start)
+        {
+            prepare_default_server_acme_state_dir(config)?;
+        }
         let authorization = match config.admission {
             crate::ServerAdmission::Static => {
                 ServerAuthorization::from_static_tunnels(&config.hostname, &config.tunnels)
@@ -110,24 +139,31 @@ impl PreparedServer {
                         },
                     );
                 }
-                let acme_state = build_acme_state(config.hostname.as_str(), email, state_directory);
-                let acme_lifecycle =
-                    AcmeLifecycle::server(config.hostname.as_str(), state_directory).await;
+                let options = match acme_options {
+                    Some(options) => options,
+                    None => ServerAcmeOptions::public(config.hostname.clone())
+                        .map_err(ServerStartupError::Bind)?,
+                };
+                if options.validation.hostname() != &config.hostname {
+                    return Err(ServerStartupError::Bind(io::Error::other(
+                        "certificate policy hostname does not match Server hostname",
+                    )));
+                }
+                let controller = ServerCertificateController::new(
+                    state_directory.clone(),
+                    email.clone(),
+                    options,
+                )
+                .map_err(ServerStartupError::Bind)?;
                 let quic_server_config = make_server_tunnel_h3_config_with_resolver(
-                    acme_state.resolver(),
+                    controller.serving_resolver(),
                     client_admission,
                 )
                 .map_err(ServerStartupError::QuicConfig)?;
-                (
-                    quic_server_config,
-                    Some(ManagedAcmeRuntime {
-                        state: acme_state,
-                        lifecycle: acme_lifecycle,
-                    }),
-                )
+                (quic_server_config, Some(controller))
             }
         };
-        let server = Server::bind_with_proxy(
+        let server = Server::bind_with_proxy_and_certificate(
             ServerBindConfig {
                 public_bind_addrs,
                 tunnel_connection_bind_addrs: tunnel_bind_addrs,
@@ -136,12 +172,13 @@ impl PreparedServer {
                 authorization,
                 public_tls_config: acme_runtime
                     .as_ref()
-                    .map(|acme| acme.state.challenge_rustls_config()),
+                    .map(ServerCertificateController::challenge_config),
                 quic_server_config,
                 admission: config.admission,
             },
             config.visitor_proxy_protocol,
             config.visitor_proxy_trusted_networks.clone(),
+            acme_runtime.clone(),
         )
         .await
         .map_err(ServerStartupError::Bind)?;
@@ -177,6 +214,10 @@ impl PreparedServer {
 
     pub fn trusted_client_identities(&self) -> &[ClientIdentity] {
         &self.trusted_client_identities
+    }
+
+    pub fn certificate_controller(&self) -> Option<ServerCertificateController> {
+        self.acme_runtime.clone()
     }
 
     /// Managed-session Server authorization adapter shared with the bound runtime.
@@ -226,7 +267,7 @@ impl PreparedServer {
         if let Some(acme_runtime) = acme_runtime {
             coordinate_server_acme(
                 server.run_with_shutdown(shutdown),
-                run_acme_state(acme_runtime.state, acme_runtime.lifecycle),
+                acme_runtime.run(),
                 shutdown,
             )
             .await
@@ -799,10 +840,12 @@ fn prepare_default_server_acme_state_dir(
         return Ok(());
     };
 
-    std::fs::create_dir_all(state_directory).map_err(|source| ServerStartupError::CreateDirectory {
-        field_name: "server.acme.state-dir",
-        path: state_directory.clone(),
-        source,
+    crate::server_certificate::private_directory(state_directory).map_err(|source| {
+        ServerStartupError::CreateDirectory {
+            field_name: "server.acme.state-dir",
+            path: state_directory.clone(),
+            source,
+        }
     })
 }
 

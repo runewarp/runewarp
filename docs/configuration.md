@@ -297,6 +297,8 @@ Client reconnect behavior is runtime-owned. There is no `client.reconnect-interv
 
 When `[server.acme]` is enabled, Runewarp warns at startup for each public bind address that is not on TCP 443. That warning is advisory rather than fatal because container and NAT deployments may still publish port 443 externally even when the internal bind port differs.
 
+Server ACME state directories must be private to their operator, with mode `0700`; generated material uses `0600`. All owner-capable processes on a worker share the same stable local lock inode and committed state directory. Older binaries without process-held ownership must stop before the first participating owner imports their legacy cache. The CLI observes the Server hostname on external TCP 443 before issuance and starts unready without a usable validated certificate. It uses a 24-hour minimum remaining certificate lifetime, a one-hour safety margin and five-minute finite recovery. Explicit routed overlap and caller-specific lifetime budgets use the integrated Rust controller interface, not an extra TOML marker. See [Server certificate ownership](server-certificates.md).
+
 ### Client identity material
 
 `client.identity-dir` holds:

@@ -49,6 +49,7 @@ async fn fixture(
         limits,
         None,
         vec![],
+        None,
     )
     .await?;
     Ok((server, client_config))

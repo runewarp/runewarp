@@ -365,18 +365,7 @@ impl Store {
             });
         let mut generations = vec![id];
         generations.extend(previous);
-        let manifest =
-            serde_json::to_vec(&Manifest { generations }).map_err(|_| invalid_state())?;
-        let candidate = directory.join("candidate.json");
-        let file = write_private(&candidate, &manifest)?;
-        self.io.sync_file(&file, StoreOperation::ManifestSync)?;
-        self.io.rename(
-            &candidate,
-            &directory.join("current.json"),
-            StoreOperation::ManifestRename,
-        )?;
-        self.io
-            .sync_directory(&directory, StoreOperation::ManifestDirectorySync)?;
+        self.publish_manifest(&Manifest { generations })?;
         self.prune()
     }
 

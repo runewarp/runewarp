@@ -62,7 +62,7 @@ fn certificate_process() {
         let client = Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth());
         let route = std::env::var("RUNEWARP_TEST_CHALLENGE_INGRESS").unwrap().parse().unwrap();
         let mut options = ServerAcmeOptions::new(policy, &directory, client, Arc::new(TcpChallengeRoute::at(route, "consumed-local-ingress-v1").unwrap())).unwrap();
-        options.recovery_timeout = Duration::from_secs(15); options.retry_interval = Duration::from_millis(20);
+        options.recovery_timeout = Duration::from_millis(std::env::var("RUNEWARP_TEST_RECOVERY_MILLIS").unwrap().parse().unwrap()); options.retry_interval = Duration::from_millis(20);
         let mut settings = load_server_config(&path.join("server.toml")).unwrap();
         settings.graceful_shutdown_duration = Duration::from_millis(50);
         let server = ServerRuntime::prepare_listeners_with_acme(&settings, vec!["127.0.0.1:0".parse().unwrap()], vec!["127.0.0.1:0".parse().unwrap()], options).await.unwrap();
@@ -92,12 +92,25 @@ struct Process {
 }
 impl Process {
     fn spawn(path: &Path, directory: &str, ingress: std::net::SocketAddr, seed: bool) -> Self {
+        Self::spawn_with_recovery(path, directory, ingress, seed, Duration::from_secs(15))
+    }
+    fn spawn_with_recovery(
+        path: &Path,
+        directory: &str,
+        ingress: std::net::SocketAddr,
+        seed: bool,
+        recovery: Duration,
+    ) -> Self {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args(["--exact", "certificate_process", "--nocapture"])
             .env("RUNEWARP_TEST_CERTIFICATE_PROCESS", path)
             .env("RUNEWARP_TEST_CA_DIRECTORY", directory)
             .env("RUNEWARP_TEST_CHALLENGE_INGRESS", ingress.to_string())
+            .env(
+                "RUNEWARP_TEST_RECOVERY_MILLIS",
+                recovery.as_millis().to_string(),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -206,6 +219,104 @@ async fn interrupted_due_renewal_retries_only_after_owner_exit_and_consumed_rout
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn owner_death_before_first_export_requires_exclusive_issuance_before_serving() {
     takeover(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cached_due_certificate_cannot_restart_failed_renewal_recovery() {
+    renewal_failure(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn durable_renewal_ends_recovery_before_its_deadline() {
+    renewal_failure(true).await;
+}
+
+async fn renewal_failure(recover: bool) {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path();
+    let authority = ca::Authority::new();
+    fixture(path, &authority);
+    let ingress = ca::Ingress::new().await;
+    let ca = ca::FakeCa::new(authority, ingress.address).await;
+    ca.fail_orders(true);
+    let mut seeder = Process::spawn(path, &ca.directory, ingress.address, true);
+    assert_eq!(seeder.read()["seeded"], true);
+    assert!(seeder.child.wait().unwrap().success());
+    let mut owner = Process::spawn_with_recovery(
+        path,
+        &ca.directory,
+        ingress.address,
+        false,
+        Duration::from_secs(2),
+    );
+    let addresses = owner.read();
+    let public = addresses["public"].as_str().unwrap().parse().unwrap();
+    let tunnel = addresses["tunnel"].as_str().unwrap().parse().unwrap();
+    *ingress.target.lock().unwrap() = Some(public);
+    let settings = load_client_config(&path.join("client.toml")).unwrap();
+    let fingerprint = owner.command("status")["fingerprint"].clone();
+    owner.command("takeover");
+    timeout(Duration::from_secs(2), async {
+        while ca.orders() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("renewal retries against the failing local CA");
+    assert!(owner.command("status")["serving"].as_bool().unwrap());
+    assert!(
+        timeout(
+            Duration::from_secs(1),
+            PreparedClient::connect_to(&settings, "127.0.0.1:0".parse().unwrap(), tunnel),
+        )
+        .await
+        .unwrap()
+        .is_ok(),
+        "last-good certificate remains usable during bounded renewal recovery"
+    );
+    if recover {
+        ca.fail_orders(false);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let exported = owner.command("export");
+                if exported["ready"] == true && exported["fingerprint"] != fingerprint {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a new durable certificate ends failed-renewal recovery");
+        tokio::time::sleep(Duration::from_millis(2300)).await;
+        let status = owner.command("status");
+        assert_eq!(status["maintenance"], false);
+        assert_eq!(status["serving"], true);
+        assert!(
+            timeout(
+                Duration::from_secs(1),
+                PreparedClient::connect_to(&settings, "127.0.0.1:0".parse().unwrap(), tunnel),
+            )
+            .await
+            .unwrap()
+            .is_ok()
+        );
+        return;
+    }
+    timeout(Duration::from_secs(4), async {
+        while !owner.command("status")["maintenance"].as_bool().unwrap() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("reloading the same due certificate must not reset finite renewal recovery");
+    assert!(!owner.command("status")["serving"].as_bool().unwrap());
+    timeout(Duration::from_secs(1), async {
+        while tokio::net::TcpStream::connect(public).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("maintenance stops ingress");
 }
 
 async fn takeover(seed: bool) {

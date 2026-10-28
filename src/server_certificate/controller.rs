@@ -110,6 +110,7 @@ struct State {
     failure: Option<&'static str>,
     store: Option<CertificateStore>,
     recovery_started: Option<tokio::time::Instant>,
+    failed_renewal_fingerprint: Option<String>,
 }
 
 struct Controller {
@@ -167,6 +168,7 @@ impl ServerCertificateController {
                     failure,
                     store: None,
                     recovery_started: requested.then(tokio::time::Instant::now),
+                    failed_renewal_fingerprint: None,
                 }),
                 requested: AtomicBool::new(requested),
                 route_lost: AtomicBool::new(false),
@@ -270,6 +272,15 @@ impl ServerCertificateController {
             route_version: state.route_version.clone(),
             failure: state.failure,
         }
+    }
+
+    pub(crate) fn is_serving(&self) -> bool {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .expect("certificate controller mutex poisoned");
+        usable(&state, &self.inner.options.validation)
     }
 
     pub(crate) fn readiness(&self) -> watch::Receiver<bool> {
@@ -439,17 +450,38 @@ impl ServerCertificateController {
                 event = acme.next() => event,
             };
             match event {
-                Some(Ok(EventOk::DeployedCachedCert | EventOk::CertCacheStore)) => {
+                Some(Ok(event @ (EventOk::DeployedCachedCert | EventOk::CertCacheStore))) => {
                     let snapshot = self.durable_snapshot(store.clone()).await?;
+                    {
+                        let mut state = self
+                            .inner
+                            .state
+                            .lock()
+                            .expect("certificate controller mutex poisoned");
+                        // Reopening the same due certificate does not repair a failed renewal.
+                        // Route-only recovery or a durable renewed certificate can end recovery.
+                        if matches!(event, EventOk::CertCacheStore)
+                            || state.failed_renewal_fingerprint.as_deref()
+                                != Some(snapshot.fingerprint())
+                        {
+                            state.recovery_started = None;
+                            state.failed_renewal_fingerprint = None;
+                        }
+                    }
                     self.install_snapshot(snapshot)?;
-                    self.inner
-                        .state
-                        .lock()
-                        .expect("certificate controller mutex poisoned")
-                        .recovery_started = None;
-                    // Having a usable durable active certificate ends recovery. Subsequent
-                    // ACME errors begin a new bounded attempt in the outer driver.
-                    return self.drive_active(acme, store).await;
+                    let result = self.drive_active(acme, store).await;
+                    if result.is_err() {
+                        let mut state = self
+                            .inner
+                            .state
+                            .lock()
+                            .expect("certificate controller mutex poisoned");
+                        state.failed_renewal_fingerprint = state
+                            .snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.fingerprint.clone());
+                    }
+                    return result;
                 }
                 Some(Ok(_)) => {}
                 Some(Err(_)) | None => {
@@ -482,9 +514,14 @@ impl ServerCertificateController {
                 biased;
                 _ = self.inner.notify.notified() => if self.inner.route_lost.load(Ordering::SeqCst) { return Ok(()); },
                 event = acme.next() => match event {
-                    Some(Ok(EventOk::CertCacheStore)) => self.install_snapshot(self.durable_snapshot(store.clone()).await?)?,
+                    Some(Ok(EventOk::CertCacheStore)) => {
+                        self.install_snapshot(self.durable_snapshot(store.clone()).await?)?;
+                        let mut state = self.inner.state.lock().expect("certificate controller mutex poisoned");
+                        state.recovery_started = None;
+                        state.failed_renewal_fingerprint = None;
+                    },
                     Some(Ok(_)) => {},
-                    Some(Err(_)) | None => { self.failure("ACME renewal or persistence failed"); return Ok(()); }
+                    Some(Err(_)) | None => { self.failure("ACME renewal or persistence failed"); return Err(io::Error::other("ACME renewal or persistence failed")); }
                 },
             }
         }

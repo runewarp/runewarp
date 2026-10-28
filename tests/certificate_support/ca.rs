@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -101,6 +101,7 @@ struct State {
     count: AtomicUsize,
     requests: AtomicUsize,
     challenges: AtomicUsize,
+    fail_orders: AtomicBool,
     target: SocketAddr,
 }
 pub struct FakeCa {
@@ -133,6 +134,7 @@ impl FakeCa {
             count: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
             challenges: AtomicUsize::new(0),
+            fail_orders: AtomicBool::new(false),
             target,
         });
         let server = state.clone();
@@ -166,6 +168,9 @@ impl FakeCa {
     }
     pub fn requests(&self) -> usize {
         self.state.requests.load(Ordering::SeqCst)
+    }
+    pub fn fail_orders(&self, fail: bool) {
+        self.state.fail_orders.store(fail, Ordering::SeqCst);
     }
 }
 impl Drop for FakeCa {
@@ -203,6 +208,16 @@ async fn handle(
     } else if path == "/orders" {
         let id = state.count.fetch_add(1, Ordering::SeqCst) + 1;
         state.orders.lock().unwrap().insert(id, Order::default());
+        if state.fail_orders.load(Ordering::SeqCst) {
+            return Ok(Response::builder()
+                .status(503)
+                .header("replay-nonce", "local-nonce")
+                .header("content-type", "application/problem+json")
+                .body(Full::new(Bytes::from(
+                    json!({"type":"urn:ietf:params:acme:error:serverInternal","detail":"controlled order failure","status":503}).to_string(),
+                )))
+                .unwrap());
+        }
         // The first real newOrder remains pending until the old process is killed.
         // A finite fixture deadline bounds an abandoned remote request.
         if id == 1 {

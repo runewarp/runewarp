@@ -226,7 +226,7 @@ impl VisitorIntake {
         if self
             .certificate
             .as_ref()
-            .is_some_and(|certificate| !certificate.status().serving)
+            .is_some_and(|certificate| !certificate.is_serving())
         {
             return Ok(());
         }

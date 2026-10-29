@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Added
 
-- Added one INFO `server runtime started: server-generation=<uuid>` event before listener readiness, and Server generation plus process-wide connection IDs on Server route, Tunnel lifecycle and related connection diagnostics at their existing levels. IDs cover failed handshakes and remain stable per TCP or QUIC connection without logging payloads or remote addresses. (TEMPORARY PR REFERENCE: replace with introducing PR before publication; issue [#284](https://github.com/runewarp/runewarp/issues/284))
+- Added one INFO `server runtime started: server-generation=<uuid>` event before listener readiness, and Server generation plus process-wide connection IDs on Server route, Tunnel lifecycle and related connection diagnostics at their existing levels. IDs cover failed handshakes and remain stable per TCP or QUIC connection without logging payloads or remote addresses. ([#291](https://github.com/runewarp/runewarp/pull/291))
 
 - Added immutable validated Server certificate snapshots, process-held exclusive Server ACME ownership, atomic durable cache generations and activation through consumed challenge-route observation without restarting listeners. Interrupted orders may retry after owner exit; finite recovery stops new admission before certificate safety is exhausted. Upgrade older nonparticipating owners sequentially before overlap. ([#283](https://github.com/runewarp/runewarp/pull/283))
 

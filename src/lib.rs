@@ -23,6 +23,7 @@ mod server_address;
 mod server_admission;
 mod server_cert;
 pub mod server_certificate;
+mod server_connection_log;
 mod server_identity;
 mod server_runtime;
 mod shutdown;

@@ -170,6 +170,19 @@ pub fn install(level: LogLevel) -> Result<InstallOutcome, InstallError> {
 }
 
 pub fn emit(level: EventLevel, message: &str) {
+    let correlated;
+    let message = if let Some(context) =
+        crate::server_connection_log::current().filter(|_| message.starts_with("server "))
+    {
+        let separator = if message.contains(':') { " " } else { ": " };
+        correlated = format!(
+            "{message}{separator}server-generation={} connection-id={}",
+            context.generation, context.connection_id
+        );
+        correlated.as_str()
+    } else {
+        message
+    };
     match level {
         EventLevel::Error => tracing::error!("{message}"),
         EventLevel::Warn => tracing::warn!("{message}"),
@@ -181,7 +194,17 @@ pub fn emit(level: EventLevel, message: &str) {
 
 /// Stream-open diagnostics exclude peer-provided reason strings and transport internals.
 pub fn server_tunnel_stream_open_failed(reason: &'static str, code: Option<u64>) {
-    tracing::debug!(reason, code, "server Visitor stream open failed");
+    if let Some(context) = crate::server_connection_log::current() {
+        tracing::debug!(
+            reason,
+            code,
+            "server Visitor stream open failed: server-generation={} connection-id={}",
+            context.generation,
+            context.connection_id
+        );
+    } else {
+        tracing::debug!(reason, code, "server Visitor stream open failed");
+    }
 }
 
 pub fn server_route(public_hostname: &str, outcome: ServerRouteOutcome) {
@@ -463,6 +486,16 @@ pub fn client_trust_store_warning(errors: usize) {
         EventLevel::Warn,
         &format!(
             "{errors} system trust-store certificate(s) could not be loaded; continuing with the successfully loaded trust anchors"
+        ),
+    );
+}
+
+pub fn server_runtime_started(generation: crate::tunnel::ServerRuntimeGeneration) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            "server runtime started",
+            [("server-generation", Cow::Owned(generation.to_string()))],
         ),
     );
 }
@@ -1669,6 +1702,87 @@ mod tests {
             assert!(output.contains(&line), "{line}\n{output}");
         }
         assert!(!output.contains("connection refused"));
+    }
+
+    #[test]
+    fn server_connection_fields_preserve_event_text_levels_and_debug_details() {
+        use crate::server_connection_log::{CONNECTION_LOG, ConnectionLogContext};
+        let generation =
+            crate::tunnel::ServerRuntimeGeneration::parse("01928f3e-7b6a-7c3d-8e4f-0123456789ab")
+                .expect("canonical UUIDv7 literal");
+        let context = ConnectionLogContext {
+            generation,
+            connection_id: 42,
+        };
+        let identity: ClientIdentity =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .parse()
+                .unwrap();
+        let events = || {
+            CONNECTION_LOG.sync_scope(context, || {
+                for outcome in [
+                    ServerRouteOutcome::Forwarded,
+                    ServerRouteOutcome::RejectedServerHostname,
+                    ServerRouteOutcome::RejectedUnauthorized,
+                    ServerRouteOutcome::NoActiveTunnelConnection,
+                    ServerRouteOutcome::AcmeChallenge,
+                    ServerRouteOutcome::MissingAcmeTlsConfig,
+                ] {
+                    server_route("app.example.test", outcome);
+                }
+                server_route_rejected_client_hello(&ClientHelloError::InvalidTls);
+                server_tunnel_connection_accepted(&identity);
+                server_tunnel_connection_terminated(&identity, &ConnectionError::LocallyClosed);
+                server_tunnel_connection_unauthorized(&identity);
+                server_tunnel_connection_failed("handshake timed out");
+                emit_server_tunnel_connection_dropped(
+                    &identity,
+                    "aborted by peer: transport error: timed out",
+                );
+                super::server_tunnel_stream_open_failed("session-stream-error", Some(256));
+            })
+        };
+        let fields = format!("server-generation={generation} connection-id=42");
+        let info = capture(LogLevel::Info, events);
+        for expected in [
+            format!("INFO server tunnel connection accepted: client-identity={identity} {fields}"),
+            format!("INFO server tunnel connection closed: client-identity={identity} {fields}"),
+            format!(
+                "WARN server tunnel connection unauthorized: client-identity={identity} {fields}"
+            ),
+            format!("WARN server tunnel connection failed: handshake timed out {fields}"),
+            format!(
+                "WARN server tunnel connection dropped: client-identity={identity}: timed out {fields}"
+            ),
+            format!(
+                "WARN server route unavailable: public-hostname=app.example.test reason=no-active-tunnel-connection {fields}"
+            ),
+        ] {
+            assert!(info.contains(&expected), "{expected}\n{info}");
+        }
+        assert!(!info.contains("server route forwarded"));
+        assert!(!info.contains("server route rejected"));
+        assert!(!info.contains("dropped detail"));
+        assert!(!info.contains("stream open failed"));
+        let debug = capture(LogLevel::Debug, events);
+        for line in debug.lines() {
+            assert!(
+                line.contains(&fields),
+                "every connection diagnostic is correlated: {line}"
+            );
+        }
+        assert!(debug.contains(&format!(
+            "DEBUG server route forwarded: public-hostname=app.example.test {fields}"
+        )));
+        assert!(debug.contains(&format!(
+            "DEBUG server route rejected: reason=non-tls-client-hello {fields}"
+        )));
+        assert!(debug.contains(&format!("DEBUG server tunnel connection dropped detail: client-identity={identity}: aborted by peer: transport error: timed out {fields}")));
+        assert!(debug.contains(&format!(
+            "DEBUG server Visitor stream open failed: {fields}"
+        )));
+        assert!(debug.contains("reason=\"session-stream-error\""));
+        assert!(debug.contains("code=256"));
     }
 
     #[test]

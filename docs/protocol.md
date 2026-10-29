@@ -33,13 +33,13 @@ For each inbound TCP connection on any configured `server.public-bind-address` o
 At `log-level = "debug"`, stderr may include:
 
 - the normalized **Public hostname**
-- stable key=value fields such as `public-hostname`, `backend-address`, and `reason`
+- stable key=value fields such as `public-hostname`, `backend-address`, and `reason`, plus `server-generation` and `connection-id` on Server route and Tunnel connection diagnostics
 - `server acme challenge handled` with `server-hostname=...` for `acme-tls/1` traffic on the **Server hostname**
 - separate Client ACME challenge handling lines for terminating **Public hostnames**
 
 It must not include HTTP headers, bodies, decrypted application plaintext, or the raw buffered ClientHello.
 
-Runtime tunnel failures keep full detail at debug level while operator-facing warning lines remain concise.
+Runtime Tunnel failures keep full detail at debug level while operator-facing warning lines remain concise. The [operator guide](usage.md#runtime-logs) specifies the INFO `server runtime started: server-generation=<uuid>` contract, connection correlation and existing event levels. Log correlation changes no Tunnel or Managed-session wire fields.
 
 Server ACME uses independent ordinary-serving and challenge resolvers from initial bind. Ordinary Tunnel handshakes require a validated serving certificate; its snapshot never answers `acme-tls/1`. The challenge path serves only the process-held owner, including its fresh route-observation proof before ACME polling begins. First boot without a usable certificate stays unready. Certificate maintenance stops new handshakes and Visitor placement when finite recovery or certificate safety is exhausted. This adds no Tunnel or Managed wire fields and preserves customer TLS passthrough. See [Server certificate ownership](server-certificates.md).
 

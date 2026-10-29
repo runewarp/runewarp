@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Added
 
+- Added one INFO `server runtime started: server-generation=<uuid>` event before listener readiness, and Server generation plus process-wide connection IDs on Server route, Tunnel lifecycle and related connection diagnostics at their existing levels. IDs cover failed handshakes and remain stable per TCP or QUIC connection without logging payloads or remote addresses. ([#291](https://github.com/runewarp/runewarp/pull/291))
+
 - Added immutable validated Server certificate snapshots, process-held exclusive Server ACME ownership, atomic durable cache generations and activation through consumed challenge-route observation without restarting listeners. Interrupted orders may retry after owner exit; finite recovery stops new admission before certificate safety is exhausted. Upgrade older nonparticipating owners sequentially before overlap. ([#283](https://github.com/runewarp/runewarp/pull/283))
 
 - Added support for 1 to 8 distinct Visitor TCP and Tunnel UDP bind addresses per Server through `server.public-bind-addresses` and `server.tunnel-bind-addresses`. Each plural array key is mutually exclusive with its existing singular string key; omitted pairs still default to `0.0.0.0:443`. All listeners share authorization, admission limits and graceful shutdown. Static Clients accept at most 256 effective Server addresses after CLI overrides, matching the Managed production ceiling to bound assigned-address worker and endpoint fanout. ([#281](https://github.com/runewarp/runewarp/pull/281))

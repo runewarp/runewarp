@@ -180,15 +180,21 @@ impl ActiveClientPool {
         let connection_for_close = connection.clone();
         let close_watcher = tokio::spawn(async move {
             let close_error = connection_for_close.closed().await;
-            runtime_log::server_tunnel_connection_terminated(
-                &client_identity_for_close,
-                &close_error,
+            crate::server_connection_log::sync_in_context(
+                connection_for_close.log_context(),
+                || {
+                    runtime_log::server_tunnel_connection_terminated(
+                        &client_identity_for_close,
+                        &close_error,
+                    );
+                },
             );
             let mut members_guard = members.write().await;
             members_guard.retain(|member| member.member_id != member_id);
         })
         .abort_handle();
 
+        let log_context = connection.log_context();
         members_guard.push(PoolMember {
             member_id,
             client_identity: client_identity.clone(),
@@ -198,7 +204,9 @@ impl ActiveClientPool {
             _admission_permit: admission_permit,
         });
         drop(members_guard);
-        runtime_log::server_tunnel_connection_accepted(&client_identity);
+        crate::server_connection_log::sync_in_context(log_context, || {
+            runtime_log::server_tunnel_connection_accepted(&client_identity);
+        });
         Ok(())
     }
 
@@ -302,9 +310,14 @@ impl ActiveClientPool {
         let connection_for_close = connection.clone();
         let close_watcher = tokio::spawn(async move {
             let close_error = connection_for_close.closed().await;
-            runtime_log::server_tunnel_connection_terminated(
-                &client_identity_for_close,
-                &close_error,
+            crate::server_connection_log::sync_in_context(
+                connection_for_close.log_context(),
+                || {
+                    runtime_log::server_tunnel_connection_terminated(
+                        &client_identity_for_close,
+                        &close_error,
+                    );
+                },
             );
             let mut members_guard = members.write().await;
             members_guard.retain(|member| member.member_id != member_id);

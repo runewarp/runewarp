@@ -213,7 +213,7 @@ Add `[client.acme]` for ACME-managed certificates, or `client.public-cert-dir` f
 | --- | --- | --- |
 | `log-level` | no | Top-level runtime stderr log level for the selected role. Supported values: `off`, `error`, `warn`, `info`, `debug`, `trace`. Defaults to `info`. `trace` is accepted, but no trace-only runtime events are emitted today, so it currently behaves the same as `debug`. |
 
-At `info`, Runewarp emits readiness, tunnel connection lifecycle events, warnings, and errors. `debug` adds routing diagnostics and ACME challenge-handling detail. Output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message.
+At `info`, Runewarp emits Server runtime startup, readiness, Tunnel connection lifecycle events, warnings, and errors. `debug` adds routing diagnostics and ACME challenge-handling detail. Server startup announces `server-generation`; Server route and Tunnel connection events add `server-generation` and `connection-id` at their existing levels. See the [operator logging contract](usage.md#runtime-logs). Output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message.
 
 ### Control
 

@@ -25,14 +25,24 @@ impl ConnectionLogContext {
     pub(crate) fn allocate(generation: ServerRuntimeGeneration) -> io::Result<Self> {
         // One process-wide sequence covers both protocols, every listener and runtime restart.
         // On exhaustion the checked update leaves MAX unchanged, so no ID can wrap or be reused.
-        let previous = LAST_CONNECTION_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
-                last.checked_add(1)
-            })
-            .map_err(|_| io::Error::other("Server connection IDs exhausted"))?;
+        let mut previous = LAST_CONNECTION_ID.load(Ordering::Relaxed);
+        let connection_id = loop {
+            let next = previous
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("Server connection IDs exhausted"))?;
+            match LAST_CONNECTION_ID.compare_exchange_weak(
+                previous,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break next,
+                Err(actual) => previous = actual,
+            }
+        };
         Ok(Self {
             generation,
-            connection_id: previous + 1,
+            connection_id,
         })
     }
 }
@@ -86,5 +96,28 @@ impl quinn::Runtime for ServerQuicRuntime {
         socket: std::net::UdpSocket,
     ) -> io::Result<Arc<dyn quinn::AsyncUdpSocket>> {
         quinn::TokioRuntime.wrap_udp_socket(socket)
+    }
+
+    fn now(&self) -> Instant {
+        quinn::TokioRuntime.now()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use quinn::Runtime;
+
+    use super::ServerQuicRuntime;
+
+    #[tokio::test(start_paused = true)]
+    async fn quic_clock_follows_tokio_simulated_time() {
+        let runtime = ServerQuicRuntime;
+        let started = runtime.now();
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+
+        assert_eq!(runtime.now() - started, Duration::from_secs(60));
     }
 }

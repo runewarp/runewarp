@@ -42,6 +42,7 @@ Runtime diagnostics follow the same boundary.
 
 - normalized **Public hostname**
 - routing outcome, connection timing, and transport errors
+- Server runtime generation and process-local connection IDs for log correlation, never authentication; the UUIDv7 generation reveals its mint time
 - effective Client `server-address` values plus resolved socket addresses on connection-attempt lines
 - rejected or authenticated **Client identity** values on tunnel-auth warnings
 - Client `backend-address` values in routing diagnostics

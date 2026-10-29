@@ -352,6 +352,10 @@ impl Server {
                 })?;
             tunnel_sockets.push(socket);
         }
+        // Static Servers never publish a replacement hint; only the Managed adapter does.
+        // Mint and announce once before readiness can emit from its background task.
+        let tunnel_events = ServerTunnelEvents::new(ServerRuntimeGeneration::generate());
+        runtime_log::server_runtime_started(tunnel_events.server_generation());
         let initially_ready = config.admission == ServerAdmission::Static;
         let fatal = FatalSignal::default();
         let readiness_probe = match config.readiness_bind_addr {
@@ -375,7 +379,7 @@ impl Server {
                 quinn::EndpointConfig::default(),
                 Some(config.quic_server_config.clone()),
                 socket,
-                Arc::new(quinn::TokioRuntime),
+                Arc::new(crate::server_connection_log::ServerQuicRuntime),
             ) {
                 Ok(endpoint) => tunnel_endpoints.push(endpoint),
                 Err(error) => {
@@ -396,8 +400,6 @@ impl Server {
         if let Some(gate) = readiness_gate {
             tunnel_registry.set_readiness(gate);
         }
-        // Static Servers never publish a replacement hint; only the Managed adapter does.
-        let tunnel_events = ServerTunnelEvents::new(ServerRuntimeGeneration::generate());
         let drain = ServerDrain::new();
         let authorization_adapter = ServerAuthorizationAdapter::new(
             config.server_hostname.clone(),
@@ -573,6 +575,7 @@ impl Server {
                         &visitor_intake,
                         shutdown.clone(),
                         &mut visitor_intakes,
+                        tunnel_events.server_generation(),
                     ) {
                         Ok(not_before) => public_accept_not_before = not_before,
                         Err(error) => {
@@ -588,14 +591,27 @@ impl Server {
                         break;
                     };
 
-                    admit_tunnel_handshake(
-                        &admission_policy,
-                        tunnel_registry.clone(),
-                        incoming,
-                        &mut handshakes,
-                        server_hostname.clone(),
-                        tunnel_events.clone(),
-                    );
+                    let context = match crate::server_connection_log::ConnectionLogContext::allocate(
+                        tunnel_events.server_generation(),
+                    ) {
+                        Ok(context) => context,
+                        Err(error) => {
+                            incoming.refuse();
+                            terminal_error = Some(error);
+                            let _ = shutdown.begin_fast();
+                            break;
+                        }
+                    };
+                    crate::server_connection_log::CONNECTION_LOG.sync_scope(context, || {
+                        admit_tunnel_handshake(
+                            &admission_policy,
+                            tunnel_registry.clone(),
+                            incoming,
+                            &mut handshakes,
+                            server_hostname.clone(),
+                            tunnel_events.clone(),
+                        )
+                    });
                 }
             }
         }
@@ -694,13 +710,17 @@ fn process_public_accept(
     visitor_intake: &VisitorIntake,
     shutdown: OrderlyShutdown,
     visitor_intakes: &mut JoinSet<()>,
+    generation: ServerRuntimeGeneration,
 ) -> io::Result<Option<tokio::time::Instant>> {
     match accept_result {
         Ok((visitor_stream, _peer_address)) => {
             if accept_backoff.on_success() {
                 runtime_log::server_public_listener_accept_recovered();
             }
-            visitor_intake.accept_scoped(visitor_stream, shutdown, visitor_intakes);
+            let context = crate::server_connection_log::ConnectionLogContext::allocate(generation)?;
+            crate::server_connection_log::CONNECTION_LOG.sync_scope(context, || {
+                visitor_intake.accept_scoped(visitor_stream, shutdown, visitor_intakes);
+            });
             Ok(None)
         }
         Err(error) => {
@@ -733,7 +753,7 @@ fn admit_tunnel_handshake(
     };
     admission_policy.report_recovery(&[AdmissionLimit::Handshakes]);
     let admission_policy = admission_policy.clone();
-    handshakes.spawn(async move {
+    handshakes.spawn(crate::server_connection_log::inherit(async move {
         register_tunnel_connection(
             tunnel_registry,
             incoming,
@@ -743,7 +763,7 @@ fn admit_tunnel_handshake(
             tunnel_events,
         )
         .await;
-    });
+    }));
 }
 
 async fn register_tunnel_connection(

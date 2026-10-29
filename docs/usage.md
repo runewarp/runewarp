@@ -216,7 +216,15 @@ Under **TLS passthrough**, the backend's own certificate should appear. In **Ter
 
 With Client ACME, an immediate Terminate-mode handshake failure can mean issuance is still pending. Confirm that the Public hostname reaches the Server on TCP 443 and is authorized and routed to the Client; there is no temporary passthrough fallback.
 
-At the default `log-level = "info"`, Runewarp logs readiness, tunnel connection lifecycle, warnings, and errors to stderr. Set `log-level = "debug"` when you need per-connection routing detail.
+## Runtime logs
+
+At the default `log-level = "info"`, Runewarp logs Server runtime startup, readiness, Tunnel connection lifecycle, warnings, and errors to stderr. Set `log-level = "debug"` when you need successful Visitor routing and connection failure detail.
+
+Each Server runtime emits exactly one INFO startup event before listener-ready or readiness events, using the stable message and field contract `server runtime started: server-generation=<uuid>`. The value is the same canonical lowercase hyphenated UUIDv7 sent in that runtime's Tunnel event snapshots. It changes on restart and reveals the runtime's mint time. Supervisors can attribute runtime events without enabling debug logs.
+
+Server Visitor routing outcomes and Tunnel connection `accepted`, `closed`, `unauthorized`, `failed`, and `dropped` events include `server-generation=<uuid>` and `connection-id=<n>`. Related connection diagnostics, including dropped-connection debug detail and Visitor stream-open failures, carry these fields too. IDs are decimal `u64` values allocated once per accepted Visitor TCP connection or incoming Tunnel QUIC connection, including failed handshakes, from one increasing process-wide sequence shared across listeners and protocols. IDs remain stable for that connection, are never allocated per stream or log line, and never wrap or get reused within the process. ID exhaustion stops the Server instead of reusing an ID. A Visitor route's ID names the Visitor TCP connection; a Tunnel lifecycle or stream-open diagnostic's ID names the Tunnel QUIC connection. Correlate both fields when combining process logs.
+
+Existing levels are retained: Tunnel `accepted` and `closed` events are INFO; `unauthorized`, `failed`, and `dropped` are WARN; dropped-connection detail and stream-open diagnostics are DEBUG. Successful routes and routing rejections are DEBUG; unavailable routes are WARN. Authentication failure warnings keep their existing rate limit. Correlation adds no per-connection INFO event, payload data or remote socket address.
 
 If you enable `server.readiness-bind-address`, probe that TCP listener for ingress admission instead of probing the public TLS port. Runewarp drops readiness immediately when Server shutdown begins. `SIGTERM` and the first `Ctrl-C` use graceful Server shutdown; `SIGQUIT` on Unix or a second `Ctrl-C` escalates to fast Server shutdown.
 

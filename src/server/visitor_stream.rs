@@ -85,7 +85,7 @@ impl VisitorIntake {
         shutdown: Option<crate::shutdown::OrderlyShutdown>,
     ) {
         if let Some(task) = self.accepted_task(visitor_stream, shutdown) {
-            tokio::spawn(task);
+            tokio::spawn(crate::server_connection_log::inherit(task));
         }
     }
 
@@ -96,7 +96,7 @@ impl VisitorIntake {
         tasks: &mut tokio::task::JoinSet<()>,
     ) {
         if let Some(task) = self.accepted_task(visitor_stream, Some(shutdown)) {
-            tasks.spawn(task);
+            tasks.spawn(crate::server_connection_log::inherit(task));
         }
     }
 

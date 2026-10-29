@@ -41,6 +41,7 @@ type ServerRequestStream = RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
 pub struct ServerTunnel {
     connection: quinn::Connection,
     client_identity: ClientIdentity,
+    log_context: Option<crate::server_connection_log::ConnectionLogContext>,
     shared: Arc<Shared>,
     begin_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     _task: OwnedTask,
@@ -210,10 +211,15 @@ impl ServerTunnel {
         Ok(Self {
             connection,
             client_identity,
+            log_context: crate::server_connection_log::current(),
             shared,
             begin_shutdown: Mutex::new(Some(begin_shutdown)),
             _task: task,
         })
+    }
+
+    pub(crate) fn log_context(&self) -> Option<crate::server_connection_log::ConnectionLogContext> {
+        self.log_context
     }
 
     /// Pinned Client identity authenticated by this connection.
@@ -267,7 +273,12 @@ impl ServerTunnel {
         match result {
             Ok(stream) => Ok(stream),
             Err(failure) => {
-                crate::runtime_log::server_tunnel_stream_open_failed(failure.reason, failure.code);
+                crate::server_connection_log::sync_in_context(self.log_context, || {
+                    crate::runtime_log::server_tunnel_stream_open_failed(
+                        failure.reason,
+                        failure.code,
+                    );
+                });
                 #[cfg(test)]
                 crate::capacity_benchmark::record_open_error(format!(
                     "reason={} code={:?}",

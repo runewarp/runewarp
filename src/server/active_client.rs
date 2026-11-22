@@ -1,10 +1,12 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 use crate::tunnel::ServerTunnel;
 use tokio::sync::RwLock;
 use tokio::task::AbortHandle;
 
+use crate::metrics::{ServerMetrics, TunnelCloseReason};
 use crate::{ClientIdentity, runtime_log};
 
 use super::admission::{
@@ -18,6 +20,55 @@ struct PoolMember {
     active_streams: Arc<AtomicUsize>,
     close_watcher: AbortHandle,
     _admission_permit: TunnelConnectionPermit,
+    lifecycle: MemberLifecycle,
+}
+
+/// Why the Server itself closed a member, set before the close so the watcher can report it.
+const CLOSE_CAUSE_NONE: u8 = 0;
+const CLOSE_CAUSE_SHUTDOWN: u8 = 1;
+const CLOSE_CAUSE_REPLACED: u8 = 2;
+
+/// Accepted-connection facts that follow a member across pool realignment.
+#[derive(Clone)]
+struct MemberLifecycle {
+    registered_at: Instant,
+    close_cause: Arc<AtomicU8>,
+    /// A realigned member gets a new watcher; a close the old watcher already counted must
+    /// not be counted again.
+    close_counted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MemberLifecycle {
+    fn new() -> Self {
+        Self {
+            registered_at: Instant::now(),
+            close_cause: Arc::new(AtomicU8::new(CLOSE_CAUSE_NONE)),
+            close_counted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Record a local close cause. The first cause wins.
+    fn mark(&self, cause: u8) {
+        let _ = self.close_cause.compare_exchange(
+            CLOSE_CAUSE_NONE,
+            cause,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn close_reason(&self, error: &quinn::ConnectionError) -> TunnelCloseReason {
+        match self.close_cause.load(Ordering::Relaxed) {
+            CLOSE_CAUSE_SHUTDOWN => TunnelCloseReason::Shutdown,
+            CLOSE_CAUSE_REPLACED => TunnelCloseReason::Replaced,
+            _ => match error {
+                quinn::ConnectionError::ApplicationClosed(_)
+                | quinn::ConnectionError::ConnectionClosed(_)
+                | quinn::ConnectionError::LocallyClosed => TunnelCloseReason::Closed,
+                _ => TunnelCloseReason::Dropped,
+            },
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -79,6 +130,7 @@ pub(crate) struct ActiveClientPool {
     next_member_id: Arc<AtomicU64>,
     next_round_robin_offset: Arc<AtomicU64>,
     admission: TunnelConnectionAdmission,
+    metrics: ServerMetrics,
 }
 
 /// A pool member detached from its previous Tunnel pool without closing the connection.
@@ -88,6 +140,7 @@ pub(crate) struct TakenPoolMember {
     active_streams: Arc<AtomicUsize>,
     close_watcher: AbortHandle,
     admission_permit: TunnelConnectionPermit,
+    lifecycle: MemberLifecycle,
 }
 
 impl TakenPoolMember {
@@ -122,18 +175,52 @@ fn least_active_index(
 impl ActiveClientPool {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::with_admission(TunnelConnectionAdmission::new(
-            super::admission::ServerAdmissionLimits::default(),
-        ))
+        Self::with_admission(
+            TunnelConnectionAdmission::new(super::admission::ServerAdmissionLimits::default()),
+            ServerMetrics::for_test(),
+        )
     }
 
-    pub(crate) fn with_admission(admission: TunnelConnectionAdmission) -> Self {
+    pub(crate) fn with_admission(
+        admission: TunnelConnectionAdmission,
+        metrics: ServerMetrics,
+    ) -> Self {
         Self {
             members: Arc::new(RwLock::new(Vec::new())),
             next_member_id: Arc::new(AtomicU64::new(1)),
             next_round_robin_offset: Arc::new(AtomicU64::new(0)),
             admission,
+            metrics,
         }
+    }
+
+    /// Watch one member until its connection ends: log, count, then leave the pool.
+    fn spawn_close_watcher(
+        &self,
+        member_id: u64,
+        client_identity: ClientIdentity,
+        connection: Arc<ServerTunnel>,
+        lifecycle: MemberLifecycle,
+    ) -> AbortHandle {
+        let members = self.members.clone();
+        let metrics = self.metrics.clone();
+        tokio::spawn(async move {
+            let close_error = connection.closed().await;
+            crate::server_connection_log::sync_in_context(connection.log_context(), || {
+                runtime_log::server_tunnel_connection_terminated(&client_identity, &close_error);
+            });
+            if !lifecycle.close_counted.swap(true, Ordering::Relaxed) {
+                metrics.tunnel_connection_closed(
+                    lifecycle.close_reason(&close_error),
+                    lifecycle.registered_at.elapsed(),
+                );
+            }
+            let mut members_guard = members.write().await;
+            let before = members_guard.len();
+            members_guard.retain(|member| member.member_id != member_id);
+            metrics.tunnel_pool_resized(before, members_guard.len());
+        })
+        .abort_handle()
     }
 
     pub(crate) async fn select_connection(&self) -> Option<SelectedTunnelConnection> {
@@ -175,26 +262,18 @@ impl ActiveClientPool {
         }
         let admission_permit = self.admission.try_acquire(&client_identity)?;
         let member_id = self.next_member_id.fetch_add(1, Ordering::Relaxed);
-        let members = self.members.clone();
-        let client_identity_for_close = client_identity.clone();
-        let connection_for_close = connection.clone();
-        let close_watcher = tokio::spawn(async move {
-            let close_error = connection_for_close.closed().await;
-            crate::server_connection_log::sync_in_context(
-                connection_for_close.log_context(),
-                || {
-                    runtime_log::server_tunnel_connection_terminated(
-                        &client_identity_for_close,
-                        &close_error,
-                    );
-                },
-            );
-            let mut members_guard = members.write().await;
-            members_guard.retain(|member| member.member_id != member_id);
-        })
-        .abort_handle();
+        let lifecycle = MemberLifecycle::new();
+        // Count before the watcher can observe a close, so the live gauge never goes negative.
+        self.metrics.tunnel_connection_accepted();
+        let close_watcher = self.spawn_close_watcher(
+            member_id,
+            client_identity.clone(),
+            connection.clone(),
+            lifecycle.clone(),
+        );
 
         let log_context = connection.log_context();
+        let before = members_guard.len();
         members_guard.push(PoolMember {
             member_id,
             client_identity: client_identity.clone(),
@@ -202,7 +281,10 @@ impl ActiveClientPool {
             active_streams: Arc::new(AtomicUsize::new(0)),
             close_watcher,
             _admission_permit: admission_permit,
+            lifecycle,
         });
+        self.metrics
+            .tunnel_pool_resized(before, members_guard.len());
         drop(members_guard);
         crate::server_connection_log::sync_in_context(log_context, || {
             runtime_log::server_tunnel_connection_accepted(&client_identity);
@@ -221,6 +303,19 @@ impl ActiveClientPool {
             .expect("default test admission limits should accept the connection");
     }
 
+    /// Every member's connection, each marked as ending for Server shutdown.
+    pub(crate) async fn connections_for_shutdown(&self) -> Vec<Arc<ServerTunnel>> {
+        self.members
+            .read()
+            .await
+            .iter()
+            .map(|member| {
+                member.lifecycle.mark(CLOSE_CAUSE_SHUTDOWN);
+                member.connection.clone()
+            })
+            .collect()
+    }
+
     pub(crate) async fn connections(&self) -> Vec<Arc<ServerTunnel>> {
         self.members
             .read()
@@ -230,14 +325,9 @@ impl ActiveClientPool {
             .collect()
     }
 
+    /// Close every member for Server shutdown.
     pub(crate) async fn close_all_connections(&self, reason: &'static [u8]) -> usize {
-        let connections = self
-            .members
-            .read()
-            .await
-            .iter()
-            .map(|member| member.connection.clone())
-            .collect::<Vec<_>>();
+        let connections = self.connections_for_shutdown().await;
         for connection in &connections {
             connection.close(reason);
         }
@@ -255,7 +345,10 @@ impl ActiveClientPool {
             .await
             .iter()
             .filter(|member| identities.contains(&member.client_identity))
-            .map(|member| member.connection.clone())
+            .map(|member| {
+                member.lifecycle.mark(CLOSE_CAUSE_REPLACED);
+                member.connection.clone()
+            })
             .collect::<Vec<_>>();
         let mut closed = 0;
         for connection in connections {
@@ -275,6 +368,7 @@ impl ActiveClientPool {
     /// prior pool list.
     pub(crate) async fn take_members(&self) -> Vec<TakenPoolMember> {
         let members = std::mem::take(&mut *self.members.write().await);
+        self.metrics.tunnel_pool_resized(members.len(), 0);
         members
             .into_iter()
             .map(|member| TakenPoolMember {
@@ -283,6 +377,7 @@ impl ActiveClientPool {
                 active_streams: member.active_streams,
                 close_watcher: member.close_watcher,
                 admission_permit: member._admission_permit,
+                lifecycle: member.lifecycle,
             })
             .collect()
     }
@@ -301,30 +396,20 @@ impl ActiveClientPool {
             active_streams,
             close_watcher,
             admission_permit,
+            lifecycle,
         } = member;
         close_watcher.abort();
 
         let member_id = self.next_member_id.fetch_add(1, Ordering::Relaxed);
-        let members = self.members.clone();
-        let client_identity_for_close = client_identity.clone();
-        let connection_for_close = connection.clone();
-        let close_watcher = tokio::spawn(async move {
-            let close_error = connection_for_close.closed().await;
-            crate::server_connection_log::sync_in_context(
-                connection_for_close.log_context(),
-                || {
-                    runtime_log::server_tunnel_connection_terminated(
-                        &client_identity_for_close,
-                        &close_error,
-                    );
-                },
-            );
-            let mut members_guard = members.write().await;
-            members_guard.retain(|member| member.member_id != member_id);
-        })
-        .abort_handle();
+        let close_watcher = self.spawn_close_watcher(
+            member_id,
+            client_identity.clone(),
+            connection.clone(),
+            lifecycle.clone(),
+        );
 
         let mut members = self.members.write().await;
+        let before = members.len();
         members.push(PoolMember {
             member_id,
             client_identity,
@@ -332,7 +417,9 @@ impl ActiveClientPool {
             active_streams,
             close_watcher,
             _admission_permit: admission_permit,
+            lifecycle,
         });
+        self.metrics.tunnel_pool_resized(before, members.len());
     }
 
     #[cfg(test)]
@@ -352,6 +439,7 @@ impl ActiveClientPool {
 
 #[cfg(test)]
 mod tests {
+    use crate::metrics::ServerMetrics;
     use std::io::{self, Write};
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
@@ -492,7 +580,10 @@ mod tests {
             max_tunnel_connections_per_identity: 4,
             ..ServerAdmissionLimits::for_test()
         };
-        let pool = ActiveClientPool::with_admission(TunnelConnectionAdmission::new(limits));
+        let pool = ActiveClientPool::with_admission(
+            TunnelConnectionAdmission::new(limits),
+            ServerMetrics::for_test(),
+        );
 
         assert!(
             pool.try_register(

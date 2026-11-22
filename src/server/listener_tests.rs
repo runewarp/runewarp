@@ -36,6 +36,7 @@ async fn fixture(
             public_bind_addrs: vec!["127.0.0.1:0".parse()?, "[::1]:0".parse()?],
             tunnel_connection_bind_addrs: vec!["127.0.0.1:0".parse()?, "[::1]:0".parse()?],
             readiness_bind_addr: None,
+            metrics_bind_addr: None,
             server_hostname: hostname,
             authorization: authorization.clone(),
             public_tls_config: None,

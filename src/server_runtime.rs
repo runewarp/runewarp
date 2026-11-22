@@ -149,6 +149,11 @@ impl ServerRuntime {
         self.server.readiness_addr()
     }
 
+    /// Bound metrics scrape address, if `server.metrics-bind-address` bound.
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self.server.metrics_addr()
+    }
+
     pub fn shutdown(&self) -> OrderlyShutdown {
         self.shutdown.clone()
     }
@@ -183,10 +188,14 @@ async fn run_managed(
 ) -> io::Result<()> {
     let (session_stop_tx, session_stop_rx) = oneshot::channel::<()>();
     let shutdown_for_session = shutdown.clone();
+    let metrics = server.metrics();
     let session_runtime = session.run(
         adapter,
-        |event| async move {
-            crate::runtime_log::managed_session_event(ManagedSessionRole::Server, &event);
+        |event| {
+            metrics.managed_session_event(&event);
+            async move {
+                crate::runtime_log::managed_session_event(ManagedSessionRole::Server, &event);
+            }
         },
         async move {
             tokio::select! {

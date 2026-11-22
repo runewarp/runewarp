@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
 
+use crate::metrics::ClientMetrics;
 use crate::runtime_log;
 
 const SATURATION_LOG_INTERVAL: Duration = Duration::from_secs(10);
@@ -50,14 +51,21 @@ impl ClientStreamLimits {
 #[derive(Clone)]
 pub(crate) struct ClientStreamBudget {
     limits: ClientStreamLimits,
+    metrics: ClientMetrics,
     handlers: Arc<Semaphore>,
     last_saturation_log: Arc<Mutex<Option<Instant>>>,
     saturated: Arc<Mutex<bool>>,
 }
 
 impl ClientStreamBudget {
+    /// A budget with detached metrics, for library entry points without a Client runtime.
     pub(crate) fn new(limits: ClientStreamLimits) -> Self {
+        Self::with_metrics(limits, ClientMetrics::new(false))
+    }
+
+    pub(crate) fn with_metrics(limits: ClientStreamLimits, metrics: ClientMetrics) -> Self {
         Self {
+            metrics,
             handlers: Arc::new(Semaphore::new(limits.max_stream_handlers)),
             last_saturation_log: Arc::new(Mutex::new(None)),
             saturated: Arc::new(Mutex::new(false)),
@@ -67,6 +75,10 @@ impl ClientStreamBudget {
 
     pub(crate) fn limits(&self) -> ClientStreamLimits {
         self.limits
+    }
+
+    pub(crate) fn metrics(&self) -> &ClientMetrics {
+        &self.metrics
     }
 
     pub(crate) fn semaphore(&self) -> Arc<Semaphore> {
@@ -91,7 +103,7 @@ impl ClientStreamBudget {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         runtime_log::client_stream_handler_saturated(
-            self.limits.max_stream_handlers,
+            self.metrics.active_stream_handlers(),
             self.limits.max_stream_handlers,
         );
     }

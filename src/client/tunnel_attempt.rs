@@ -319,7 +319,8 @@ impl ClientTunnelAttempt {
         let connected_once = Arc::clone(&self.connected_once);
         let establish_attempts = Arc::clone(&self.establish_attempts);
         let candidate = expected_generation.is_some();
-        async move {
+        let metrics = self.instance.stream_budget().metrics().clone();
+        let attempt = async move {
             let phase = client_tunnel_phase(connected_once.load(Ordering::SeqCst));
             let attempt_kind = if candidate {
                 crate::runtime_log::ClientTunnelAttemptKind::Retry
@@ -412,7 +413,52 @@ impl ClientTunnelAttempt {
                     })
                 }),
             }
+        };
+        async move { record_attempt(&metrics, attempt.await) }
+    }
+}
+
+/// Count one attempt by outcome. A connection counts as live until its run ends or the
+/// address worker drops it unrun.
+fn record_attempt(
+    metrics: &crate::metrics::ClientMetrics,
+    outcome: TunnelAttemptOutcome,
+) -> TunnelAttemptOutcome {
+    use crate::metrics::ClientTunnelAttemptOutcome as Outcome;
+
+    let label = match &outcome {
+        TunnelAttemptOutcome::Connected { .. } => Outcome::Connected,
+        TunnelAttemptOutcome::Retryable(failure) => match failure.kind {
+            AttemptFailureKind::Resolution(_) => Outcome::ResolutionFailed,
+            AttemptFailureKind::Unauthorized(_) => Outcome::Unauthorized,
+            AttemptFailureKind::WrongGeneration => Outcome::WrongGeneration,
+            AttemptFailureKind::Transport(..) | AttemptFailureKind::Unclassified => Outcome::Failed,
+        },
+        TunnelAttemptOutcome::FatalLocalMaterial(_) => Outcome::Failed,
+    };
+    metrics.tunnel_connection_attempt(label);
+    match outcome {
+        TunnelAttemptOutcome::Connected {
+            configured_server_addr,
+            run,
+            hints,
+            generation,
+        } => {
+            let live = metrics.tunnel_connection_opened();
+            TunnelAttemptOutcome::Connected {
+                configured_server_addr,
+                run: Box::new(move |shutdown| {
+                    let run = run(shutdown);
+                    Box::pin(async move {
+                        let _live = live;
+                        run.await
+                    })
+                }),
+                hints,
+                generation,
+            }
         }
+        outcome => outcome,
     }
 }
 

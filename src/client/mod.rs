@@ -208,6 +208,7 @@ impl Client {
                     }
                 })
             },
+            stream_budget.metrics().credit_gauges(),
             expected_generation,
         )
         .await

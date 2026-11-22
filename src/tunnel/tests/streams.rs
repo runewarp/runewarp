@@ -688,7 +688,12 @@ async fn explicit_reserved_credit_eight_to_nine_is_advertised_without_extra_capa
     let fixture = Fixture::new().expect("fixture");
     let (server, client) = fixture.connect().await.expect("handshake");
     // No H3 driver: this isolates Quinn's explicit application credit updates.
-    let credits = crate::tunnel::credit::VisitorCredits::new(client, budget(9), None);
+    let credits = crate::tunnel::credit::VisitorCredits::new(
+        client,
+        budget(9),
+        None,
+        crate::metrics::CreditGauges::default(),
+    );
     for _ in 0..8 {
         credits.offer(
             credits

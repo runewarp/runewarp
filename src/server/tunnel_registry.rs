@@ -10,6 +10,7 @@ use crate::tunnel::ServerTunnel;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable, Aborted};
 use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock};
 
+use crate::metrics::ServerMetrics;
 use crate::{ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig};
 
 use super::active_client::{ActiveClientPool, ActiveStreamGuard, SelectedTunnelConnection};
@@ -31,7 +32,10 @@ pub(crate) enum TunnelRouteOutcome {
 pub(crate) enum TunnelRegistrationOutcome {
     Registered,
     Rejected(AdmissionRejection),
+    /// The registry stopped accepting connections for shutdown.
     Closed,
+    /// The Client identity maps to no Tunnel under the current authorization.
+    Unmapped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +158,7 @@ pub(crate) struct TunnelRegistry {
     tunnel_connection_admission: TunnelConnectionAdmission,
     readiness: Arc<StdRwLock<Option<ReadinessGate>>>,
     first_apply_completed: Arc<AtomicBool>,
+    metrics: ServerMetrics,
 }
 
 impl TunnelRegistry {
@@ -210,6 +215,7 @@ impl TunnelRegistry {
             authorization: Arc::new(AuthorizationState::from_snapshot_for_test(snapshot)),
             tunnel_pools: Arc::new(RwLock::new(vec![ActiveClientPool::with_admission(
                 tunnel_connection_admission.clone(),
+                ServerMetrics::for_test(),
             )])),
             visitor_work: Arc::new(ActiveVisitorWorkState {
                 inner: StdMutex::new(ActiveVisitorWorkSet {
@@ -225,6 +231,7 @@ impl TunnelRegistry {
             tunnel_connection_admission,
             readiness: Arc::new(StdRwLock::new(None)),
             first_apply_completed: Arc::new(AtomicBool::new(false)),
+            metrics: ServerMetrics::for_test(),
         })
     }
 
@@ -261,18 +268,21 @@ impl TunnelRegistry {
         Self::from_authorization_with_admission(
             authorization,
             TunnelConnectionAdmission::new(ServerAdmissionLimits::default()),
+            ServerMetrics::for_test(),
         )
     }
 
     pub(crate) fn from_authorization_with_admission(
         authorization: ServerAuthorization,
         tunnel_connection_admission: TunnelConnectionAdmission,
+        metrics: ServerMetrics,
     ) -> io::Result<Self> {
         let tunnel_count = authorization.current_tunnel_count();
         let mut tunnel_pools = Vec::with_capacity(tunnel_count);
         for _ in 0..tunnel_count {
             tunnel_pools.push(ActiveClientPool::with_admission(
                 tunnel_connection_admission.clone(),
+                metrics.clone(),
             ));
         }
         Ok(Self {
@@ -292,6 +302,7 @@ impl TunnelRegistry {
             tunnel_connection_admission,
             readiness: Arc::new(StdRwLock::new(None)),
             first_apply_completed: Arc::new(AtomicBool::new(false)),
+            metrics,
         })
     }
 
@@ -388,7 +399,10 @@ impl TunnelRegistry {
                 let mut rebuilt = Vec::with_capacity(next_ids.len());
                 for id in next_ids {
                     rebuilt.push(pools_by_id.remove(id).unwrap_or_else(|| {
-                        ActiveClientPool::with_admission(self.tunnel_connection_admission.clone())
+                        ActiveClientPool::with_admission(
+                            self.tunnel_connection_admission.clone(),
+                            self.metrics.clone(),
+                        )
                     }));
                 }
                 *pools = rebuilt;
@@ -465,11 +479,11 @@ impl TunnelRegistry {
         let Some((tunnel_index, client_identity)) = self.tunnel_registration_context(&connection)
         else {
             connection.close(b"unmapped client identity");
-            return TunnelRegistrationOutcome::Closed;
+            return TunnelRegistrationOutcome::Unmapped;
         };
         let Some(pool) = pools.get(tunnel_index).cloned() else {
             connection.close(b"unmapped client identity");
-            return TunnelRegistrationOutcome::Closed;
+            return TunnelRegistrationOutcome::Unmapped;
         };
         drop(pools);
         match pool.try_register(connection.clone(), client_identity).await {
@@ -498,7 +512,7 @@ impl TunnelRegistry {
         let pools = self.tunnel_pools.read().await.clone();
         let mut shutdowns = tokio::task::JoinSet::new();
         for pool in pools {
-            for connection in pool.connections().await {
+            for connection in pool.connections_for_shutdown().await {
                 shutdowns.spawn(async move { connection.shutdown(deadline).await });
             }
         }
@@ -799,6 +813,7 @@ fn stream_remains_authorized(
 
 #[cfg(test)]
 mod tests {
+    use crate::metrics::ServerMetrics;
     use std::collections::HashSet;
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
@@ -1288,6 +1303,7 @@ mod tests {
         let registry = TunnelRegistry::from_authorization_with_admission(
             authorization,
             TunnelConnectionAdmission::new(limits),
+            ServerMetrics::for_test(),
         )?;
 
         let first_fixture = TunnelConnectionFixture::connect(&first_identity).await?;

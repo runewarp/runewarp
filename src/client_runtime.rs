@@ -12,6 +12,7 @@ pub struct ClientRuntime {
     settings: Arc<crate::ClientConfig>,
     instance: Arc<ClientInstancePrep>,
     local_bind_addr: SocketAddr,
+    metrics_endpoint: Option<crate::metrics::MetricsEndpoint>,
 }
 
 impl ClientRuntime {
@@ -21,11 +22,32 @@ impl ClientRuntime {
     ) -> Result<Self, crate::ClientStartupError> {
         let settings = Arc::new(settings.clone());
         let instance = ClientInstancePrep::prepare(settings.as_ref()).await?;
+        // Never fatal: a bind failure logs and the Client runs without metrics.
+        let metrics_endpoint = match settings.metrics_bind_address {
+            Some(bind_addr) => {
+                crate::metrics::MetricsEndpoint::bind(
+                    "client",
+                    "client.metrics-bind-address",
+                    bind_addr,
+                    instance.stream_budget().metrics().collector(),
+                )
+                .await
+            }
+            None => None,
+        };
         Ok(Self {
             settings,
             instance,
             local_bind_addr,
+            metrics_endpoint,
         })
+    }
+
+    /// Bound metrics scrape address, if `client.metrics-bind-address` bound.
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self.metrics_endpoint
+            .as_ref()
+            .map(crate::metrics::MetricsEndpoint::local_addr)
     }
 
     /// Run until `shutdown_signal` resolves with the shutdown mode.
@@ -52,6 +74,7 @@ impl ClientRuntime {
             settings,
             instance,
             local_bind_addr,
+            metrics_endpoint,
         } = self;
         instance.start_acme_once();
 
@@ -64,6 +87,7 @@ impl ClientRuntime {
         )
         .await;
         instance.stop_acme().await;
+        drop(metrics_endpoint);
         result
     }
 }
@@ -424,6 +448,7 @@ mod tests {
             public_bind_addrs: vec![localhost(0)],
             tunnel_connection_bind_addrs: vec![localhost(0)],
             readiness_bind_addr: None,
+            metrics_bind_addr: None,
             server_hostname: server_hostname("localhost"),
             authorization: authorization.clone(),
             public_tls_config: None,
@@ -477,6 +502,7 @@ mod tests {
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            metrics_bind_address: None,
             server_addresses: vec![failing_server_address.clone(), valid_server_address.clone()],
             server_hostname: failing_server_address.hostname().clone(),
             server_port: failing_server_address.port(),

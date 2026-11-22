@@ -113,6 +113,7 @@ impl ClientTunnel {
         server_hostname: &ServerHostname,
         stream_budget: Arc<Semaphore>,
         observer: Arc<dyn Fn(bool) + Send + Sync>,
+        credit_gauges: crate::metrics::CreditGauges,
         expected_generation: Option<ServerRuntimeGeneration>,
     ) -> Result<Self, TunnelError> {
         Self::establish_internal(
@@ -121,6 +122,7 @@ impl ClientTunnel {
             stream_budget,
             EstablishOptions {
                 budget_observer: Some(observer),
+                credit_gauges,
                 expected_generation,
                 ..EstablishOptions::default()
             },
@@ -161,7 +163,7 @@ impl ClientTunnel {
             EstablishOptions {
                 timing,
                 expected_generation: Some(expected_generation),
-                budget_observer: None,
+                ..EstablishOptions::default()
             },
         )
         .await
@@ -176,6 +178,7 @@ impl ClientTunnel {
         let EstablishOptions {
             timing,
             budget_observer,
+            credit_gauges,
             expected_generation,
         } = options;
         let (driver, send_request) = with_handshake_timeout(
@@ -263,8 +266,12 @@ impl ClientTunnel {
         // Intake never waits for handlers. Every queued stream owns a budget permit, which
         // bounds this queue by the Client-instance budget despite its unbounded channel API.
         let (assigned_sender, assigned) = mpsc::unbounded_channel();
-        let credits =
-            super::credit::VisitorCredits::new(connection.clone(), stream_budget, budget_observer);
+        let credits = super::credit::VisitorCredits::new(
+            connection.clone(),
+            stream_budget,
+            budget_observer,
+            credit_gauges,
+        );
         let session_connection = connection.clone();
         let maintenance = super::credit::CreditMaintenance(credits.clone());
         // A candidate offers no credit until it joins, so a rejected candidate never holds a
@@ -546,6 +553,8 @@ impl Drop for ClientTunnel {
 struct EstablishOptions {
     timing: TunnelTiming,
     budget_observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+    /// Client-instance credit gauges; tests and library callers get detached ones.
+    credit_gauges: crate::metrics::CreditGauges,
     /// Candidate attempts require the first snapshot to name this generation.
     expected_generation: Option<ServerRuntimeGeneration>,
 }

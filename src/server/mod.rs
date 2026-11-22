@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use self::drain::ServerDrain;
+use crate::metrics::{MetricsEndpoint, ServerMetrics, TunnelRejectReason};
 use crate::tunnel::{ServerRuntimeGeneration, ServerTunnel, ServerTunnelEvents};
 use quinn::Endpoint;
 use tokio::net::{TcpListener, TcpSocket};
@@ -82,6 +83,8 @@ pub struct ServerBindConfig {
     /// One to eight distinct Tunnel UDP addresses, sharing authorization and pools.
     pub tunnel_connection_bind_addrs: Vec<SocketAddr>,
     pub readiness_bind_addr: Option<SocketAddr>,
+    /// Optional Prometheus scrape listener. A bind failure logs and leaves metrics disabled.
+    pub metrics_bind_addr: Option<SocketAddr>,
     pub server_hostname: ServerHostname,
     /// Shared authorization snapshot consulted by Public-hostname routing.
     /// Pass the same handle to the QUIC Client-identity admission builder.
@@ -103,6 +106,9 @@ pub struct Server {
     server_hostname: ServerHostname,
     tunnel_events: ServerTunnelEvents,
     drain: ServerDrain,
+    metrics: ServerMetrics,
+    metrics_endpoint: Option<MetricsEndpoint>,
+    readiness_metric: tokio::task::JoinHandle<()>,
 }
 
 struct ReadinessProbe {
@@ -142,9 +148,8 @@ where
 impl ReadinessProbe {
     async fn bind(
         bind_addr: SocketAddr,
-        initially_ready: bool,
+        gate: ReadinessGate,
         fatal: FatalSignal,
-        certificate: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> io::Result<Self> {
         // Reserve the readiness port at startup. For managed admission, keep the
         // socket bound without listen() so probes stay Unready and no other
@@ -160,7 +165,6 @@ impl ReadinessProbe {
             )
         })?;
         let bind_address = socket.local_addr()?;
-        let gate = ReadinessGate::with_certificate(initially_ready, certificate);
         let task = if gate.is_ready() {
             let listener = socket.listen(128).map_err(|source| {
                 io::Error::new(
@@ -220,6 +224,11 @@ impl ReadinessProbe {
         self.task.abort();
         let _ = self.task.await;
     }
+}
+
+/// Mirror the readiness gate into `runewarp_server_ready` until the Server stops accepting.
+async fn track_readiness(gate: ReadinessGate, metrics: ServerMetrics) {
+    gate.watch(|ready| metrics.set_ready(ready)).await;
 }
 
 fn tcp_socket_for(bind_addr: SocketAddr) -> io::Result<TcpSocket> {
@@ -301,9 +310,16 @@ impl Server {
             ));
         }
         let admission_policy = ServerAdmissionPolicy::new(admission_limits);
+        let generation = ServerRuntimeGeneration::generate();
+        let metrics = ServerMetrics::new(
+            generation,
+            config.admission == ServerAdmission::Managed,
+            admission_policy.metrics_gauges(),
+        );
         let tunnel_registry = TunnelRegistry::from_authorization_with_admission(
             config.authorization,
             admission_policy.tunnel_connections(),
+            metrics.clone(),
         )?;
         let visitor_intake = VisitorIntake::new_with_proxy(
             config.server_hostname.clone(),
@@ -354,22 +370,21 @@ impl Server {
         }
         // Static Servers never publish a replacement hint; only the Managed adapter does.
         // Mint and announce once before readiness can emit from its background task.
-        let tunnel_events = ServerTunnelEvents::new(ServerRuntimeGeneration::generate());
+        let tunnel_events = ServerTunnelEvents::new(generation);
         runtime_log::server_runtime_started(tunnel_events.server_generation());
         let initially_ready = config.admission == ServerAdmission::Static;
         let fatal = FatalSignal::default();
+        // One gate drives the optional probe and the readiness metric alike.
+        let readiness_gate = ReadinessGate::with_certificate(
+            initially_ready,
+            certificate
+                .as_ref()
+                .map(crate::server_certificate::ServerCertificateController::readiness),
+        );
         let readiness_probe = match config.readiness_bind_addr {
-            Some(bind_addr) => Some(
-                ReadinessProbe::bind(
-                    bind_addr,
-                    initially_ready,
-                    fatal.clone(),
-                    certificate
-                        .as_ref()
-                        .map(crate::server_certificate::ServerCertificateController::readiness),
-                )
-                .await?,
-            ),
+            Some(bind_addr) => {
+                Some(ReadinessProbe::bind(bind_addr, readiness_gate.clone(), fatal.clone()).await?)
+            }
             None => None,
         };
         // No QUIC driver starts until every TCP, UDP and readiness bind succeeded.
@@ -396,10 +411,24 @@ impl Server {
                 runtime_log::server_readiness_gained(readiness_probe.bind_address());
             }
         }
-        let readiness_gate = readiness_probe.as_ref().map(ReadinessProbe::gate);
-        if let Some(gate) = readiness_gate {
-            tunnel_registry.set_readiness(gate);
+        tunnel_registry.set_readiness(readiness_gate.clone());
+        let readiness_metric = tokio::spawn(track_readiness(readiness_gate, metrics.clone()));
+        if let Some(certificate) = certificate.as_ref() {
+            certificate.attach_metrics(metrics.clone());
         }
+        // Last, so no other bind failure can leave a scrape listener behind. Never fatal.
+        let metrics_endpoint = match config.metrics_bind_addr {
+            Some(bind_addr) => {
+                MetricsEndpoint::bind(
+                    "server",
+                    "server.metrics-bind-address",
+                    bind_addr,
+                    metrics.collector(),
+                )
+                .await
+            }
+            None => None,
+        };
         let drain = ServerDrain::new();
         let authorization_adapter = ServerAuthorizationAdapter::new(
             config.server_hostname.clone(),
@@ -420,6 +449,9 @@ impl Server {
             server_hostname: config.server_hostname,
             tunnel_events,
             drain,
+            metrics,
+            metrics_endpoint,
+            readiness_metric,
         })
     }
 
@@ -451,6 +483,17 @@ impl Server {
         self.readiness_probe
             .as_ref()
             .map(ReadinessProbe::bind_address)
+    }
+
+    /// Bound scrape address, or `None` when metrics are off or the bind failed.
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self.metrics_endpoint
+            .as_ref()
+            .map(MetricsEndpoint::local_addr)
+    }
+
+    pub(crate) fn metrics(&self) -> ServerMetrics {
+        self.metrics.clone()
     }
 
     /// Shared Managed-session role adapter for atomic authorization applies.
@@ -534,6 +577,9 @@ impl Server {
             server_hostname,
             tunnel_events,
             drain: _,
+            metrics,
+            metrics_endpoint,
+            readiness_metric,
         } = self;
         let mut public_cursor = 0;
         let mut tunnel_cursor = 0;
@@ -610,6 +656,7 @@ impl Server {
                             &mut handshakes,
                             server_hostname.clone(),
                             tunnel_events.clone(),
+                            metrics.clone(),
                         )
                     });
                 }
@@ -620,6 +667,9 @@ impl Server {
             .mode()
             .expect("shutdown must be started before the server leaves the accept loop");
         tunnel_registry.stop_accepting_new_work();
+        readiness_metric.abort();
+        metrics.set_ready(false);
+        metrics.set_draining();
         if let Some(readiness_probe) = readiness_probe {
             runtime_log::server_readiness_lost(readiness_probe.bind_address());
             readiness_probe.close().await;
@@ -655,6 +705,8 @@ impl Server {
         visitor_intakes.abort_all();
         while visitor_intakes.join_next().await.is_some() {}
         tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
+        // Scrapes stay available through the whole drain.
+        drop(metrics_endpoint);
         terminal_error.map_or(Ok(()), Err)
     }
 }
@@ -742,11 +794,13 @@ fn admit_tunnel_handshake(
     handshakes: &mut JoinSet<()>,
     server_hostname: ServerHostname,
     tunnel_events: ServerTunnelEvents,
+    metrics: ServerMetrics,
 ) {
     let handshake_permit = match admission_policy.try_admit_handshake() {
         Ok(permit) => permit,
         Err(rejection) => {
             incoming.refuse();
+            metrics.tunnel_connection_rejected(TunnelRejectReason::HandshakeFailed);
             admission_policy.report_saturation(rejection);
             return;
         }
@@ -761,6 +815,7 @@ fn admit_tunnel_handshake(
             admission_policy,
             server_hostname,
             tunnel_events,
+            metrics,
         )
         .await;
     }));
@@ -773,24 +828,39 @@ async fn register_tunnel_connection(
     admission_policy: ServerAdmissionPolicy,
     server_hostname: ServerHostname,
     tunnel_events: ServerTunnelEvents,
+    metrics: ServerMetrics,
 ) {
     let connecting = match incoming.accept() {
         Ok(connecting) => connecting,
         Err(error) => {
+            metrics.tunnel_connection_rejected(TunnelRejectReason::HandshakeFailed);
             report_tunnel_handshake_failure(&admission_policy, &error.to_string());
             return;
         }
     };
     let handshake = with_handshake_timeout(
         async {
-            let connection = connecting.await.map_err(|error| error.to_string())?;
+            let connection = connecting.await.map_err(|error| {
+                // The pinned-identity verifier refuses unknown Clients with access_denied.
+                let reason = if crate::quic::is_tls_access_denied(&error) {
+                    TunnelRejectReason::Unauthorized
+                } else {
+                    TunnelRejectReason::HandshakeFailed
+                };
+                (reason, error.to_string())
+            })?;
             ServerTunnel::establish(connection, server_hostname, tunnel_events)
                 .await
                 .map(Arc::new)
-                .map_err(|error| error.to_string())
+                .map_err(|error| (TunnelRejectReason::HandshakeFailed, error.to_string()))
         },
         HANDSHAKE_TIMEOUT,
-        || "tunnel handshake timed out".to_owned(),
+        || {
+            (
+                TunnelRejectReason::HandshakeFailed,
+                "tunnel handshake timed out".to_owned(),
+            )
+        },
     )
     .await;
     drop(handshake_permit);
@@ -801,6 +871,7 @@ async fn register_tunnel_connection(
             }
             match tunnel_registry.register(connection).await {
                 TunnelRegistrationOutcome::Rejected(rejection) => {
+                    metrics.tunnel_connection_rejected(TunnelRejectReason::PoolFull);
                     admission_policy.report_saturation(rejection);
                 }
                 TunnelRegistrationOutcome::Registered => admission_policy.report_recovery(&[
@@ -808,10 +879,18 @@ async fn register_tunnel_connection(
                     AdmissionLimit::TunnelConnectionsPerTunnel,
                     AdmissionLimit::TunnelConnectionsPerIdentity,
                 ]),
-                TunnelRegistrationOutcome::Closed => {}
+                TunnelRegistrationOutcome::Closed => {
+                    metrics.tunnel_connection_rejected(TunnelRejectReason::Shutdown);
+                }
+                TunnelRegistrationOutcome::Unmapped => {
+                    metrics.tunnel_connection_rejected(TunnelRejectReason::Unauthorized);
+                }
             }
         }
-        Err(error) => report_tunnel_handshake_failure(&admission_policy, &error.to_string()),
+        Err((reason, error)) => {
+            metrics.tunnel_connection_rejected(reason);
+            report_tunnel_handshake_failure(&admission_policy, &error);
+        }
     }
 }
 

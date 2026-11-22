@@ -6,6 +6,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use super::MAX_IDLE_VISITOR_CREDIT;
 use super::stream::StreamResource;
+use crate::metrics::CreditGauges;
 
 struct State {
     idle: Vec<OwnedSemaphorePermit>,
@@ -23,6 +24,7 @@ pub(super) struct VisitorCredits {
     /// Published once idle maintenance stops, so the session task drops its pending acquisition.
     idle_stopped: watch::Sender<bool>,
     observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+    gauges: CreditGauges,
     #[cfg(test)]
     pub(super) guard_rejections: std::sync::atomic::AtomicUsize,
 }
@@ -32,6 +34,7 @@ impl VisitorCredits {
         connection: quinn::Connection,
         budget: Arc<Semaphore>,
         observer: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+        gauges: CreditGauges,
     ) -> Arc<Self> {
         Arc::new(Self {
             connection,
@@ -45,6 +48,7 @@ impl VisitorCredits {
             active: watch::Sender::new(0),
             idle_stopped: watch::Sender::new(false),
             observer,
+            gauges,
             #[cfg(test)]
             guard_rejections: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -94,6 +98,7 @@ impl VisitorCredits {
         state.idle.push(permit);
         state.held += 1;
         self.set_limit(&state);
+        self.gauges.available.inc();
         drop(state);
         self.note_budget(true);
     }
@@ -106,6 +111,7 @@ impl VisitorCredits {
             return None;
         }
         let permit = if let Some(permit) = state.idle.pop() {
+            self.gauges.available.dec();
             permit
         } else {
             match self.budget.clone().try_acquire_owned() {
@@ -128,6 +134,7 @@ impl VisitorCredits {
             }
         };
         self.active.send_modify(|active| *active += 1);
+        self.gauges.active.inc();
         Some(Arc::new(VisitorPermit {
             credits: self.clone(),
             _permit: permit,
@@ -172,6 +179,9 @@ impl VisitorCredits {
         state.held -= state.idle.len();
         // Lower the target before releasing actual capacity to another connection.
         self.set_limit(state);
+        self.gauges
+            .available
+            .dec_by(crate::metrics::gauge_value(state.idle.len()));
         state.idle.clear();
         self.idle_stopped.send_replace(true);
     }
@@ -206,6 +216,7 @@ impl StreamResource for VisitorPermit {
 impl Drop for VisitorPermit {
     fn drop(&mut self) {
         self.credits.active.send_modify(|active| *active -= 1);
+        self.credits.gauges.active.dec();
     }
 }
 

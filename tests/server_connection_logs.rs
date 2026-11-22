@@ -103,6 +103,7 @@ async fn server_connection_logs_correlate_visitors_and_tunnels_across_listeners(
         public_bind_addrs: addresses.clone(),
         tunnel_connection_bind_addrs: addresses,
         readiness_bind_addr: None,
+        metrics_bind_addr: None,
         server_hostname: hostname.clone(),
         authorization: authorization.clone(),
         public_tls_config: None,

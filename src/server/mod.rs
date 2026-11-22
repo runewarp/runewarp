@@ -496,6 +496,12 @@ impl Server {
         self.metrics.clone()
     }
 
+    /// Move the scrape listener to a caller that outlives `run`, such as a Managed runtime
+    /// that keeps reporting after a drain completes.
+    pub(crate) fn take_metrics_endpoint(&mut self) -> Option<MetricsEndpoint> {
+        self.metrics_endpoint.take()
+    }
+
     /// Shared Managed-session role adapter for atomic authorization applies.
     pub fn authorization_adapter(&self) -> ServerAuthorizationAdapter {
         self.authorization_adapter.clone()
@@ -667,7 +673,9 @@ impl Server {
             .mode()
             .expect("shutdown must be started before the server leaves the accept loop");
         tunnel_registry.stop_accepting_new_work();
+        // Join the watcher so a write it already started cannot land after this clear.
         readiness_metric.abort();
+        let _ = readiness_metric.await;
         metrics.set_ready(false);
         metrics.set_draining();
         if let Some(readiness_probe) = readiness_probe {
@@ -677,7 +685,12 @@ impl Server {
         drop(public_listeners);
         drop(tunnel_endpoints);
         handshakes.abort_all();
-        while handshakes.join_next().await.is_some() {}
+        while let Some(result) = handshakes.join_next().await {
+            // A handshake cut short by shutdown records no outcome of its own.
+            if result.is_err() {
+                metrics.tunnel_connection_rejected(TunnelRejectReason::Shutdown);
+            }
+        }
 
         if mode == ShutdownMode::Graceful && shutdown.graceful_shutdown_duration() > Duration::ZERO
         {

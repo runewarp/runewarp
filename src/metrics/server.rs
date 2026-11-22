@@ -413,6 +413,17 @@ mod tests {
             ]
         );
         assert_eq!(all::<TunnelCloseReason>().len(), 4);
+        assert_eq!(
+            label_values(
+                &text,
+                "runewarp_server_tunnel_connection_duration_seconds_bucket",
+                "le"
+            ),
+            [
+                "1.0", "10.0", "60.0", "300.0", "1800.0", "3600.0", "21600.0", "86400.0",
+                "604800.0", "+Inf"
+            ]
+        );
     }
 
     #[test]
@@ -422,6 +433,14 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("runewarp_build_info{"))
             .expect("build info");
+        assert_eq!(
+            build,
+            format!(
+                r#"runewarp_build_info{{version="{}",revision="{}",role="server",mode="managed"}} 1"#,
+                env!("CARGO_PKG_VERSION"),
+                env!("RUNEWARP_BUILD_REVISION")
+            )
+        );
         assert!(build.contains(r#"role="server""#), "{build}");
         assert!(build.contains(r#"mode="managed""#), "{build}");
         assert!(

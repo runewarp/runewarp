@@ -166,10 +166,13 @@ impl ServerRuntime {
 
     pub async fn run(self) -> io::Result<()> {
         let Self {
-            server,
+            mut server,
             shutdown,
             mode,
         } = self;
+        // Held until the whole runtime returns: a Managed Server keeps its session and keeps
+        // reporting after a drain completes, so scrapes must outlive the serving loop.
+        let _metrics_endpoint = server.take_metrics_endpoint();
         match mode {
             ServerRuntimeMode::Static => server.run_with_shutdown(&shutdown).await,
             ServerRuntimeMode::Managed {

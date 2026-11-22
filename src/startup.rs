@@ -227,6 +227,10 @@ impl PreparedServer {
         self.server.metrics()
     }
 
+    pub(crate) fn take_metrics_endpoint(&mut self) -> Option<crate::metrics::MetricsEndpoint> {
+        self.server.take_metrics_endpoint()
+    }
+
     pub fn trusted_client_identities(&self) -> &[ClientIdentity] {
         &self.trusted_client_identities
     }

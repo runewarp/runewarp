@@ -19,7 +19,7 @@ Runewarp makes no outbound calls for metrics. Any collector that scrapes Prometh
 - Each connection serves one request and closes. A connection still open after 5 seconds is closed.
 - The listener has no authentication or TLS. Bind it to loopback or a private network.
 - A bind failure never stops the runtime. It logs `ERROR <role> metrics listener disabled: config-key=<key> bind-address=<address>: bind failed: <error>` and the runtime keeps serving without metrics. A successful bind logs `INFO <role> metrics listener enabled: bind-address=<address>`.
-- The Server keeps the listener open through graceful shutdown and Managed drain, and closes it when the runtime stops.
+- The Server keeps the listener open through graceful shutdown and Managed drain. A Managed Server runtime keeps it open after a drain completes, while it keeps reporting, and closes it when the runtime returns.
 
 ## Guarantees
 
@@ -45,8 +45,8 @@ Runewarp makes no outbound calls for metrics. Any collector that scrapes Prometh
 | `runewarp_server_tunnel_connections` | gauge | | | Accepted Tunnel connections that have not closed. Counted from Tunnel pool registration until the close is observed. |
 | `runewarp_server_tunnels_connected` | gauge | | | Tunnels with at least one connection in their pool. |
 | `runewarp_server_tunnel_connections_accepted_total` | counter | | | Tunnel connections registered in a Tunnel pool after a successful handshake. |
-| `runewarp_server_tunnel_connections_rejected_total` | counter | | `reason` | Tunnel connections refused before registration. `unauthorized`: the pinned-identity check refused the Client identity, or it maps to no Tunnel. `handshake_failed`: QUIC, TLS, HTTP/3 or event-stream setup failed or timed out, or the pending-handshake limit was full. `pool_full`: a Tunnel connection admission limit was full. `shutdown`: the Server had stopped accepting. |
-| `runewarp_server_tunnel_connections_closed_total` | counter | | `reason` | Accepted connections that ended. `closed`: the peer or the WebTransport session closed cleanly, including Client withdrawal. `dropped`: a transport failure, such as an idle timeout or reset. `replaced`: an Authorization replacement revoked its Client identity. `shutdown`: Server shutdown or Managed drain closed it. |
+| `runewarp_server_tunnel_connections_rejected_total` | counter | | `reason` | Tunnel connections refused before registration. `unauthorized`: the pinned-identity check refused the Client identity, or it maps to no Tunnel. `handshake_failed`: QUIC, TLS, HTTP/3 or event-stream setup failed or timed out, or the pending-handshake limit was full. `pool_full`: a Tunnel connection admission limit was full. `shutdown`: the Server had stopped accepting, or shutdown interrupted the handshake. |
+| `runewarp_server_tunnel_connections_closed_total` | counter | | `reason` | Accepted connections that ended. `closed`: the peer closed with `H3_NO_ERROR` or QUIC `NO_ERROR`, or the local session driver closed after the WebTransport session ended, including Client withdrawal. `dropped`: any other end, such as a peer error code, an idle timeout or a reset. `replaced`: an Authorization replacement revoked its Client identity. `shutdown`: Server shutdown or Managed drain closed it. |
 | `runewarp_server_tunnel_connection_duration_seconds` | histogram | seconds | | Lifetime of each accepted connection, from registration to close. Buckets: 1, 10, 60, 300, 1800, 3600, 21600, 86400 and 604800 seconds. |
 | `runewarp_server_admission_in_use` | gauge | | `limit` | Work holding an aggregate admission limit. `visitor_global`, `quic_handshake_global`, `pending_stream_open`, `active_routed_stream`, `tunnel_connection_global`. |
 | `runewarp_server_admission_limit` | gauge | | `limit` | Effective limit after file-descriptor sizing. The in-use values plus `visitor_source`, `tunnel_connection_per_tunnel` and `tunnel_connection_per_client_identity`. |

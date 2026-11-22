@@ -61,13 +61,30 @@ impl MemberLifecycle {
         match self.close_cause.load(Ordering::Relaxed) {
             CLOSE_CAUSE_SHUTDOWN => TunnelCloseReason::Shutdown,
             CLOSE_CAUSE_REPLACED => TunnelCloseReason::Replaced,
-            _ => match error {
-                quinn::ConnectionError::ApplicationClosed(_)
-                | quinn::ConnectionError::ConnectionClosed(_)
-                | quinn::ConnectionError::LocallyClosed => TunnelCloseReason::Closed,
-                _ => TunnelCloseReason::Dropped,
-            },
+            _ => classify_close(error),
         }
+    }
+}
+
+/// HTTP/3 `H3_NO_ERROR`, which both peers use for every orderly Tunnel close.
+const H3_NO_ERROR: u32 = 0x100;
+
+/// A close the Server did not cause: clean only without an error code.
+fn classify_close(error: &quinn::ConnectionError) -> TunnelCloseReason {
+    match error {
+        quinn::ConnectionError::ApplicationClosed(close)
+            if close.error_code == quinn::VarInt::from_u32(H3_NO_ERROR) =>
+        {
+            TunnelCloseReason::Closed
+        }
+        quinn::ConnectionError::ConnectionClosed(close)
+            if close.error_code == quinn::TransportErrorCode::NO_ERROR =>
+        {
+            TunnelCloseReason::Closed
+        }
+        // The local session driver closes with H3_NO_ERROR after the WebTransport session ends.
+        quinn::ConnectionError::LocallyClosed => TunnelCloseReason::Closed,
+        _ => TunnelCloseReason::Dropped,
     }
 }
 
@@ -440,6 +457,53 @@ impl ActiveClientPool {
 #[cfg(test)]
 mod tests {
     use crate::metrics::ServerMetrics;
+
+    #[test]
+    fn peer_closes_count_as_clean_only_without_an_error_code() {
+        use super::{TunnelCloseReason, classify_close};
+
+        let application = |code: u32| {
+            quinn::ConnectionError::ApplicationClosed(quinn::ApplicationClose {
+                error_code: quinn::VarInt::from_u32(code),
+                reason: bytes::Bytes::new(),
+            })
+        };
+        let transport = |code| {
+            quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
+                error_code: code,
+                frame_type: None,
+                reason: bytes::Bytes::new(),
+            })
+        };
+        assert_eq!(
+            classify_close(&application(0x100)),
+            TunnelCloseReason::Closed
+        );
+        assert_eq!(
+            classify_close(&application(0x102)),
+            TunnelCloseReason::Dropped
+        );
+        assert_eq!(
+            classify_close(&transport(quinn::TransportErrorCode::NO_ERROR)),
+            TunnelCloseReason::Closed
+        );
+        assert_eq!(
+            classify_close(&transport(quinn::TransportErrorCode::PROTOCOL_VIOLATION)),
+            TunnelCloseReason::Dropped
+        );
+        assert_eq!(
+            classify_close(&quinn::ConnectionError::LocallyClosed),
+            TunnelCloseReason::Closed
+        );
+        assert_eq!(
+            classify_close(&quinn::ConnectionError::TimedOut),
+            TunnelCloseReason::Dropped
+        );
+        assert_eq!(
+            classify_close(&quinn::ConnectionError::Reset),
+            TunnelCloseReason::Dropped
+        );
+    }
     use std::io::{self, Write};
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};

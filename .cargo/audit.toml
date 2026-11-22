@@ -9,7 +9,13 @@
 # classes.
 
 [advisories]
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0543: chrono is unmaintained (an informational finding, not a vulnerability).
+    # It enters only through rustls-acme, which depends on it in every release up to 0.15.4.
+    # Runewarp code never uses chrono directly.
+    # Owner: dtcristo. Remove when rustls-acme drops chrono or Runewarp replaces rustls-acme.
+    "RUSTSEC-2026-0543",
+]
 
 [output]
 quiet = false

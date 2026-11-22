@@ -11,6 +11,7 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
     let runtime = ServerRuntimeArgs {
         hostname: command.hostname,
         control_address: command.control_address,
+        log_format: command.log_format.map(Into::into),
     };
     let config = command.config;
     if let Some(cli::ServerSubcommand::Cert(command)) = command.command {
@@ -29,12 +30,18 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
             )
             .into());
         }
+        if runtime.log_format.is_some() {
+            return Err(
+                "--log-format is only supported for `runewarp server`, not `runewarp server cert ...`"
+                    .into(),
+            );
+        }
         return cert::run(config, command);
     }
 
     let config = resolve_server_config_from_cli(config, runtime)
         .map_err(wrap_server_config_resolution_error)?;
-    runewarp::runtime_log::install(config.log_level)?;
+    runewarp::runtime_log::install(config.log_level, config.log_format)?;
     let server = match ServerRuntime::prepare_listeners(
         &config,
         config.public_bind_addresses.clone(),

@@ -542,6 +542,7 @@ identity-dir = "client-identity"
             server_addresses: vec!["tunnel.example.test".to_owned()],
             backend_address: Some(backend.0.to_string()),
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory: tempdir.path().join("unused-default"),
@@ -2207,6 +2208,7 @@ client-identity = "{}"
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
+        log_format: runewarp::LogFormat::Text,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
@@ -2379,6 +2381,7 @@ client-identity = "{}"
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
+        log_format: runewarp::LogFormat::Text,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
@@ -2539,6 +2542,7 @@ client-identity = "{}"
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
+        log_format: runewarp::LogFormat::Text,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
@@ -2734,6 +2738,7 @@ client-identity = "{}"
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
+        log_format: runewarp::LogFormat::Text,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
@@ -2878,6 +2883,7 @@ client-identity = "{}"
         server_hostname: server_hostname("tunnel.example.test"),
         server_port: 443,
         log_level: LogLevel::Off,
+        log_format: runewarp::LogFormat::Text,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),

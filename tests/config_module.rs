@@ -25,6 +25,7 @@ fn client_config_can_be_resolved_through_the_deep_config_module() -> Result<(), 
             server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("localhost:8443".to_owned()),
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory: identity_directory.clone(),

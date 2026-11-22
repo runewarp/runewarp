@@ -8,9 +8,10 @@ use crate::config::preparation::{
     resolve_path_with_default,
 };
 use crate::config::{
-    ConfigFileError, LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig,
-    SERVER_HOSTNAME_ENV_VAR, collect_server_unknown_field_messages, deserialize_selected_section,
-    load_log_level_from_path, load_optional_selected_section_value,
+    ConfigFileError, GlobalLogConfig, LogFormat, LogLevel, RawServerAcmeConfig, RawServerConfig,
+    RawServerTunnelConfig, SERVER_HOSTNAME_ENV_VAR, collect_server_unknown_field_messages,
+    deserialize_selected_section, load_global_log_config_from_path,
+    load_optional_selected_section_value,
 };
 use crate::{
     ServerHostname, XdgPathError, default_config_path, default_server_acme_state_dir,
@@ -22,12 +23,15 @@ use std::env;
 pub struct ServerRuntimeArgs {
     pub hostname: Option<String>,
     pub control_address: Option<String>,
+    /// Overrides the top-level `log-format` config key.
+    pub log_format: Option<LogFormat>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreparedServerConfig {
     pub(crate) hostname: Option<String>,
     pub(crate) log_level: LogLevel,
+    pub(crate) log_format: LogFormat,
     pub(crate) public_bind_address: Option<String>,
     pub(crate) public_bind_addresses: Option<Vec<String>>,
     pub(crate) tunnel_bind_address: Option<String>,
@@ -103,11 +107,14 @@ pub(crate) fn prepare_server_config_from_cli(
     if let Some(hostname) = resolve_server_hostname_runtime_override(runtime.hostname) {
         raw.hostname = Some(hostname);
     }
-    let log_level = load_log_level_from_path(path)?;
+    let mut log = load_global_log_config_from_path(path)?;
+    if let Some(format) = runtime.log_format {
+        log.format = format;
+    }
     let control = prepare_control_section(path, runtime.control_address)?;
     Ok(prepare_raw_server_config(
         path,
-        log_level,
+        log,
         raw,
         unknown_field_messages,
         control,
@@ -122,14 +129,14 @@ struct ServerPreparationDefaults<'a> {
 
 fn prepare_raw_server_config(
     path: &Path,
-    log_level: LogLevel,
+    log: GlobalLogConfig,
     raw: RawServerConfig,
     unknown_field_messages: Vec<String>,
     control: crate::config::preparation::control::PreparedControlSection,
 ) -> PreparedServerConfig {
     prepare_raw_server_config_with_defaults(
         path,
-        log_level,
+        log,
         raw,
         unknown_field_messages,
         control,
@@ -143,7 +150,7 @@ fn prepare_raw_server_config(
 
 fn prepare_raw_server_config_with_defaults(
     path: &Path,
-    log_level: LogLevel,
+    log: GlobalLogConfig,
     raw: RawServerConfig,
     unknown_field_messages: Vec<String>,
     control: crate::config::preparation::control::PreparedControlSection,
@@ -156,7 +163,8 @@ fn prepare_raw_server_config_with_defaults(
 
     PreparedServerConfig {
         hostname: raw.hostname,
-        log_level,
+        log_level: log.level,
+        log_format: log.format,
         public_bind_address: raw.public_bind_address.or_else(|| {
             raw.public_bind_addresses
                 .is_none()
@@ -427,7 +435,10 @@ mod tests {
         prepare_server_config_from_path,
     };
     use crate::config::preparation::control::prepare_control_section_without_config;
-    use crate::config::{LogLevel, RawServerAcmeConfig, RawServerConfig, RawServerTunnelConfig};
+    use crate::config::{
+        GlobalLogConfig, LogFormat, LogLevel, RawServerAcmeConfig, RawServerConfig,
+        RawServerTunnelConfig,
+    };
 
     #[test]
     fn server_config_selection_prefers_the_explicit_path() -> Result<(), Box<dyn std::error::Error>>
@@ -513,12 +524,50 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             ServerRuntimeArgs {
                 hostname: Some("overridden.example.test".to_owned()),
                 control_address: None,
+                log_format: None,
             },
         )?;
 
         assert_eq!(
             prepared.hostname,
             Some("overridden.example.test".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_preparation_resolves_log_format_from_config_and_runtime()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let path = tempdir.path().join("config.toml");
+        let body = r#"
+[server]
+hostname = "tunnel.example.test"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#;
+        let runtime = |log_format| ServerRuntimeArgs {
+            hostname: None,
+            control_address: None,
+            log_format,
+        };
+
+        fs::write(&path, body)?;
+        assert_eq!(
+            prepare_server_config_from_cli(&path, runtime(None))?.log_format,
+            LogFormat::Text
+        );
+
+        fs::write(&path, format!("log-format = \"json\"\n{body}"))?;
+        assert_eq!(
+            prepare_server_config_from_cli(&path, runtime(None))?.log_format,
+            LogFormat::Json
+        );
+        assert_eq!(
+            prepare_server_config_from_cli(&path, runtime(Some(LogFormat::Text)))?.log_format,
+            LogFormat::Text
         );
         Ok(())
     }
@@ -535,7 +584,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
         let manual = super::prepare_raw_server_config_with_defaults(
             &config_path,
-            LogLevel::Info,
+            GlobalLogConfig {
+                level: LogLevel::Info,
+                format: LogFormat::Text,
+            },
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: None,
@@ -580,7 +632,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
         let acme = super::prepare_raw_server_config_with_defaults(
             &config_path,
-            LogLevel::Off,
+            GlobalLogConfig {
+                level: LogLevel::Off,
+                format: LogFormat::Text,
+            },
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: None,
@@ -637,7 +692,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
         let prepared = super::prepare_raw_server_config_with_defaults(
             &config_path,
-            LogLevel::Off,
+            GlobalLogConfig {
+                level: LogLevel::Off,
+                format: LogFormat::Text,
+            },
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: None,
@@ -708,7 +766,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
         let prepared = super::prepare_raw_server_config_with_defaults(
             &config_path,
-            LogLevel::Info,
+            GlobalLogConfig {
+                level: LogLevel::Info,
+                format: LogFormat::Text,
+            },
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: Some(PathBuf::from("server-cert")),
@@ -748,7 +809,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 
         let prepared = super::prepare_raw_server_config_with_defaults(
             &config_path,
-            LogLevel::Info,
+            GlobalLogConfig {
+                level: LogLevel::Info,
+                format: LogFormat::Text,
+            },
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: Some(PathBuf::from("server-cert")),

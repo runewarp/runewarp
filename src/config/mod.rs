@@ -70,10 +70,28 @@ impl LogLevel {
     }
 }
 
+/// Runtime stderr log line encoding. `Text` is the human-readable default; `Json` writes one
+/// JSON object per line with the same timestamp, level and message as the text envelope.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
+}
+
+/// Top-level logging keys shared by every role.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GlobalLogConfig {
+    pub(crate) level: LogLevel,
+    pub(crate) format: LogFormat,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerConfig {
     pub hostname: ServerHostname,
     pub log_level: LogLevel,
+    pub log_format: LogFormat,
     pub certificate: ServerCertificateConfig,
     pub public_bind_addresses: Vec<SocketAddr>,
     pub tunnel_connection_bind_addresses: Vec<SocketAddr>,
@@ -121,6 +139,7 @@ pub struct ClientConfig {
     pub server_hostname: ServerHostname,
     pub server_port: u16,
     pub log_level: LogLevel,
+    pub log_format: LogFormat,
     pub server_trust: crate::trust::ClientServerTrust,
     pub identity_directory: PathBuf,
     pub services: Vec<ServiceConfig>,
@@ -376,11 +395,16 @@ pub(crate) fn load_optional_selected_section_value(
     Ok(document.get(section).cloned())
 }
 
-pub(crate) fn load_log_level_from_path(path: &Path) -> Result<LogLevel, ConfigFileError> {
+pub(crate) fn load_global_log_config_from_path(
+    path: &Path,
+) -> Result<GlobalLogConfig, ConfigFileError> {
     let document = load_config_document(path, "config")?;
     document
         .try_into::<RawGlobalConfig>()
-        .map(|raw| raw.log_level.unwrap_or_default())
+        .map(|raw| GlobalLogConfig {
+            level: raw.log_level.unwrap_or_default(),
+            format: raw.log_format.unwrap_or_default(),
+        })
         .map_err(|source| ConfigFileError::Parse {
             path: path.to_path_buf(),
             section: "config",
@@ -430,6 +454,7 @@ fn validate_prepared_server_config(
     let PreparedServerConfig {
         hostname,
         log_level,
+        log_format,
         public_bind_address,
         public_bind_addresses,
         tunnel_bind_address,
@@ -616,6 +641,7 @@ fn validate_prepared_server_config(
         Ok(ServerConfig {
             hostname: hostname.expect("validated server.hostname"),
             log_level,
+            log_format,
             certificate: certificate.expect("validated server certificate settings"),
             public_bind_addresses,
             tunnel_connection_bind_addresses,
@@ -648,6 +674,7 @@ pub(crate) fn validate_prepared_client_config(
         server_address,
         server_addresses,
         log_level,
+        log_format,
         trust,
         identity_directory,
         services,
@@ -927,6 +954,7 @@ pub(crate) fn validate_prepared_client_config(
             server_hostname,
             server_port,
             log_level,
+            log_format,
             server_trust: server_trust.expect("validated client.server-trust"),
             identity_directory: identity_directory.expect("validated client.identity-dir"),
             services,
@@ -1880,6 +1908,7 @@ pub(crate) struct RawClientServiceConfig {
 #[serde(rename_all = "kebab-case")]
 struct RawGlobalConfig {
     log_level: Option<LogLevel>,
+    log_format: Option<LogFormat>,
 }
 
 #[cfg(test)]

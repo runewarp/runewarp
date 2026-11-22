@@ -1,6 +1,22 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+/// CLI spelling of [`runewarp::LogFormat`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum LogFormatArg {
+    Text,
+    Json,
+}
+
+impl From<LogFormatArg> for runewarp::LogFormat {
+    fn from(format: LogFormatArg) -> Self {
+        match format {
+            LogFormatArg::Text => Self::Text,
+            LogFormatArg::Json => Self::Json,
+        }
+    }
+}
 
 const TOP_LEVEL_EXAMPLES: &str = "\
 Examples:
@@ -88,6 +104,9 @@ pub struct ServerArgs {
     /// Override the Control endpoint for the runtime Server command. Enables managed mode.
     #[arg(long, value_name = "HOSTNAME[:PORT]")]
     pub control_address: Option<String>,
+    /// Override the runtime stderr log format. Beats log-format from config.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub log_format: Option<LogFormatArg>,
     #[command(subcommand)]
     pub command: Option<ServerSubcommand>,
 }
@@ -162,6 +181,9 @@ pub struct ClientArgs {
     /// Override the Control endpoint for the runtime Client command. Enables managed mode.
     #[arg(long, value_name = "HOSTNAME[:PORT]")]
     pub control_address: Option<String>,
+    /// Override the runtime stderr log format. Beats log-format from config.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub log_format: Option<LogFormatArg>,
     #[command(subcommand)]
     pub command: Option<ClientSubcommand>,
 }

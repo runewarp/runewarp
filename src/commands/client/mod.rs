@@ -16,6 +16,7 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
         server_address,
         backend_address,
         control_address,
+        log_format,
         command,
     } = command;
 
@@ -24,6 +25,7 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
             &server_address,
             backend_address.as_deref(),
             control_address.as_deref(),
+            log_format.is_some(),
         );
         if !forbidden_flags.is_empty() {
             return Err(format!(
@@ -40,6 +42,7 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
             &server_address,
             backend_address.as_deref(),
             control_address.as_deref(),
+            log_format.is_some(),
         );
         if !forbidden_flags.is_empty() {
             return Err(format!(
@@ -55,10 +58,11 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
         server_addresses: server_address,
         backend_address,
         control_address,
+        log_format: log_format.map(Into::into),
     };
     let config = resolve_client_config_from_cli(config.clone(), runtime)
         .map_err(wrap_client_config_resolution_error)?;
-    runewarp::runtime_log::install(config.log_level)?;
+    runewarp::runtime_log::install(config.log_level, config.log_format)?;
     // Like the Server, only a first Ctrl-C or SIGQUIT arms graceful-to-fast escalation.
     let escalates = std::sync::atomic::AtomicBool::new(false);
     ClientRuntime::prepare(&config, wildcard(0))
@@ -104,6 +108,7 @@ fn client_identity_forbidden_runtime_flags(
     server_addresses: &[String],
     backend_address: Option<&str>,
     control_address: Option<&str>,
+    log_format: bool,
 ) -> Vec<&'static str> {
     let mut flags = Vec::new();
     if !server_addresses.is_empty() {
@@ -115,6 +120,9 @@ fn client_identity_forbidden_runtime_flags(
     if control_address.is_some() {
         flags.push("--control-address");
     }
+    if log_format {
+        flags.push("--log-format");
+    }
     flags
 }
 
@@ -122,8 +130,14 @@ fn client_public_cert_forbidden_runtime_flags(
     server_addresses: &[String],
     backend_address: Option<&str>,
     control_address: Option<&str>,
+    log_format: bool,
 ) -> Vec<&'static str> {
-    client_identity_forbidden_runtime_flags(server_addresses, backend_address, control_address)
+    client_identity_forbidden_runtime_flags(
+        server_addresses,
+        backend_address,
+        control_address,
+        log_format,
+    )
 }
 
 fn wildcard(port: u16) -> SocketAddr {

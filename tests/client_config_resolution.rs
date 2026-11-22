@@ -41,6 +41,7 @@ fn effective_static_client_address_lists_are_limited_across_config_and_cli_paths
                     .collect(),
                 backend_address: Some("localhost:8443".to_owned()),
                 control_address: None,
+                log_format: None,
             };
             match resolve_selected_client_config(selected.clone(), &runtime, &defaults) {
                 Ok(config) if count == 256 => {
@@ -109,6 +110,7 @@ fn runtime_server_address_overrides_replace_invalid_file_lists_before_validation
                     server_addresses: addresses.clone(),
                     backend_address: Some("localhost:8443".to_owned()),
                     control_address: None,
+                    log_format: None,
                 },
                 &defaults,
             )?;
@@ -138,6 +140,7 @@ fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<
             server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("localhost:8443".to_owned()),
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory: identity_directory.clone(),
@@ -169,6 +172,7 @@ fn cli_only_resolution_requires_backend_address_without_a_selected_config()
             server_addresses: vec!["tunnel.example.test".to_owned()],
             backend_address: None,
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -210,6 +214,7 @@ fn cli_only_resolution_accepts_repeated_server_address_flags_without_a_selected_
             ],
             backend_address: Some("localhost:8443".to_owned()),
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -251,6 +256,7 @@ hostname = "tunnel.example.test"
             server_addresses: vec!["tunnel.example.test:9443".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -288,6 +294,7 @@ log-level = "off"
             server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -326,6 +333,7 @@ server-address = "127.0.0.1:443"
             server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -368,6 +376,7 @@ backend-address = "backend.internal:443"
             ],
             backend_address: None,
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -412,6 +421,7 @@ backend-address = "backend.internal:443"
             server_addresses: Vec::new(),
             backend_address: Some("override.internal:8443".to_owned()),
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -454,6 +464,7 @@ public-hostnames = ["app.example.test"]
             server_addresses: Vec::new(),
             backend_address: Some("override.internal:8443".to_owned()),
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,
@@ -485,6 +496,7 @@ fn cli_only_resolution_rejects_ip_literal_server_addresses() -> Result<(), Box<d
             server_addresses: vec!["127.0.0.1:443".to_owned()],
             backend_address: Some("backend.internal:443".to_owned()),
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,

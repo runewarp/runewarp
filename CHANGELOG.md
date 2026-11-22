@@ -46,6 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Security
 
+- Upgraded transitive `quinn-udp` past RUSTSEC-2026-0538 (receive loop can spin after a truncated datagram) and `rustix` past RUSTSEC-2026-0486 (xattr unsoundness). ([#300](https://github.com/runewarp/runewarp/pull/300))
 - Limited Tunnel HTTP/3 header sections to 16 KiB on both peers; oversized request headers receive a bodyless `431` without starting request-handler work or closing the connection. (#263)
 - Upgraded transitive `quinn-proto`, `rustls`, `rustls-webpki`, `webpki-roots`, `h2`, `tokio`, and `chacha20` past 12 RustSec advisories, including RUSTSEC-2026-0338 through RUSTSEC-2026-0342 (`quinn-proto`), RUSTSEC-2026-0258 (`h2`), and RUSTSEC-2026-0386 (`tokio`). (#248)
 - Upgraded transitive `event-listener` past RUSTSEC-2026-0221 (`StackSlot` Send/Sync unsoundness). (#236)

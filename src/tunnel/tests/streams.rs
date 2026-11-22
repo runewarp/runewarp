@@ -684,6 +684,34 @@ async fn two_connections_share_the_budget_and_quiet_connections_hold_at_most_t_p
 }
 
 #[tokio::test]
+async fn credit_gauges_follow_offer_assignment_release_and_idle_stop() {
+    let fixture = Fixture::new().expect("fixture");
+    let (_server, client) = fixture.connect().await.expect("handshake");
+    let gauges = crate::metrics::CreditGauges::default();
+    let credits =
+        crate::tunnel::credit::VisitorCredits::new(client, budget(4), None, gauges.clone());
+    for _ in 0..3 {
+        credits.offer(
+            credits
+                .budget()
+                .acquire_owned()
+                .await
+                .expect("reserved permit"),
+        );
+    }
+    assert_eq!((gauges.available.get(), gauges.active.get()), (3, 0));
+    let first = credits.assign().expect("idle credit");
+    let second = credits.assign().expect("idle credit");
+    assert_eq!((gauges.available.get(), gauges.active.get()), (1, 2));
+    drop(first);
+    assert_eq!((gauges.available.get(), gauges.active.get()), (1, 1));
+    credits.stop_idle();
+    assert_eq!((gauges.available.get(), gauges.active.get()), (0, 1));
+    drop(second);
+    assert_eq!((gauges.available.get(), gauges.active.get()), (0, 0));
+}
+
+#[tokio::test]
 async fn explicit_reserved_credit_eight_to_nine_is_advertised_without_extra_capacity() {
     let fixture = Fixture::new().expect("fixture");
     let (server, client) = fixture.connect().await.expect("handshake");

@@ -78,6 +78,8 @@ async fn serve(listener: TcpListener, collector: Arc<dyn Collector>) {
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
+                    // Reap finished scrapes so bookkeeping stays within the cap.
+                    while connections.try_join_next().is_some() {}
                     // Over the cap, close at once rather than queueing work.
                     let Ok(permit) = permits.clone().try_acquire_owned() else {
                         drop(stream);
@@ -210,11 +212,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closes_connections_over_the_cap_and_recovers() -> io::Result<()> {
+    async fn serves_four_connections_and_closes_the_fifth() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
         let endpoint = bind().await;
         // Idle connections hold every slot until their deadline.
         let mut held = Vec::new();
-        for _ in 0..MAX_SCRAPE_CONNECTIONS {
+        for _ in 0..4 {
             held.push(TcpStream::connect(endpoint.local_addr()).await?);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -222,8 +226,17 @@ mod tests {
         let mut buffer = [0; 1];
         let read = tokio::time::timeout(Duration::from_secs(1), rejected.read(&mut buffer))
             .await
-            .expect("an over-cap connection is closed at once");
+            .expect("the fifth connection is closed at once");
         assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+
+        // The fourth held connection was admitted and still serves.
+        let mut fourth = held.pop().expect("four held connections");
+        fourth
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: metrics\r\n\r\n")
+            .await?;
+        let mut response = String::new();
+        fourth.read_to_string(&mut response).await?;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 
         drop(held);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -232,17 +245,21 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn idle_connection_is_closed_at_the_deadline() -> io::Result<()> {
+    // Real time: a paused clock races real socket I/O and skips past the close.
+    #[tokio::test]
+    async fn idle_connection_survives_until_five_seconds() -> io::Result<()> {
         let endpoint = bind().await;
         let mut idle = TcpStream::connect(endpoint.local_addr()).await?;
         let mut buffer = [0; 1];
-        let read = tokio::time::timeout(
-            SCRAPE_CONNECTION_TIMEOUT + Duration::from_secs(1),
-            idle.read(&mut buffer),
-        )
-        .await
-        .expect("the scrape deadline closes an idle connection");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(4_500), idle.read(&mut buffer))
+                .await
+                .is_err(),
+            "an idle connection stays open before the deadline"
+        );
+        let read = tokio::time::timeout(Duration::from_millis(1_500), idle.read(&mut buffer))
+            .await
+            .expect("the deadline closes an idle connection at five seconds");
         assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
         Ok(())
     }

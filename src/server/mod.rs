@@ -108,7 +108,29 @@ pub struct Server {
     drain: ServerDrain,
     metrics: ServerMetrics,
     metrics_endpoint: Option<MetricsEndpoint>,
-    readiness_metric: tokio::task::JoinHandle<()>,
+    readiness_metric: AbortOnDrop,
+}
+
+/// Owns a background task that must not outlive its Server, even when `run` never starts or
+/// is cancelled.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl AbortOnDrop {
+    /// Abort and wait, so no write the task already started can land afterwards.
+    async fn stop(mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
 }
 
 struct ReadinessProbe {
@@ -412,7 +434,10 @@ impl Server {
             }
         }
         tunnel_registry.set_readiness(readiness_gate.clone());
-        let readiness_metric = tokio::spawn(track_readiness(readiness_gate, metrics.clone()));
+        let readiness_metric = AbortOnDrop(Some(tokio::spawn(track_readiness(
+            readiness_gate,
+            metrics.clone(),
+        ))));
         if let Some(certificate) = certificate.as_ref() {
             certificate.attach_metrics(metrics.clone());
         }
@@ -673,9 +698,7 @@ impl Server {
             .mode()
             .expect("shutdown must be started before the server leaves the accept loop");
         tunnel_registry.stop_accepting_new_work();
-        // Join the watcher so a write it already started cannot land after this clear.
-        readiness_metric.abort();
-        let _ = readiness_metric.await;
+        readiness_metric.stop().await;
         metrics.set_ready(false);
         metrics.set_draining();
         if let Some(readiness_probe) = readiness_probe {

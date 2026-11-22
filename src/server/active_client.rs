@@ -418,14 +418,15 @@ impl ActiveClientPool {
         close_watcher.abort();
 
         let member_id = self.next_member_id.fetch_add(1, Ordering::Relaxed);
+        // Hold the destination lock first, as registration does: a watcher that observes an
+        // early close must find this member to remove.
+        let mut members = self.members.write().await;
         let close_watcher = self.spawn_close_watcher(
             member_id,
             client_identity.clone(),
             connection.clone(),
             lifecycle.clone(),
         );
-
-        let mut members = self.members.write().await;
         let before = members.len();
         members.push(PoolMember {
             member_id,

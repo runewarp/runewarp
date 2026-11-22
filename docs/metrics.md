@@ -24,7 +24,7 @@ Runewarp makes no outbound calls for metrics. Any collector that scrapes Prometh
 ## Guarantees
 
 - Every runtime owns its own series. Two runtimes in one process never share values.
-- Counters start at zero when the process starts and reset when it restarts. They are operational and best-effort, never a usage ledger.
+- Counters start at zero when a runtime starts and reset with each new runtime, including a new runtime in the same process. They are operational and best-effort, never a usage ledger.
 - Gauges are atomics updated where state changes. A scrape only reads atomics: it takes no locks and never walks Tunnel pools.
 - Labels come only from values enumerated in code. Series never carry hostnames, IP addresses, Client identities or Tunnel IDs, so the series count per role is fixed.
 - Metric names, types, units and label values are a public contract. Changes follow changelog discipline.
@@ -34,7 +34,7 @@ Runewarp makes no outbound calls for metrics. Any collector that scrapes Prometh
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `runewarp_build_info` | info | `version`, `revision`, `role` (`server`, `client`), `mode` (`static`, `managed`) | Crate version, full build commit (empty when unknown), role and admission mode. |
-| `target_info` | info | `service_name`, `service_version`, `service_instance_id` | OpenTelemetry resource attributes. `service_name` is `runewarp-server` or `runewarp-client`. `service_version` matches `runewarp --version`. On a Server, `service_instance_id` is the Server runtime generation, so overlapping generations during a rollout stay distinct. A Client mints a UUIDv7 per process. |
+| `target_info` | info | `service_name`, `service_version`, `service_instance_id` | OpenTelemetry resource attributes. `service_name` is `runewarp-server` or `runewarp-client`. `service_version` matches `runewarp --version`. On a Server, `service_instance_id` is the Server runtime generation, so overlapping generations during a rollout stay distinct. Each Client runtime mints its own UUIDv7. |
 
 ## Server
 

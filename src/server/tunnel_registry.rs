@@ -10,6 +10,7 @@ use crate::tunnel::ServerTunnel;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable, Aborted};
 use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock};
 
+use crate::metrics::ServerMetrics;
 use crate::{ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig};
 
 use super::active_client::{ActiveClientPool, ActiveStreamGuard, SelectedTunnelConnection};
@@ -31,7 +32,10 @@ pub(crate) enum TunnelRouteOutcome {
 pub(crate) enum TunnelRegistrationOutcome {
     Registered,
     Rejected(AdmissionRejection),
+    /// The registry stopped accepting connections for shutdown.
     Closed,
+    /// The Client identity maps to no Tunnel under the current authorization.
+    Unmapped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +158,7 @@ pub(crate) struct TunnelRegistry {
     tunnel_connection_admission: TunnelConnectionAdmission,
     readiness: Arc<StdRwLock<Option<ReadinessGate>>>,
     first_apply_completed: Arc<AtomicBool>,
+    metrics: ServerMetrics,
 }
 
 impl TunnelRegistry {
@@ -210,6 +215,7 @@ impl TunnelRegistry {
             authorization: Arc::new(AuthorizationState::from_snapshot_for_test(snapshot)),
             tunnel_pools: Arc::new(RwLock::new(vec![ActiveClientPool::with_admission(
                 tunnel_connection_admission.clone(),
+                ServerMetrics::for_test(),
             )])),
             visitor_work: Arc::new(ActiveVisitorWorkState {
                 inner: StdMutex::new(ActiveVisitorWorkSet {
@@ -225,6 +231,7 @@ impl TunnelRegistry {
             tunnel_connection_admission,
             readiness: Arc::new(StdRwLock::new(None)),
             first_apply_completed: Arc::new(AtomicBool::new(false)),
+            metrics: ServerMetrics::for_test(),
         })
     }
 
@@ -261,18 +268,21 @@ impl TunnelRegistry {
         Self::from_authorization_with_admission(
             authorization,
             TunnelConnectionAdmission::new(ServerAdmissionLimits::default()),
+            ServerMetrics::for_test(),
         )
     }
 
     pub(crate) fn from_authorization_with_admission(
         authorization: ServerAuthorization,
         tunnel_connection_admission: TunnelConnectionAdmission,
+        metrics: ServerMetrics,
     ) -> io::Result<Self> {
         let tunnel_count = authorization.current_tunnel_count();
         let mut tunnel_pools = Vec::with_capacity(tunnel_count);
         for _ in 0..tunnel_count {
             tunnel_pools.push(ActiveClientPool::with_admission(
                 tunnel_connection_admission.clone(),
+                metrics.clone(),
             ));
         }
         Ok(Self {
@@ -292,7 +302,13 @@ impl TunnelRegistry {
             tunnel_connection_admission,
             readiness: Arc::new(StdRwLock::new(None)),
             first_apply_completed: Arc::new(AtomicBool::new(false)),
+            metrics,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn metrics(&self) -> ServerMetrics {
+        self.metrics.clone()
     }
 
     pub(crate) fn set_readiness(&self, readiness: ReadinessGate) {
@@ -388,7 +404,10 @@ impl TunnelRegistry {
                 let mut rebuilt = Vec::with_capacity(next_ids.len());
                 for id in next_ids {
                     rebuilt.push(pools_by_id.remove(id).unwrap_or_else(|| {
-                        ActiveClientPool::with_admission(self.tunnel_connection_admission.clone())
+                        ActiveClientPool::with_admission(
+                            self.tunnel_connection_admission.clone(),
+                            self.metrics.clone(),
+                        )
                     }));
                 }
                 *pools = rebuilt;
@@ -465,11 +484,11 @@ impl TunnelRegistry {
         let Some((tunnel_index, client_identity)) = self.tunnel_registration_context(&connection)
         else {
             connection.close(b"unmapped client identity");
-            return TunnelRegistrationOutcome::Closed;
+            return TunnelRegistrationOutcome::Unmapped;
         };
         let Some(pool) = pools.get(tunnel_index).cloned() else {
             connection.close(b"unmapped client identity");
-            return TunnelRegistrationOutcome::Closed;
+            return TunnelRegistrationOutcome::Unmapped;
         };
         drop(pools);
         match pool.try_register(connection.clone(), client_identity).await {
@@ -498,7 +517,7 @@ impl TunnelRegistry {
         let pools = self.tunnel_pools.read().await.clone();
         let mut shutdowns = tokio::task::JoinSet::new();
         for pool in pools {
-            for connection in pool.connections().await {
+            for connection in pool.connections_for_shutdown().await {
                 shutdowns.spawn(async move { connection.shutdown(deadline).await });
             }
         }
@@ -799,6 +818,7 @@ fn stream_remains_authorized(
 
 #[cfg(test)]
 mod tests {
+    use crate::metrics::ServerMetrics;
     use std::collections::HashSet;
     use std::io;
     use std::net::{Ipv4Addr, SocketAddr};
@@ -1288,6 +1308,7 @@ mod tests {
         let registry = TunnelRegistry::from_authorization_with_admission(
             authorization,
             TunnelConnectionAdmission::new(limits),
+            ServerMetrics::for_test(),
         )?;
 
         let first_fixture = TunnelConnectionFixture::connect(&first_identity).await?;
@@ -1550,6 +1571,101 @@ mod tests {
                 .current()
                 .authorizes_client_identity(&first_identity.client_identity)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_metrics_follow_revocation_realignment_and_shutdown() -> io::Result<()> {
+        use crate::metrics::test_support::sample;
+
+        async fn eventually(registry: &TunnelRegistry, expected: &[(&str, f64)]) {
+            for _ in 0..100 {
+                let text = registry.metrics().render();
+                if expected
+                    .iter()
+                    .all(|(series, value)| sample(&text, series) == Some(*value))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("{expected:?}\n{}", registry.metrics().render());
+        }
+
+        let revoked = generate_test_client_identity()?;
+        let surviving = generate_test_client_identity()?;
+        let tunnel =
+            |id: &str, hostname: &str, identity: &GeneratedClientIdentity| ServerTunnelConfig {
+                id: Some(TunnelId::parse(id).unwrap()),
+                public_hostnames: vec![public_hostname(hostname)],
+                authorized_client_identities: vec![identity.client_identity.clone()],
+            };
+        let registry = TunnelRegistry::configured_managed(
+            &server_hostname("tunnel.example.test"),
+            &[
+                tunnel("tunnel-1", "app.example.test", &revoked),
+                tunnel("tunnel-2", "api.example.test", &surviving),
+            ],
+        )?;
+        let revoked_fixture = TunnelConnectionFixture::connect(&revoked).await?;
+        let surviving_fixture = TunnelConnectionFixture::connect(&surviving).await?;
+        registry
+            .register(revoked_fixture.server_connection.clone())
+            .await;
+        registry
+            .register(surviving_fixture.server_connection.clone())
+            .await;
+        eventually(
+            &registry,
+            &[
+                ("runewarp_server_tunnel_connections_accepted_total", 2.0),
+                ("runewarp_server_tunnel_connections", 2.0),
+                ("runewarp_server_tunnels_connected", 2.0),
+            ],
+        )
+        .await;
+
+        // Revoke one identity; the surviving member is rehomed without being counted again.
+        registry
+            .replace_authorization(
+                &server_hostname("tunnel.example.test"),
+                &[tunnel("tunnel-2", "api.example.test", &surviving)],
+            )
+            .await?;
+        eventually(
+            &registry,
+            &[
+                (
+                    r#"runewarp_server_tunnel_connections_closed_total{reason="replaced"}"#,
+                    1.0,
+                ),
+                ("runewarp_server_tunnel_connections", 1.0),
+                ("runewarp_server_tunnels_connected", 1.0),
+            ],
+        )
+        .await;
+
+        registry.close_all(b"graceful shutdown").await;
+        eventually(
+            &registry,
+            &[
+                (
+                    r#"runewarp_server_tunnel_connections_closed_total{reason="shutdown"}"#,
+                    1.0,
+                ),
+                (
+                    r#"runewarp_server_tunnel_connections_closed_total{reason="replaced"}"#,
+                    1.0,
+                ),
+                ("runewarp_server_tunnel_connections", 0.0),
+                ("runewarp_server_tunnels_connected", 0.0),
+                (
+                    "runewarp_server_tunnel_connection_duration_seconds_count",
+                    2.0,
+                ),
+            ],
+        )
+        .await;
         Ok(())
     }
 

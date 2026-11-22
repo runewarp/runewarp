@@ -11,6 +11,7 @@ mod fd_capacity;
 mod hostname;
 mod identity;
 pub mod managed_session;
+mod metrics;
 mod opaque_control_token;
 mod paths;
 mod proxy;

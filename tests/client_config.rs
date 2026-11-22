@@ -1480,6 +1480,31 @@ fn client_visitor_capacity_rejects_out_of_bounds_and_non_integers() {
 }
 
 #[test]
+fn client_metrics_bind_address_is_off_by_default_and_accepts_a_socket_address() {
+    let (_directory, path) = capacity_config("");
+    assert_eq!(
+        load_client_config(&path).unwrap().metrics_bind_address,
+        None
+    );
+    let (_directory, path) = capacity_config("metrics-bind-address = \"127.0.0.1:9101\"");
+    assert_eq!(
+        load_client_config(&path).unwrap().metrics_bind_address,
+        Some("127.0.0.1:9101".parse().unwrap())
+    );
+}
+
+#[test]
+fn client_metrics_bind_address_rejects_hostnames() {
+    let (_directory, path) =
+        capacity_config("metrics-bind-address = \"metrics.example.test:9101\"");
+    let message = load_client_config(&path).unwrap_err().to_string();
+    assert!(
+        message.contains("client.metrics-bind-address is invalid"),
+        "{message}"
+    );
+}
+
+#[test]
 fn client_graceful_shutdown_duration_defaults_to_60s() {
     let (_directory, path) = capacity_config("");
     assert_eq!(

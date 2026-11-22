@@ -556,6 +556,37 @@ pub fn server_readiness_lost(bind_address: SocketAddr) {
     );
 }
 
+/// `role` is `server` or `client`.
+pub fn metrics_listener_enabled(role: &str, bind_address: SocketAddr) {
+    emit(
+        EventLevel::Info,
+        &event_line(
+            &format!("{role} metrics listener enabled"),
+            [("bind-address", Cow::Owned(bind_address.to_string()))],
+        ),
+    );
+}
+
+/// Metrics never gate serving: the runtime continues with metrics disabled.
+pub fn metrics_listener_bind_failed(
+    role: &str,
+    config_key: &str,
+    bind_address: SocketAddr,
+    error: &io::Error,
+) {
+    emit(
+        EventLevel::Error,
+        &event_line_with_summary(
+            &format!("{role} metrics listener disabled"),
+            [
+                ("config-key", Cow::Borrowed(config_key)),
+                ("bind-address", Cow::Owned(bind_address.to_string())),
+            ],
+            &format!("bind failed: {error}"),
+        ),
+    );
+}
+
 /// Control requested a Managed drain; the Server runs its bounded graceful drain and keeps running.
 pub fn server_drain_started() {
     emit(EventLevel::Info, &event_line("server drain started", []));

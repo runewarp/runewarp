@@ -181,6 +181,7 @@ Server ACME installs ordinary-serving and TCP challenge resolver wrappers at ini
 - Static and Managed modes are mutually exclusive startup shapes; switching requires configuration replacement and process restart
 - Static Clients emit a one-shot **Client readiness** signal; Managed Clients report **Assignment convergence** instead
 - optional **Server readiness** reports ingress admission only, not Tunnel coverage or application health
+- optional Prometheus [metrics](metrics.md) are per runtime, read only atomics on scrape, and never gate serving: a metrics bind failure only disables metrics
 - orderly shutdown stops new work before closing all active **Tunnel connections**; graceful shutdown offers a bounded opportunity for completion without guaranteeing it, while fast shutdown skips that longer window
 - TLS passthrough remains the default; plain HTTP backends require Terminate mode
 

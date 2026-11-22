@@ -396,6 +396,7 @@ async fn authorization_revocation_ends_the_session_and_connection() {
         public_bind_addrs: vec![localhost(0)],
         tunnel_connection_bind_addrs: vec![localhost(0)],
         readiness_bind_addr: None,
+        metrics_bind_addr: None,
         server_hostname: server_hostname(),
         authorization: crate::ServerAuthorization::empty_managed(),
         public_tls_config: None,

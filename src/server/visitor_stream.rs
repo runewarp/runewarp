@@ -273,6 +273,9 @@ impl VisitorIntake {
         buffered_bytes: Vec<u8>,
     ) -> io::Result<()> {
         if let Some(public_tls_config) = self.public_tls_config.clone() {
+            if let Some(certificate) = self.certificate.as_ref() {
+                certificate.record_challenge_handled();
+            }
             runtime_log::acme(
                 AcmeRole::Server {
                     server_hostname: server_hostname.as_str(),

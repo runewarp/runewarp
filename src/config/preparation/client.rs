@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 pub(crate) struct PreparedClientConfig {
     pub(crate) max_visitor_streams: usize,
     pub(crate) graceful_shutdown_duration: String,
+    pub(crate) metrics_bind_address: Option<String>,
     pub(crate) selected_path: Option<PathBuf>,
     pub(crate) server_address: Option<String>,
     pub(crate) server_addresses: Option<Vec<String>>,
@@ -286,6 +287,7 @@ fn prepare_cli_only_client_config(
         RawClientConfig {
             max_visitor_streams: None,
             graceful_shutdown_duration: None,
+            metrics_bind_address: None,
             server_address: if !managed && runtime.server_addresses.len() == 1 {
                 Some(runtime.server_addresses[0].clone())
             } else {
@@ -366,6 +368,7 @@ fn prepare_raw_client_config_with_defaults(
         graceful_shutdown_duration: raw
             .graceful_shutdown_duration
             .unwrap_or_else(|| "60s".to_owned()),
+        metrics_bind_address: raw.metrics_bind_address,
         selected_path,
         server_address: raw.server_address,
         server_addresses: raw.server_addresses,
@@ -788,6 +791,7 @@ hostname = "tunnel.example.test"
             RawClientConfig {
                 max_visitor_streams: None,
                 graceful_shutdown_duration: None,
+                metrics_bind_address: None,
                 server_address: Some("tunnel.example.test".to_owned()),
                 server_addresses: None,
                 server_trust: Some("ca-file".to_owned()),
@@ -854,6 +858,7 @@ hostname = "tunnel.example.test"
             RawClientConfig {
                 max_visitor_streams: None,
                 graceful_shutdown_duration: None,
+                metrics_bind_address: None,
                 server_address: Some("tunnel.example.test".to_owned()),
                 server_addresses: None,
                 server_trust: Some("ca-file".to_owned()),

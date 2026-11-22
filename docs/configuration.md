@@ -238,6 +238,7 @@ At `info`, Runewarp emits Server runtime startup, readiness, Tunnel connection l
 | `server.tunnel-bind-address` | no | One literal UDP socket address string for **Client** **Tunnel connections**. Mutually exclusive with `server.tunnel-bind-addresses`. Defaults to `"0.0.0.0:443"` when neither key is supplied; every listener uses ordinary HTTP/3 with ALPN `h3`. |
 | `server.tunnel-bind-addresses` | no | Array of 1 to 8 distinct literal UDP socket addresses for **Client** **Tunnel connections**, using ALPN `h3`. Mutually exclusive with `server.tunnel-bind-address`. |
 | `server.readiness-bind-address` | no | Optional literal TCP socket address for a probe-only **Server readiness** listener. When configured, TCP accept success means the Server is ready for new ingress admission. There is no default listener. In managed mode the listener address is validated at startup, but the probe stays Unready until the first successful Server input apply. |
+| `server.metrics-bind-address` | no | Optional literal TCP socket address for a Prometheus scrape listener serving `GET /metrics`. Off when unset. A bind failure logs an error and the Server keeps serving without metrics. See [metrics](metrics.md). |
 | `server.graceful-shutdown-duration` | no | Operator-facing graceful drain window for the Server role. Defaults to `"60s"`. Supports non-negative integer durations with `ms`, `s`, `m`, or `h` suffixes. `"0s"` disables the longer drain window and makes graceful Server shutdown converge to fast Server behavior. |
 | `server.visitor-proxy-protocol` | no | `"v2"` requires strict PROXY v2 framing on every Visitor connection. Omission keeps direct ingress. |
 | `server.visitor-proxy-trusted-networks` | with Visitor PROXY v2 | Non-empty canonical IPv4/IPv6 CIDRs whose accepted socket peers may supply Visitor metadata. Network entries must use their network address; individual hosts require `/32` or `/128`. |
@@ -249,7 +250,7 @@ At `info`, Runewarp emits Server runtime startup, readiness, Tunnel connection l
 
 Choose at most one key from each singular/plural pair. Singular keys accept only strings and plural keys accept only arrays. Supplying both keys in a pair is an error even if they describe the same address or either value is empty or invalid. Public and Tunnel choices are independent: a singular public address and plural Tunnel addresses, or vice versa, are valid. If neither key in a pair is supplied, that transport uses `0.0.0.0:443`.
 
-Each bind address creates its own listener on the same Server runtime. All listeners share authorization, Tunnel pools, the runtime generation, admission limits, and graceful shutdown. Limits apply across the entire runtime, rather than separately per listener. A failure to bind any Visitor, Tunnel, or readiness address fails startup and releases the earlier sockets. Addresses that differ as literals can still overlap at the operating system, for example wildcard and specific-IP binds on the same port; such conflicts fail startup too. IPv6 wildcard dual-stack behavior follows the operating system's defaults, as it does for a single string.
+Each bind address creates its own listener on the same Server runtime. All listeners share authorization, Tunnel pools, the runtime generation, admission limits, and graceful shutdown. Limits apply across the entire runtime, rather than separately per listener. A failure to bind any Visitor, Tunnel, or readiness address fails startup and releases the earlier sockets. The metrics address is the exception: its bind failure only disables metrics. Addresses that differ as literals can still overlap at the operating system, for example wildcard and specific-IP binds on the same port; such conflicts fail startup too. IPv6 wildcard dual-stack behavior follows the operating system's defaults, as it does for a single string.
 
 All four bind keys are file configuration; there are no bind-address CLI flags or environment overrides. Existing single-string configurations keep their meaning. For example, bind separate IPv4 and IPv6 addresses on the same operator-selected port:
 
@@ -266,6 +267,7 @@ The addresses must belong to the host; add the remaining certificate and Tunnel 
 
 | Key | Required | Notes |
 | --- | --- | --- |
+| `client.metrics-bind-address` | no | Optional literal TCP socket address for a Prometheus scrape listener serving `GET /metrics`. Off when unset. A bind failure logs an error and the Client keeps running without metrics. See [metrics](metrics.md). |
 | `client.graceful-shutdown-duration` | no | Client-instance-wide deadline for graceful Client shutdown, during which every live Tunnel connection withdraws from placement concurrently and in-flight Visitors may finish. Defaults to `"60s"` and starts when shutdown begins. Supports non-negative integer durations with `ms`, `s`, `m`, or `h` suffixes. `"0s"` makes graceful Client shutdown behave as fast shutdown. Connections still draining at the deadline close as unconfirmed. |
 | `client.max-visitor-streams` | no | Integer, default `16384`. Shared idle-credit and active-Visitor budget for the Client instance, across all connections; valid range `256..=1048576`, reduced at Unix startup when the fd limit cannot support it |
 | `client.server-address` | runtime or config | Ergonomic single-target **Server address** shortcut, written as `hostname[:port]`. Mutually exclusive with `client.server-addresses`. When the port is omitted, Runewarp uses UDP port `443`. On `runewarp client`, one `--server-address` may supply or replace this value before validation. |
@@ -381,6 +383,7 @@ Runewarp supports two Client trust modes:
 - `server.public-bind-addresses` and `server.tunnel-bind-addresses` accept only arrays of 1 to 8 distinct literal socket addresses; hostnames, empty arrays, duplicates after address parsing, and larger arrays are rejected
 - each singular/plural bind pair is mutually exclusive, even if either value is empty or invalid; omitting both defaults that transport to `0.0.0.0:443`
 - `server.readiness-bind-address` when present must be one literal socket address
+- `server.metrics-bind-address` and `client.metrics-bind-address` when present must be one literal socket address
 - `server.graceful-shutdown-duration` and `client.graceful-shutdown-duration` must be non-negative duration strings such as `"0s"`, `"60s"`, `"5m"`, or `"250ms"`
 - Visitor PROXY v2 requires a non-empty CIDR-only trusted-network list; trusted networks without the protocol setting are rejected
 - `client.services[].proxy-protocol`, when present, must be `"v2"`

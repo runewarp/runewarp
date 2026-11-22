@@ -62,6 +62,31 @@ impl ReadinessGate {
         }
     }
 
+    /// Report readiness to `on_change` now and after every possible change. Never returns.
+    pub(crate) async fn watch(&self, mut on_change: impl FnMut(bool)) {
+        let mut certificate = self.certificate.clone();
+        loop {
+            // Register before reading so a concurrent mark cannot be missed.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            on_change(self.is_ready());
+            let certificate_changed = async {
+                match certificate.as_mut() {
+                    Some(receiver) => receiver.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                _ = &mut notified => {}
+                open = certificate_changed => if !open {
+                    // The controller is gone; its last value stays authoritative.
+                    certificate = None;
+                }
+            }
+        }
+    }
+
     pub(crate) fn mark_ready(&self) {
         self.ready.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
@@ -102,6 +127,46 @@ mod tests {
             .expect("wait_until_ready should observe mark_ready")
             .expect("waiter task should finish");
         assert!(gate.is_ready());
+    }
+
+    #[tokio::test]
+    async fn watch_reports_initial_state_and_every_mark() {
+        let gate = ReadinessGate::new(false);
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let watcher_gate = gate.clone();
+        let watcher = tokio::spawn(async move {
+            watcher_gate
+                .watch(move |ready| {
+                    let _ = sender.send(ready);
+                })
+                .await;
+        });
+        assert_eq!(receiver.recv().await, Some(false));
+        gate.mark_ready();
+        assert_eq!(receiver.recv().await, Some(true));
+        gate.mark_not_ready();
+        assert_eq!(receiver.recv().await, Some(false));
+        watcher.abort();
+    }
+
+    #[tokio::test]
+    async fn watch_follows_certificate_serving_state() {
+        let (certificate, receiver_side) = tokio::sync::watch::channel(true);
+        let gate = ReadinessGate::with_certificate(true, Some(receiver_side));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let watcher_gate = gate.clone();
+        let watcher = tokio::spawn(async move {
+            watcher_gate
+                .watch(move |ready| {
+                    let _ = sender.send(ready);
+                })
+                .await;
+        });
+        assert_eq!(receiver.recv().await, Some(true));
+        certificate.send_replace(false);
+        assert_eq!(receiver.recv().await, Some(false));
+        drop(certificate);
+        watcher.abort();
     }
 
     #[tokio::test]

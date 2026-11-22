@@ -12,6 +12,11 @@ fn main() {
         .unwrap_or_else(|message| panic!("{message}"));
 
     println!("cargo:rustc-env=RUNEWARP_CLI_VERSION={cli_version}");
+    // Full commit for the metrics build-info series; empty when no commit is known.
+    println!(
+        "cargo:rustc-env=RUNEWARP_BUILD_REVISION={}",
+        build_commit.as_deref().unwrap_or_default()
+    );
 }
 
 fn git_commit() -> Option<String> {

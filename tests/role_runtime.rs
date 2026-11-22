@@ -18,6 +18,7 @@ async fn client_runtime_tears_down_after_shutdown_signal_failure() {
     let config = ClientConfig {
         max_visitor_streams: 16_384,
         graceful_shutdown_duration: std::time::Duration::from_secs(60),
+        metrics_bind_address: None,
         server_hostname: server_address.hostname().clone(),
         server_port: server_address.port(),
         server_addresses: vec![server_address],

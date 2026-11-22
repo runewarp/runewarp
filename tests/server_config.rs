@@ -559,6 +559,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         vec!["127.0.0.1:9443".parse().unwrap()]
     );
     assert_eq!(settings.readiness_bind_address, None);
+    assert_eq!(settings.metrics_bind_address, None);
     assert_eq!(
         settings.graceful_shutdown_duration,
         std::time::Duration::from_secs(60)
@@ -580,6 +581,7 @@ fn server_config_accepts_readiness_bind_address_and_graceful_shutdown_duration()
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
 readiness-bind-address = "127.0.0.1:9000"
+metrics-bind-address = "127.0.0.1:9100"
 graceful-shutdown-duration = "45s"
 
 [[server.tunnels]]
@@ -594,6 +596,10 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert_eq!(
         settings.readiness_bind_address,
         Some("127.0.0.1:9000".parse().unwrap())
+    );
+    assert_eq!(
+        settings.metrics_bind_address,
+        Some("127.0.0.1:9100".parse().unwrap())
     );
     assert_eq!(
         settings.graceful_shutdown_duration,
@@ -716,6 +722,7 @@ fn server_config_rejects_invalid_readiness_bind_address_and_shutdown_duration() 
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
 readiness-bind-address = "readiness.example.test:9000"
+metrics-bind-address = "metrics.example.test:9100"
 graceful-shutdown-duration = "abc"
 
 [[server.tunnels]]
@@ -729,6 +736,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let message = error.to_string();
 
     assert!(message.contains("server.readiness-bind-address is invalid"));
+    assert!(message.contains("server.metrics-bind-address is invalid"));
     assert!(message.contains("server.graceful-shutdown-duration is invalid"));
 }
 

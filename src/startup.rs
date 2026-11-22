@@ -113,9 +113,11 @@ impl PreparedServer {
         };
         let client_admission: Arc<dyn ClientIdentityAdmission> = Arc::new(authorization.clone());
         let trusted_client_identities = authorization.trusted_client_identities();
+        let mut manual_certificate_expiry = None;
         let (quic_server_config, acme_runtime) = match &config.certificate {
             ServerCertificateConfig::Manual { directory } => {
                 let cert_chain = load_certificate_chain(&directory.join(SERVER_CERT_FILENAME))?;
+                manual_certificate_expiry = cert_chain.first().and_then(certificate_expiry);
                 let private_key = load_private_key(&directory.join(SERVER_KEY_FILENAME))?;
                 let quic_server_config =
                     make_server_tunnel_h3_config(cert_chain, private_key, client_admission)
@@ -168,6 +170,7 @@ impl PreparedServer {
                 public_bind_addrs,
                 tunnel_connection_bind_addrs: tunnel_bind_addrs,
                 readiness_bind_addr: config.readiness_bind_address,
+                metrics_bind_addr: config.metrics_bind_address,
                 server_hostname: config.hostname.clone(),
                 authorization,
                 public_tls_config: acme_runtime
@@ -182,6 +185,9 @@ impl PreparedServer {
         )
         .await
         .map_err(ServerStartupError::Bind)?;
+        if let Some(expires_at) = manual_certificate_expiry {
+            server.metrics().set_certificate_expiry(expires_at);
+        }
 
         Ok(Self {
             server,
@@ -210,6 +216,19 @@ impl PreparedServer {
 
     pub fn readiness_addr(&self) -> Option<SocketAddr> {
         self.server.readiness_addr()
+    }
+
+    /// Bound metrics scrape address, if `server.metrics-bind-address` bound.
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self.server.metrics_addr()
+    }
+
+    pub(crate) fn metrics(&self) -> crate::metrics::ServerMetrics {
+        self.server.metrics()
+    }
+
+    pub(crate) fn take_metrics_endpoint(&mut self) -> Option<crate::metrics::MetricsEndpoint> {
+        self.server.take_metrics_endpoint()
     }
 
     pub fn trusted_client_identities(&self) -> &[ClientIdentity] {
@@ -301,6 +320,16 @@ where
     }
 }
 
+/// Leaf expiry for the manual-certificate metric. An unparsable leaf leaves it unknown;
+/// TLS setup already validated the chain.
+fn certificate_expiry(
+    certificate: &rustls::pki_types::CertificateDer<'_>,
+) -> Option<std::time::SystemTime> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(certificate.as_ref()).ok()?;
+    let seconds = u64::try_from(parsed.validity().not_after.timestamp()).ok()?;
+    Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+}
+
 /// Client-instance preparation shared across independent Tunnel-connection workers.
 ///
 /// Owns validated Services, Terminate-mode TLS resolver state, and Client ACME
@@ -358,7 +387,12 @@ impl ClientInstancePrep {
         Ok(Arc::new(Self {
             services,
             termination_tls_configs,
-            stream_budget: Arc::new(crate::client::ClientStreamBudget::new(stream_limits)),
+            stream_budget: Arc::new(crate::client::ClientStreamBudget::with_metrics(
+                stream_limits,
+                crate::metrics::ClientMetrics::new(
+                    config.admission == crate::ClientAdmission::Managed,
+                ),
+            )),
             acme_manager_count,
             acme: Mutex::new(ClientAcmeDrive::Idle(acme_runtimes)),
         }))
@@ -1435,6 +1469,7 @@ mod tests {
             public_bind_addresses: vec!["127.0.0.1:443".parse()?],
             tunnel_connection_bind_addresses: vec!["127.0.0.1:443".parse()?],
             readiness_bind_address: None,
+            metrics_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             visitor_proxy_protocol: None,
             visitor_proxy_trusted_networks: Vec::new(),
@@ -1464,6 +1499,7 @@ mod tests {
             public_bind_addresses: vec!["127.0.0.1:443".parse().unwrap()],
             tunnel_connection_bind_addresses: vec!["127.0.0.1:443".parse().unwrap()],
             readiness_bind_address: None,
+            metrics_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             visitor_proxy_protocol: None,
             visitor_proxy_trusted_networks: Vec::new(),
@@ -1499,6 +1535,7 @@ mod tests {
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            metrics_bind_address: None,
             server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
@@ -1547,6 +1584,7 @@ mod tests {
         ClientConfig {
             max_visitor_streams: 16_384,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            metrics_bind_address: None,
             server_addresses: vec![
                 server_address("tunnel-a.example.test"),
                 server_address("tunnel-b.example.test"),
@@ -1652,6 +1690,7 @@ mod tests {
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            metrics_bind_address: None,
             server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
@@ -1699,6 +1738,7 @@ mod tests {
             public_bind_addresses: vec!["127.0.0.1:443".parse()?],
             tunnel_connection_bind_addresses: vec!["127.0.0.1:443".parse()?],
             readiness_bind_address: None,
+            metrics_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             visitor_proxy_protocol: None,
             visitor_proxy_trusted_networks: Vec::new(),
@@ -1734,6 +1774,7 @@ mod tests {
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            metrics_bind_address: None,
             server_addresses: vec![server_address("tunnel.example.test")],
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
@@ -1859,6 +1900,7 @@ mod tests {
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            metrics_bind_address: None,
             server_addresses: Vec::new(),
             server_hostname: server_hostname("unassigned.invalid"),
             server_port: 443,
@@ -1921,6 +1963,7 @@ mod tests {
             public_bind_addresses: vec!["127.0.0.1:0".parse().unwrap()],
             tunnel_connection_bind_addresses: vec!["127.0.0.1:0".parse().unwrap()],
             readiness_bind_address: None,
+            metrics_bind_address: None,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
             visitor_proxy_protocol: None,
             visitor_proxy_trusted_networks: Vec::new(),

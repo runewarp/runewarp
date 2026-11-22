@@ -67,6 +67,31 @@ pub(crate) enum AdmissionLimit {
 }
 
 impl AdmissionLimit {
+    const ALL: [Self; 8] = [
+        Self::VisitorsGlobal,
+        Self::VisitorSource,
+        Self::Handshakes,
+        Self::PendingStreamOpens,
+        Self::ActiveRoutedStreams,
+        Self::TunnelConnectionsGlobal,
+        Self::TunnelConnectionsPerTunnel,
+        Self::TunnelConnectionsPerIdentity,
+    ];
+
+    /// Stable `limit` label value for admission metrics.
+    pub(crate) fn metric_label(self) -> &'static str {
+        match self {
+            Self::VisitorsGlobal => "visitor_global",
+            Self::VisitorSource => "visitor_source",
+            Self::Handshakes => "quic_handshake_global",
+            Self::PendingStreamOpens => "pending_stream_open",
+            Self::ActiveRoutedStreams => "active_routed_stream",
+            Self::TunnelConnectionsGlobal => "tunnel_connection_global",
+            Self::TunnelConnectionsPerTunnel => "tunnel_connection_per_tunnel",
+            Self::TunnelConnectionsPerIdentity => "tunnel_connection_per_client_identity",
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::VisitorsGlobal => "visitor-global",
@@ -245,6 +270,53 @@ impl ServerAdmissionPolicy {
             .take_recovered(AdmissionLogOutcome::TunnelHandshakeFailure)
     }
 
+    /// Lock-free admission views for metrics. Only aggregate limits report in-use work.
+    pub(crate) fn metrics_gauges(&self) -> crate::metrics::ServerAdmissionGauges {
+        use crate::metrics::AdmissionInUse;
+
+        let permits = |limit: AdmissionLimit, semaphore: &Arc<Semaphore>, maximum: usize| {
+            (
+                limit.metric_label(),
+                AdmissionInUse::Permits {
+                    semaphore: semaphore.clone(),
+                    limit: maximum,
+                },
+            )
+        };
+        crate::metrics::ServerAdmissionGauges {
+            limits: AdmissionLimit::ALL
+                .iter()
+                .filter_map(|limit| Some((limit.metric_label(), self.limit_value(*limit)?)))
+                .collect(),
+            in_use: vec![
+                permits(
+                    AdmissionLimit::VisitorsGlobal,
+                    &self.pending_visitors,
+                    self.limits.max_pending_visitors,
+                ),
+                permits(
+                    AdmissionLimit::Handshakes,
+                    &self.pending_handshakes,
+                    self.limits.max_pending_handshakes,
+                ),
+                permits(
+                    AdmissionLimit::PendingStreamOpens,
+                    &self.pending_stream_opens,
+                    self.limits.max_pending_stream_opens,
+                ),
+                permits(
+                    AdmissionLimit::ActiveRoutedStreams,
+                    &self.active_routed_streams,
+                    self.limits.max_active_routed_streams,
+                ),
+                (
+                    AdmissionLimit::TunnelConnectionsGlobal.metric_label(),
+                    AdmissionInUse::Count(self.tunnel_connections.active.clone()),
+                ),
+            ],
+        }
+    }
+
     pub(crate) fn limit_value(&self, limit: AdmissionLimit) -> Option<usize> {
         match limit {
             AdmissionLimit::VisitorsGlobal => Some(self.limits.max_pending_visitors),
@@ -327,6 +399,8 @@ impl Drop for VisitorAdmissionPermit {
 pub(crate) struct TunnelConnectionAdmission {
     limits: ServerAdmissionLimits,
     state: Arc<Mutex<TunnelConnectionAdmissionState>>,
+    /// Mirror of `state.active`, written under the state lock, so metrics read it lock-free.
+    active: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Default)]
@@ -340,6 +414,7 @@ impl TunnelConnectionAdmission {
         Self {
             limits,
             state: Arc::new(Mutex::new(TunnelConnectionAdmissionState::default())),
+            active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -373,6 +448,8 @@ impl TunnelConnectionAdmission {
             });
         }
         state.active += 1;
+        self.active
+            .store(state.active, std::sync::atomic::Ordering::Relaxed);
         *state
             .active_by_identity
             .entry(client_identity.clone())
@@ -399,6 +476,9 @@ impl Drop for TunnelConnectionPermit {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.active -= 1;
+        self.admission
+            .active
+            .store(state.active, std::sync::atomic::Ordering::Relaxed);
         let Some(active) = state.active_by_identity.get_mut(&self.client_identity) else {
             return;
         };
@@ -498,6 +578,63 @@ mod tests {
         AcceptBackoff, AdmissionLimit, AdmissionLogGate, AdmissionLogOutcome,
         ServerAdmissionLimits, ServerAdmissionPolicy,
     };
+
+    #[test]
+    fn admission_metrics_expose_every_limit_and_aggregate_in_use_work() {
+        use crate::metrics::ServerMetrics;
+        use crate::metrics::test_support::{label_values, sample};
+
+        let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits::default());
+        let metrics = ServerMetrics::new("generation", false, policy.metrics_gauges());
+        let _handshake = policy.try_admit_handshake().expect("handshake permit");
+        let identity = crate::generate_client_identity()
+            .expect("identity")
+            .client_identity;
+        let _connection = policy
+            .tunnel_connections()
+            .try_acquire(&identity)
+            .expect("connection permit");
+        let text = metrics.render();
+        assert_eq!(
+            label_values(&text, "runewarp_server_admission_limit", "limit"),
+            [
+                "visitor_global",
+                "visitor_source",
+                "quic_handshake_global",
+                "pending_stream_open",
+                "active_routed_stream",
+                "tunnel_connection_global",
+                "tunnel_connection_per_tunnel",
+                "tunnel_connection_per_client_identity",
+            ]
+        );
+        assert_eq!(
+            label_values(&text, "runewarp_server_admission_in_use", "limit"),
+            [
+                "visitor_global",
+                "quic_handshake_global",
+                "pending_stream_open",
+                "active_routed_stream",
+                "tunnel_connection_global",
+            ]
+        );
+        let in_use = |limit: &str| {
+            sample(
+                &text,
+                &format!(r#"runewarp_server_admission_in_use{{limit="{limit}"}}"#),
+            )
+        };
+        assert_eq!(in_use("quic_handshake_global"), Some(1.0));
+        assert_eq!(in_use("tunnel_connection_global"), Some(1.0));
+        assert_eq!(in_use("visitor_global"), Some(0.0));
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_admission_limit{limit="active_routed_stream"}"#
+            ),
+            Some(65_536.0)
+        );
+    }
 
     #[test]
     fn production_limits_match_the_documented_policy() {

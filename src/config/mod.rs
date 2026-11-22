@@ -96,6 +96,8 @@ pub struct ServerConfig {
     pub public_bind_addresses: Vec<SocketAddr>,
     pub tunnel_connection_bind_addresses: Vec<SocketAddr>,
     pub readiness_bind_address: Option<SocketAddr>,
+    /// Optional Prometheus scrape listener; unset keeps metrics off.
+    pub metrics_bind_address: Option<SocketAddr>,
     pub graceful_shutdown_duration: std::time::Duration,
     pub visitor_proxy_protocol: Option<ProxyProtocolVersion>,
     pub visitor_proxy_trusted_networks: Vec<TrustedNetwork>,
@@ -135,6 +137,8 @@ pub struct ClientConfig {
     /// Client-instance-wide deadline for withdrawing every Tunnel connection during graceful
     /// shutdown. Zero makes graceful shutdown behave as fast shutdown.
     pub graceful_shutdown_duration: std::time::Duration,
+    /// Optional Prometheus scrape listener; unset keeps metrics off.
+    pub metrics_bind_address: Option<SocketAddr>,
     pub server_addresses: Vec<ServerAddress>,
     pub server_hostname: ServerHostname,
     pub server_port: u16,
@@ -460,6 +464,7 @@ fn validate_prepared_server_config(
         tunnel_bind_address,
         tunnel_bind_addresses,
         readiness_bind_address,
+        metrics_bind_address,
         graceful_shutdown_duration,
         visitor_proxy_protocol,
         visitor_proxy_trusted_networks,
@@ -534,6 +539,9 @@ fn validate_prepared_server_config(
     );
     let readiness_bind_address = readiness_bind_address.and_then(|address| {
         validate_socket_address_field("server.readiness-bind-address", address, &mut messages)
+    });
+    let metrics_bind_address = metrics_bind_address.and_then(|address| {
+        validate_socket_address_field("server.metrics-bind-address", address, &mut messages)
     });
     let graceful_shutdown_duration = validate_duration_field(
         "server.graceful-shutdown-duration",
@@ -646,6 +654,7 @@ fn validate_prepared_server_config(
             public_bind_addresses,
             tunnel_connection_bind_addresses,
             readiness_bind_address,
+            metrics_bind_address,
             graceful_shutdown_duration: graceful_shutdown_duration
                 .expect("validated server.graceful-shutdown-duration"),
             visitor_proxy_protocol,
@@ -671,6 +680,7 @@ pub(crate) fn validate_prepared_client_config(
     let PreparedClientConfig {
         max_visitor_streams,
         graceful_shutdown_duration,
+        metrics_bind_address,
         server_address,
         server_addresses,
         log_level,
@@ -698,6 +708,9 @@ pub(crate) fn validate_prepared_client_config(
         graceful_shutdown_duration.as_str(),
         &mut messages,
     );
+    let metrics_bind_address = metrics_bind_address.and_then(|address| {
+        validate_socket_address_field("client.metrics-bind-address", address, &mut messages)
+    });
 
     let managed = control.address.is_some();
     if control.section_present && control.address.is_none() {
@@ -950,6 +963,7 @@ pub(crate) fn validate_prepared_client_config(
             max_visitor_streams,
             graceful_shutdown_duration: graceful_shutdown_duration
                 .expect("validated client.graceful-shutdown-duration"),
+            metrics_bind_address,
             server_addresses: validated_server_addresses,
             server_hostname,
             server_port,
@@ -1713,6 +1727,7 @@ pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value)
             "tunnel-bind-address",
             "tunnel-bind-addresses",
             "readiness-bind-address",
+            "metrics-bind-address",
             "graceful-shutdown-duration",
             "visitor-proxy-protocol",
             "visitor-proxy-trusted-networks",
@@ -1782,6 +1797,7 @@ pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value)
         &[
             "max-visitor-streams",
             "graceful-shutdown-duration",
+            "metrics-bind-address",
             "server-address",
             "server-addresses",
             "server-trust",
@@ -1850,6 +1866,7 @@ pub(crate) struct RawServerConfig {
     pub(crate) tunnel_bind_address: Option<String>,
     pub(crate) tunnel_bind_addresses: Option<Vec<String>>,
     pub(crate) readiness_bind_address: Option<String>,
+    pub(crate) metrics_bind_address: Option<String>,
     pub(crate) graceful_shutdown_duration: Option<String>,
     pub(crate) visitor_proxy_protocol: Option<String>,
     pub(crate) visitor_proxy_trusted_networks: Option<Vec<String>>,
@@ -1877,6 +1894,7 @@ pub(crate) struct RawServerTunnelConfig {
 pub(crate) struct RawClientConfig {
     pub(crate) max_visitor_streams: Option<usize>,
     pub(crate) graceful_shutdown_duration: Option<String>,
+    pub(crate) metrics_bind_address: Option<String>,
     pub(crate) server_address: Option<String>,
     pub(crate) server_addresses: Option<Vec<String>>,
     pub(crate) server_trust: Option<String>,

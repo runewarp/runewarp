@@ -500,3 +500,15 @@ Before each implementation/harness commit and again before the evidence commit, 
 The final source audit also reruns stronger private transport regressions at budgets 8 and 256. They assert exact request/echo bytes, FIN/EOF, actual zero guards, a waiting excess open, two-second single-completion recovery and replacement echo/FIN. Both fail on the pin at active/idle 7/1 and 255/1, and pass in 0.09 seconds under only the private zero-batching dependency experiment. The isolated real-runtime 256/257 case fails on the pin and passes in 0.44 seconds under that same experiment. Initial compilation mistakes in preparing those probes are retained separately and are not treated as behavior failures. No dependency override is shipped. The unsupported recovery probes remain private rather than becoming active or ignored alpha acceptance tests; the limitation is explicitly deferred under [#267](https://github.com/runewarp/runewarp/issues/267).
 
 Privacy checking scans 204 research files and finds zero private hostname or absolute machine-path matches. All 62 historical JSON measurements still match the original PR head after comparing around only the two sanitized path-metadata fields. The final evidence adds 55 workload summaries with every role's sampled histories, including failed workloads and the corrected stale-binary capture. Source revisions, dirty/diff provenance, binary hashes, sampling limits, known starvation, unresolved losses and the known recovery limitation remain explicit. This record does not claim remote CI or independent review results.
+
+## Metrics overhead
+
+Recorded for [#295](https://github.com/runewarp/runewarp/issues/295) on a local macOS arm64 VM. Three alternating runs of `--scenarios subcapacity throughput --cooldown-seconds 5` compared the parent commit `1fbebb4` with the metrics branch. Instrumentation always runs; the scrape listener was not bound and no scrapes ran during the runs.
+
+| Measure | Parent runs | Metrics runs | Median change |
+| --- | --- | --- | ---: |
+| Throughput transfer seconds (256 MiB) | 2.684, 2.908, 2.814 | 2.528, 3.119, 2.541 | −9.7% time (faster) |
+| Throughput TTFB p99 ms | 3.024, 2.892, 2.833 | 4.177, 2.945, 2.815 | +1.8% |
+| Subcapacity TTFB p99 ms | 4.576, 2.765, 2.795 | 3.030, 2.992, 5.252 | +8.4% |
+
+The budget is at most 2% throughput loss and 5% p99 stream-open regression. Throughput is within budget. The p99 medians move by less than the run-to-run spread within each side (2.765–4.576 ms on the parent), so these runs show no regression they can attribute to metrics, but they are too noisy to prove the 5% bound. TTFB includes stream open plus forwarding. Runs under concurrent scrapes were not captured.

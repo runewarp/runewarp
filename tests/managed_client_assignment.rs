@@ -225,6 +225,7 @@ impl ManagedClientHarness {
         let settings = ClientConfig {
             max_visitor_streams: 16_384,
             graceful_shutdown_duration: std::time::Duration::from_secs(60),
+            metrics_bind_address: None,
             server_addresses: vec![],
             server_hostname: ServerHostname::try_from("localhost").unwrap(),
             server_port: 443,
@@ -368,6 +369,7 @@ impl ManagedClientHarness {
             public_bind_addrs: vec![localhost(0)],
             tunnel_connection_bind_addrs: vec![first_localhost_address(0).await],
             readiness_bind_addr: None,
+            metrics_bind_addr: None,
             server_hostname: ServerHostname::try_from("localhost").unwrap(),
             authorization: authorization.clone(),
             public_tls_config: None,

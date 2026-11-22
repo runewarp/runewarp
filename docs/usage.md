@@ -216,6 +216,10 @@ Under **TLS passthrough**, the backend's own certificate should appear. In **Ter
 
 With Client ACME, an immediate Terminate-mode handshake failure can mean issuance is still pending. Confirm that the Public hostname reaches the Server on TCP 443 and is authorized and routed to the Client; there is no temporary passthrough fallback.
 
+## Metrics
+
+Set `server.metrics-bind-address` or `client.metrics-bind-address` to serve Prometheus metrics on `GET /metrics`. The [metrics reference](metrics.md) lists every series with its type, unit, labels and boundary.
+
 ## Runtime logs
 
 At the default `log-level = "info"`, Runewarp logs Server runtime startup, readiness, Tunnel connection lifecycle, warnings, and errors to stderr. Set `log-level = "debug"` when you need successful Visitor routing and connection failure detail.

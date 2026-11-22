@@ -123,6 +123,8 @@ struct Controller {
     running: AtomicBool,
     notify: Notify,
     ready: watch::Sender<bool>,
+    /// The bound Server runtime's metrics, attached once at bind.
+    metrics: std::sync::OnceLock<crate::metrics::ServerMetrics>,
 }
 
 /// Shared handle used by Server startup, TLS resolvers and the owning rollout caller.
@@ -175,6 +177,7 @@ impl ServerCertificateController {
                 running: AtomicBool::new(false),
                 notify: Notify::new(),
                 ready: watch::Sender::new(ready),
+                metrics: std::sync::OnceLock::new(),
             }),
         })
     }
@@ -201,10 +204,39 @@ impl ServerCertificateController {
             .is_none_or(|current| current.fingerprint() != snapshot.fingerprint())
         {
             tracing::info!(server_hostname = %self.inner.options.validation.hostname, fingerprint = snapshot.fingerprint(), expires_at = ?snapshot.expires_at(), "Server serving certificate validated");
+            self.record(crate::metrics::AcmeMetricEvent::CertificateInstalled);
+        }
+        if let Some(metrics) = self.inner.metrics.get() {
+            metrics.set_certificate_expiry(snapshot.expires_at);
         }
         state.snapshot = Some(snapshot);
         self.inner.ready.send_replace(true);
         Ok(())
+    }
+
+    /// Report certificate expiry and ACME events to the bound Server runtime. Later calls are
+    /// ignored: one controller serves one runtime.
+    pub(crate) fn attach_metrics(&self, metrics: crate::metrics::ServerMetrics) {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .expect("certificate controller mutex poisoned");
+        if let Some(snapshot) = state.snapshot.as_ref() {
+            metrics.set_certificate_expiry(snapshot.expires_at);
+        }
+        let _ = self.inner.metrics.set(metrics);
+    }
+
+    /// A TLS-ALPN-01 challenge connection reached this Server.
+    pub(crate) fn record_challenge_handled(&self) {
+        self.record(crate::metrics::AcmeMetricEvent::ChallengeHandled);
+    }
+
+    fn record(&self, event: crate::metrics::AcmeMetricEvent) {
+        if let Some(metrics) = self.inner.metrics.get() {
+            metrics.acme_event(event);
+        }
     }
 
     /// Begin bounded takeover. The stable process lock, then a fresh consumed-route
@@ -368,6 +400,7 @@ impl ServerCertificateController {
                 .lock()
                 .expect("certificate controller mutex poisoned")
                 .owner = true;
+            self.record(crate::metrics::AcmeMetricEvent::OwnershipAcquired);
             tracing::info!(server_hostname = %self.inner.options.validation.hostname, "Server certificate ownership acquired");
         }
         let owner = owner.as_ref().expect("owner was acquired").clone();
@@ -528,6 +561,7 @@ impl ServerCertificateController {
     }
 
     fn failure(&self, reason: &'static str) {
+        self.record(crate::metrics::AcmeMetricEvent::Failure);
         self.inner
             .state
             .lock()
@@ -545,6 +579,8 @@ impl ServerCertificateController {
         state.driving = false;
         state.failure = Some(reason);
         tracing::warn!(server_hostname = %self.inner.options.validation.hostname, reason, "Server certificate maintenance started");
+        drop(state);
+        self.record(crate::metrics::AcmeMetricEvent::MaintenanceStarted);
         self.inner.ready.send_replace(false);
         Err(io::Error::other(reason))
     }

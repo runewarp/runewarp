@@ -602,7 +602,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 }
 
 #[test]
-fn server_config_accept_top_level_log_level() {
+fn server_config_accept_top_level_log_level_and_format() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
         tempdir.path().join("server-cert").as_path(),
@@ -613,6 +613,7 @@ fn server_config_accept_top_level_log_level() {
         tempdir.path().join("config.toml"),
         r#"
 log-level = "debug"
+log-format = "json"
 
 [server]
 hostname = "tunnel.example.test"
@@ -628,6 +629,14 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
 
     assert_eq!(settings.log_level, LogLevel::Debug);
+    assert_eq!(settings.log_format, runewarp::LogFormat::Json);
+
+    let unset = fs::read_to_string(tempdir.path().join("config.toml"))
+        .unwrap()
+        .replace("log-format = \"json\"\n", "");
+    fs::write(tempdir.path().join("config.toml"), unset).unwrap();
+    let settings = load_server_config(&tempdir.path().join("config.toml")).unwrap();
+    assert_eq!(settings.log_format, runewarp::LogFormat::Text);
 }
 
 #[test]

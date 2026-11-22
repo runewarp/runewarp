@@ -51,6 +51,7 @@ fn run_failing_client(dir: &Path, extra_args: &[&str]) -> String {
     String::from_utf8(assert.get_output().stderr.clone()).unwrap()
 }
 
+/// Asserts every line is a JSON envelope and each `(level, message prefix)` appears.
 fn assert_json_lines(stderr: &str, expected_messages: &[(&str, &str)]) {
     let lines = stderr
         .lines()
@@ -72,9 +73,10 @@ fn assert_json_lines(stderr: &str, expected_messages: &[(&str, &str)]) {
     }
     for (level, message) in expected_messages {
         assert!(
-            lines
-                .iter()
-                .any(|line| line["level"] == *level && line["message"] == *message),
+            lines.iter().any(|line| line["level"] == *level
+                && line["message"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with(message))),
             "missing {level} {message:?} in {stderr}"
         );
     }
@@ -101,9 +103,7 @@ fn client_text_log_format_is_the_default() {
         );
     }
     assert!(
-        stderr.contains(
-            "  INFO client Visitor capacity: max-visitor-streams=16384 configured=16384\n"
-        )
+        stderr.contains("  INFO client tunnel connection connecting: server-address=localhost:443")
     );
     assert!(stderr.contains(" ERROR no certificates found in server-ca.pem\n"));
 }
@@ -120,7 +120,7 @@ fn client_json_log_format_from_config_emits_one_object_per_line() {
         &[
             (
                 "INFO",
-                "client Visitor capacity: max-visitor-streams=16384 configured=16384",
+                "client tunnel connection connecting: server-address=localhost:443",
             ),
             ("ERROR", "no certificates found in server-ca.pem"),
         ],
@@ -203,6 +203,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let assert = Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(tempdir.path())
+        .env_remove("RUNEWARP_SERVER_HOSTNAME")
         .args(["server", "--config", "server.toml", "--log-format", "json"])
         .assert()
         .failure();

@@ -200,6 +200,7 @@ fn client_config(
         server_port: server_address.port(),
         server_addresses: vec![server_address],
         log_level: LogLevel::Off,
+        log_format: runewarp::LogFormat::Text,
         server_trust: runewarp::ClientServerTrust::CaFile(directory.join("server-ca.pem")),
         identity_directory,
         services: vec![ServiceConfig {

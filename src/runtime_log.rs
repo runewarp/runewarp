@@ -8,6 +8,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use time::format_description::{self, OwnedFormatItem};
 use tracing::Subscriber;
+use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::time::UtcTime;
 use tracing_subscriber::fmt::writer::MakeWriter;
@@ -16,7 +17,7 @@ use tracing_subscriber::{fmt as tracing_fmt, reload};
 
 use crate::client_hello::ClientHelloError;
 use crate::shutdown::ShutdownMode;
-use crate::{ClientIdentity, LogLevel, ManagedSessionEvent, ManagedSessionRole};
+use crate::{ClientIdentity, LogFormat, LogLevel, ManagedSessionEvent, ManagedSessionRole};
 
 static LOGGER: OnceLock<InstalledLogger> = OnceLock::new();
 
@@ -142,14 +143,16 @@ impl InstalledLogger {
     }
 }
 
-pub fn install(level: LogLevel) -> Result<InstallOutcome, InstallError> {
+/// Installs the process-wide runtime logger. The first install fixes `format`; later installs
+/// update only the level.
+pub fn install(level: LogLevel, format: LogFormat) -> Result<InstallOutcome, InstallError> {
     if let Some(logger) = LOGGER.get() {
         logger.set_level(level)?;
         return Ok(InstallOutcome::Updated);
     }
 
     let use_ansi = io::stderr().is_terminal();
-    let (subscriber, reload_filter) = build_subscriber(level, io::stderr, use_ansi);
+    let (subscriber, reload_filter) = build_subscriber(level, format, io::stderr, use_ansi);
     tracing::subscriber::set_global_default(subscriber).map_err(InstallError::SetGlobalDefault)?;
 
     let logger = InstalledLogger {
@@ -866,6 +869,7 @@ pub(crate) fn installed_level() -> Option<LogLevel> {
 
 fn build_subscriber<W>(
     level: LogLevel,
+    format: LogFormat,
     writer: W,
     use_ansi: bool,
 ) -> (RuntimeSubscriber, ReloadFilter)
@@ -873,13 +877,24 @@ where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
     let (filter_layer, reload_handle) = reload::Layer::new(level_filter(level));
-    let subscriber = tracing_subscriber::registry().with(filter_layer).with(
-        tracing_fmt::layer()
-            .with_writer(writer)
-            .with_timer(UtcTime::new(log_timestamp_format()))
-            .with_ansi(use_ansi)
-            .with_target(false),
-    );
+    let layer = tracing_fmt::layer()
+        .with_writer(writer)
+        .with_timer(UtcTime::new(log_timestamp_format()))
+        .with_target(false);
+    // JSON keeps the text envelope's timestamp, level and message as top-level keys, with event
+    // fields flattened beside them. Runtime events use no spans, so span keys are omitted.
+    let layer = match format {
+        LogFormat::Text => layer.with_ansi(use_ansi).boxed(),
+        LogFormat::Json => layer
+            .json()
+            .flatten_event(true)
+            .with_current_span(false)
+            .with_span_list(false)
+            .boxed(),
+    };
+    let subscriber = tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(layer);
 
     let reload_filter = Box::new(move |level| {
         reload_handle
@@ -1550,7 +1565,7 @@ mod tests {
 
     use super::{
         AcmeEvent, AcmeRole, ClientRouteOutcome, ClientTunnelAttemptKind, ClientTunnelPhase,
-        EventLevel, InstallOutcome, ServerRouteOutcome, acme, build_subscriber,
+        EventLevel, InstallOutcome, LogFormat, ServerRouteOutcome, acme, build_subscriber,
         client_graceful_shutdown_closing_tunnel_connection, client_graceful_shutdown_started,
         client_ready, client_route, client_trust_store_warning, client_tunnel_candidate_aborted,
         client_tunnel_candidate_failed, client_tunnel_candidate_joined,
@@ -1615,9 +1630,96 @@ mod tests {
 
     fn capture_with_ansi(level: LogLevel, ansi: bool, emit_logs: impl FnOnce()) -> String {
         let buffer = SharedBuffer::default();
-        let (subscriber, _) = build_subscriber(level, buffer.clone(), ansi);
+        // Text tests use the default format so they also guard default output stability.
+        let (subscriber, _) = build_subscriber(level, LogFormat::default(), buffer.clone(), ansi);
         tracing::subscriber::with_default(subscriber, emit_logs);
         buffer.read()
+    }
+
+    fn capture_json(level: LogLevel, emit_logs: impl FnOnce()) -> Vec<serde_json::Value> {
+        let buffer = SharedBuffer::default();
+        let (subscriber, _) = build_subscriber(level, LogFormat::Json, buffer.clone(), true);
+        tracing::subscriber::with_default(subscriber, emit_logs);
+        buffer
+            .read()
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line)
+                    .unwrap_or_else(|error| panic!("line is not JSON ({error}): {line}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn default_text_format_keeps_the_exact_envelope() {
+        let output = capture(LogLevel::Info, || {
+            server_admission_saturated("visitor-global", 4_096, 4_096);
+            emit(EventLevel::Error, "server failed");
+        });
+        let lines = output.lines().collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 2);
+        let (timestamp, rest) = lines[0].split_once(' ').expect("timestamp separator");
+        assert!(OffsetDateTime::parse(timestamp, &Rfc3339).is_ok());
+        assert_eq!(
+            rest,
+            " WARN server admission saturated: scope=visitor-global active-work=4096 limit=4096"
+        );
+        let (_, rest) = lines[1].split_once(' ').expect("timestamp separator");
+        assert_eq!(rest, "ERROR server failed");
+        assert!(output.ends_with('\n'));
+    }
+
+    #[test]
+    fn json_format_writes_text_envelope_fields_as_one_object_per_line() {
+        let lines = capture_json(LogLevel::Info, || {
+            emit(EventLevel::Debug, "filtered detail");
+            server_admission_saturated("visitor-global", 4_096, 4_096);
+            client_route(
+                "app.example.test",
+                ClientRouteOutcome::RejectedNoMatchingService,
+            );
+        });
+
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            let object = line.as_object().expect("each line is a JSON object");
+            let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(keys, ["level", "message", "timestamp"]);
+            let timestamp = object["timestamp"].as_str().expect("timestamp string");
+            assert!(OffsetDateTime::parse(timestamp, &Rfc3339).is_ok());
+            assert!(timestamp.ends_with('Z'));
+        }
+        assert_eq!(lines[0]["level"], "WARN");
+        assert_eq!(
+            lines[0]["message"],
+            "server admission saturated: scope=visitor-global active-work=4096 limit=4096"
+        );
+        assert_eq!(lines[1]["level"], "WARN");
+        assert_eq!(
+            lines[1]["message"],
+            "client route unavailable: public-hostname=app.example.test reason=no-matching-service"
+        );
+    }
+
+    #[test]
+    fn json_format_flattens_structured_event_fields_and_never_emits_ansi() {
+        let buffer = SharedBuffer::default();
+        let (subscriber, _) =
+            build_subscriber(LogLevel::Debug, LogFormat::Json, buffer.clone(), true);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!(reason = "refused", code = 7_u64, "stream open failed");
+        });
+        let output = buffer.read();
+        let line: serde_json::Value =
+            serde_json::from_str(output.trim_end()).expect("line is JSON");
+
+        assert!(!output.contains("\u{1b}["));
+        assert_eq!(line["level"], "DEBUG");
+        assert_eq!(line["message"], "stream open failed");
+        assert_eq!(line["reason"], "refused");
+        assert_eq!(line["code"], 7);
     }
 
     #[test]
@@ -1913,14 +2015,15 @@ mod tests {
     fn install_is_safe_to_repeat_for_current_process_model() {
         let _guard = INSTALL_LOCK.lock().expect("install mutex poisoned");
 
-        let first = install(LogLevel::Info).expect("first install should succeed");
+        let first = install(LogLevel::Info, LogFormat::Text).expect("first install should succeed");
         assert!(matches!(
             first,
             InstallOutcome::Installed | InstallOutcome::Updated
         ));
         assert_eq!(installed_level(), Some(LogLevel::Info));
 
-        let second = install(LogLevel::Debug).expect("second install should succeed");
+        let second =
+            install(LogLevel::Debug, LogFormat::Text).expect("second install should succeed");
         assert_eq!(second, InstallOutcome::Updated);
         assert_eq!(installed_level(), Some(LogLevel::Debug));
     }

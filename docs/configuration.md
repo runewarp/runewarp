@@ -55,8 +55,9 @@ For `runewarp server`, config/runtime precedence is:
 3. `runewarp server --hostname <HOSTNAME>` replaces `server.hostname` from the selected config before validation
 4. when `--hostname` is omitted, `RUNEWARP_SERVER_HOSTNAME` replaces `server.hostname` from the selected config before validation
 5. `runewarp server --control-address <HOSTNAME[:PORT]>` replaces `control.address` from the selected config before validation and enables managed mode when an effective Control address is present
+6. `runewarp server --log-format <text|json>` replaces top-level `log-format`
 
-The Server runtime stays config-file-first: only `server.hostname` and the effective Control address are overridable at runtime. `--hostname` and `--control-address` belong only to the runtime `runewarp server` command, not `runewarp server cert ...`.
+The Server runtime stays config-file-first: only `server.hostname`, the effective Control address and `log-format` are overridable at runtime. `--hostname`, `--control-address` and `--log-format` belong only to the runtime `runewarp server` command, not `runewarp server cert ...`.
 
 For `runewarp client`, config/runtime precedence is:
 
@@ -68,6 +69,7 @@ When a selected config file is involved:
 
 - repeated `--server-address` flags replace either `client.server-address` or `client.server-addresses` before validation
 - `--control-address` replaces `control.address` before validation and enables managed mode when an effective Control address is present
+- `--log-format` replaces top-level `log-format`; it also applies when no Client config is selected, and is rejected on `runewarp client identity ...` and `runewarp client public-cert ...`
 - `--backend-address` may supply the sole Catch-all Service only when the selected config contributes no `[[client.services]]` blocks
 - any configured Service blocks `--backend-address`, even when that Service block is malformed
 - a selected file with no `[client]` section may still start the Client when both runtime flags are present
@@ -212,8 +214,9 @@ Add `[client.acme]` for ACME-managed certificates, or `client.public-cert-dir` f
 | Key | Required | Notes |
 | --- | --- | --- |
 | `log-level` | no | Top-level runtime stderr log level for the selected role. Supported values: `off`, `error`, `warn`, `info`, `debug`, `trace`. Defaults to `info`. `trace` is accepted, but no trace-only runtime events are emitted today, so it currently behaves the same as `debug`. |
+| `log-format` | no | Top-level runtime stderr log line format for the selected role. Supported values: `text`, `json`. Defaults to `text`. On the runtime `runewarp server` and `runewarp client` commands, `--log-format` may replace this value. |
 
-At `info`, Runewarp emits Server runtime startup, readiness, Tunnel connection lifecycle events, warnings, and errors. `debug` adds routing diagnostics and ACME challenge-handling detail. Server startup announces `server-generation`; Server route and Tunnel connection events add `server-generation` and `connection-id` at their existing levels. See the [operator logging contract](usage.md#runtime-logs). Output is stderr-only and each line uses a UTC RFC3339 timestamp, level, and message.
+At `info`, Runewarp emits Server runtime startup, readiness, Tunnel connection lifecycle events, warnings, and errors. `debug` adds routing diagnostics and ACME challenge-handling detail. Server startup announces `server-generation`; Server route and Tunnel connection events add `server-generation` and `connection-id` at their existing levels. See the [operator logging contract](usage.md#runtime-logs). Output is stderr-only. With `log-format = "text"`, each line uses a UTC RFC3339 timestamp, level, and message, with ANSI colour only when stderr is a terminal. With `log-format = "json"`, each line is one JSON object with the same `timestamp`, `level` and `message` values as top-level keys, never contains ANSI escapes, and adds any structured event fields, such as stream-open `reason` and `code`, as further top-level keys. Message text, including its `key=value` fields, is identical in both formats.
 
 ### Control
 

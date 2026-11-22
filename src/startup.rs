@@ -1426,6 +1426,7 @@ mod tests {
         let settings = ServerConfig {
             hostname: server_hostname("tunnel.example.test"),
             log_level: LogLevel::Info,
+            log_format: crate::LogFormat::Text,
             certificate: ServerCertificateConfig::Acme {
                 email: "admin@example.test".to_owned(),
                 state_directory: state_directory.clone(),
@@ -1454,6 +1455,7 @@ mod tests {
         let acme_settings = ServerConfig {
             hostname: server_hostname("tunnel.example.test"),
             log_level: LogLevel::Info,
+            log_format: crate::LogFormat::Text,
             certificate: ServerCertificateConfig::Acme {
                 email: "admin@example.test".to_owned(),
                 state_directory: PathBuf::from("/tmp/server-acme"),
@@ -1501,6 +1503,7 @@ mod tests {
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
             log_level: LogLevel::Info,
+            log_format: crate::LogFormat::Text,
             server_trust: crate::ClientServerTrust::System,
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
@@ -1551,6 +1554,7 @@ mod tests {
             server_hostname: server_hostname("tunnel-a.example.test"),
             server_port: 443,
             log_level: LogLevel::Off,
+            log_format: crate::LogFormat::Text,
             server_trust: crate::ClientServerTrust::System,
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
@@ -1652,6 +1656,7 @@ mod tests {
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
             log_level: LogLevel::Info,
+            log_format: crate::LogFormat::Text,
             server_trust: crate::ClientServerTrust::System,
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
@@ -1685,6 +1690,7 @@ mod tests {
         let settings = ServerConfig {
             hostname: server_hostname("tunnel.example.test"),
             log_level: LogLevel::Info,
+            log_format: crate::LogFormat::Text,
             certificate: ServerCertificateConfig::Acme {
                 email: "admin@example.test".to_owned(),
                 state_directory: state_directory.clone(),
@@ -1732,6 +1738,7 @@ mod tests {
             server_hostname: server_hostname("tunnel.example.test"),
             server_port: 443,
             log_level: LogLevel::Info,
+            log_format: crate::LogFormat::Text,
             server_trust: crate::ClientServerTrust::System,
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
@@ -1856,6 +1863,7 @@ mod tests {
             server_hostname: server_hostname("unassigned.invalid"),
             server_port: 443,
             log_level: LogLevel::Info,
+            log_format: crate::LogFormat::Text,
             server_trust: crate::ClientServerTrust::System,
             identity_directory: PathBuf::from("/tmp/unused-client-identity"),
             services: vec![ServiceConfig {
@@ -1906,6 +1914,7 @@ mod tests {
         ServerConfig {
             hostname: server_hostname("tunnel.example.test"),
             log_level: LogLevel::Info,
+            log_format: crate::LogFormat::Text,
             certificate: ServerCertificateConfig::Manual {
                 directory: certificate_directory.to_path_buf(),
             },

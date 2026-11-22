@@ -59,7 +59,7 @@ pub use client_public_cert::{
 pub use client_runtime::ClientRuntime;
 pub use config::{
     ClientConfig, ClientPublicCertConfig, ClientTlsMode, ConfigFileError, ControlConfig,
-    ControlTrust, LogLevel, MaterialDirectoryError, SelectedTerminatingHostnames,
+    ControlTrust, LogFormat, LogLevel, MaterialDirectoryError, SelectedTerminatingHostnames,
     ServerCertHostnameError, ServerCertificateConfig, ServerConfig, ServerConfigResolutionError,
     ServerIdentityConfig, ServerRuntimeArgs, ServerTunnelConfig, ServiceConfig,
     is_managed_client_config, is_managed_selected_client_config, load_client_config,

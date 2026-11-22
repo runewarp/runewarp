@@ -481,6 +481,7 @@ mod tests {
             server_hostname: failing_server_address.hostname().clone(),
             server_port: failing_server_address.port(),
             log_level: LogLevel::Off,
+            log_format: crate::LogFormat::Text,
             server_trust: crate::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {

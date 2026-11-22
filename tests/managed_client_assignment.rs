@@ -229,6 +229,7 @@ impl ManagedClientHarness {
             server_hostname: ServerHostname::try_from("localhost").unwrap(),
             server_port: 443,
             log_level: LogLevel::Off,
+            log_format: runewarp::LogFormat::Text,
             server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
             identity_directory: identity_dir.clone(),
             services: vec![ServiceConfig {

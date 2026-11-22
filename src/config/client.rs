@@ -18,6 +18,8 @@ pub struct ClientRuntimeArgs {
     pub server_addresses: Vec<String>,
     pub backend_address: Option<String>,
     pub control_address: Option<String>,
+    /// Overrides the top-level `log-format` config key.
+    pub log_format: Option<crate::LogFormat>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

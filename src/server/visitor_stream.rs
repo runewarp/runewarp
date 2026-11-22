@@ -529,7 +529,7 @@ mod tests {
         Fut: std::future::Future<Output = io::Result<()>>,
     {
         let _lock = LOG_CAPTURE_LOCK.lock().await;
-        let _ = crate::runtime_log::install(level);
+        let _ = crate::runtime_log::install(level, crate::LogFormat::Text);
         let buffer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry()
             .with(level_filter(level))

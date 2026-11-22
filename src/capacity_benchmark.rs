@@ -142,7 +142,7 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
                 setup(&directory)?;
             }
             "server" => {
-                crate::runtime_log::install(crate::LogLevel::Info)?;
+                crate::runtime_log::install(crate::LogLevel::Info, crate::LogFormat::Text)?;
                 let id = std::env::var("RUNEWARP_BENCH_ID")?;
                 let config = crate::load_server_config(&directory.join("server.toml"))?;
                 let server = crate::ServerRuntime::prepare(&config, address(0), tunnel_bind).await?;
@@ -157,7 +157,7 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
                 write_json(&directory.join(format!("server-{id}.counts.json")), counts())?;
             }
             "client" => {
-                crate::runtime_log::install(crate::LogLevel::Info)?;
+                crate::runtime_log::install(crate::LogLevel::Info, crate::LogFormat::Text)?;
                 let config = crate::load_client_config(&directory.join("client.toml"))?;
                 let client = crate::ClientRuntime::prepare(&config, tunnel_bind).await?;
                 let announce = async {

@@ -41,6 +41,7 @@ backend-address = "localhost:8443"
             server_addresses: Vec::new(),
             backend_address: None,
             control_address: None,
+            log_format: None,
         },
         &ClientConfigResolutionDefaults {
             identity_directory,

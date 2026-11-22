@@ -6,9 +6,9 @@ use crate::config::preparation::{
     PreparedDirectory, PreparedValue, resolve_default_path, resolve_path, resolve_path_with_default,
 };
 use crate::config::{
-    ConfigFileError, LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig,
-    collect_client_unknown_field_messages, deserialize_selected_section, load_log_level_from_path,
-    load_optional_selected_section_value,
+    ConfigFileError, GlobalLogConfig, LogLevel, RawClientAcmeConfig, RawClientConfig,
+    RawClientServiceConfig, collect_client_unknown_field_messages, deserialize_selected_section,
+    load_global_log_config_from_path, load_optional_selected_section_value,
 };
 use crate::trust::{
     ClientServerTrust, ResolveClientServerTrustError, resolve_client_server_trust_with_default,
@@ -26,6 +26,7 @@ pub(crate) struct PreparedClientConfig {
     pub(crate) server_address: Option<String>,
     pub(crate) server_addresses: Option<Vec<String>>,
     pub(crate) log_level: LogLevel,
+    pub(crate) log_format: crate::LogFormat,
     pub(crate) trust: PreparedClientTrust,
     pub(crate) identity_directory: PreparedValue<PathBuf>,
     pub(crate) services: Vec<PreparedClientServiceConfig>,
@@ -114,11 +115,11 @@ pub(crate) fn prepare_optional_client_config_from_path(
     };
     let unknown_field_messages = collect_client_unknown_field_messages(&section_value);
     let raw = deserialize_selected_section::<RawClientConfig>(path, "client", &section_value)?;
-    let log_level = load_log_level_from_path(path)?;
+    let log = load_global_log_config_from_path(path)?;
     let control = prepare_control_section(path, None)?;
     Ok(Some(prepare_raw_client_config(
         Some(path.to_path_buf()),
-        log_level,
+        log,
         raw,
         unknown_field_messages,
         control,
@@ -136,7 +137,7 @@ pub(crate) fn prepare_selected_client_config(
     match selected_config {
         SelectedClientConfig::None => prepare_cli_only_client_config(
             None,
-            LogLevel::default(),
+            runtime_log_config(GlobalLogConfig::default(), runtime),
             runtime,
             default_identity_directory,
             default_public_cert_directory,
@@ -152,6 +153,13 @@ pub(crate) fn prepare_selected_client_config(
     }
 }
 
+fn runtime_log_config(mut log: GlobalLogConfig, runtime: &ClientRuntimeArgs) -> GlobalLogConfig {
+    if let Some(format) = runtime.log_format {
+        log.format = format;
+    }
+    log
+}
+
 fn prepare_selected_config_client_config(
     path: PathBuf,
     runtime: &ClientRuntimeArgs,
@@ -160,12 +168,14 @@ fn prepare_selected_config_client_config(
 ) -> Result<PreparedClientConfig, ClientConfigResolutionError> {
     let section_value = load_optional_selected_section_value(&path, "client")
         .map_err(ClientConfigResolutionError::ConfigFile)?;
-    let log_level =
-        load_log_level_from_path(&path).map_err(ClientConfigResolutionError::ConfigFile)?;
+    let log = runtime_log_config(
+        load_global_log_config_from_path(&path).map_err(ClientConfigResolutionError::ConfigFile)?,
+        runtime,
+    );
     let Some(section_value) = section_value else {
         return prepare_cli_only_client_config(
             Some(&path),
-            log_level,
+            log,
             runtime,
             default_identity_directory,
             default_public_cert_directory,
@@ -215,7 +225,7 @@ fn prepare_selected_config_client_config(
 
     Ok(prepare_raw_client_config(
         Some(path),
-        log_level,
+        log,
         raw,
         messages,
         control,
@@ -226,7 +236,7 @@ fn prepare_selected_config_client_config(
 
 fn prepare_cli_only_client_config(
     selected_path: Option<&Path>,
-    log_level: LogLevel,
+    log: GlobalLogConfig,
     runtime: &ClientRuntimeArgs,
     default_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
     default_public_cert_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
@@ -272,7 +282,7 @@ fn prepare_cli_only_client_config(
 
     Ok(prepare_raw_client_config(
         selected_path.map(Path::to_path_buf),
-        log_level,
+        log,
         RawClientConfig {
             max_visitor_streams: None,
             graceful_shutdown_duration: None,
@@ -307,7 +317,7 @@ fn prepare_cli_only_client_config(
 
 pub(crate) fn prepare_raw_client_config(
     selected_path: Option<PathBuf>,
-    log_level: LogLevel,
+    log: GlobalLogConfig,
     raw: RawClientConfig,
     unknown_field_messages: Vec<String>,
     control: PreparedControlSection,
@@ -316,7 +326,7 @@ pub(crate) fn prepare_raw_client_config(
 ) -> PreparedClientConfig {
     prepare_raw_client_config_with_defaults(
         selected_path,
-        log_level,
+        log,
         raw,
         unknown_field_messages,
         control,
@@ -331,7 +341,7 @@ pub(crate) fn prepare_raw_client_config(
 
 fn prepare_raw_client_config_with_defaults(
     selected_path: Option<PathBuf>,
-    log_level: LogLevel,
+    log: GlobalLogConfig,
     raw: RawClientConfig,
     unknown_field_messages: Vec<String>,
     control: PreparedControlSection,
@@ -359,7 +369,8 @@ fn prepare_raw_client_config_with_defaults(
         selected_path,
         server_address: raw.server_address,
         server_addresses: raw.server_addresses,
-        log_level,
+        log_level: log.level,
+        log_format: log.format,
         trust: prepare_client_trust(
             raw.server_trust.as_deref(),
             raw.server_ca_file,
@@ -653,7 +664,10 @@ mod tests {
     };
     use crate::config::client::{ClientRuntimeArgs, SelectedClientConfig};
     use crate::config::preparation::control::prepare_control_section_without_config;
-    use crate::config::{LogLevel, RawClientAcmeConfig, RawClientConfig, RawClientServiceConfig};
+    use crate::config::{
+        GlobalLogConfig, LogFormat, LogLevel, RawClientAcmeConfig, RawClientConfig,
+        RawClientServiceConfig,
+    };
 
     #[test]
     fn client_config_selection_discovers_the_default_config_path()
@@ -684,6 +698,7 @@ mod tests {
                 server_addresses: vec!["tunnel.example.test".to_owned()],
                 backend_address: Some("backend.internal:443".to_owned()),
                 control_address: None,
+                log_format: None,
             },
             &|| Ok(identity_directory.clone()),
             &|| Ok(tempdir.path().join("unused-public-cert")),
@@ -734,6 +749,7 @@ hostname = "tunnel.example.test"
                 server_addresses: vec!["tunnel.example.test".to_owned()],
                 backend_address: Some("backend.internal:443".to_owned()),
                 control_address: None,
+                log_format: None,
             },
             &|| Ok(identity_directory.clone()),
             &|| Ok(tempdir.path().join("unused-public-cert")),
@@ -765,7 +781,10 @@ hostname = "tunnel.example.test"
 
         let prepared = super::prepare_raw_client_config_with_defaults(
             Some(config_path),
-            LogLevel::Info,
+            GlobalLogConfig {
+                level: LogLevel::Info,
+                format: LogFormat::Text,
+            },
             RawClientConfig {
                 max_visitor_streams: None,
                 graceful_shutdown_duration: None,
@@ -828,7 +847,10 @@ hostname = "tunnel.example.test"
 
         let prepared = super::prepare_raw_client_config_with_defaults(
             Some(config_path.clone()),
-            LogLevel::Off,
+            GlobalLogConfig {
+                level: LogLevel::Off,
+                format: LogFormat::Text,
+            },
             RawClientConfig {
                 max_visitor_streams: None,
                 graceful_shutdown_duration: None,
@@ -877,6 +899,33 @@ hostname = "tunnel.example.test"
     }
 
     #[test]
+    fn cli_only_preparation_uses_the_runtime_log_format() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let tempdir = tempdir()?;
+        let runtime = |log_format| ClientRuntimeArgs {
+            server_addresses: vec!["tunnel.example.test".to_owned()],
+            backend_address: Some("backend.internal:443".to_owned()),
+            control_address: None,
+            log_format,
+        };
+        let prepare = |runtime: &ClientRuntimeArgs| {
+            prepare_selected_client_config(
+                SelectedClientConfig::None,
+                runtime,
+                &|| Ok(tempdir.path().join("client-identity")),
+                &|| Ok(tempdir.path().join("unused-public-cert")),
+            )
+        };
+
+        assert_eq!(prepare(&runtime(None))?.log_format, LogFormat::Text);
+        assert_eq!(
+            prepare(&runtime(Some(LogFormat::Json)))?.log_format,
+            LogFormat::Json
+        );
+        Ok(())
+    }
+
+    #[test]
     fn selected_config_preparation_applies_runtime_overrides_before_validation()
     -> Result<(), Box<dyn std::error::Error>> {
         let tempdir = tempdir()?;
@@ -897,6 +946,7 @@ log-level = "off"
                 server_addresses: vec!["Tunnel.Example.Test.".to_owned()],
                 backend_address: Some("backend.internal:443".to_owned()),
                 control_address: None,
+                log_format: None,
             },
             &|| Ok(identity_directory.clone()),
             &|| Ok(tempdir.path().join("unused-public-cert")),

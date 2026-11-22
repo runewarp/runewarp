@@ -134,6 +134,36 @@ mod tests {
     }
 
     #[test]
+    fn saturation_warning_reports_active_stream_handlers_not_the_limit() {
+        #[derive(Clone, Default)]
+        struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("buffer").extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let budget = ClientStreamBudget::new(ClientStreamLimits::for_test());
+        budget.metrics().credit_gauges().active.set(1);
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || budget.note_saturation());
+        let output = String::from_utf8(buffer.0.lock().expect("buffer").clone()).expect("UTF-8");
+        assert!(
+            output.contains("client stream handlers saturated: active-work=1 limit=2"),
+            "{output}"
+        );
+    }
+
+    #[test]
     fn recovery_is_armed_only_by_an_emitted_saturation_warning() {
         let budget = ClientStreamBudget::new(ClientStreamLimits::for_test());
         budget.note_saturation();

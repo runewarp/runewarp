@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 ### Added
 
+- Added opt-in Prometheus/OpenMetrics metrics on Server and Client through `server.metrics-bind-address` and `client.metrics-bind-address`. The bounded `GET /metrics` listener reports readiness, draining, Tunnel connection lifecycle and lifetimes, admission use and limits, Managed-session state, Server certificate expiry, ACME events, Client Tunnel attempts, Visitor credit and active stream handlers, plus build and OpenTelemetry target info. Labels are code-enumerated and never carry hostnames, addresses, identities or Tunnel IDs. A metrics bind failure logs an error and serving continues. See [metrics](docs/metrics.md). ([#PR](https://github.com/runewarp/runewarp/pull/PR))
+
 - Added an optional JSON runtime log format for Client and Server through top-level `log-format = "json"` or `--log-format json`. Each runtime log line is one JSON object with the text envelope's `timestamp`, `level` and `message` plus any structured event fields. The default `text` format is unchanged. ([#298](https://github.com/runewarp/runewarp/pull/298))
 - Added one INFO `server runtime started: server-generation=<uuid>` event before listener readiness, and Server generation plus process-wide connection IDs on Server route, Tunnel lifecycle and related connection diagnostics at their existing levels. IDs cover failed handshakes and remain stable per TCP or QUIC connection without logging payloads or remote addresses. ([#291](https://github.com/runewarp/runewarp/pull/291))
 
@@ -20,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Added Server replacement hints. A Managed Server input may name a `replacement_generation`, and the Server advertises it on every Tunnel event stream; a hint naming the Server's own generation is not advertised, and an invalid one rejects the input. Static Servers send no hints. (#272)
 
 ### Changed
+
+- The `client stream handlers saturated` warning now reports active stream handlers as `active-work` instead of repeating the limit. ([#PR](https://github.com/runewarp/runewarp/pull/PR))
 
 - Require a fresh canonical UUIDv7 `runewarp-session-id` on each Managed events response and echo it on every state PUT. Missing, malformed or duplicate response IDs fail before input acceptance; reconnect retains last-applied serving while adopting the new downlink ID. This is a breaking lockstep Managed-session change; upgrade Control, Servers and Clients together. (#282)
 

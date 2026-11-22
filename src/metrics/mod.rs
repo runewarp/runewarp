@@ -60,11 +60,6 @@ impl<L: LabelValue> LabelledCounter<L> {
         self.counters[label.index()].inc();
     }
 
-    #[cfg(test)]
-    pub(crate) fn get(&self, label: L) -> u64 {
-        self.counters[label.index()].get()
-    }
-
     fn encode(&self, encoder: &mut DescriptorEncoder<'_>, name: &str, help: &str) -> fmt::Result {
         let mut metric = encoder.encode_descriptor(name, help, None, MetricType::Counter)?;
         for label in L::ALL {
@@ -106,11 +101,6 @@ impl AtomicHistogram {
                 Some((f64::from_bits(bits) + value).to_bits())
             });
         self.count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn count(&self) -> u64 {
-        self.count.load(Ordering::Relaxed)
     }
 
     fn encode(

@@ -306,6 +306,11 @@ impl TunnelRegistry {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn metrics(&self) -> ServerMetrics {
+        self.metrics.clone()
+    }
+
     pub(crate) fn set_readiness(&self, readiness: ReadinessGate) {
         *self
             .readiness
@@ -1566,6 +1571,101 @@ mod tests {
                 .current()
                 .authorizes_client_identity(&first_identity.client_identity)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_metrics_follow_revocation_realignment_and_shutdown() -> io::Result<()> {
+        use crate::metrics::test_support::sample;
+
+        async fn eventually(registry: &TunnelRegistry, expected: &[(&str, f64)]) {
+            for _ in 0..100 {
+                let text = registry.metrics().render();
+                if expected
+                    .iter()
+                    .all(|(series, value)| sample(&text, series) == Some(*value))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("{expected:?}\n{}", registry.metrics().render());
+        }
+
+        let revoked = generate_test_client_identity()?;
+        let surviving = generate_test_client_identity()?;
+        let tunnel =
+            |id: &str, hostname: &str, identity: &GeneratedClientIdentity| ServerTunnelConfig {
+                id: Some(TunnelId::parse(id).unwrap()),
+                public_hostnames: vec![public_hostname(hostname)],
+                authorized_client_identities: vec![identity.client_identity.clone()],
+            };
+        let registry = TunnelRegistry::configured_managed(
+            &server_hostname("tunnel.example.test"),
+            &[
+                tunnel("tunnel-1", "app.example.test", &revoked),
+                tunnel("tunnel-2", "api.example.test", &surviving),
+            ],
+        )?;
+        let revoked_fixture = TunnelConnectionFixture::connect(&revoked).await?;
+        let surviving_fixture = TunnelConnectionFixture::connect(&surviving).await?;
+        registry
+            .register(revoked_fixture.server_connection.clone())
+            .await;
+        registry
+            .register(surviving_fixture.server_connection.clone())
+            .await;
+        eventually(
+            &registry,
+            &[
+                ("runewarp_server_tunnel_connections_accepted_total", 2.0),
+                ("runewarp_server_tunnel_connections", 2.0),
+                ("runewarp_server_tunnels_connected", 2.0),
+            ],
+        )
+        .await;
+
+        // Revoke one identity; the surviving member is rehomed without being counted again.
+        registry
+            .replace_authorization(
+                &server_hostname("tunnel.example.test"),
+                &[tunnel("tunnel-2", "api.example.test", &surviving)],
+            )
+            .await?;
+        eventually(
+            &registry,
+            &[
+                (
+                    r#"runewarp_server_tunnel_connections_closed_total{reason="replaced"}"#,
+                    1.0,
+                ),
+                ("runewarp_server_tunnel_connections", 1.0),
+                ("runewarp_server_tunnels_connected", 1.0),
+            ],
+        )
+        .await;
+
+        registry.close_all(b"graceful shutdown").await;
+        eventually(
+            &registry,
+            &[
+                (
+                    r#"runewarp_server_tunnel_connections_closed_total{reason="shutdown"}"#,
+                    1.0,
+                ),
+                (
+                    r#"runewarp_server_tunnel_connections_closed_total{reason="replaced"}"#,
+                    1.0,
+                ),
+                ("runewarp_server_tunnel_connections", 0.0),
+                ("runewarp_server_tunnels_connected", 0.0),
+                (
+                    "runewarp_server_tunnel_connection_duration_seconds_count",
+                    2.0,
+                ),
+            ],
+        )
+        .await;
         Ok(())
     }
 

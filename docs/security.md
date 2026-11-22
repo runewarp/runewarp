@@ -6,7 +6,8 @@ In the default passthrough mode, Runewarp does not terminate customer TLS on the
 
 - choose system trust or an exclusive CA bundle deliberately for every Server and Control connection
 - protect Client and Server identity keys, private CA keys, and explicit ACME state directories
-- expose only the intended public TCP, Tunnel UDP, readiness, and Control listeners; every configured bind address opens a listener
+- expose only the intended public TCP, Tunnel UDP, readiness, metrics, and Control listeners; every configured bind address opens a listener
+- bind `server.metrics-bind-address` and `client.metrics-bind-address` to loopback or a private network; the [metrics](metrics.md) listener has no authentication or TLS, though its series carry no hostnames, addresses, identities or Tunnel IDs
 - account for the Server's visibility into SNI, Visitor source addresses, timing, and byte counts
 - probe `server.readiness-bind-address` rather than public TLS when readiness is configured
 - use `tls-mode = "terminate"` only when Client-side TLS termination and plaintext delivery to the Local backend are intended

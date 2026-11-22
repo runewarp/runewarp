@@ -95,11 +95,20 @@ impl AtomicHistogram {
         if let Some(index) = self.upper_bounds.iter().position(|upper| value <= *upper) {
             self.buckets[index].fetch_add(1, Ordering::Relaxed);
         }
-        let _ = self
-            .sum_bits
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
-                Some((f64::from_bits(bits) + value).to_bits())
-            });
+        // A CAS loop builds on every supported toolchain; `fetch_update` is deprecated on newer ones.
+        let mut current = self.sum_bits.load(Ordering::Relaxed);
+        loop {
+            let next = (f64::from_bits(current) + value).to_bits();
+            match self.sum_bits.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
         self.count.fetch_add(1, Ordering::Relaxed);
     }
 

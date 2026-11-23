@@ -44,7 +44,8 @@ const DEFAULT_TRACES_PATH: &str = "/v1/traces";
 const MAX_QUEUE_SIZE: usize = 2048;
 const MAX_EXPORT_BATCH_SIZE: usize = 512;
 const SCHEDULED_DELAY: Duration = Duration::from_secs(5);
-/// Bounds one export request, including connect, retries and the response body.
+/// Bounds one HTTP attempt, including connect and the response body. The SDK may retry a failed
+/// batch with backoff, and each attempt gets its own timeout.
 const EXPORT_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Collectors answer with a small protobuf or status body.
@@ -89,8 +90,9 @@ impl TraceExportConfig {
     /// The default `trace-sample-ratio`: export every Visitor.
     pub const DEFAULT_SAMPLE_RATIO: f64 = 1.0;
 
-    /// Validate an `http` or `https` endpoint and a ratio from 0 to 1. An endpoint without a
-    /// path gets `/v1/traces`.
+    /// Validate an `http` or `https` endpoint and a ratio from 0 to 1. An endpoint whose path is
+    /// empty or `/` gets `/v1/traces`, keeping any query. Errors never repeat the endpoint, which
+    /// may carry credentials.
     pub fn new(endpoint: &str, sample_ratio: Option<f64>) -> Result<Self, String> {
         let sample_ratio = sample_ratio.unwrap_or(Self::DEFAULT_SAMPLE_RATIO);
         if !(0.0..=1.0).contains(&sample_ratio) {
@@ -98,10 +100,11 @@ impl TraceExportConfig {
                 "trace-sample-ratio must be between 0 and 1, got {sample_ratio}"
             ));
         }
-        let invalid = |reason: &str| format!("invalid otlp-traces-endpoint `{endpoint}`: {reason}");
+        let invalid = |reason: &str| format!("invalid otlp-traces-endpoint: {reason}");
         let uri: http::Uri = endpoint
             .parse()
             .map_err(|error: http::uri::InvalidUri| invalid(&error.to_string()))?;
+        // `InvalidUri` messages describe the failure without quoting the input.
         match uri.scheme_str() {
             Some("http" | "https") => {}
             _ => return Err(invalid("scheme must be http or https")),
@@ -112,9 +115,18 @@ impl TraceExportConfig {
         if authority.as_str().contains('@') {
             return Err(invalid("credentials are not allowed in the URL"));
         }
-        let uri = if matches!(uri.path(), "" | "/") && uri.query().is_none() {
+        // `http::Uri` reads an omitted path as `/`, so the two cannot be told apart.
+        let uri = if matches!(uri.path(), "" | "/") {
+            let path_and_query = match uri.query() {
+                Some(query) => format!("{DEFAULT_TRACES_PATH}?{query}"),
+                None => DEFAULT_TRACES_PATH.to_owned(),
+            };
             let mut parts = uri.into_parts();
-            parts.path_and_query = Some(http::uri::PathAndQuery::from_static(DEFAULT_TRACES_PATH));
+            parts.path_and_query = Some(
+                path_and_query
+                    .parse()
+                    .map_err(|error: http::uri::InvalidUri| invalid(&error.to_string()))?,
+            );
             http::Uri::from_parts(parts).map_err(|error| invalid(&error.to_string()))?
         } else {
             uri
@@ -182,9 +194,14 @@ fn is_trace_span(metadata: &Metadata<'_>) -> bool {
     metadata.is_span() && metadata.target() == TARGET
 }
 
-/// Whether the log formatter may see `metadata`. Runewarp trace spans never appear in log lines.
+/// `tracing` target prefix of the HTTP client that only the exporter uses. Its per-connection
+/// diagnostics would repeat on every export retry, bypassing the rate-limited failure line.
+const EXPORTER_HTTP_TARGET: &str = "hyper_util::client";
+
+/// Whether the log formatter may see `metadata`. Runewarp trace spans and the exporter's HTTP
+/// client diagnostics never appear in log lines.
 pub(crate) fn visible_to_logs(metadata: &Metadata<'_>) -> bool {
-    !is_trace_span(metadata)
+    !is_trace_span(metadata) && !metadata.target().starts_with(EXPORTER_HTTP_TARGET)
 }
 
 /// The `tracing` layer that turns Runewarp trace spans into OpenTelemetry spans.
@@ -218,17 +235,25 @@ pub(crate) fn otlp_provider(
         .with_http_client(http_client)
         .build()
         .map_err(|error| format!("trace exporter setup failed: {error}"))?;
+    Ok(provider_builder(config.sample_ratio, role)
+        .with_span_processor(batch_processor(exporter, role))
+        .build())
+}
+
+/// The bounded batch processor: at most [`MAX_QUEUE_SIZE`] finished spans wait, and further
+/// spans are dropped while the exporter is busy.
+fn batch_processor<E>(exporter: E, role: TraceRole) -> BatchSpanProcessor
+where
+    E: SpanExporter + 'static,
+{
     let batch = BatchConfigBuilder::default()
         .with_max_queue_size(MAX_QUEUE_SIZE)
         .with_max_export_batch_size(MAX_EXPORT_BATCH_SIZE)
         .with_scheduled_delay(SCHEDULED_DELAY)
         .build();
-    let processor = BatchSpanProcessor::builder(ReportingExporter::new(exporter, role.log_role()))
+    BatchSpanProcessor::builder(ReportingExporter::new(exporter, role.log_role()))
         .with_batch_config(batch)
-        .build();
-    Ok(provider_builder(config.sample_ratio, role)
-        .with_span_processor(processor)
-        .build())
+        .build()
 }
 
 fn provider_builder(
@@ -566,6 +591,38 @@ mod tests {
             "https://otel.example.test/custom/traces"
         );
         assert_eq!(config.sample_ratio(), 0.25);
+
+        for (endpoint, expected) in [
+            ("http://h:4318/", "http://h:4318/v1/traces"),
+            ("http://h:4318?tenant=a", "http://h:4318/v1/traces?tenant=a"),
+            (
+                "http://h:4318/?tenant=a",
+                "http://h:4318/v1/traces?tenant=a",
+            ),
+            (
+                "http://h:4318/custom?tenant=a",
+                "http://h:4318/custom?tenant=a",
+            ),
+        ] {
+            let config = TraceExportConfig::new(endpoint, None).expect("config");
+            assert_eq!(config.endpoint().to_string(), expected, "{endpoint}");
+        }
+    }
+
+    #[test]
+    fn config_errors_never_repeat_the_endpoint() {
+        for endpoint in [
+            "http://user:secret-marker@otel.example.test/v1/traces",
+            "grpc://otel.example.test/secret-marker",
+            "http://otel.example.test/secret-marker with spaces",
+        ] {
+            let error = TraceExportConfig::new(endpoint, None).expect_err(endpoint);
+            assert!(
+                error.starts_with("invalid otlp-traces-endpoint: "),
+                "{error}"
+            );
+            assert!(!error.contains("secret-marker"), "{error}");
+        }
     }
 
     #[test]
@@ -770,6 +827,73 @@ mod tests {
         .ok();
         tokio::task::spawn_blocking(move || shutdown(&provider)).await?;
         Ok(())
+    }
+
+    /// Blocks its first export until released, and counts every exported span.
+    #[derive(Debug)]
+    struct BlockingExporter {
+        exported: std::sync::Arc<AtomicU64>,
+        started: std::sync::mpsc::SyncSender<()>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl SpanExporter for BlockingExporter {
+        async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+            let release = self.release.lock().expect("release").take();
+            if let Some(release) = release {
+                let _ = self.started.send(());
+                let _ = release.recv();
+            }
+            self.exported
+                .fetch_add(batch.len() as u64, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_busy_exporter_drops_spans_beyond_the_queue() {
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "a_busy_exporter_drops_spans_beyond_the_queue",
+        ) {
+            return;
+        }
+        let exported = std::sync::Arc::new(AtomicU64::new(0));
+        let (started, export_started) = std::sync::mpsc::sync_channel(1);
+        let (release_export, release) = std::sync::mpsc::channel();
+        let exporter = BlockingExporter {
+            exported: exported.clone(),
+            started,
+            release: Mutex::new(Some(release)),
+        };
+        let provider = provider_builder(1.0, TraceRole::Server)
+            .with_span_processor(batch_processor(exporter, TraceRole::Server))
+            .build();
+        use tracing_subscriber::layer::SubscriberExt;
+        let subscriber = tracing_subscriber::registry().with(layer(&provider));
+        let emitted = MAX_EXPORT_BATCH_SIZE + 4 * MAX_QUEUE_SIZE;
+        tracing::subscriber::with_default(subscriber, || {
+            // A full batch starts an export, which then holds the exporter busy.
+            for _ in 0..MAX_EXPORT_BATCH_SIZE {
+                tracing::info_span!(target: TARGET, "probe").in_scope(|| {});
+            }
+            export_started
+                .recv_timeout(Duration::from_secs(10))
+                .expect("first export started");
+            let started = Instant::now();
+            for _ in MAX_EXPORT_BATCH_SIZE..emitted {
+                tracing::info_span!(target: TARGET, "probe").in_scope(|| {});
+            }
+            assert!(started.elapsed() < Duration::from_secs(2));
+        });
+        release_export.send(()).expect("release");
+        shutdown(&provider);
+
+        let exported = exported.load(Ordering::Relaxed) as usize;
+        assert!(
+            (MAX_QUEUE_SIZE..=MAX_EXPORT_BATCH_SIZE * 2 + MAX_QUEUE_SIZE).contains(&exported),
+            "exported {exported} of {emitted}"
+        );
     }
 
     #[derive(Debug)]

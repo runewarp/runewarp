@@ -18,6 +18,17 @@ use crate::trace_export::TracedStage;
 use crate::tunnel_framing::read_tunnel_stream;
 use crate::{ClientTlsMode, ServiceConfig, proxy::proxy_tcp_over_tunnel};
 
+/// Start the `client.visitor` span. It ends when the backend TCP connection is established or
+/// the stream is rejected, not at stream close.
+pub(crate) fn client_visitor_span() -> TracedStage {
+    TracedStage::new(tracing::info_span!(
+        target: crate::trace_export::TARGET,
+        parent: None,
+        "client.visitor",
+        runewarp.outcome = tracing::field::Empty,
+    ))
+}
+
 #[derive(Clone)]
 pub(crate) struct TunnelConnectionStreamHandler {
     service_selector: ServiceSelector,
@@ -38,14 +49,17 @@ impl TunnelConnectionStreamHandler {
         }
     }
 
-    pub(crate) async fn handle(&self, mut stream: ClientTunnelStream) -> io::Result<()> {
-        // Ends when the backend is connected or the stream is rejected, not at stream close.
-        let visitor = TracedStage::new(tracing::info_span!(
-            target: crate::trace_export::TARGET,
-        parent: None,
-            "client.visitor",
-            runewarp.outcome = tracing::field::Empty,
-        ));
+    #[cfg(test)]
+    pub(crate) async fn handle(&self, stream: ClientTunnelStream) -> io::Result<()> {
+        self.handle_traced(stream, client_visitor_span()).await
+    }
+
+    /// Handle a stream whose `client.visitor` span started when the stream was accepted.
+    pub(crate) async fn handle_traced(
+        &self,
+        mut stream: ClientTunnelStream,
+        visitor: TracedStage,
+    ) -> io::Result<()> {
         let intake = tokio::time::timeout(self.stream_limits.client_hello_timeout, async {
             let decoded = read_tunnel_stream(&mut stream).await?;
             Ok::<_, io::Error>((decoded.addresses, decoded.client_hello))
@@ -108,6 +122,8 @@ impl TunnelConnectionStreamHandler {
                 return Err(error);
             }
         };
+        // The span measures accept to backend connect, so the initial write is outside it.
+        visitor.finish("connected");
         let mut initial_bytes = service
             .proxy_protocol
             .map(|_| addresses.encode_proxy_v2())
@@ -127,7 +143,6 @@ impl TunnelConnectionStreamHandler {
                 },
             );
             drop(stream);
-            visitor.finish("rejected");
             return Err(error);
         }
         runtime_log::client_route(
@@ -136,7 +151,6 @@ impl TunnelConnectionStreamHandler {
                 backend_address: service.backend_address.as_str(),
             },
         );
-        visitor.finish("connected");
 
         let (recv, send) = stream.into_split();
         proxy_tcp_over_tunnel(backend_stream, Vec::new(), send, recv).await

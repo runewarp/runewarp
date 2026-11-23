@@ -343,8 +343,10 @@ impl Client {
 
     fn spawn_stream_handler(&self, stream: ClientTunnelStream) {
         let tunnel_stream_handler = self.tunnel_stream_handler.clone();
+        // Start at accept, so the span includes the wait for the handler task to run.
+        let visitor = tunnel_stream::client_visitor_span();
         tokio::spawn(async move {
-            let _ = tunnel_stream_handler.handle(stream).await;
+            let _ = tunnel_stream_handler.handle_traced(stream, visitor).await;
         });
     }
 }

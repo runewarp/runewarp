@@ -1816,6 +1816,58 @@ mod tests {
     }
 
     #[test]
+    fn unreachable_collector_logs_only_the_rate_limited_failure_line() {
+        use crate::trace_export::{TARGET, TraceExportConfig, TraceRole};
+        // The exporter thread and HTTP tasks log through the global subscriber, so this test
+        // needs its own process.
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "unreachable_collector_logs_only_the_rate_limited_failure_line",
+        ) {
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+        drop(listener);
+        let config = TraceExportConfig::new(&endpoint, None).expect("config");
+        let provider = crate::trace_export::otlp_provider(
+            &config,
+            TraceRole::Server,
+            runtime.handle().clone(),
+        )
+        .expect("provider");
+        let buffer = SharedBuffer::default();
+        let (subscriber, _) = build_subscriber(
+            LogLevel::Trace,
+            LogFormat::Text,
+            Some(&provider),
+            buffer.clone(),
+            false,
+        );
+        tracing::subscriber::set_global_default(subscriber).expect("global subscriber");
+
+        for _ in 0..3 {
+            tracing::info_span!(target: TARGET, "probe").in_scope(|| {});
+            let _ = provider.force_flush();
+        }
+        crate::trace_export::shutdown(&provider);
+
+        let output = buffer.read();
+        let lines = output.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "{output}");
+        assert!(
+            lines[0].contains("DEBUG server trace export failed:")
+                && lines[0].ends_with("suppressed=0"),
+            "{output}"
+        );
+    }
+
+    #[test]
     fn trace_export_leaves_text_and_json_log_lines_unchanged() {
         if !crate::trace_export::test_support::isolated(
             module_path!(),

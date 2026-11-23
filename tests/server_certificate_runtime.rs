@@ -177,6 +177,7 @@ backend-address = "127.0.0.1:1"
         vec!["127.0.0.1:0".parse().unwrap()],
         vec!["127.0.0.1:0".parse().unwrap()],
         options,
+        runewarp::ServerRuntimeGeneration::generate(),
     )
     .await
     .unwrap();

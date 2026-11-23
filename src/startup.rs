@@ -74,24 +74,22 @@ impl PreparedServer {
         .await
     }
 
-    /// Bind the actual Server listeners with caller-owned certificate and route policy.
+    /// Bind the actual Server listeners with caller-owned certificate and route policy, as
+    /// Server runtime `generation`. Mint a fresh generation for every start, and pass the same
+    /// value to trace export so `service.instance.id` matches.
     pub async fn bind_listeners_with_acme(
         config: &ServerConfig,
         public_bind_addrs: Vec<SocketAddr>,
         tunnel_bind_addrs: Vec<SocketAddr>,
         options: ServerAcmeOptions,
+        generation: ServerRuntimeGeneration,
     ) -> Result<Self, ServerStartupError> {
-        if !matches!(config.certificate, ServerCertificateConfig::Acme { .. }) {
-            return Err(ServerStartupError::Bind(io::Error::other(
-                "ACME controller requires Server ACME configuration",
-            )));
-        }
         Self::bind_with_acme_options(
             config,
             public_bind_addrs,
             tunnel_bind_addrs,
             Some(options),
-            ServerRuntimeGeneration::generate(),
+            generation,
         )
         .await
     }
@@ -104,6 +102,13 @@ impl PreparedServer {
         acme_options: Option<ServerAcmeOptions>,
         generation: ServerRuntimeGeneration,
     ) -> Result<Self, ServerStartupError> {
+        if acme_options.is_some()
+            && !matches!(config.certificate, ServerCertificateConfig::Acme { .. })
+        {
+            return Err(ServerStartupError::Bind(io::Error::other(
+                "ACME controller requires Server ACME configuration",
+            )));
+        }
         crate::config::validate_bind_addresses("server.public-bind-address", &public_bind_addrs)
             .and_then(|()| {
                 crate::config::validate_bind_addresses(

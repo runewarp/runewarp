@@ -252,6 +252,77 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 }
 
 #[tokio::test]
+async fn runtime_with_acme_options_rejects_a_manual_certificate_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    struct UnusedRoute;
+    impl runewarp::server_certificate::ChallengeRouteObserver for UnusedRoute {
+        fn observe(
+            &self,
+            _request: runewarp::server_certificate::ChallengeRouteRequest,
+        ) -> futures_util::future::BoxFuture<
+            '_,
+            io::Result<runewarp::server_certificate::ConsumedChallengeRoute>,
+        > {
+            Box::pin(async { Err(io::Error::other("no ACME work runs in this test")) })
+        }
+    }
+    let directory = tempdir()?;
+    initialize_manual_server_certificate(
+        &directory.path().join("server-cert"),
+        "tunnel.example.test",
+    )?;
+    let path = directory.path().join("config.toml");
+    fs::write(
+        &path,
+        r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+public-bind-address = "127.0.0.1:0"
+tunnel-bind-address = "127.0.0.1:0"
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )?;
+    let settings = load_server_config(&path)?;
+    let validation = runewarp::server_certificate::CertificateValidation::new(
+        "tunnel.example.test".try_into().expect("server hostname"),
+        Arc::new(RootCertStore::empty()),
+        Duration::from_secs(3_600),
+        Duration::from_secs(60),
+    )?;
+    let client = rustls::ClientConfig::builder()
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth();
+    let options = runewarp::server_certificate::ServerAcmeOptions::new(
+        validation,
+        "https://acme.invalid/directory",
+        Arc::new(client),
+        Arc::new(UnusedRoute),
+    )?;
+    let error = match runewarp::ServerRuntime::prepare_listeners_with_acme(
+        &settings,
+        settings.public_bind_addresses.clone(),
+        settings.tunnel_connection_bind_addresses.clone(),
+        options,
+        runewarp::ServerRuntimeGeneration::generate(),
+    )
+    .await
+    {
+        Ok(_) => panic!("manual certificate config accepted ACME options"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("ACME controller requires Server ACME configuration"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn prepared_server_binds_the_existing_runtime_from_validated_settings() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
@@ -1727,6 +1798,7 @@ backend-address = "127.0.0.1:1"
         vec![localhost(0)],
         vec![localhost(0)],
         options,
+        runewarp::ServerRuntimeGeneration::generate(),
     )
     .await
     .unwrap();

@@ -19,14 +19,17 @@ enum ServerRuntimeMode {
     },
 }
 
+/// One running Server process.
+///
+/// The caller mints the runtime `generation`, so trace export can tag spans before the runtime
+/// exists. Mint a fresh [`ServerRuntimeGeneration`] for every start and pass the same value to
+/// [`crate::TraceRole::Server`]. The runtime reports it to Clients, in logs and in metrics.
 pub struct ServerRuntime {
     server: PreparedServer,
     shutdown: OrderlyShutdown,
     mode: ServerRuntimeMode,
 }
 
-// The caller mints the process's `generation` so trace export can tag its spans before the
-// runtime starts. The runtime reports the same value to Clients, in metrics and in logs.
 impl ServerRuntime {
     pub async fn prepare(
         config: &ServerConfig,

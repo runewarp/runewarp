@@ -41,7 +41,18 @@ pub(crate) async fn run(command: cli::ServerArgs) -> CommandResult {
 
     let config = resolve_server_config_from_cli(config, runtime)
         .map_err(wrap_server_config_resolution_error)?;
-    runewarp::runtime_log::install(config.log_level, config.log_format)?;
+    runewarp::runtime_log::install_with_trace_export(
+        config.log_level,
+        config.log_format,
+        config.trace_export.as_ref(),
+        runewarp::TraceRole::Server,
+    )?;
+    let result = serve(config).await;
+    runewarp::runtime_log::shutdown_trace_export().await;
+    result
+}
+
+async fn serve(config: runewarp::ServerConfig) -> CommandResult {
     let server = match ServerRuntime::prepare_listeners(
         &config,
         config.public_bind_addresses.clone(),

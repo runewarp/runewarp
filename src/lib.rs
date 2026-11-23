@@ -31,6 +31,7 @@ mod shutdown;
 mod sse;
 mod startup;
 mod tls_material;
+mod trace_export;
 mod trust;
 pub mod tunnel;
 mod tunnel_framing;
@@ -119,6 +120,7 @@ pub use shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
 pub use startup::{
     ClientInstancePrep, ClientStartupError, PreparedClient, PreparedServer, ServerStartupError,
 };
+pub use trace_export::{TraceExportConfig, TraceRole};
 pub use trust::ClientServerTrust;
 pub use tunnel::{
     ProtocolFailure, ReplacementHint, ServerRuntimeGeneration, UnconfirmedDrain, WithdrawalOutcome,
@@ -132,5 +134,7 @@ mod capacity_benchmark;
 
 #[cfg(test)]
 mod runtime_capacity_tests;
+#[cfg(test)]
+mod trace_runtime_tests;
 
 mod visitor_capacity;

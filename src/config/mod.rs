@@ -80,11 +80,12 @@ pub enum LogFormat {
     Json,
 }
 
-/// Top-level logging keys shared by every role.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Top-level logging and trace export keys shared by every role.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GlobalLogConfig {
     pub(crate) level: LogLevel,
     pub(crate) format: LogFormat,
+    pub(crate) trace_export: Option<crate::TraceExportConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +93,8 @@ pub struct ServerConfig {
     pub hostname: ServerHostname,
     pub log_level: LogLevel,
     pub log_format: LogFormat,
+    /// Optional OTLP span export; unset exports nothing.
+    pub trace_export: Option<crate::TraceExportConfig>,
     pub certificate: ServerCertificateConfig,
     pub public_bind_addresses: Vec<SocketAddr>,
     pub tunnel_connection_bind_addresses: Vec<SocketAddr>,
@@ -144,6 +147,8 @@ pub struct ClientConfig {
     pub server_port: u16,
     pub log_level: LogLevel,
     pub log_format: LogFormat,
+    /// Optional OTLP span export; unset exports nothing.
+    pub trace_export: Option<crate::TraceExportConfig>,
     pub server_trust: crate::trust::ClientServerTrust,
     pub identity_directory: PathBuf,
     pub services: Vec<ServiceConfig>,
@@ -403,17 +408,31 @@ pub(crate) fn load_global_log_config_from_path(
     path: &Path,
 ) -> Result<GlobalLogConfig, ConfigFileError> {
     let document = load_config_document(path, "config")?;
-    document
+    let raw = document
         .try_into::<RawGlobalConfig>()
-        .map(|raw| GlobalLogConfig {
-            level: raw.log_level.unwrap_or_default(),
-            format: raw.log_format.unwrap_or_default(),
-        })
         .map_err(|source| ConfigFileError::Parse {
             path: path.to_path_buf(),
             section: "config",
             source: Box::new(source),
-        })
+        })?;
+    let trace_export = match (raw.otlp_traces_endpoint, raw.trace_sample_ratio) {
+        (Some(endpoint), ratio) => Some(crate::TraceExportConfig::new(&endpoint, ratio)),
+        (None, Some(_)) => Some(Err(
+            "trace-sample-ratio requires otlp-traces-endpoint".to_owned()
+        )),
+        (None, None) => None,
+    }
+    .transpose()
+    .map_err(|message| ConfigFileError::Validation {
+        path: path.to_path_buf(),
+        section: "top-level",
+        messages: vec![message],
+    })?;
+    Ok(GlobalLogConfig {
+        level: raw.log_level.unwrap_or_default(),
+        format: raw.log_format.unwrap_or_default(),
+        trace_export,
+    })
 }
 
 fn load_config_document(
@@ -459,6 +478,7 @@ fn validate_prepared_server_config(
         hostname,
         log_level,
         log_format,
+        trace_export,
         public_bind_address,
         public_bind_addresses,
         tunnel_bind_address,
@@ -650,6 +670,7 @@ fn validate_prepared_server_config(
             hostname: hostname.expect("validated server.hostname"),
             log_level,
             log_format,
+            trace_export,
             certificate: certificate.expect("validated server certificate settings"),
             public_bind_addresses,
             tunnel_connection_bind_addresses,
@@ -685,6 +706,7 @@ pub(crate) fn validate_prepared_client_config(
         server_addresses,
         log_level,
         log_format,
+        trace_export,
         trust,
         identity_directory,
         services,
@@ -969,6 +991,7 @@ pub(crate) fn validate_prepared_client_config(
             server_port,
             log_level,
             log_format,
+            trace_export,
             server_trust: server_trust.expect("validated client.server-trust"),
             identity_directory: identity_directory.expect("validated client.identity-dir"),
             services,
@@ -1927,6 +1950,8 @@ pub(crate) struct RawClientServiceConfig {
 struct RawGlobalConfig {
     log_level: Option<LogLevel>,
     log_format: Option<LogFormat>,
+    otlp_traces_endpoint: Option<String>,
+    trace_sample_ratio: Option<f64>,
 }
 
 #[cfg(test)]

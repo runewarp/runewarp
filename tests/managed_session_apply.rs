@@ -1971,3 +1971,162 @@ async fn snapshot_byte_limit_replaces_session() {
     let _ = runner.await;
     fixture.shutdown().await;
 }
+
+/// Applies inputs without Server addresses and rejects the rest.
+struct EmptyOnlyAdapter;
+
+impl RoleAdapter for EmptyOnlyAdapter {
+    type Input = ClientManagedInput;
+
+    fn parse_input(
+        input: Value,
+        limits: &runewarp::ManagedSessionLimits,
+    ) -> Result<Self::Input, runewarp::InputError> {
+        parse_client_input(input, limits)
+    }
+
+    async fn apply(&mut self, input: Self::Input) -> Result<(), ApplyError> {
+        if input.server_addresses.is_empty() {
+            Ok(())
+        } else {
+            Err(ApplyError::new("addresses refused"))
+        }
+    }
+}
+
+#[tokio::test]
+async fn applies_export_managed_apply_spans_with_role_revision_and_outcome() {
+    // Callsite interest is process-wide: with one scoped subscriber live, a parallel test that
+    // registers the span callsite first can disable it here. Run alone in a child process.
+    const CHILD: &str = "RUNEWARP_TRACE_TEST_CHILD";
+    const NAME: &str = "applies_export_managed_apply_spans_with_role_revision_and_outcome";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let _trace = tracing::subscriber::set_default(
+        tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
+    );
+
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse("rev-1", "{\"server_addresses\":[]}")],
+    )
+    .await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut EmptyOnlyAdapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+    wait_for_event(
+        &mut event_rx,
+        ManagedSessionEvent::Applied {
+            revision: "rev-1".to_owned(),
+        },
+    )
+    .await;
+    fixture.push_snapshot(snapshot_sse(
+        "rev-2",
+        "{\"server_addresses\":[\"tunnel.example.test\"]}",
+    ));
+    wait_for_event(
+        &mut event_rx,
+        ManagedSessionEvent::Rejected {
+            revision: "rev-2".to_owned(),
+        },
+    )
+    .await;
+
+    let spans = exporter.get_finished_spans().unwrap();
+    eprintln!(
+        "DBG {:?}",
+        spans.iter().map(|s| s.name.to_string()).collect::<Vec<_>>()
+    );
+    let applies = spans
+        .iter()
+        .filter(|span| span.name == "managed.apply")
+        .map(|span| {
+            let attribute = |key: &str| {
+                span.attributes
+                    .iter()
+                    .find(|attribute| attribute.key.as_str() == key)
+                    .map(|attribute| attribute.value.to_string())
+            };
+            for attribute in &span.attributes {
+                assert!(
+                    !attribute.value.to_string().contains("tunnel.example.test"),
+                    "managed.apply exports a hostname"
+                );
+            }
+            (
+                attribute("runewarp.role"),
+                attribute("runewarp.revision"),
+                attribute("runewarp.outcome"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let some = |value: &str| Some(value.to_owned());
+    assert_eq!(
+        applies,
+        vec![
+            (some("client"), some("rev-1"), some("applied")),
+            (some("client"), some("rev-2"), some("rejected")),
+        ]
+    );
+
+    let _ = stop_tx.send(());
+    runner.await.unwrap();
+    fixture.shutdown().await;
+}
+
+async fn wait_for_event(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<ManagedSessionEvent>,
+    expected: ManagedSessionEvent,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while events.recv().await != Some(expected.clone()) {}
+    })
+    .await
+    .expect("expected Managed-session event");
+}

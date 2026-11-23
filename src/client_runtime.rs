@@ -508,6 +508,7 @@ mod tests {
             server_port: failing_server_address.port(),
             log_level: LogLevel::Off,
             log_format: crate::LogFormat::Text,
+            trace_export: None,
             server_trust: crate::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
             identity_directory: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {

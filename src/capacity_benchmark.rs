@@ -89,6 +89,21 @@ fn counts() -> serde_json::Value {
     })
 }
 
+/// `RUNEWARP_BENCH_OTLP_ENDPOINT` turns on trace export for overhead runs.
+fn install_logger(role: crate::TraceRole) -> Result<(), Box<dyn Error>> {
+    let trace_export = std::env::var("RUNEWARP_BENCH_OTLP_ENDPOINT")
+        .ok()
+        .map(|endpoint| crate::TraceExportConfig::new(&endpoint, None))
+        .transpose()?;
+    crate::runtime_log::install_with_trace_export(
+        crate::LogLevel::Info,
+        crate::LogFormat::Text,
+        trace_export.as_ref(),
+        role,
+    )?;
+    Ok(())
+}
+
 pub(crate) fn setup(directory: &Path) -> Result<(), Box<dyn Error>> {
     crate::initialize_manual_server_certificate(&directory.join("cert"), "localhost")?;
     let identity = crate::generate_client_identity()?;
@@ -148,7 +163,7 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
                 setup(&directory)?;
             }
             "server" => {
-                crate::runtime_log::install(crate::LogLevel::Info, crate::LogFormat::Text)?;
+                install_logger(crate::TraceRole::Server)?;
                 let id = std::env::var("RUNEWARP_BENCH_ID")?;
                 let config = crate::load_server_config(&directory.join("server.toml"))?;
                 let server = crate::ServerRuntime::prepare(&config, address(0), tunnel_bind).await?;
@@ -164,7 +179,7 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
                 write_json(&directory.join(format!("server-{id}.counts.json")), counts())?;
             }
             "client" => {
-                crate::runtime_log::install(crate::LogLevel::Info, crate::LogFormat::Text)?;
+                install_logger(crate::TraceRole::Client)?;
                 let config = crate::load_client_config(&directory.join("client.toml"))?;
                 let client = crate::ClientRuntime::prepare(&config, tunnel_bind).await?;
                 write_json(&directory.join("client.ready"), serde_json::json!({

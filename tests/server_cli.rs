@@ -621,3 +621,35 @@ tunnel-bind-address = "127.0.0.1:0"
     assert!(!stderr.contains("control.address is required"));
     Ok(())
 }
+
+#[test]
+fn server_rejects_endpoint_credentials_without_printing_them() {
+    let tempdir = tempdir().unwrap();
+    fs::write(
+        tempdir.path().join("custom.toml"),
+        r#"
+otlp-traces-endpoint = "http://collector:hunter2-marker@otel.example.test/v1/traces?token=query-marker"
+
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "missing-server"
+
+[[server.tunnels]]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+
+    let assert = Command::cargo_bin("runewarp")
+        .unwrap()
+        .current_dir(tempdir.path())
+        .args(["server", "--config", "custom.toml"])
+        .assert()
+        .failure();
+
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("otlp-traces-endpoint"), "{stderr}");
+    assert!(stderr.contains("credentials are not allowed"), "{stderr}");
+    assert!(!stderr.contains("hunter2-marker"), "{stderr}");
+    assert!(!stderr.contains("query-marker"), "{stderr}");
+}

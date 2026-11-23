@@ -22,7 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use self::drain::ServerDrain;
-use crate::metrics::{MetricsEndpoint, ServerMetrics, TunnelRejectReason};
+use crate::metrics::{LabelValue as _, MetricsEndpoint, ServerMetrics, TunnelRejectReason};
+use crate::trace_export::TracedStage;
 use crate::tunnel::{ServerRuntimeGeneration, ServerTunnel, ServerTunnelEvents};
 use quinn::Endpoint;
 use tokio::net::{TcpListener, TcpSocket};
@@ -832,19 +833,21 @@ fn admit_tunnel_handshake(
     tunnel_events: ServerTunnelEvents,
     metrics: ServerMetrics,
 ) {
+    let handshake = handshake_span();
     let handshake_permit = match admission_policy.try_admit_handshake() {
         Ok(permit) => permit,
         Err(rejection) => {
             incoming.refuse();
             metrics.tunnel_connection_rejected(TunnelRejectReason::HandshakeFailed);
             admission_policy.report_saturation(rejection);
+            handshake.finish(TunnelRejectReason::HandshakeFailed.as_str());
             return;
         }
     };
     admission_policy.report_recovery(&[AdmissionLimit::Handshakes]);
     let admission_policy = admission_policy.clone();
     handshakes.spawn(crate::server_connection_log::inherit(async move {
-        register_tunnel_connection(
+        let outcome = register_tunnel_connection(
             tunnel_registry,
             incoming,
             handshake_permit,
@@ -854,7 +857,28 @@ fn admit_tunnel_handshake(
             metrics,
         )
         .await;
+        handshake.finish(outcome);
     }));
+}
+
+/// Root span for one Tunnel connection handshake, ending at registration or rejection.
+fn handshake_span() -> TracedStage {
+    let span = tracing::info_span!(
+        target: crate::trace_export::TARGET,
+        parent: None,
+        "tunnel_connection.handshake",
+        runewarp.outcome = tracing::field::Empty,
+        runewarp.server_generation = tracing::field::Empty,
+    );
+    if !span.is_disabled()
+        && let Some(context) = crate::server_connection_log::current()
+    {
+        span.record(
+            "runewarp.server_generation",
+            tracing::field::display(context.generation),
+        );
+    }
+    TracedStage::new(span)
 }
 
 async fn register_tunnel_connection(
@@ -865,13 +889,13 @@ async fn register_tunnel_connection(
     server_hostname: ServerHostname,
     tunnel_events: ServerTunnelEvents,
     metrics: ServerMetrics,
-) {
+) -> &'static str {
     let connecting = match incoming.accept() {
         Ok(connecting) => connecting,
         Err(error) => {
             metrics.tunnel_connection_rejected(TunnelRejectReason::HandshakeFailed);
             report_tunnel_handshake_failure(&admission_policy, &error.to_string());
-            return;
+            return TunnelRejectReason::HandshakeFailed.as_str();
         }
     };
     let handshake = with_handshake_timeout(
@@ -905,27 +929,29 @@ async fn register_tunnel_connection(
             if admission_policy.take_tunnel_handshake_failure_recovered() {
                 runtime_log::server_admission_recovered("quic-handshake-failure");
             }
-            match tunnel_registry.register(connection).await {
+            let rejected = match tunnel_registry.register(connection).await {
                 TunnelRegistrationOutcome::Rejected(rejection) => {
-                    metrics.tunnel_connection_rejected(TunnelRejectReason::PoolFull);
                     admission_policy.report_saturation(rejection);
+                    TunnelRejectReason::PoolFull
                 }
-                TunnelRegistrationOutcome::Registered => admission_policy.report_recovery(&[
-                    AdmissionLimit::TunnelConnectionsGlobal,
-                    AdmissionLimit::TunnelConnectionsPerTunnel,
-                    AdmissionLimit::TunnelConnectionsPerIdentity,
-                ]),
-                TunnelRegistrationOutcome::Closed => {
-                    metrics.tunnel_connection_rejected(TunnelRejectReason::Shutdown);
+                TunnelRegistrationOutcome::Registered => {
+                    admission_policy.report_recovery(&[
+                        AdmissionLimit::TunnelConnectionsGlobal,
+                        AdmissionLimit::TunnelConnectionsPerTunnel,
+                        AdmissionLimit::TunnelConnectionsPerIdentity,
+                    ]);
+                    return "accepted";
                 }
-                TunnelRegistrationOutcome::Unmapped => {
-                    metrics.tunnel_connection_rejected(TunnelRejectReason::Unauthorized);
-                }
-            }
+                TunnelRegistrationOutcome::Closed => TunnelRejectReason::Shutdown,
+                TunnelRegistrationOutcome::Unmapped => TunnelRejectReason::Unauthorized,
+            };
+            metrics.tunnel_connection_rejected(rejected);
+            rejected.as_str()
         }
         Err((reason, error)) => {
             metrics.tunnel_connection_rejected(reason);
             report_tunnel_handshake_failure(&admission_policy, &error);
+            reason.as_str()
         }
     }
 }

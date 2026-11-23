@@ -18,8 +18,20 @@ use crate::metrics::{
 use crate::proxy::TcpByteCounters;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
+use crate::trace_export::TracedStage;
 use crate::tunnel_framing::read_tunnel_stream;
 use crate::{ClientTlsMode, ServiceConfig, proxy::proxy_tcp_over_tunnel};
+
+/// Start the `client.visitor` span. It ends when the backend TCP connection is established or
+/// the stream is rejected, not at stream close.
+pub(crate) fn client_visitor_span() -> TracedStage {
+    TracedStage::new(tracing::info_span!(
+        target: crate::trace_export::TARGET,
+        parent: None,
+        "client.visitor",
+        runewarp.outcome = tracing::field::Empty,
+    ))
+}
 
 #[derive(Clone)]
 pub(crate) struct TunnelConnectionStreamHandler {
@@ -49,7 +61,17 @@ impl TunnelConnectionStreamHandler {
         self
     }
 
-    pub(crate) async fn handle(&self, mut stream: ClientTunnelStream) -> io::Result<()> {
+    #[cfg(test)]
+    pub(crate) async fn handle(&self, stream: ClientTunnelStream) -> io::Result<()> {
+        self.handle_traced(stream, client_visitor_span()).await
+    }
+
+    /// Handle a stream whose `client.visitor` span started when the stream was accepted.
+    pub(crate) async fn handle_traced(
+        &self,
+        mut stream: ClientTunnelStream,
+        trace: TracedStage,
+    ) -> io::Result<()> {
         let visitor = self.metrics.visitor_handled();
         let intake = tokio::time::timeout(self.stream_limits.client_hello_timeout, async {
             let decoded = read_tunnel_stream(&mut stream).await?;
@@ -66,12 +88,14 @@ impl TunnelConnectionStreamHandler {
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
                 drop(stream);
                 visitor.reject(ClientVisitorRejectReason::IntakeTimeout);
+                trace.finish("rejected");
                 return Err(io::Error::new(io::ErrorKind::TimedOut, error));
             }
             Ok(Err(error)) => {
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
                 drop(stream);
                 visitor.reject(ClientVisitorRejectReason::ParseFailed);
+                trace.finish("rejected");
                 return Err(error);
             }
         };
@@ -83,12 +107,20 @@ impl TunnelConnectionStreamHandler {
             );
             drop(stream);
             visitor.reject(ClientVisitorRejectReason::NoService);
+            trace.finish("rejected");
             return Ok(());
         };
 
         if service.tls_mode == ClientTlsMode::Terminate {
             return self
-                .handle_terminate(stream, parsed_client_hello, service, addresses, visitor)
+                .handle_terminate(
+                    stream,
+                    parsed_client_hello,
+                    service,
+                    addresses,
+                    visitor,
+                    trace,
+                )
                 .await;
         }
 
@@ -105,9 +137,12 @@ impl TunnelConnectionStreamHandler {
                     },
                 );
                 drop(stream);
+                trace.finish("rejected");
                 return Err(error);
             }
         };
+        // The span measures accept to backend connect, so the initial write is outside it.
+        trace.finish("connected");
         let backend_bytes = self.backend_bytes();
         let mut initial_bytes = service
             .proxy_protocol
@@ -168,6 +203,7 @@ impl TunnelConnectionStreamHandler {
         service: &ServiceConfig,
         addresses: crate::VisitorTcpAddresses,
         visitor: ClientVisitor,
+        trace: TracedStage,
     ) -> io::Result<()> {
         let public_hostname = parsed_client_hello.public_hostname().clone();
         if parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN)
@@ -175,6 +211,7 @@ impl TunnelConnectionStreamHandler {
                 .termination_tls_configs
                 .acme_challenge_server_config(public_hostname.as_str())
         {
+            trace.finish("acme_challenge");
             return self
                 .handle_acme_tls_alpn_challenge(
                     stream,
@@ -195,6 +232,7 @@ impl TunnelConnectionStreamHandler {
             );
             drop(stream);
             visitor.reject(ClientVisitorRejectReason::TlsTerminationFailed);
+            trace.finish("rejected");
             return Err(io::Error::other(format!(
                 "no TLS config for {public_hostname}"
             )));
@@ -214,12 +252,14 @@ impl TunnelConnectionStreamHandler {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
                 visitor.reject(ClientVisitorRejectReason::TlsTerminationFailed);
+                trace.finish("rejected");
                 return Err(io::Error::other(format!(
                     "TLS termination handshake failed for {public_hostname}: {error}"
                 )));
             }
             Err(_) => {
                 visitor.reject(ClientVisitorRejectReason::TlsTerminationFailed);
+                trace.finish("rejected");
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
@@ -239,9 +279,11 @@ impl TunnelConnectionStreamHandler {
                         backend_address: service.backend_address.as_str(),
                     },
                 );
+                trace.finish("rejected");
                 return Err(error);
             }
         };
+        trace.finish("connected");
         let backend_bytes = self.backend_bytes();
         let mut backend_stream =
             CountedIo::new(backend_stream, backend_bytes.read, backend_bytes.written);

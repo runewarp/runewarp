@@ -28,6 +28,7 @@ pub(crate) struct PreparedClientConfig {
     pub(crate) server_addresses: Option<Vec<String>>,
     pub(crate) log_level: LogLevel,
     pub(crate) log_format: crate::LogFormat,
+    pub(crate) trace_export: Option<crate::TraceExportConfig>,
     pub(crate) trust: PreparedClientTrust,
     pub(crate) identity_directory: PreparedValue<PathBuf>,
     pub(crate) services: Vec<PreparedClientServiceConfig>,
@@ -374,6 +375,7 @@ fn prepare_raw_client_config_with_defaults(
         server_addresses: raw.server_addresses,
         log_level: log.level,
         log_format: log.format,
+        trace_export: log.trace_export,
         trust: prepare_client_trust(
             raw.server_trust.as_deref(),
             raw.server_ca_file,
@@ -787,6 +789,7 @@ hostname = "tunnel.example.test"
             GlobalLogConfig {
                 level: LogLevel::Info,
                 format: LogFormat::Text,
+                trace_export: None,
             },
             RawClientConfig {
                 max_visitor_streams: None,
@@ -854,6 +857,7 @@ hostname = "tunnel.example.test"
             GlobalLogConfig {
                 level: LogLevel::Off,
                 format: LogFormat::Text,
+                trace_export: None,
             },
             RawClientConfig {
                 max_visitor_streams: None,
@@ -927,6 +931,26 @@ hostname = "tunnel.example.test"
             prepare(&runtime(Some(LogFormat::Json)))?.log_format,
             LogFormat::Json
         );
+        Ok(())
+    }
+
+    #[test]
+    fn client_preparation_reads_trace_export_from_the_config_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let path = tempdir.path().join("config.toml");
+        fs::write(
+            &path,
+            "otlp-traces-endpoint = \"https://otel.example.test/v1/traces\"\ntrace-sample-ratio = 0.1\n\n[client]\n",
+        )?;
+
+        let prepared = super::prepare_client_config_from_path(&path)?;
+        let trace_export = prepared.trace_export.ok_or("trace export configured")?;
+        assert_eq!(
+            trace_export.endpoint().to_string(),
+            "https://otel.example.test/v1/traces"
+        );
+        assert_eq!(trace_export.sample_ratio(), 0.1);
         Ok(())
     }
 

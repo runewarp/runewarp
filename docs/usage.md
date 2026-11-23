@@ -220,6 +220,10 @@ With Client ACME, an immediate Terminate-mode handshake failure can mean issuanc
 
 Set `server.metrics-bind-address` or `client.metrics-bind-address` to serve Prometheus metrics on `GET /metrics`. The [metrics reference](metrics.md) lists every series with its type, unit, labels and boundary.
 
+## Traces
+
+Set top-level `otlp-traces-endpoint` to export Visitor, Tunnel handshake, Client connect and Managed-apply spans to an OTLP/HTTP collector. `trace-sample-ratio` lowers the share of exported spans. The [traces reference](traces.md) lists every span with its boundaries and attributes.
+
 ## Runtime logs
 
 At the default `log-level = "info"`, Runewarp logs Server runtime startup, readiness, Tunnel connection lifecycle, warnings, and errors to stderr. Set `log-level = "debug"` when you need successful Visitor routing and connection failure detail.

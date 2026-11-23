@@ -512,3 +512,17 @@ Recorded for [#295](https://github.com/runewarp/runewarp/issues/295) on a local 
 | Subcapacity TTFB p99 ms | 4.576, 2.765, 2.795 | 3.030, 2.992, 5.252 | +8.4% |
 
 The budget is at most 2% throughput loss and 5% p99 stream-open regression. Throughput is within budget. The p99 medians move by less than the run-to-run spread within each side (2.765–4.576 ms on the parent), so these runs show no regression they can attribute to metrics, but they are too noisy to prove the 5% bound. TTFB includes stream open plus forwarding. Runs under concurrent scrapes were not captured.
+
+## Trace export overhead
+
+Recorded for [#297](https://github.com/runewarp/runewarp/issues/297) on a local macOS arm64 host at `7479c60`. Five alternating rounds of `--scenarios subcapacity throughput --cooldown-seconds 5` compared export off, export on to a local OTLP sink that answers `200`, and export on to an unreachable endpoint (`http://127.0.0.1:9`). `RUNEWARP_BENCH_OTLP_ENDPOINT` sets the endpoint for the benchmark's Server and Client, at sample ratio `1`. Every run placed and byte-validated all Visitors, with zero failures.
+
+| Measure | Off | On | Unreachable | Median change, on / unreachable |
+| --- | --- | --- | --- | ---: |
+| Throughput transfer seconds (256 MiB) | 3.029, 2.811, 2.424, 2.902, 2.789 | 2.518, 3.827, 2.413, 2.524, 2.406 | 2.562, 2.509, 2.766, 2.729, 2.932 | −10.4% / −2.9% time (faster) |
+| Throughput TTFB p99 ms | 2.757, 3.300, 5.353, 4.816, 5.614 | 2.859, 12.962, 4.975, 4.648, 5.776 | 5.685, 5.624, 3.951, 4.214, 4.619 | +3.3% / −4.1% |
+| Subcapacity TTFB p99 ms | 3.014, 5.978, 5.504, 4.917, 4.212 | 3.075, 4.490, 5.493, 4.989, 4.003 | 2.790, 3.028, 2.885, 3.329, 6.093 | −8.7% / −38.4% |
+
+The budget is at most 2% throughput loss and 5% p99 stream-open regression. Every median is within budget. As with the metrics runs, the spread within each side is wider than the budget (2.757–5.614 ms throughput p99 with export off), so these runs show no regression attributable to trace export but cannot prove the bounds. One export-on round had a 12.962 ms throughput p99 and 3.827 s transfer; neighbouring off and unreachable rounds did not, and the other four export-on rounds sit inside the off range. Spans cover only work before placement, so transfer itself carries no span cost.
+
+Review fixes after `7479c60` start `client.visitor` before the stream handler is spawned instead of inside it, and hide the exporter's HTTP client diagnostics from logs. Neither adds per-Visitor work, so the runs were not repeated.

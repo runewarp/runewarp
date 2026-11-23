@@ -170,6 +170,9 @@ pub(crate) struct TunnelRegistry {
     tunnel_connection_admission: TunnelConnectionAdmission,
     readiness: Arc<StdRwLock<Option<ReadinessGate>>>,
     first_apply_completed: Arc<AtomicBool>,
+    /// Set once shutdown starts closing every Tunnel connection, so Visitors cut by that close
+    /// count as cancelled rather than as errors.
+    closing_all: Arc<AtomicBool>,
     metrics: ServerMetrics,
 }
 
@@ -243,6 +246,7 @@ impl TunnelRegistry {
             tunnel_connection_admission,
             readiness: Arc::new(StdRwLock::new(None)),
             first_apply_completed: Arc::new(AtomicBool::new(false)),
+            closing_all: Arc::new(AtomicBool::new(false)),
             metrics: ServerMetrics::for_test(),
         })
     }
@@ -314,6 +318,7 @@ impl TunnelRegistry {
             tunnel_connection_admission,
             readiness: Arc::new(StdRwLock::new(None)),
             first_apply_completed: Arc::new(AtomicBool::new(false)),
+            closing_all: Arc::new(AtomicBool::new(false)),
             metrics,
         })
     }
@@ -516,12 +521,18 @@ impl TunnelRegistry {
     }
 
     pub(crate) async fn close_all(&self, reason: &'static [u8]) -> usize {
+        self.closing_all.store(true, Ordering::SeqCst);
         let pools = self.tunnel_pools.read().await.clone();
         let mut closed = 0;
         for pool in pools.iter() {
             closed += pool.close_all_connections(reason).await;
         }
         closed
+    }
+
+    /// Whether shutdown has started closing every Tunnel connection.
+    pub(crate) fn is_closing_all(&self) -> bool {
+        self.closing_all.load(Ordering::SeqCst)
     }
 
     pub(crate) async fn shutdown_connections(&self, deadline: std::time::Duration) {

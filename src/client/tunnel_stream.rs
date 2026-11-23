@@ -12,7 +12,9 @@ use tokio_rustls::TlsAcceptor;
 use crate::acme::ACME_TLS_ALPN;
 use crate::client::{ClientStreamLimits, ServiceSelector, TerminationTlsConfigs};
 use crate::client_hello::ParsedClientHello;
-use crate::metrics::{BackendDirection, ClientMetrics, ClientVisitorRejectReason, CountedIo};
+use crate::metrics::{
+    BackendDirection, ClientMetrics, ClientVisitor, ClientVisitorRejectReason, CountedIo,
+};
 use crate::proxy::TcpByteCounters;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
@@ -86,7 +88,7 @@ impl TunnelConnectionStreamHandler {
 
         if service.tls_mode == ClientTlsMode::Terminate {
             return self
-                .handle_terminate(stream, parsed_client_hello, service, addresses)
+                .handle_terminate(stream, parsed_client_hello, service, addresses, visitor)
                 .await;
         }
 
@@ -165,6 +167,7 @@ impl TunnelConnectionStreamHandler {
         parsed_client_hello: ParsedClientHello,
         service: &ServiceConfig,
         addresses: crate::VisitorTcpAddresses,
+        visitor: ClientVisitor,
     ) -> io::Result<()> {
         let public_hostname = parsed_client_hello.public_hostname().clone();
         if parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN)
@@ -191,6 +194,7 @@ impl TunnelConnectionStreamHandler {
                 ClientRouteOutcome::MissingTlsConfig,
             );
             drop(stream);
+            visitor.reject(ClientVisitorRejectReason::TlsTerminationFailed);
             return Err(io::Error::other(format!(
                 "no TLS config for {public_hostname}"
             )));
@@ -209,11 +213,13 @@ impl TunnelConnectionStreamHandler {
         {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
+                visitor.reject(ClientVisitorRejectReason::TlsTerminationFailed);
                 return Err(io::Error::other(format!(
                     "TLS termination handshake failed for {public_hostname}: {error}"
                 )));
             }
             Err(_) => {
+                visitor.reject(ClientVisitorRejectReason::TlsTerminationFailed);
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
@@ -677,6 +683,28 @@ mod tests {
                     1.0,
                 ),
                 ("runewarp_client_visitors_handled_total", 1.0),
+                ("runewarp_client_visitors_active", 0.0),
+            ],
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn rejects_terminate_streams_without_a_tls_config() -> io::Result<()> {
+        assert_rejected_stream(
+            vec![ServiceConfig {
+                public_hostnames: Some(vec![public_hostname("app.example.test")]),
+                backend_address: "127.0.0.1:443".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
+            }],
+            "app.example.test",
+            |result: io::Result<()>| assert!(result.is_err()),
+            &[
+                (
+                    r#"runewarp_client_visitors_rejected_total{reason="tls_termination_failed"}"#,
+                    1.0,
+                ),
                 ("runewarp_client_visitors_active", 0.0),
             ],
         )

@@ -27,6 +27,7 @@ label_enum!(ClientVisitorRejectReason, "reason", {
     NoService => "no_service",
     IntakeTimeout => "intake_timeout",
     ParseFailed => "parse_failed",
+    TlsTerminationFailed => "tls_termination_failed",
     Saturated => "saturated",
 });
 
@@ -270,7 +271,13 @@ mod tests {
         let text = ClientMetrics::new(false).render();
         assert_eq!(
             label_values(&text, "runewarp_client_visitors_rejected_total", "reason"),
-            ["no_service", "intake_timeout", "parse_failed", "saturated"]
+            [
+                "no_service",
+                "intake_timeout",
+                "parse_failed",
+                "tls_termination_failed",
+                "saturated"
+            ]
         );
         assert_eq!(
             label_values(&text, "runewarp_client_backend_bytes_total", "direction"),

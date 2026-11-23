@@ -22,8 +22,8 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::{Registry, Unit};
 
 pub(crate) use self::client::{
-    BackendDirection, ClientMetrics, ClientTunnelAttemptOutcome, ClientVisitorRejectReason,
-    CreditGauges,
+    BackendDirection, ClientMetrics, ClientTunnelAttemptOutcome, ClientVisitor,
+    ClientVisitorRejectReason, CreditGauges,
 };
 pub(crate) use self::counted_io::CountedIo;
 pub(crate) use self::endpoint::MetricsEndpoint;

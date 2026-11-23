@@ -453,6 +453,8 @@ impl VisitorIntake {
             .await;
         visitor.closed(match outcome {
             Ok(Ok(())) => VisitorCloseOutcome::Ok,
+            // Shutdown closing the Tunnel connection under the Visitor is a cancellation.
+            Ok(Err(_)) if registry.is_closing_all() => VisitorCloseOutcome::Cancelled,
             Ok(Err(_)) => VisitorCloseOutcome::Error,
             Err(_) => VisitorCloseOutcome::Cancelled,
         });
@@ -1825,6 +1827,50 @@ mod tests {
             sample(
                 &text,
                 r#"runewarp_server_visitors_closed_total{outcome="ok"}"#
+            ),
+            Some(0.0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_closing_the_tunnel_cancels_the_placed_visitor() -> io::Result<()> {
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        let registry = intake.tunnel_registry.clone();
+        let metrics = registry.metrics();
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor
+            .write_all(&build_client_hello("app.example.test")?)
+            .await?;
+        let (_send, mut recv) = timeout(Duration::from_secs(1), tunnel_connection.accept_stream())
+            .await
+            .map_err(|_| timeout_error("intake should open a tunnel stream"))?
+            .map_err(io::Error::other)?;
+        crate::proxy_protocol::read_proxy_v2(&mut recv)
+            .await
+            .map_err(io::Error::other)?;
+        eventually_metric(&metrics, "runewarp_server_visitors_active", 1.0).await?;
+        registry.close_all(b"graceful shutdown").await;
+        // The closed Tunnel fails the response direction; finishing the request lets the
+        // proxy return that error instead of waiting on the Visitor.
+        let _ = timeout(Duration::from_secs(1), visitor.read(&mut [0_u8; 1])).await;
+        let _ = visitor.shutdown().await;
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+        let text = eventually_metric(
+            &metrics,
+            r#"runewarp_server_visitors_closed_total{outcome="cancelled"}"#,
+            1.0,
+        )
+        .await?;
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitors_closed_total{outcome="error"}"#
             ),
             Some(0.0)
         );

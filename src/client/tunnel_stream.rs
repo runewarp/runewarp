@@ -12,6 +12,10 @@ use tokio_rustls::TlsAcceptor;
 use crate::acme::ACME_TLS_ALPN;
 use crate::client::{ClientStreamLimits, ServiceSelector, TerminationTlsConfigs};
 use crate::client_hello::ParsedClientHello;
+use crate::metrics::{
+    BackendDirection, ClientMetrics, ClientVisitor, ClientVisitorRejectReason, CountedIo,
+};
+use crate::proxy::TcpByteCounters;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
 use crate::trace_export::TracedStage;
@@ -34,6 +38,7 @@ pub(crate) struct TunnelConnectionStreamHandler {
     service_selector: ServiceSelector,
     termination_tls_configs: TerminationTlsConfigs,
     stream_limits: ClientStreamLimits,
+    metrics: ClientMetrics,
 }
 
 impl TunnelConnectionStreamHandler {
@@ -46,7 +51,14 @@ impl TunnelConnectionStreamHandler {
             service_selector: ServiceSelector::new(services),
             termination_tls_configs,
             stream_limits,
+            // Detached until a Client instance attaches its own series.
+            metrics: ClientMetrics::new(false),
         }
+    }
+
+    pub(crate) fn with_metrics(mut self, metrics: ClientMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     #[cfg(test)]
@@ -58,8 +70,9 @@ impl TunnelConnectionStreamHandler {
     pub(crate) async fn handle_traced(
         &self,
         mut stream: ClientTunnelStream,
-        visitor: TracedStage,
+        trace: TracedStage,
     ) -> io::Result<()> {
+        let visitor = self.metrics.visitor_handled();
         let intake = tokio::time::timeout(self.stream_limits.client_hello_timeout, async {
             let decoded = read_tunnel_stream(&mut stream).await?;
             Ok::<_, io::Error>((decoded.addresses, decoded.client_hello))
@@ -74,13 +87,15 @@ impl TunnelConnectionStreamHandler {
                 );
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
                 drop(stream);
-                visitor.finish("rejected");
+                visitor.reject(ClientVisitorRejectReason::IntakeTimeout);
+                trace.finish("rejected");
                 return Err(io::Error::new(io::ErrorKind::TimedOut, error));
             }
             Ok(Err(error)) => {
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
                 drop(stream);
-                visitor.finish("rejected");
+                visitor.reject(ClientVisitorRejectReason::ParseFailed);
+                trace.finish("rejected");
                 return Err(error);
             }
         };
@@ -91,23 +106,27 @@ impl TunnelConnectionStreamHandler {
                 ClientRouteOutcome::RejectedNoMatchingService,
             );
             drop(stream);
-            visitor.finish("rejected");
+            visitor.reject(ClientVisitorRejectReason::NoService);
+            trace.finish("rejected");
             return Ok(());
         };
 
         if service.tls_mode == ClientTlsMode::Terminate {
             return self
-                .handle_terminate(stream, parsed_client_hello, service, addresses, visitor)
+                .handle_terminate(
+                    stream,
+                    parsed_client_hello,
+                    service,
+                    addresses,
+                    visitor,
+                    trace,
+                )
                 .await;
         }
 
         let (_, buffered_bytes) = parsed_client_hello.into_parts();
 
-        let mut backend_stream = match connect_backend(
-            service.backend_address.as_str(),
-            self.stream_limits.backend_connect_timeout,
-        )
-        .await
+        let mut backend_stream = match self.connect_backend(service.backend_address.as_str()).await
         {
             Ok(stream) => stream,
             Err(error) => {
@@ -118,19 +137,20 @@ impl TunnelConnectionStreamHandler {
                     },
                 );
                 drop(stream);
-                visitor.finish("rejected");
+                trace.finish("rejected");
                 return Err(error);
             }
         };
         // The span measures accept to backend connect, so the initial write is outside it.
-        visitor.finish("connected");
+        trace.finish("connected");
+        let backend_bytes = self.backend_bytes();
         let mut initial_bytes = service
             .proxy_protocol
             .map(|_| addresses.encode_proxy_v2())
             .unwrap_or_default();
         initial_bytes.extend_from_slice(&buffered_bytes);
         if let Err(error) = write_backend_with_timeout(
-            &mut backend_stream,
+            &mut CountedIo::new(&mut backend_stream, None, backend_bytes.written.clone()),
             &initial_bytes,
             self.stream_limits.initial_backend_write_timeout,
         )
@@ -153,7 +173,27 @@ impl TunnelConnectionStreamHandler {
         );
 
         let (recv, send) = stream.into_split();
-        proxy_tcp_over_tunnel(backend_stream, Vec::new(), send, recv).await
+        proxy_tcp_over_tunnel(backend_stream, Vec::new(), send, recv, backend_bytes).await
+    }
+
+    /// Connect to the Local backend, recording latency or the failure.
+    async fn connect_backend(&self, backend_address: &str) -> io::Result<TcpStream> {
+        let started = std::time::Instant::now();
+        let result =
+            connect_backend(backend_address, self.stream_limits.backend_connect_timeout).await;
+        match &result {
+            Ok(_) => self.metrics.backend_connected(started.elapsed()),
+            Err(_) => self.metrics.backend_connect_failed(),
+        }
+        result
+    }
+
+    /// Counters at the backend socket: written bytes go to the backend, read bytes come from it.
+    fn backend_bytes(&self) -> TcpByteCounters {
+        TcpByteCounters {
+            read: Some(self.metrics.backend_bytes(BackendDirection::FromBackend)),
+            written: Some(self.metrics.backend_bytes(BackendDirection::ToBackend)),
+        }
     }
 
     async fn handle_terminate(
@@ -162,7 +202,8 @@ impl TunnelConnectionStreamHandler {
         parsed_client_hello: ParsedClientHello,
         service: &ServiceConfig,
         addresses: crate::VisitorTcpAddresses,
-        visitor: TracedStage,
+        visitor: ClientVisitor,
+        trace: TracedStage,
     ) -> io::Result<()> {
         let public_hostname = parsed_client_hello.public_hostname().clone();
         if parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN)
@@ -170,7 +211,7 @@ impl TunnelConnectionStreamHandler {
                 .termination_tls_configs
                 .acme_challenge_server_config(public_hostname.as_str())
         {
-            visitor.finish("acme_challenge");
+            trace.finish("acme_challenge");
             return self
                 .handle_acme_tls_alpn_challenge(
                     stream,
@@ -190,7 +231,8 @@ impl TunnelConnectionStreamHandler {
                 ClientRouteOutcome::MissingTlsConfig,
             );
             drop(stream);
-            visitor.finish("rejected");
+            visitor.reject(ClientVisitorRejectReason::TlsTerminationFailed);
+            trace.finish("rejected");
             return Err(io::Error::other(format!(
                 "no TLS config for {public_hostname}"
             )));
@@ -209,13 +251,15 @@ impl TunnelConnectionStreamHandler {
         {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
-                visitor.finish("rejected");
+                visitor.reject(ClientVisitorRejectReason::TlsTerminationFailed);
+                trace.finish("rejected");
                 return Err(io::Error::other(format!(
                     "TLS termination handshake failed for {public_hostname}: {error}"
                 )));
             }
             Err(_) => {
-                visitor.finish("rejected");
+                visitor.reject(ClientVisitorRejectReason::TlsTerminationFailed);
+                trace.finish("rejected");
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
@@ -226,12 +270,7 @@ impl TunnelConnectionStreamHandler {
             }
         };
 
-        let mut backend_stream = match connect_backend(
-            service.backend_address.as_str(),
-            self.stream_limits.backend_connect_timeout,
-        )
-        .await
-        {
+        let backend_stream = match self.connect_backend(service.backend_address.as_str()).await {
             Ok(stream) => stream,
             Err(error) => {
                 runtime_log::client_route(
@@ -240,10 +279,13 @@ impl TunnelConnectionStreamHandler {
                         backend_address: service.backend_address.as_str(),
                     },
                 );
-                visitor.finish("rejected");
+                trace.finish("rejected");
                 return Err(error);
             }
         };
+        let backend_bytes = self.backend_bytes();
+        let mut backend_stream =
+            CountedIo::new(backend_stream, backend_bytes.read, backend_bytes.written);
 
         runtime_log::client_route(
             public_hostname.as_str(),
@@ -251,7 +293,7 @@ impl TunnelConnectionStreamHandler {
                 backend_address: service.backend_address.as_str(),
             },
         );
-        visitor.finish("connected");
+        trace.finish("connected");
 
         if service.proxy_protocol.is_some() {
             write_backend_with_timeout(
@@ -345,8 +387,8 @@ async fn connect_backend(backend_address: &str, timeout: Duration) -> io::Result
     result
 }
 
-async fn write_backend_with_timeout(
-    backend_stream: &mut TcpStream,
+async fn write_backend_with_timeout<W: AsyncWrite + Unpin>(
+    backend_stream: &mut W,
     buffered_bytes: &[u8],
     timeout: Duration,
 ) -> io::Result<()> {
@@ -451,6 +493,8 @@ mod tests {
 
     use super::{ACME_TLS_ALPN, TunnelConnectionStreamHandler};
     use crate::client::ClientStreamLimits;
+    use crate::metrics::ClientMetrics;
+    use crate::metrics::test_support::sample;
     use crate::{
         ClientTlsMode, LogLevel, PublicHostname, ServiceConfig, client::TerminationTlsConfigs,
         generate_client_identity, make_client_tunnel_h3_config,
@@ -509,6 +553,8 @@ mod tests {
                 ..ClientStreamLimits::for_test()
             },
         );
+        let metrics = ClientMetrics::new(false);
+        let stream_handler = stream_handler.with_metrics(metrics.clone());
         let fixture = TunnelConnectionFixture::connect().await?;
         let client_connection = fixture.client_connection.clone();
         let (mut send, _recv) = timeout(
@@ -536,6 +582,16 @@ mod tests {
             .map_err(|_| timeout_error("handler should finish after backend connect timeout"))?
             .map_err(io::Error::other)?;
         assert!(result.is_err());
+        assert_series(
+            &metrics,
+            &[
+                ("runewarp_client_backend_connect_failures_total", 1.0),
+                (
+                    "runewarp_client_backend_connect_duration_seconds_count",
+                    0.0,
+                ),
+            ],
+        );
         Ok(())
     }
 
@@ -555,6 +611,8 @@ mod tests {
                 ..ClientStreamLimits::for_test()
             },
         );
+        let metrics = ClientMetrics::new(false);
+        let stream_handler = stream_handler.with_metrics(metrics.clone());
         let fixture = TunnelConnectionFixture::connect().await?;
         let client_connection = fixture.client_connection.clone();
         let (mut send, _recv) = timeout(
@@ -579,6 +637,17 @@ mod tests {
             .map_err(|_| timeout_error("handler should finish after ClientHello timeout"))?
             .map_err(io::Error::other)?;
         assert!(result.is_err());
+        assert_series(
+            &metrics,
+            &[
+                (
+                    r#"runewarp_client_visitors_rejected_total{reason="intake_timeout"}"#,
+                    1.0,
+                ),
+                ("runewarp_client_visitors_handled_total", 1.0),
+                ("runewarp_client_visitors_active", 0.0),
+            ],
+        );
         Ok(())
     }
 
@@ -594,6 +663,8 @@ mod tests {
             TerminationTlsConfigs::empty(),
             ClientStreamLimits::for_test(),
         );
+        let metrics = ClientMetrics::new(false);
+        let stream_handler = stream_handler.with_metrics(metrics.clone());
         let fixture = TunnelConnectionFixture::connect().await?;
         let client_connection = fixture.client_connection.clone();
         let (mut tunnel_send, _tunnel_recv) = fixture
@@ -612,6 +683,13 @@ mod tests {
                 .handle(client_stream(send, recv))
                 .await
                 .is_err()
+        );
+        assert_series(
+            &metrics,
+            &[(
+                r#"runewarp_client_visitors_rejected_total{reason="parse_failed"}"#,
+                1.0,
+            )],
         );
         Ok(())
     }
@@ -641,6 +719,36 @@ mod tests {
             }],
             "api.example.test",
             |result: io::Result<()>| assert!(result.is_ok()),
+            &[
+                (
+                    r#"runewarp_client_visitors_rejected_total{reason="no_service"}"#,
+                    1.0,
+                ),
+                ("runewarp_client_visitors_handled_total", 1.0),
+                ("runewarp_client_visitors_active", 0.0),
+            ],
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn rejects_terminate_streams_without_a_tls_config() -> io::Result<()> {
+        assert_rejected_stream(
+            vec![ServiceConfig {
+                public_hostnames: Some(vec![public_hostname("app.example.test")]),
+                backend_address: "127.0.0.1:443".to_owned(),
+                tls_mode: ClientTlsMode::Terminate,
+                proxy_protocol: None,
+            }],
+            "app.example.test",
+            |result: io::Result<()>| assert!(result.is_err()),
+            &[
+                (
+                    r#"runewarp_client_visitors_rejected_total{reason="tls_termination_failed"}"#,
+                    1.0,
+                ),
+                ("runewarp_client_visitors_active", 0.0),
+            ],
         )
         .await
     }
@@ -658,6 +766,10 @@ mod tests {
             }],
             "app.example.test",
             |result: io::Result<()>| assert!(result.is_err()),
+            &[
+                ("runewarp_client_backend_connect_failures_total", 1.0),
+                ("runewarp_client_visitors_active", 0.0),
+            ],
         )
         .await
     }
@@ -685,6 +797,8 @@ mod tests {
             }],
             "app.example.test",
             |result: io::Result<()>| assert!(result.is_err()),
+            // A reset backend can fail the connect or the first write, depending on the OS.
+            &[("runewarp_client_visitors_active", 0.0)],
         )
         .await?;
 
@@ -935,12 +1049,15 @@ mod tests {
         services: Vec<ServiceConfig>,
         requested_hostname: &str,
         assert_handler_result: impl FnOnce(io::Result<()>) + Send + 'static,
+        expected_series: &[(&str, f64)],
     ) -> io::Result<()> {
+        let metrics = ClientMetrics::new(false);
         let stream_handler = TunnelConnectionStreamHandler::new(
             services,
             TerminationTlsConfigs::empty(),
             ClientStreamLimits::default(),
-        );
+        )
+        .with_metrics(metrics.clone());
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
         let client_connection = fixture.client_connection.clone();
@@ -974,7 +1091,15 @@ mod tests {
         stream_handler_task
             .await
             .map_err(|error| join_error("stream handler task failed", error))??;
+        assert_series(&metrics, expected_series);
         Ok(())
+    }
+
+    fn assert_series(metrics: &ClientMetrics, expected: &[(&str, f64)]) {
+        let text = metrics.render();
+        for (series, value) in expected {
+            assert_eq!(sample(&text, series), Some(*value), "{series}\n{text}");
+        }
     }
 
     async fn spawn_tls_backend(
@@ -1372,11 +1497,13 @@ mod tests {
         }];
         let mut tls_configs = HashMap::new();
         tls_configs.insert(hostname.to_owned(), tls_config.clone());
+        let metrics = ClientMetrics::new(false);
         let stream_handler = TunnelConnectionStreamHandler::new(
             services,
             TerminationTlsConfigs::new(tls_configs, HashMap::new()),
             ClientStreamLimits::default(),
-        );
+        )
+        .with_metrics(metrics.clone());
 
         let fixture = TunnelConnectionFixture::connect().await?;
         let server_connection = fixture.server_connection.clone();
@@ -1405,6 +1532,118 @@ mod tests {
         stream_handler_task
             .await
             .map_err(|error| join_error("stream handler task failed", error))??;
+        // Terminate mode counts plaintext, including the regenerated PROXY v2 header.
+        let proxy_header_len = crate::VisitorTcpAddresses {
+            source: "192.0.2.10:12345".parse().unwrap(),
+            destination: "198.51.100.20:443".parse().unwrap(),
+        }
+        .encode_proxy_v2()
+        .len();
+        assert_series(
+            &metrics,
+            &[
+                (
+                    r#"runewarp_client_backend_bytes_total{direction="to_backend"}"#,
+                    (proxy_header_len + 4) as f64,
+                ),
+                (
+                    r#"runewarp_client_backend_bytes_total{direction="from_backend"}"#,
+                    4.0,
+                ),
+                ("runewarp_client_visitors_active", 0.0),
+            ],
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn passthrough_counts_backend_socket_bytes_in_both_directions() -> io::Result<()> {
+        for proxy_protocol in [None, Some(crate::ProxyProtocolVersion::V2)] {
+            let client_hello = build_client_hello("app.example.test")?;
+            let backend_listener = TcpListener::bind(localhost(0)).await?;
+            let backend_address = backend_listener.local_addr()?.to_string();
+            let backend_task = tokio::spawn(async move {
+                let (mut backend_stream, _) =
+                    timeout(Duration::from_secs(1), backend_listener.accept())
+                        .await
+                        .map_err(|_| timeout_error("backend should accept"))??;
+                let mut received = Vec::new();
+                // The Visitor half-closes first; the backend still answers afterwards.
+                backend_stream.read_to_end(&mut received).await?;
+                backend_stream.write_all(b"response-bytes").await?;
+                backend_stream.shutdown().await?;
+                Ok::<_, io::Error>(received.len())
+            });
+            let metrics = ClientMetrics::new(false);
+            let stream_handler = TunnelConnectionStreamHandler::new(
+                vec![ServiceConfig {
+                    public_hostnames: None,
+                    backend_address,
+                    tls_mode: ClientTlsMode::Passthrough,
+                    proxy_protocol,
+                }],
+                TerminationTlsConfigs::empty(),
+                ClientStreamLimits::default(),
+            )
+            .with_metrics(metrics.clone());
+            let fixture = TunnelConnectionFixture::connect().await?;
+            let client_connection = fixture.client_connection.clone();
+            let handler_task = tokio::spawn(async move {
+                let (send, recv) =
+                    timeout(Duration::from_secs(1), client_connection.accept_stream())
+                        .await
+                        .map_err(|_| timeout_error("handler should accept a tunnel stream"))?
+                        .map_err(io::Error::other)?;
+                stream_handler.handle(client_stream(send, recv)).await
+            });
+            let (mut send, mut recv) = timeout(
+                Duration::from_secs(1),
+                fixture.server_connection.open_stream(),
+            )
+            .await
+            .map_err(|_| timeout_error("test should open a tunnel stream"))?
+            .map_err(io::Error::other)?;
+            send.write_all(&internal_stream_bytes(&client_hello))
+                .await?;
+            send.write_all(b"ping").await?;
+            send.shutdown().await?;
+            let response = timeout(Duration::from_secs(1), read_to_end(&mut recv, 64))
+                .await
+                .map_err(|_| timeout_error("response should reach the Server"))?
+                .map_err(io::Error::other)?;
+            assert_eq!(response, b"response-bytes");
+            let received = backend_task
+                .await
+                .map_err(|error| join_error("backend task failed", error))??;
+            handler_task
+                .await
+                .map_err(|error| join_error("stream handler task failed", error))??;
+            let proxy_header_len = if proxy_protocol.is_some() {
+                internal_stream_bytes(&[]).len()
+            } else {
+                0
+            };
+            assert_eq!(received, proxy_header_len + client_hello.len() + 4);
+            assert_series(
+                &metrics,
+                &[
+                    (
+                        r#"runewarp_client_backend_bytes_total{direction="to_backend"}"#,
+                        received as f64,
+                    ),
+                    (
+                        r#"runewarp_client_backend_bytes_total{direction="from_backend"}"#,
+                        14.0,
+                    ),
+                    (
+                        "runewarp_client_backend_connect_duration_seconds_count",
+                        1.0,
+                    ),
+                    ("runewarp_client_visitors_handled_total", 1.0),
+                    ("runewarp_client_visitors_active", 0.0),
+                ],
+            );
+        }
         Ok(())
     }
 

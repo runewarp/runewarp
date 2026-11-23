@@ -6,7 +6,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use super::MAX_IDLE_VISITOR_CREDIT;
 use super::stream::StreamResource;
-use crate::metrics::CreditGauges;
+use crate::metrics::{ClientVisitorRejectReason, CreditGauges};
 
 struct State {
     idle: Vec<OwnedSemaphorePermit>,
@@ -107,6 +107,8 @@ impl VisitorCredits {
     /// finished QUIC stream while its handler retains capacity; try the budget once in that case.
     pub(super) fn assign(self: &Arc<Self>) -> Option<Arc<dyn StreamResource>> {
         let mut state = self.state();
+        // Only the session task assigns, and it closes credits after its intake loop ends,
+        // so no Visitor stream reaches a closed controller.
         if state.closed {
             return None;
         }
@@ -128,6 +130,8 @@ impl VisitorCredits {
                     self.guard_rejections
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     drop(state);
+                    self.gauges
+                        .reject_unassigned(ClientVisitorRejectReason::Saturated);
                     self.note_budget(false);
                     return None;
                 }

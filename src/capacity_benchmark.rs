@@ -126,10 +126,16 @@ pub(crate) fn setup(directory: &Path) -> Result<(), Box<dyn Error>> {
     ] {
         std::fs::write(directory.join("identity").join(file), bytes)?;
     }
+    // Concurrent-scrape runs bind each Server's metrics listener on an ephemeral port.
+    let metrics = if std::env::var("RUNEWARP_BENCH_METRICS").is_ok_and(|value| value == "1") {
+        "metrics-bind-address = \"127.0.0.1:0\"\n"
+    } else {
+        ""
+    };
     std::fs::write(
         directory.join("server.toml"),
         format!(
-            "[server]\nhostname = \"localhost\"\ncert-dir = \"cert\"\n[[server.tunnels]]\npublic-hostnames = [\"app.example.test\"]\nclient-identity = \"{}\"\n",
+            "[server]\nhostname = \"localhost\"\ncert-dir = \"cert\"\n{metrics}[[server.tunnels]]\npublic-hostnames = [\"app.example.test\"]\nclient-identity = \"{}\"\n",
             identity.client_identity
         ),
     )?;
@@ -162,7 +168,8 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
                 let config = crate::load_server_config(&directory.join("server.toml"))?;
                 let server = crate::ServerRuntime::prepare(&config, address(0), tunnel_bind).await?;
                 write_json(&directory.join(format!("server-{id}.ready")), serde_json::json!({
-                    "public": server.public_addr()?.to_string(), "tunnel": server.tunnel_addr()?.to_string()
+                    "public": server.public_addr()?.to_string(), "tunnel": server.tunnel_addr()?.to_string(),
+                    "metrics": server.metrics_addr().map(|address| address.to_string())
                 }))?;
                 let shutdown = server.shutdown();
                 tokio::select! {
@@ -175,6 +182,9 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
                 install_logger(crate::TraceRole::Client)?;
                 let config = crate::load_client_config(&directory.join("client.toml"))?;
                 let client = crate::ClientRuntime::prepare(&config, tunnel_bind).await?;
+                write_json(&directory.join("client.ready"), serde_json::json!({
+                    "metrics": client.metrics_addr().map(|address| address.to_string())
+                }))?;
                 let announce = async {
                     loop {
                         write_json(&directory.join("client.counts.json"), counts()).expect("write counts");

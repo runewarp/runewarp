@@ -9,11 +9,17 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
 
 use super::admission::{AdmissionLimit, ServerAdmissionPolicy, VisitorAdmissionPermit};
-use super::tunnel_registry::{TunnelRegistry, TunnelRouteOutcome, VisitorRoute};
+use super::tunnel_registry::{
+    TunnelRegistry, TunnelRouteOutcome, VisitorRoute, VisitorWorkRejection,
+};
 use crate::acme::ACME_TLS_ALPN;
 use crate::client_hello::ParsedClientHello;
 use crate::client_hello::read_client_hello;
-use crate::proxy::proxy_tcp_over_tunnel;
+use crate::metrics::{
+    AcmeMetricEvent, CountedIo, VisitorCloseOutcome, VisitorDirection, VisitorRejectReason,
+    VisitorTracker,
+};
+use crate::proxy::{TcpByteCounters, proxy_tcp_over_tunnel};
 use crate::proxy_protocol::read_proxy_v2;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ServerRouteOutcome};
@@ -106,13 +112,16 @@ impl VisitorIntake {
         visitor_stream: TcpStream,
         shutdown: Option<crate::shutdown::OrderlyShutdown>,
     ) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
-        let visitor = visitor_span();
+        // The task owns the tracker, so an abort during shutdown still records an outcome.
+        let visitor = self.tunnel_registry.metrics().visitor_accepted();
+        let trace = visitor_span();
         let permit = match self.admission_policy.try_admit_visitor_global() {
             Ok(permit) => permit,
             Err(rejection) => {
                 drop(visitor_stream);
                 self.admission_policy.report_saturation(rejection);
-                visitor.finish("rejected");
+                visitor.reject(VisitorRejectReason::AdmissionVisitorGlobal);
+                trace.finish("rejected");
                 return None;
             }
         };
@@ -125,19 +134,27 @@ impl VisitorIntake {
         Some(async move {
             match shutdown {
                 Some(shutdown) => {
-                    let _ = intake
-                        .intake_until(visitor_stream, timeout, permit, visitor, async move {
-                            let _ = shutdown.wait_started().await;
-                        })
-                        .await;
-                }
-                None => {
-                    let _ = intake
+                    intake
                         .intake_until(
                             visitor_stream,
                             timeout,
                             permit,
                             visitor,
+                            trace,
+                            async move {
+                                let _ = shutdown.wait_started().await;
+                            },
+                        )
+                        .await;
+                }
+                None => {
+                    intake
+                        .intake_until(
+                            visitor_stream,
+                            timeout,
+                            permit,
+                            visitor,
+                            trace,
                             std::future::pending(),
                         )
                         .await;
@@ -151,27 +168,43 @@ impl VisitorIntake {
         mut visitor_stream: TcpStream,
         timeout: std::time::Duration,
         mut admission_permit: VisitorAdmissionPermit,
-        visitor: TracedStage,
+        visitor: VisitorTracker,
+        trace: TracedStage,
         shutdown: Shutdown,
-    ) -> io::Result<()>
-    where
+    ) where
         Shutdown: std::future::Future<Output = ()>,
     {
-        let direct_addresses = VisitorTcpAddresses::from_socket(&visitor_stream)?;
+        let direct_addresses = match VisitorTcpAddresses::from_socket(&visitor_stream) {
+            Ok(addresses) => addresses,
+            Err(error) => {
+                runtime_log::warning("server", &format!("rejected Visitor stream: {error}"));
+                visitor.reject(VisitorRejectReason::ParseFailed);
+                trace.finish("rejected");
+                return;
+            }
+        };
         let peer_ip = direct_addresses.source.ip();
-        let intake_span = tracing::info_span!(target: TARGET, parent: visitor.span(), "intake");
+        let intake_span = tracing::info_span!(target: TARGET, parent: trace.span(), "intake");
         let parsed_client_hello = tokio::select! {
             parsed = tokio::time::timeout(timeout, async {
                 let addresses = if self.visitor_proxy_protocol.is_some() {
                     if !self.visitor_proxy_trusted_networks.iter()
                         .any(|network| network.contains(peer_ip))
                     {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "visitor PROXY protocol peer is not trusted",
+                        return Err(IntakeRejection::logged(
+                            VisitorRejectReason::ParseFailed,
+                            io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                "visitor PROXY protocol peer is not trusted",
+                            ),
                         ));
                     }
-                    read_proxy_v2(&mut visitor_stream).await.map_err(io::Error::other)?
+                    read_proxy_v2(&mut visitor_stream).await.map_err(|error| {
+                        IntakeRejection::logged(
+                            VisitorRejectReason::ParseFailed,
+                            io::Error::other(error),
+                        )
+                    })?
                 } else {
                     direct_addresses
                 };
@@ -182,23 +215,32 @@ impl VisitorIntake {
                         .max_pending_visitors_per_source,
                 ) {
                     self.admission_policy.report_saturation(rejection);
-                    return Ok(None);
+                    return Err(IntakeRejection {
+                        reason: VisitorRejectReason::AdmissionVisitorSource,
+                        error: None,
+                    });
                 }
-                let hello = read_client_hello(&mut visitor_stream)
-                    .await
-                    .map_err(io::Error::other)?;
-                Ok::<_, io::Error>(Some((hello, addresses)))
+                let hello = read_client_hello(&mut visitor_stream).await.map_err(|error| {
+                    IntakeRejection::logged(
+                        VisitorRejectReason::ParseFailed,
+                        io::Error::other(error),
+                    )
+                })?;
+                Ok((hello, addresses))
             }) => match parsed {
                 Ok(result) => result,
-                Err(_) => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Visitor pre-routing intake timed out",
+                Err(_) => Err(IntakeRejection::logged(
+                    VisitorRejectReason::IntakeTimeout,
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Visitor pre-routing intake timed out",
+                    ),
                 )),
             },
             _ = shutdown => {
-                drop(intake_span);
-                visitor.finish("shutdown");
-                return Ok(());
+                visitor.reject(VisitorRejectReason::Shutdown);
+                trace.finish("shutdown");
+                return;
             }
         };
         drop(intake_span);
@@ -206,19 +248,24 @@ impl VisitorIntake {
         // Visitor traffic must remain independent from admission saturation.
         drop(admission_permit);
         let (parsed_client_hello, addresses) = match parsed_client_hello {
-            Ok(Some(parsed)) => parsed,
-            Ok(None) => {
-                visitor.finish("rejected");
-                return Ok(());
-            }
-            Err(error) => {
-                runtime_log::warning("server", &format!("rejected Visitor stream: {error}"));
-                visitor.finish("rejected");
-                return Ok(());
+            Ok(parsed) => parsed,
+            Err(rejection) => {
+                if let Some(error) = rejection.error {
+                    runtime_log::warning("server", &format!("rejected Visitor stream: {error}"));
+                }
+                visitor.reject(rejection.reason);
+                trace.finish("rejected");
+                return;
             }
         };
-        self.handle_parsed(visitor_stream, parsed_client_hello, addresses, visitor)
-            .await
+        self.handle_parsed(
+            visitor_stream,
+            parsed_client_hello,
+            addresses,
+            visitor,
+            trace,
+        )
+        .await;
     }
 
     async fn handle_parsed(
@@ -226,24 +273,31 @@ impl VisitorIntake {
         visitor_stream: TcpStream,
         parsed_client_hello: ParsedClientHello,
         addresses: VisitorTcpAddresses,
-        visitor: TracedStage,
-    ) -> io::Result<()> {
+        visitor: VisitorTracker,
+        trace: TracedStage,
+    ) {
         let serves_acme_tls_alpn_01 = parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN);
         let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
 
         if public_hostname.as_str() == self.server_hostname.as_str() {
-            return if serves_acme_tls_alpn_01 {
-                visitor.finish("acme_challenge");
-                self.serve_acme_tls_alpn_01(visitor_stream, public_hostname, buffered_bytes)
-                    .await
+            if serves_acme_tls_alpn_01 {
+                trace.finish("acme_challenge");
+                self.serve_acme_tls_alpn_01(
+                    visitor_stream,
+                    public_hostname,
+                    buffered_bytes,
+                    visitor,
+                )
+                .await;
             } else {
                 runtime_log::server_route(
                     public_hostname.as_str(),
                     ServerRouteOutcome::RejectedServerHostname,
                 );
-                visitor.finish("rejected");
-                Ok(())
-            };
+                visitor.reject(VisitorRejectReason::UnknownServerHostname);
+                trace.finish("rejected");
+            }
+            return;
         }
 
         if self
@@ -251,11 +305,12 @@ impl VisitorIntake {
             .as_ref()
             .is_some_and(|certificate| !certificate.is_serving())
         {
-            visitor.finish("rejected");
-            return Ok(());
+            visitor.reject(VisitorRejectReason::CertificateNotServing);
+            trace.finish("rejected");
+            return;
         }
 
-        let route_span = tracing::info_span!(target: TARGET, parent: visitor.span(), "route");
+        let route_span = tracing::info_span!(target: TARGET, parent: trace.span(), "route");
         let route = self
             .tunnel_registry
             .route_tunnel_connection(&public_hostname)
@@ -267,10 +322,12 @@ impl VisitorIntake {
                     public_hostname.as_str(),
                     ServerRouteOutcome::RejectedUnauthorized,
                 );
-                visitor.finish("rejected");
-                return Ok(());
+                visitor.reject(VisitorRejectReason::UnauthorizedHostname);
+                trace.finish("rejected");
+                return;
             }
-            TunnelRouteOutcome::NoActiveTunnelConnection => {
+            outcome @ (TunnelRouteOutcome::NoActiveTunnelConnection
+            | TunnelRouteOutcome::ShuttingDown) => {
                 #[cfg(test)]
                 crate::capacity_benchmark::NO_ACTIVE_ROUTE
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -278,8 +335,12 @@ impl VisitorIntake {
                     public_hostname.as_str(),
                     ServerRouteOutcome::NoActiveTunnelConnection,
                 );
-                visitor.finish("rejected");
-                return Ok(());
+                visitor.reject(match outcome {
+                    TunnelRouteOutcome::ShuttingDown => VisitorRejectReason::Shutdown,
+                    _ => VisitorRejectReason::NoTunnelConnection,
+                });
+                trace.finish("rejected");
+                return;
             }
             TunnelRouteOutcome::Connected(tunnel_connection) => tunnel_connection,
         };
@@ -290,9 +351,12 @@ impl VisitorIntake {
             buffered_bytes,
             selected_tunnel_connection,
             addresses,
-            visitor,
+            VisitorRecord {
+                metrics: visitor,
+                trace,
+            },
         )
-        .await
+        .await;
     }
 
     async fn serve_acme_tls_alpn_01(
@@ -300,11 +364,13 @@ impl VisitorIntake {
         visitor_stream: TcpStream,
         server_hostname: PublicHostname,
         buffered_bytes: Vec<u8>,
-    ) -> io::Result<()> {
+        visitor: VisitorTracker,
+    ) {
         if let Some(public_tls_config) = self.public_tls_config.clone() {
-            if let Some(certificate) = self.certificate.as_ref() {
-                certificate.record_challenge_handled();
-            }
+            visitor.acme_challenge();
+            self.tunnel_registry
+                .metrics()
+                .acme_event(AcmeMetricEvent::ChallengeHandled);
             runtime_log::acme(
                 AcmeRole::Server {
                     server_hostname: server_hostname.as_str(),
@@ -323,8 +389,8 @@ impl VisitorIntake {
                 server_hostname.as_str(),
                 ServerRouteOutcome::MissingAcmeTlsConfig,
             );
+            visitor.reject(VisitorRejectReason::UnknownServerHostname);
         }
-        Ok(())
     }
 
     async fn forward_to_tunnel(
@@ -334,26 +400,33 @@ impl VisitorIntake {
         buffered_bytes: Vec<u8>,
         tunnel_connection: VisitorRoute,
         addresses: VisitorTcpAddresses,
-        visitor: TracedStage,
-    ) -> io::Result<()> {
+        record: VisitorRecord,
+    ) {
+        let VisitorRecord {
+            metrics: mut visitor,
+            trace,
+        } = record;
         let pending_open_permit = match self.admission_policy.try_admit_pending_stream_open() {
             Ok(permit) => permit,
             Err(rejection) => {
                 self.admission_policy.report_saturation(rejection);
-                visitor.finish("rejected");
-                return Ok(());
+                visitor.reject(VisitorRejectReason::AdmissionPendingStreamOpen);
+                trace.finish("rejected");
+                return;
             }
         };
         self.admission_policy
             .report_recovery(&[AdmissionLimit::PendingStreamOpens]);
 
         let stream_open_span =
-            tracing::info_span!(target: TARGET, parent: visitor.span(), "stream_open");
+            tracing::info_span!(target: TARGET, parent: trace.span(), "stream_open");
+        let open_started = std::time::Instant::now();
         let open_result = tunnel_connection
             .connection()
             .open_tunnel_stream(self.admission_policy.limits().stream_open_timeout)
             .await;
         drop(stream_open_span);
+        let stream_open = open_started.elapsed();
         let stream = match open_result {
             Ok(stream) => stream,
             Err(_) => {
@@ -362,8 +435,9 @@ impl VisitorIntake {
                     public_hostname.as_str(),
                     ServerRouteOutcome::NoActiveTunnelConnection,
                 );
-                visitor.finish("rejected");
-                return Ok(());
+                visitor.reject(VisitorRejectReason::StreamOpenFailed);
+                trace.finish("rejected");
+                return;
             }
         };
 
@@ -373,8 +447,9 @@ impl VisitorIntake {
                 drop(pending_open_permit);
                 drop(stream);
                 self.admission_policy.report_saturation(rejection);
-                visitor.finish("rejected");
-                return Ok(());
+                visitor.reject(VisitorRejectReason::AdmissionActiveRoutedStream);
+                trace.finish("rejected");
+                return;
             }
         };
         drop(pending_open_permit);
@@ -389,26 +464,69 @@ impl VisitorIntake {
             tunnel_connection,
             active_stream_permit,
         ) {
-            Some(work) => work,
-            None => {
+            Ok(work) => work,
+            Err(rejection) => {
                 drop(stream);
-                visitor.finish("rejected");
-                return Ok(());
+                visitor.reject(match rejection {
+                    VisitorWorkRejection::ShuttingDown => VisitorRejectReason::Shutdown,
+                    VisitorWorkRejection::Unauthorized => VisitorRejectReason::UnauthorizedHostname,
+                });
+                trace.finish("rejected");
+                return;
             }
         };
         runtime_log::server_route(public_hostname.as_str(), ServerRouteOutcome::Forwarded);
         // The Visitor span ends at placement, not when the proxied stream closes.
-        visitor.finish("placed");
-        match work
+        trace.finish("placed");
+        visitor.placed(stream_open);
+        let metrics = registry.metrics();
+        let outcome = work
             .run(async move {
                 let initial_bytes = encode_tunnel_stream(addresses, &buffered_bytes);
+                // Count Visitor stream bytes only: the framing prefix ahead of the
+                // ClientHello is Runewarp's, not the Visitor's.
+                let framing_len = initial_bytes.len() - buffered_bytes.len();
                 let (recv, send) = stream.into_split();
-                proxy_tcp_over_tunnel(visitor_stream, initial_bytes, send, recv).await
+                let send =
+                    CountedIo::writer(send, metrics.visitor_bytes(VisitorDirection::FromVisitor))
+                        .skipping_written_prefix(framing_len);
+                // `from_visitor` is counted at the Tunnel writer, not the Visitor socket.
+                let tcp_bytes = TcpByteCounters {
+                    read: None,
+                    written: Some(metrics.visitor_bytes(VisitorDirection::ToVisitor)),
+                };
+                proxy_tcp_over_tunnel(visitor_stream, initial_bytes, send, recv, tcp_bytes).await
             })
-            .await
-        {
-            Ok(result) => result,
-            Err(_) => Ok(()),
+            .await;
+        visitor.closed(match outcome {
+            Ok(Ok(())) => VisitorCloseOutcome::Ok,
+            // Shutdown closing the Tunnel connection under the Visitor is a cancellation.
+            Ok(Err(_)) if registry.is_closing_all() => VisitorCloseOutcome::Cancelled,
+            Ok(Err(_)) => VisitorCloseOutcome::Error,
+            Err(_) => VisitorCloseOutcome::Cancelled,
+        });
+    }
+}
+
+/// One Visitor's metrics tracker and trace span. The span ends at placement; the tracker
+/// lasts until the Visitor closes.
+struct VisitorRecord {
+    metrics: VisitorTracker,
+    trace: TracedStage,
+}
+
+/// A Visitor dropped during intake, with the error to log when the drop is not already
+/// reported by admission saturation logging.
+struct IntakeRejection {
+    reason: VisitorRejectReason,
+    error: Option<io::Error>,
+}
+
+impl IntakeRejection {
+    fn logged(reason: VisitorRejectReason, error: io::Error) -> Self {
+        Self {
+            reason,
+            error: Some(error),
         }
     }
 }
@@ -526,6 +644,8 @@ mod tests {
 
     use crate::LogLevel;
     use crate::acme::ACME_TLS_ALPN;
+    use crate::metrics::test_support::sample;
+    use crate::metrics::{LabelValue, ServerMetrics, VisitorRejectReason};
     use crate::server::admission::{AdmissionLimit, ServerAdmissionLimits, ServerAdmissionPolicy};
     use crate::tls_material::{certificate_chain_from_pem, private_key_from_pem};
     use crate::{
@@ -770,6 +890,7 @@ mod tests {
             intake,
             build_client_hello("other.example.test")?,
             tunnel_connection,
+            VisitorRejectReason::UnauthorizedHostname,
         )
         .await?;
 
@@ -877,6 +998,7 @@ mod tests {
             Some(ProxyProtocolVersion::V2),
             vec!["127.0.0.0/8".parse().unwrap()],
         )?;
+        let metrics = intake.tunnel_registry.metrics();
         let canonical_source = "203.0.113.9:54321".parse().unwrap();
         let addresses = VisitorTcpAddresses {
             source: canonical_source,
@@ -907,6 +1029,12 @@ mod tests {
             other => panic!("expected rejected connection, got {other:?}"),
         }
 
+        eventually_metric(
+            &metrics,
+            r#"runewarp_server_visitors_rejected_total{reason="admission_visitor_source"}"#,
+            1.0,
+        )
+        .await?;
         drop(first_visitor);
         first_task
             .await
@@ -1051,6 +1179,7 @@ mod tests {
         let held_pending = policy
             .try_admit_pending_stream_open()
             .expect("pending open should fit");
+        let metrics = registry.metrics();
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry,
@@ -1087,6 +1216,7 @@ mod tests {
             .await
             .map_err(|error| join_error("intake task failed", error))??;
 
+        assert_only_rejection(&metrics, VisitorRejectReason::AdmissionPendingStreamOpen).await?;
         drop(held_pending);
         assert!(policy.try_admit_pending_stream_open().is_ok());
         Ok(())
@@ -1140,6 +1270,11 @@ mod tests {
             .await
             .map_err(|error| join_error("intake task failed", error))??;
         assert_eq!(registry.tracked_visitor_stream_count(), 0);
+        assert_only_rejection(
+            &registry.metrics(),
+            VisitorRejectReason::AdmissionActiveRoutedStream,
+        )
+        .await?;
 
         drop(held_active);
         assert!(policy.try_admit_active_routed_stream().is_ok());
@@ -1165,6 +1300,7 @@ mod tests {
             max_pending_stream_opens: 1,
             ..ServerAdmissionLimits::for_test()
         });
+        let metrics = registry.metrics();
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
             registry,
@@ -1221,7 +1357,7 @@ mod tests {
             recovered.is_ok(),
             "stream open timeout must release pending-open capacity"
         );
-        Ok(())
+        assert_only_rejection(&metrics, VisitorRejectReason::StreamOpenFailed).await
     }
 
     #[tokio::test]
@@ -1238,6 +1374,7 @@ mod tests {
             None,
             policy.clone(),
         )?;
+        let metrics = intake.tunnel_registry.metrics();
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
         let intake_task = spawn_intake_task(listener, intake);
@@ -1264,7 +1401,7 @@ mod tests {
             other => panic!("expected deadline rejection, got {other:?}"),
         }
         assert!(policy.try_admit_visitor(source).is_ok());
-        Ok(())
+        assert_only_rejection(&metrics, VisitorRejectReason::IntakeTimeout).await
     }
 
     #[tokio::test]
@@ -1280,6 +1417,7 @@ mod tests {
             None,
             policy.clone(),
         )?;
+        let metrics = intake.tunnel_registry.metrics();
         let source = std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
         let shutdown =
             crate::shutdown::OrderlyShutdown::new(Duration::from_secs(5), Duration::from_millis(1));
@@ -1314,7 +1452,7 @@ mod tests {
         })
         .await
         .map_err(|_| timeout_error("shutdown should release Visitor intake capacity"))?;
-        Ok(())
+        assert_only_rejection(&metrics, VisitorRejectReason::Shutdown).await
     }
 
     #[tokio::test]
@@ -1327,6 +1465,7 @@ mod tests {
             Some(public_tls_config),
             test_admission_policy(),
         )?;
+        let metrics = intake.tunnel_registry.metrics();
 
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
@@ -1352,6 +1491,30 @@ mod tests {
         intake_task
             .await
             .map_err(|error| join_error("intake task failed", error))??;
+        // A challenge is neither placed nor rejected.
+        let text = metrics.render();
+        assert_eq!(
+            sample(&text, "runewarp_server_visitors_accepted_total"),
+            Some(1.0)
+        );
+        assert_eq!(
+            sample(&text, "runewarp_server_visitors_placed_total"),
+            Some(0.0)
+        );
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_acme_events_total{event="challenge_handled"}"#
+            ),
+            Some(1.0)
+        );
+        for reason in VisitorRejectReason::ALL {
+            let series = format!(
+                r#"runewarp_server_visitors_rejected_total{{reason="{}"}}"#,
+                reason.as_str()
+            );
+            assert_eq!(sample(&text, &series), Some(0.0), "{series}");
+        }
         Ok(())
     }
 
@@ -1420,6 +1583,7 @@ mod tests {
             intake,
             build_client_hello("tunnel.example.test")?,
             Some(tunnel_connection),
+            VisitorRejectReason::UnknownServerHostname,
         )
         .await
     }
@@ -1432,6 +1596,7 @@ mod tests {
             intake,
             b"not tls".to_vec(),
             Some(tunnel_connection),
+            VisitorRejectReason::ParseFailed,
         )
         .await
     }
@@ -1444,6 +1609,7 @@ mod tests {
             intake,
             build_client_hello_for_server_name(ServerName::IpAddress(Ipv4Addr::LOCALHOST.into()))?,
             Some(tunnel_connection),
+            VisitorRejectReason::ParseFailed,
         )
         .await
     }
@@ -1457,6 +1623,7 @@ mod tests {
             intake,
             invalid_sni_client_hello()?,
             Some(tunnel_connection),
+            VisitorRejectReason::ParseFailed,
         )
         .await
     }
@@ -1467,8 +1634,13 @@ mod tests {
         let mut client_hello = build_client_hello("app.example.test")?;
         client_hello.truncate(10);
 
-        assert_drop_without_opening_a_tunnel_stream(intake, client_hello, Some(tunnel_connection))
-            .await
+        assert_drop_without_opening_a_tunnel_stream(
+            intake,
+            client_hello,
+            Some(tunnel_connection),
+            VisitorRejectReason::ParseFailed,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -1479,6 +1651,7 @@ mod tests {
             intake,
             oversized_client_hello(),
             Some(tunnel_connection),
+            VisitorRejectReason::ParseFailed,
         )
         .await
     }
@@ -1519,6 +1692,7 @@ mod tests {
                 intake,
                 visitor_bytes,
                 tunnel_connection,
+                VisitorRejectReason::ParseFailed,
             )
             .await?;
         }
@@ -1531,6 +1705,7 @@ mod tests {
             intake,
             valid_but_untrusted,
             tunnel_connection,
+            VisitorRejectReason::ParseFailed,
         )
         .await
     }
@@ -1544,6 +1719,7 @@ mod tests {
             intake,
             build_client_hello("api.example.test")?,
             Some(tunnel_connection),
+            VisitorRejectReason::UnauthorizedHostname,
         )
         .await
     }
@@ -1562,6 +1738,7 @@ mod tests {
             intake,
             build_client_hello("app.example.test")?,
             None,
+            VisitorRejectReason::NoTunnelConnection,
         )
         .await
     }
@@ -1594,8 +1771,420 @@ mod tests {
             intake,
             build_client_hello("app.example.test")?,
             Some(fixture.client_connection),
+            VisitorRejectReason::NoTunnelConnection,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn visitor_global_admission_rejection_is_counted() -> io::Result<()> {
+        let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
+            max_pending_visitors: 1,
+            ..ServerAdmissionLimits::for_test()
+        });
+        let _held = policy
+            .try_admit_visitor_global()
+            .expect("the only intake slot should fit");
+        let intake = VisitorIntake::new(
+            server_hostname("tunnel.example.test"),
+            TunnelRegistry::single(vec![public_hostname("app.example.test")])?,
+            None,
+            policy,
+        )?;
+        let metrics = intake.tunnel_registry.metrics();
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+        let mut byte = [0_u8; 1];
+        match timeout(Duration::from_secs(1), visitor.read(&mut byte)).await {
+            Ok(Ok(0)) => {}
+            Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            other => panic!("expected rejected connection, got {other:?}"),
+        }
+        assert_only_rejection(&metrics, VisitorRejectReason::AdmissionVisitorGlobal).await
+    }
+
+    #[tokio::test]
+    async fn drops_visitors_while_the_server_certificate_is_not_serving() -> io::Result<()> {
+        struct UnusedRoute;
+        impl crate::server_certificate::ChallengeRouteObserver for UnusedRoute {
+            fn observe(
+                &self,
+                _request: crate::server_certificate::ChallengeRouteRequest,
+            ) -> futures_util::future::BoxFuture<
+                '_,
+                io::Result<crate::server_certificate::ConsumedChallengeRoute>,
+            > {
+                Box::pin(async { Err(io::Error::other("no ACME work runs in this test")) })
+            }
+        }
+        let validation = crate::server_certificate::CertificateValidation::new(
+            server_hostname("tunnel.example.test"),
+            Arc::new(RootCertStore::empty()),
+            Duration::from_secs(3_600),
+            Duration::from_secs(60),
+        )?;
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+        let options = crate::server_certificate::ServerAcmeOptions::new(
+            validation,
+            "https://acme.invalid/directory",
+            Arc::new(client_config),
+            Arc::new(UnusedRoute),
+        )?;
+        let store = tempfile::tempdir()?;
+        // An empty store holds no committed snapshot, so the certificate is not serving.
+        let certificate = crate::server_certificate::ServerCertificateController::new(
+            store.path().to_path_buf(),
+            "ops@example.test".to_owned(),
+            options,
+        )?;
+        assert!(!certificate.is_serving());
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        assert_drop_without_opening_a_tunnel_stream(
+            intake.with_certificate(Some(certificate)),
+            build_client_hello("app.example.test")?,
+            Some(tunnel_connection),
+            VisitorRejectReason::CertificateNotServing,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn drops_visitors_after_the_registry_stops_accepting_work() -> io::Result<()> {
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        intake.tunnel_registry.stop_accepting_new_work();
+        assert_drop_without_opening_a_tunnel_stream(
+            intake,
+            build_client_hello("app.example.test")?,
+            Some(tunnel_connection),
+            VisitorRejectReason::Shutdown,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn placed_visitor_counts_tls_bytes_in_both_directions_across_half_close() -> io::Result<()>
+    {
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        let metrics = intake.tunnel_registry.metrics();
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+
+        let client_hello = build_client_hello("app.example.test")?;
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor.write_all(&client_hello).await?;
+        visitor.write_all(b"request").await?;
+        // Half-close: the Visitor finishes sending but still reads the response.
+        visitor.shutdown().await?;
+
+        let (mut tunnel_send, mut tunnel_recv) =
+            timeout(Duration::from_secs(1), tunnel_connection.accept_stream())
+                .await
+                .map_err(|_| timeout_error("intake should open a tunnel stream"))?
+                .map_err(io::Error::other)?;
+        crate::proxy_protocol::read_proxy_v2(&mut tunnel_recv)
+            .await
+            .map_err(io::Error::other)?;
+        let forwarded = timeout(
+            Duration::from_secs(1),
+            read_to_end(&mut tunnel_recv, client_hello.len() + 8),
+        )
+        .await
+        .map_err(|_| timeout_error("tunnel should receive the Visitor's bytes"))?
+        .map_err(io::Error::other)?;
+        assert_eq!(forwarded.len(), client_hello.len() + b"request".len());
+        let text = metrics.render();
+        assert_eq!(
+            sample(&text, "runewarp_server_visitors_placed_total"),
+            Some(1.0)
+        );
+        assert_eq!(sample(&text, "runewarp_server_visitors_active"), Some(1.0));
+
+        tunnel_send
+            .write_all(b"response-bytes")
+            .await
+            .map_err(io::Error::other)?;
+        tunnel_send.shutdown().await.map_err(io::Error::other)?;
+        let mut response = Vec::new();
+        timeout(Duration::from_secs(1), visitor.read_to_end(&mut response))
+            .await
+            .map_err(|_| timeout_error("Visitor should read the response to FIN"))??;
+        assert_eq!(response, b"response-bytes");
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+
+        let text = eventually_metric(
+            &metrics,
+            r#"runewarp_server_visitors_closed_total{outcome="ok"}"#,
+            1.0,
+        )
+        .await?;
+        // ClientHello plus forwarded TLS, without the Runewarp framing prefix.
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitor_bytes_total{direction="from_visitor"}"#
+            ),
+            Some((client_hello.len() + b"request".len()) as f64)
+        );
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitor_bytes_total{direction="to_visitor"}"#
+            ),
+            Some(b"response-bytes".len() as f64)
+        );
+        assert_eq!(sample(&text, "runewarp_server_visitors_active"), Some(0.0));
+        assert_eq!(
+            sample(&text, "runewarp_server_visitor_duration_seconds_count"),
+            Some(1.0)
+        );
+        assert_eq!(
+            sample(
+                &text,
+                "runewarp_server_visitor_stream_open_duration_seconds_count"
+            ),
+            Some(1.0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_tunnel_stream_closes_the_placed_visitor_with_an_error() -> io::Result<()> {
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        let metrics = intake.tunnel_registry.metrics();
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let client_hello = build_client_hello("app.example.test")?;
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor.write_all(&client_hello).await?;
+
+        let (tunnel_send, mut tunnel_recv) =
+            timeout(Duration::from_secs(1), tunnel_connection.accept_stream())
+                .await
+                .map_err(|_| timeout_error("intake should open a tunnel stream"))?
+                .map_err(io::Error::other)?;
+        crate::proxy_protocol::read_proxy_v2(&mut tunnel_recv)
+            .await
+            .map_err(io::Error::other)?;
+        eventually_metric(&metrics, "runewarp_server_visitors_active", 1.0).await?;
+        // Dropping both halves without FIN resets the stream in both directions.
+        drop(tunnel_send);
+        drop(tunnel_recv);
+        visitor.shutdown().await?;
+        let _ = timeout(Duration::from_secs(1), visitor.read(&mut [0_u8; 1])).await;
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+
+        let text = eventually_metric(
+            &metrics,
+            r#"runewarp_server_visitors_closed_total{outcome="error"}"#,
+            1.0,
+        )
+        .await?;
+        assert_eq!(sample(&text, "runewarp_server_visitors_active"), Some(0.0));
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitors_closed_total{outcome="ok"}"#
+            ),
+            Some(0.0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_closing_the_tunnel_cancels_the_placed_visitor() -> io::Result<()> {
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        let registry = intake.tunnel_registry.clone();
+        let metrics = registry.metrics();
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor
+            .write_all(&build_client_hello("app.example.test")?)
+            .await?;
+        let (_send, mut recv) = timeout(Duration::from_secs(1), tunnel_connection.accept_stream())
+            .await
+            .map_err(|_| timeout_error("intake should open a tunnel stream"))?
+            .map_err(io::Error::other)?;
+        crate::proxy_protocol::read_proxy_v2(&mut recv)
+            .await
+            .map_err(io::Error::other)?;
+        eventually_metric(&metrics, "runewarp_server_visitors_active", 1.0).await?;
+        registry.close_all(b"graceful shutdown").await;
+        // The closed Tunnel fails the response direction; finishing the request lets the
+        // proxy return that error instead of waiting on the Visitor.
+        let _ = timeout(Duration::from_secs(1), visitor.read(&mut [0_u8; 1])).await;
+        let _ = visitor.shutdown().await;
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+        let text = eventually_metric(
+            &metrics,
+            r#"runewarp_server_visitors_closed_total{outcome="cancelled"}"#,
+            1.0,
+        )
+        .await?;
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitors_closed_total{outcome="error"}"#
+            ),
+            Some(0.0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn strict_proxy_prefix_is_not_counted_as_visitor_bytes() -> io::Result<()> {
+        let (intake, tunnel_connection) =
+            configured_proxy_intake_with_active_tunnel_connection("127.0.0.0/8").await?;
+        let metrics = intake.tunnel_registry.metrics();
+        let addresses = VisitorTcpAddresses {
+            source: "203.0.113.9:54321".parse().unwrap(),
+            destination: "198.51.100.10:443".parse().unwrap(),
+        };
+        let client_hello = build_client_hello("app.example.test")?;
+        let mut ingress = addresses.encode_proxy_v2();
+        ingress.extend_from_slice(&client_hello);
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor.write_all(&ingress).await?;
+        visitor.shutdown().await?;
+        let (mut send, mut recv) =
+            timeout(Duration::from_secs(1), tunnel_connection.accept_stream())
+                .await
+                .map_err(|_| timeout_error("PROXY Visitor should reach the Tunnel"))?
+                .map_err(io::Error::other)?;
+        crate::proxy_protocol::read_proxy_v2(&mut recv)
+            .await
+            .map_err(io::Error::other)?;
+        read_to_end(&mut recv, client_hello.len() + 1)
+            .await
+            .map_err(io::Error::other)?;
+        send.shutdown().await.map_err(io::Error::other)?;
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+        let text = eventually_metric(
+            &metrics,
+            r#"runewarp_server_visitors_closed_total{outcome="ok"}"#,
+            1.0,
+        )
+        .await?;
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitor_bytes_total{direction="from_visitor"}"#
+            ),
+            Some(client_hello.len() as f64)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn revoked_visitor_closes_cancelled_and_keeps_bytes_already_forwarded() -> io::Result<()>
+    {
+        let client_identity = generate_test_client_identity()?;
+        let registry = TunnelRegistry::configured_managed(
+            &server_hostname("tunnel.example.test"),
+            &[ServerTunnelConfig {
+                id: Some(crate::TunnelId::parse("tunnel-1").unwrap()),
+                public_hostnames: vec![public_hostname("app.example.test")],
+                authorized_client_identities: vec![client_identity.client_identity.clone()],
+            }],
+        )?;
+        let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        registry.register(fixture.server_connection.clone()).await;
+        let metrics = registry.metrics();
+        let intake = VisitorIntake::new(
+            server_hostname("tunnel.example.test"),
+            registry.clone(),
+            None,
+            test_admission_policy(),
+        )?;
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let client_hello = build_client_hello("app.example.test")?;
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor.write_all(&client_hello).await?;
+
+        let (mut tunnel_send, mut tunnel_recv) = timeout(
+            Duration::from_secs(1),
+            fixture.client_connection.accept_stream(),
+        )
+        .await
+        .map_err(|_| timeout_error("intake should open a tunnel stream"))?
+        .map_err(io::Error::other)?;
+        crate::proxy_protocol::read_proxy_v2(&mut tunnel_recv)
+            .await
+            .map_err(io::Error::other)?;
+        let mut forwarded = vec![0_u8; client_hello.len()];
+        tunnel_recv
+            .read_exact(&mut forwarded)
+            .await
+            .map_err(io::Error::other)?;
+        tunnel_send
+            .write_all(b"partial")
+            .await
+            .map_err(io::Error::other)?;
+        let mut partial = [0_u8; 7];
+        timeout(Duration::from_secs(1), visitor.read_exact(&mut partial))
+            .await
+            .map_err(|_| timeout_error("Visitor should receive the partial response"))??;
+
+        let dispatch = registry
+            .replace_authorization(
+                &server_hostname("tunnel.example.test"),
+                &[ServerTunnelConfig {
+                    id: Some(crate::TunnelId::parse("tunnel-1").unwrap()),
+                    public_hostnames: vec![public_hostname("other.example.test")],
+                    authorized_client_identities: vec![client_identity.client_identity.clone()],
+                }],
+            )
+            .await?;
+        assert_eq!(dispatch.streams_reset, 1);
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+
+        let text = eventually_metric(
+            &metrics,
+            r#"runewarp_server_visitors_closed_total{outcome="cancelled"}"#,
+            1.0,
+        )
+        .await?;
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitor_bytes_total{direction="from_visitor"}"#
+            ),
+            Some(client_hello.len() as f64)
+        );
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitor_bytes_total{direction="to_visitor"}"#
+            ),
+            Some(7.0)
+        );
+        assert_eq!(sample(&text, "runewarp_server_visitors_active"), Some(0.0));
+        Ok(())
     }
 
     async fn configured_intake_with_active_tunnel_connection()
@@ -1657,7 +2246,9 @@ mod tests {
         intake: VisitorIntake,
         visitor_bytes: Vec<u8>,
         tunnel_connection: ClientPeer,
+        expected: VisitorRejectReason,
     ) -> io::Result<()> {
+        let metrics = intake.tunnel_registry.metrics();
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
         let intake_task = spawn_intake_task(listener, intake);
@@ -1684,14 +2275,16 @@ mod tests {
         intake_task
             .await
             .map_err(|error| join_error("intake task failed", error))??;
-        Ok(())
+        assert_only_rejection(&metrics, expected).await
     }
 
     async fn assert_drop_without_opening_a_tunnel_stream(
         intake: VisitorIntake,
         visitor_bytes: Vec<u8>,
         tunnel_connection: Option<ClientPeer>,
+        expected: VisitorRejectReason,
     ) -> io::Result<()> {
+        let metrics = intake.tunnel_registry.metrics();
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
         let intake_task = spawn_intake_task(listener, intake);
@@ -1721,6 +2314,53 @@ mod tests {
         intake_task
             .await
             .map_err(|error| join_error("intake task failed", error))??;
+        assert_only_rejection(&metrics, expected).await
+    }
+
+    /// Wait until `series` reads `value`, or fail with the last scrape.
+    async fn eventually_metric(
+        metrics: &ServerMetrics,
+        series: &str,
+        value: f64,
+    ) -> io::Result<String> {
+        let mut text = metrics.render();
+        for _ in 0..200 {
+            if sample(&text, series) == Some(value) {
+                return Ok(text);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            text = metrics.render();
+        }
+        panic!("{series} never reached {value}:\n{text}");
+    }
+
+    /// The single accepted Visitor was rejected for `expected` and nothing else.
+    async fn assert_only_rejection(
+        metrics: &ServerMetrics,
+        expected: VisitorRejectReason,
+    ) -> io::Result<()> {
+        let series = format!(
+            r#"runewarp_server_visitors_rejected_total{{reason="{}"}}"#,
+            expected.as_str()
+        );
+        let text = eventually_metric(metrics, &series, 1.0).await?;
+        for reason in VisitorRejectReason::ALL {
+            if *reason != expected {
+                let other = format!(
+                    r#"runewarp_server_visitors_rejected_total{{reason="{}"}}"#,
+                    reason.as_str()
+                );
+                assert_eq!(sample(&text, &other), Some(0.0), "{other}\n{text}");
+            }
+        }
+        assert_eq!(
+            sample(&text, "runewarp_server_visitors_accepted_total"),
+            Some(1.0)
+        );
+        assert_eq!(
+            sample(&text, "runewarp_server_visitors_placed_total"),
+            Some(0.0)
+        );
         Ok(())
     }
 

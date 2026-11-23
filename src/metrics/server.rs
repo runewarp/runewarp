@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::DescriptorEncoder;
@@ -21,6 +21,14 @@ use crate::ManagedSessionEvent;
 /// Tunnel connection lifetimes span seconds (flapping) to days (healthy).
 const TUNNEL_CONNECTION_DURATION_BUCKETS: &[f64] = &[
     1.0, 10.0, 60.0, 300.0, 1_800.0, 3_600.0, 21_600.0, 86_400.0, 604_800.0,
+];
+/// Placed Visitors live from sub-second requests to day-long streams.
+const VISITOR_DURATION_BUCKETS: &[f64] = &[
+    0.01, 0.1, 1.0, 10.0, 60.0, 300.0, 1_800.0, 3_600.0, 21_600.0, 86_400.0,
+];
+/// Latency buckets from sub-millisecond loopback to the 5 s default open deadline.
+pub(crate) const LATENCY_BUCKETS: &[f64] = &[
+    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
 ];
 const UNKNOWN_EXPIRY: i64 = i64::MIN;
 
@@ -55,6 +63,32 @@ label_enum!(TunnelCloseReason, "reason", {
     Dropped => "dropped",
     Replaced => "replaced",
     Shutdown => "shutdown",
+});
+
+label_enum!(VisitorRejectReason, "reason", {
+    AdmissionVisitorGlobal => "admission_visitor_global",
+    AdmissionVisitorSource => "admission_visitor_source",
+    AdmissionPendingStreamOpen => "admission_pending_stream_open",
+    AdmissionActiveRoutedStream => "admission_active_routed_stream",
+    IntakeTimeout => "intake_timeout",
+    ParseFailed => "parse_failed",
+    UnknownServerHostname => "unknown_server_hostname",
+    UnauthorizedHostname => "unauthorized_hostname",
+    NoTunnelConnection => "no_tunnel_connection",
+    StreamOpenFailed => "stream_open_failed",
+    CertificateNotServing => "certificate_not_serving",
+    Shutdown => "shutdown",
+});
+
+label_enum!(VisitorCloseOutcome, "outcome", {
+    Ok => "ok",
+    Error => "error",
+    Cancelled => "cancelled",
+});
+
+label_enum!(VisitorDirection, "direction", {
+    FromVisitor => "from_visitor",
+    ToVisitor => "to_visitor",
 });
 
 label_enum!(ManagedEventLabel, "event", {
@@ -121,6 +155,14 @@ struct Inner {
     tunnel_connections_rejected: LabelledCounter<TunnelRejectReason>,
     tunnel_connections_closed: LabelledCounter<TunnelCloseReason>,
     tunnel_connection_duration: AtomicHistogram,
+    visitors_accepted: Counter,
+    visitors_rejected: LabelledCounter<VisitorRejectReason>,
+    visitors_placed: Counter,
+    visitors_closed: LabelledCounter<VisitorCloseOutcome>,
+    visitors_active: Gauge,
+    visitor_duration: AtomicHistogram,
+    visitor_stream_open_duration: AtomicHistogram,
+    visitor_bytes: LabelledCounter<VisitorDirection>,
     managed_session_connected: Gauge,
     managed_session_events: LabelledCounter<ManagedEventLabel>,
     certificate_expiry: AtomicI64,
@@ -151,6 +193,14 @@ impl ServerMetrics {
             tunnel_connections_rejected: LabelledCounter::default(),
             tunnel_connections_closed: LabelledCounter::default(),
             tunnel_connection_duration: AtomicHistogram::new(TUNNEL_CONNECTION_DURATION_BUCKETS),
+            visitors_accepted: Counter::default(),
+            visitors_rejected: LabelledCounter::default(),
+            visitors_placed: Counter::default(),
+            visitors_closed: LabelledCounter::default(),
+            visitors_active: Gauge::default(),
+            visitor_duration: AtomicHistogram::new(VISITOR_DURATION_BUCKETS),
+            visitor_stream_open_duration: AtomicHistogram::new(LATENCY_BUCKETS),
+            visitor_bytes: LabelledCounter::default(),
             managed_session_connected: Gauge::default(),
             managed_session_events: LabelledCounter::default(),
             certificate_expiry: AtomicI64::new(UNKNOWN_EXPIRY),
@@ -205,6 +255,21 @@ impl ServerMetrics {
         }
     }
 
+    /// Count an accepted Visitor connection and track it until it is placed or rejected.
+    pub(crate) fn visitor_accepted(&self) -> VisitorTracker {
+        self.0.visitors_accepted.inc();
+        VisitorTracker {
+            metrics: self.clone(),
+            accepted_at: Instant::now(),
+            stage: VisitorStage::Intake,
+        }
+    }
+
+    /// Counter for Visitor stream bytes accepted by the destination writer in `direction`.
+    pub(crate) fn visitor_bytes(&self, direction: VisitorDirection) -> Counter {
+        self.0.visitor_bytes.get(direction)
+    }
+
     pub(crate) fn managed_session_event(&self, event: &ManagedSessionEvent) {
         let label = match event {
             ManagedSessionEvent::Snapshot { .. } => ManagedEventLabel::Snapshot,
@@ -240,6 +305,77 @@ impl ServerMetrics {
     #[cfg(test)]
     pub(crate) fn render(&self) -> String {
         super::render(self.collector())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VisitorStage {
+    Intake,
+    Placed,
+    Done,
+}
+
+/// One accepted Visitor's lifecycle. Each Visitor ends exactly once: rejected, closed after
+/// placement, or handed to ACME challenge handling. Dropping a tracker without an outcome, as
+/// when shutdown aborts the Visitor task, counts a `shutdown` rejection before placement and a
+/// `cancelled` close after it.
+pub(crate) struct VisitorTracker {
+    metrics: ServerMetrics,
+    accepted_at: Instant,
+    stage: VisitorStage,
+}
+
+impl VisitorTracker {
+    pub(crate) fn reject(mut self, reason: VisitorRejectReason) {
+        self.finish_rejected(reason);
+    }
+
+    /// A TLS-ALPN-01 challenge for the Server hostname, counted by `runewarp_acme_events_total`.
+    pub(crate) fn acme_challenge(mut self) {
+        self.stage = VisitorStage::Done;
+    }
+
+    /// Placement succeeded after a Tunnel stream opened in `stream_open`.
+    pub(crate) fn placed(&mut self, stream_open: Duration) {
+        debug_assert_eq!(self.stage, VisitorStage::Intake);
+        let inner = &self.metrics.0;
+        inner.visitors_placed.inc();
+        inner.visitors_active.inc();
+        inner
+            .visitor_stream_open_duration
+            .observe(stream_open.as_secs_f64());
+        self.stage = VisitorStage::Placed;
+    }
+
+    pub(crate) fn closed(mut self, outcome: VisitorCloseOutcome) {
+        self.finish_closed(outcome);
+    }
+
+    fn finish_rejected(&mut self, reason: VisitorRejectReason) {
+        debug_assert_eq!(self.stage, VisitorStage::Intake);
+        self.metrics.0.visitors_rejected.inc(reason);
+        self.stage = VisitorStage::Done;
+    }
+
+    fn finish_closed(&mut self, outcome: VisitorCloseOutcome) {
+        debug_assert_eq!(self.stage, VisitorStage::Placed);
+        let inner = &self.metrics.0;
+        inner.visitors_closed.inc(outcome);
+        inner.visitors_active.dec();
+        inner
+            .visitor_duration
+            .observe(self.accepted_at.elapsed().as_secs_f64());
+        self.stage = VisitorStage::Done;
+    }
+}
+
+impl Drop for VisitorTracker {
+    fn drop(&mut self) {
+        match self.stage {
+            VisitorStage::Intake => self.finish_rejected(VisitorRejectReason::Shutdown),
+            VisitorStage::Placed => self.finish_closed(VisitorCloseOutcome::Cancelled),
+            VisitorStage::Done => {}
+        }
     }
 }
 
@@ -296,6 +432,52 @@ impl Collector for Inner {
             "runewarp_server_tunnel_connection_duration",
             "Lifetime of accepted Tunnel connections.",
             &Unit::Seconds,
+        )?;
+        encode_counter(
+            e,
+            "runewarp_server_visitors_accepted",
+            "Visitor connections accepted from a public listener.",
+            &self.visitors_accepted,
+        )?;
+        self.visitors_rejected.encode(
+            e,
+            "runewarp_server_visitors_rejected",
+            "Visitors dropped before placement, by reason.",
+        )?;
+        encode_counter(
+            e,
+            "runewarp_server_visitors_placed",
+            "Visitors placed on a Tunnel stream.",
+            &self.visitors_placed,
+        )?;
+        self.visitors_closed.encode(
+            e,
+            "runewarp_server_visitors_closed",
+            "Placed Visitors that ended, by outcome.",
+        )?;
+        encode_gauge(
+            e,
+            "runewarp_server_visitors_active",
+            "Placed Visitors that have not ended.",
+            None,
+            self.visitors_active.get(),
+        )?;
+        self.visitor_duration.encode(
+            e,
+            "runewarp_server_visitor_duration",
+            "Lifetime of placed Visitors, from accept to close.",
+            &Unit::Seconds,
+        )?;
+        self.visitor_stream_open_duration.encode(
+            e,
+            "runewarp_server_visitor_stream_open_duration",
+            "Time to open the Tunnel stream for a placed Visitor.",
+            &Unit::Seconds,
+        )?;
+        self.visitor_bytes.encode(
+            e,
+            "runewarp_server_visitor_bytes",
+            "Visitor stream bytes accepted by the destination writer, by direction.",
         )?;
         let in_use: Vec<_> = self
             .admission
@@ -423,6 +605,151 @@ mod tests {
                 "1.0", "10.0", "60.0", "300.0", "1800.0", "3600.0", "21600.0", "86400.0",
                 "604800.0", "+Inf"
             ]
+        );
+    }
+
+    #[test]
+    fn visitor_series_expose_exactly_their_code_enumerated_values() {
+        let text = ServerMetrics::for_test().render();
+        assert_eq!(
+            label_values(&text, "runewarp_server_visitors_rejected_total", "reason"),
+            [
+                "admission_visitor_global",
+                "admission_visitor_source",
+                "admission_pending_stream_open",
+                "admission_active_routed_stream",
+                "intake_timeout",
+                "parse_failed",
+                "unknown_server_hostname",
+                "unauthorized_hostname",
+                "no_tunnel_connection",
+                "stream_open_failed",
+                "certificate_not_serving",
+                "shutdown",
+            ]
+        );
+        assert_eq!(
+            label_values(&text, "runewarp_server_visitors_closed_total", "outcome"),
+            ["ok", "error", "cancelled"]
+        );
+        assert_eq!(
+            label_values(&text, "runewarp_server_visitor_bytes_total", "direction"),
+            ["from_visitor", "to_visitor"]
+        );
+        assert_eq!(
+            label_values(
+                &text,
+                "runewarp_server_visitor_stream_open_duration_seconds_bucket",
+                "le"
+            ),
+            [
+                "0.0005", "0.001", "0.0025", "0.005", "0.01", "0.025", "0.05", "0.1", "0.25",
+                "0.5", "1.0", "2.5", "5.0", "+Inf"
+            ]
+        );
+        assert_eq!(
+            label_values(
+                &text,
+                "runewarp_server_visitor_duration_seconds_bucket",
+                "le"
+            ),
+            [
+                "0.01", "0.1", "1.0", "10.0", "60.0", "300.0", "1800.0", "3600.0", "21600.0",
+                "86400.0", "+Inf"
+            ]
+        );
+    }
+
+    #[test]
+    fn visitor_tracker_counts_each_stage_once() {
+        let metrics = ServerMetrics::for_test();
+        let rejected = metrics.visitor_accepted();
+        rejected.reject(VisitorRejectReason::ParseFailed);
+        let mut placed = metrics.visitor_accepted();
+        placed.placed(Duration::from_millis(2));
+        let text = metrics.render();
+        assert_eq!(
+            sample(&text, "runewarp_server_visitors_accepted_total"),
+            Some(2.0)
+        );
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitors_rejected_total{reason="parse_failed"}"#
+            ),
+            Some(1.0)
+        );
+        assert_eq!(
+            sample(&text, "runewarp_server_visitors_placed_total"),
+            Some(1.0)
+        );
+        assert_eq!(sample(&text, "runewarp_server_visitors_active"), Some(1.0));
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitor_stream_open_duration_seconds_bucket{le="0.0025"}"#
+            ),
+            Some(1.0)
+        );
+        placed.closed(VisitorCloseOutcome::Error);
+        let text = metrics.render();
+        assert_eq!(sample(&text, "runewarp_server_visitors_active"), Some(0.0));
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitors_closed_total{outcome="error"}"#
+            ),
+            Some(1.0)
+        );
+        assert_eq!(
+            sample(&text, "runewarp_server_visitor_duration_seconds_count"),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn dropped_visitor_tracker_counts_shutdown_or_cancellation() {
+        let metrics = ServerMetrics::for_test();
+        drop(metrics.visitor_accepted());
+        let mut placed = metrics.visitor_accepted();
+        placed.placed(Duration::ZERO);
+        drop(placed);
+        let challenge = metrics.visitor_accepted();
+        challenge.acme_challenge();
+        let text = metrics.render();
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitors_rejected_total{reason="shutdown"}"#
+            ),
+            Some(1.0)
+        );
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitors_closed_total{outcome="cancelled"}"#
+            ),
+            Some(1.0)
+        );
+        assert_eq!(sample(&text, "runewarp_server_visitors_active"), Some(0.0));
+        assert_eq!(
+            sample(&text, "runewarp_server_visitors_accepted_total"),
+            Some(3.0)
+        );
+    }
+
+    #[test]
+    fn visitor_byte_counters_feed_their_direction() {
+        let metrics = ServerMetrics::for_test();
+        metrics
+            .visitor_bytes(VisitorDirection::ToVisitor)
+            .inc_by(42);
+        assert_eq!(
+            sample(
+                &metrics.render(),
+                r#"runewarp_server_visitor_bytes_total{direction="to_visitor"}"#
+            ),
+            Some(42.0)
         );
     }
 

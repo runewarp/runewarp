@@ -65,7 +65,7 @@ fn certificate_process() {
         options.recovery_timeout = Duration::from_millis(std::env::var("RUNEWARP_TEST_RECOVERY_MILLIS").unwrap().parse().unwrap()); options.retry_interval = Duration::from_millis(20);
         let mut settings = load_server_config(&path.join("server.toml")).unwrap();
         settings.graceful_shutdown_duration = Duration::from_millis(50);
-        let server = ServerRuntime::prepare_listeners_with_acme(&settings, vec!["127.0.0.1:0".parse().unwrap()], vec!["127.0.0.1:0".parse().unwrap()], options).await.unwrap();
+        let server = ServerRuntime::prepare_listeners_with_acme(&settings, vec!["127.0.0.1:0".parse().unwrap()], vec!["127.0.0.1:0".parse().unwrap()], options, runewarp::ServerRuntimeGeneration::generate()).await.unwrap();
         let control = server.certificate_controller().unwrap(); let shutdown = server.shutdown();
         let public = server.public_addr().unwrap(); let tunnel = server.tunnel_addr().unwrap();
         let mut server = Some(tokio::spawn(server.run()));

@@ -69,9 +69,14 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     )
     .unwrap();
     let config = load_server_config(&directory.path().join("config.toml")).unwrap();
-    let runtime = ServerRuntime::prepare(&config, localhost(0), localhost(0))
-        .await
-        .unwrap();
+    let runtime = ServerRuntime::prepare(
+        &config,
+        localhost(0),
+        localhost(0),
+        runewarp::ServerRuntimeGeneration::generate(),
+    )
+    .await
+    .unwrap();
     assert_ne!(runtime.public_addr().unwrap().port(), 0);
     assert_ne!(runtime.tunnel_addr().unwrap().port(), 0);
 

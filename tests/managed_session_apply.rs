@@ -2120,6 +2120,160 @@ async fn applies_export_managed_apply_spans_with_role_revision_and_outcome() {
     fixture.shutdown().await;
 }
 
+/// Accept OTLP/HTTP exports and forward each request body.
+async fn collect_otlp(listener: TcpListener, bodies: tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    while let Ok((socket, _)) = listener.accept().await {
+        let bodies = bodies.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(socket);
+            loop {
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await.unwrap();
+                let _ = bodies.send(body);
+                reader
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_managed_apply_spans_export_with_the_runtime_generation_resource() {
+    // Installs the process-wide logger, so it runs alone in a child process.
+    const CHILD: &str = "RUNEWARP_TRACE_TEST_CHILD";
+    const NAME: &str = "server_managed_apply_spans_export_with_the_runtime_generation_resource";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let collector = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", collector.local_addr().unwrap());
+    let (body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
+    let collector = tokio::spawn(collect_otlp(collector, body_tx));
+    let generation = runewarp::ServerRuntimeGeneration::generate();
+    let trace_export = runewarp::TraceExportConfig::new(&endpoint, None).unwrap();
+    runewarp::runtime_log::install_with_trace_export(
+        runewarp::LogLevel::Error,
+        runewarp::LogFormat::Text,
+        Some(&trace_export),
+        runewarp::TraceRole::Server(generation),
+    )
+    .unwrap();
+
+    let material = generate_control_mtls_material("runewarp-server-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse("rev-1", "{\"server_addresses\":[]}")],
+    )
+    .await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Server,
+        session_material,
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut EmptyOnlyAdapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+    wait_for_event(
+        &mut event_rx,
+        ManagedSessionEvent::Applied {
+            revision: "rev-1".to_owned(),
+        },
+    )
+    .await;
+    // Let the state report land so stopping does not cut its request short.
+    wait_for_state_bodies(&fixture.metrics, 1).await;
+    let _ = stop_tx.send(());
+    runner.await.unwrap();
+    // Shutdown flushes the batch queue to the collector.
+    runewarp::runtime_log::shutdown_trace_export().await;
+
+    // Each collector body is one OTLP request. Find the resource that owns `managed.apply`.
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value;
+    use prost::Message as _;
+    let mut resources = Vec::new();
+    while let Ok(body) = body_rx.try_recv() {
+        let request = ExportTraceServiceRequest::decode(body.as_slice()).unwrap();
+        for resource_spans in request.resource_spans {
+            let owns_apply = resource_spans
+                .scope_spans
+                .iter()
+                .flat_map(|scope| &scope.spans)
+                .any(|span| span.name == "managed.apply");
+            if owns_apply {
+                resources.push(resource_spans.resource.unwrap_or_default());
+            }
+        }
+    }
+    assert!(!resources.is_empty(), "no managed.apply span exported");
+    for resource in resources {
+        let instance = resource
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == "service.instance.id")
+            .and_then(|attribute| attribute.value.as_ref()?.value.as_ref());
+        assert_eq!(
+            instance,
+            Some(&Value::StringValue(generation.to_string())),
+            "managed.apply resource lacks the Server generation"
+        );
+    }
+    collector.abort();
+    fixture.shutdown().await;
+}
+
 async fn wait_for_event(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<ManagedSessionEvent>,
     expected: ManagedSessionEvent,

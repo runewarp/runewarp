@@ -1,3 +1,4 @@
+use crate::ServerRuntimeGeneration;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -63,31 +64,51 @@ impl PreparedServer {
         public_bind_addrs: Vec<SocketAddr>,
         tunnel_bind_addrs: Vec<SocketAddr>,
     ) -> Result<Self, ServerStartupError> {
-        Self::bind_with_acme_options(config, public_bind_addrs, tunnel_bind_addrs, None).await
+        Self::bind_with_acme_options(
+            config,
+            public_bind_addrs,
+            tunnel_bind_addrs,
+            None,
+            ServerRuntimeGeneration::generate(),
+        )
+        .await
     }
 
-    /// Bind the actual Server listeners with caller-owned certificate and route policy.
+    /// Bind the actual Server listeners with caller-owned certificate and route policy, as
+    /// Server runtime `generation`. Mint a fresh generation for every start, and pass the same
+    /// value to trace export so `service.instance.id` matches.
     pub async fn bind_listeners_with_acme(
         config: &ServerConfig,
         public_bind_addrs: Vec<SocketAddr>,
         tunnel_bind_addrs: Vec<SocketAddr>,
         options: ServerAcmeOptions,
+        generation: ServerRuntimeGeneration,
     ) -> Result<Self, ServerStartupError> {
-        if !matches!(config.certificate, ServerCertificateConfig::Acme { .. }) {
-            return Err(ServerStartupError::Bind(io::Error::other(
-                "ACME controller requires Server ACME configuration",
-            )));
-        }
-        Self::bind_with_acme_options(config, public_bind_addrs, tunnel_bind_addrs, Some(options))
-            .await
+        Self::bind_with_acme_options(
+            config,
+            public_bind_addrs,
+            tunnel_bind_addrs,
+            Some(options),
+            generation,
+        )
+        .await
     }
 
-    async fn bind_with_acme_options(
+    /// Bind as Server runtime `generation`.
+    pub(crate) async fn bind_with_acme_options(
         config: &ServerConfig,
         public_bind_addrs: Vec<SocketAddr>,
         tunnel_bind_addrs: Vec<SocketAddr>,
         acme_options: Option<ServerAcmeOptions>,
+        generation: ServerRuntimeGeneration,
     ) -> Result<Self, ServerStartupError> {
+        if acme_options.is_some()
+            && !matches!(config.certificate, ServerCertificateConfig::Acme { .. })
+        {
+            return Err(ServerStartupError::Bind(io::Error::other(
+                "ACME controller requires Server ACME configuration",
+            )));
+        }
         crate::config::validate_bind_addresses("server.public-bind-address", &public_bind_addrs)
             .and_then(|()| {
                 crate::config::validate_bind_addresses(
@@ -182,6 +203,7 @@ impl PreparedServer {
             config.visitor_proxy_protocol,
             config.visitor_proxy_trusted_networks.clone(),
             acme_runtime.clone(),
+            generation,
         )
         .await
         .map_err(ServerStartupError::Bind)?;

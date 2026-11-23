@@ -2239,23 +2239,37 @@ async fn server_managed_apply_spans_export_with_the_runtime_generation_resource(
     // Shutdown flushes the batch queue to the collector.
     runewarp::runtime_log::shutdown_trace_export().await;
 
-    let mut exported = Vec::new();
+    // Each collector body is one OTLP request. Find the resource that owns `managed.apply`.
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value;
+    use prost::Message as _;
+    let mut resources = Vec::new();
     while let Ok(body) = body_rx.try_recv() {
-        exported.extend(body);
+        let request = ExportTraceServiceRequest::decode(body.as_slice()).unwrap();
+        for resource_spans in request.resource_spans {
+            let owns_apply = resource_spans
+                .scope_spans
+                .iter()
+                .flat_map(|scope| &scope.spans)
+                .any(|span| span.name == "managed.apply");
+            if owns_apply {
+                resources.push(resource_spans.resource.unwrap_or_default());
+            }
+        }
     }
-    let contains = |needle: &[u8]| {
-        exported
-            .windows(needle.len())
-            .any(|window| window == needle)
-    };
-    assert!(contains(b"managed.apply"), "no managed.apply span exported");
-    // The protobuf `KeyValue { key: "service.instance.id", value: AnyValue { string_value } }`:
-    // field 1 (key, 19 bytes), field 2 (AnyValue, 38 bytes) holding field 1 (the 36-byte UUID).
-    let mut instance = vec![0x0a, 19];
-    instance.extend_from_slice(b"service.instance.id");
-    instance.extend_from_slice(&[0x12, 38, 0x0a, 36]);
-    instance.extend_from_slice(generation.to_string().as_bytes());
-    assert!(contains(&instance), "resource lacks the Server generation");
+    assert!(!resources.is_empty(), "no managed.apply span exported");
+    for resource in resources {
+        let instance = resource
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == "service.instance.id")
+            .and_then(|attribute| attribute.value.as_ref()?.value.as_ref());
+        assert_eq!(
+            instance,
+            Some(&Value::StringValue(generation.to_string())),
+            "managed.apply resource lacks the Server generation"
+        );
+    }
     collector.abort();
     fixture.shutdown().await;
 }

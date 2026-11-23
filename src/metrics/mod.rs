@@ -6,6 +6,7 @@
 //! code-enumerated values only, so the series count is fixed per role. See `docs/metrics.md`.
 
 mod client;
+mod counted_io;
 mod endpoint;
 mod server;
 
@@ -20,11 +21,15 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::{Registry, Unit};
 
-pub(crate) use self::client::{ClientMetrics, ClientTunnelAttemptOutcome, CreditGauges};
+pub(crate) use self::client::{
+    BackendDirection, ClientMetrics, ClientTunnelAttemptOutcome, ClientVisitor,
+    ClientVisitorRejectReason, CreditGauges,
+};
+pub(crate) use self::counted_io::CountedIo;
 pub(crate) use self::endpoint::MetricsEndpoint;
 pub(crate) use self::server::{
     AcmeMetricEvent, AdmissionInUse, ServerAdmissionGauges, ServerMetrics, TunnelCloseReason,
-    TunnelRejectReason,
+    TunnelRejectReason, VisitorCloseOutcome, VisitorDirection, VisitorRejectReason, VisitorTracker,
 };
 
 /// Crate version plus the short build commit for `-dev` builds, as `--version` prints it.
@@ -58,6 +63,11 @@ impl<L: LabelValue> Default for LabelledCounter<L> {
 impl<L: LabelValue> LabelledCounter<L> {
     pub(crate) fn inc(&self, label: L) {
         self.counters[label.index()].inc();
+    }
+
+    /// A handle on one label's counter, for hot paths that add without a lookup.
+    pub(crate) fn get(&self, label: L) -> Counter {
+        self.counters[label.index()].clone()
     }
 
     fn encode(&self, encoder: &mut DescriptorEncoder<'_>, name: &str, help: &str) -> fmt::Result {

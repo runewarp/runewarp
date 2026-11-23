@@ -26,7 +26,19 @@ use super::readiness::ReadinessGate;
 pub(crate) enum TunnelRouteOutcome {
     Unauthorized,
     NoActiveTunnelConnection,
+    /// Shutdown or drain sealed new Visitor placement.
+    ShuttingDown,
     Connected(VisitorRoute),
+}
+
+/// Why a routed Visitor could not register as active work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VisitorWorkRejection {
+    /// Shutdown or drain sealed new Visitor placement after routing.
+    ShuttingDown,
+    /// An Authorization replacement after routing no longer maps the hostname to this
+    /// connection's Tunnel.
+    Unauthorized,
 }
 
 pub(crate) enum TunnelRegistrationOutcome {
@@ -158,6 +170,9 @@ pub(crate) struct TunnelRegistry {
     tunnel_connection_admission: TunnelConnectionAdmission,
     readiness: Arc<StdRwLock<Option<ReadinessGate>>>,
     first_apply_completed: Arc<AtomicBool>,
+    /// Set once shutdown starts closing every Tunnel connection, so Visitors cut by that close
+    /// count as cancelled rather than as errors.
+    closing_all: Arc<AtomicBool>,
     metrics: ServerMetrics,
 }
 
@@ -231,6 +246,7 @@ impl TunnelRegistry {
             tunnel_connection_admission,
             readiness: Arc::new(StdRwLock::new(None)),
             first_apply_completed: Arc::new(AtomicBool::new(false)),
+            closing_all: Arc::new(AtomicBool::new(false)),
             metrics: ServerMetrics::for_test(),
         })
     }
@@ -302,11 +318,11 @@ impl TunnelRegistry {
             tunnel_connection_admission,
             readiness: Arc::new(StdRwLock::new(None)),
             first_apply_completed: Arc::new(AtomicBool::new(false)),
+            closing_all: Arc::new(AtomicBool::new(false)),
             metrics,
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn metrics(&self) -> ServerMetrics {
         self.metrics.clone()
     }
@@ -448,7 +464,7 @@ impl TunnelRegistry {
         public_hostname: &PublicHostname,
     ) -> TunnelRouteOutcome {
         let Some(admission) = self.begin_active_visitor_admission() else {
-            return TunnelRouteOutcome::NoActiveTunnelConnection;
+            return TunnelRouteOutcome::ShuttingDown;
         };
         // Lock pools before reading authorization so the index→pool view stays
         // coherent with replace_authorization's write-locked swap+realign.
@@ -505,12 +521,18 @@ impl TunnelRegistry {
     }
 
     pub(crate) async fn close_all(&self, reason: &'static [u8]) -> usize {
+        self.closing_all.store(true, Ordering::SeqCst);
         let pools = self.tunnel_pools.read().await.clone();
         let mut closed = 0;
         for pool in pools.iter() {
             closed += pool.close_all_connections(reason).await;
         }
         closed
+    }
+
+    /// Whether shutdown has started closing every Tunnel connection.
+    pub(crate) fn is_closing_all(&self) -> bool {
+        self.closing_all.load(Ordering::SeqCst)
     }
 
     pub(crate) async fn shutdown_connections(&self, deadline: std::time::Duration) {
@@ -529,7 +551,7 @@ impl TunnelRegistry {
         public_hostname: &PublicHostname,
         route: VisitorRoute,
         active_stream_permit: OwnedSemaphorePermit,
-    ) -> Option<ActiveVisitorWork> {
+    ) -> Result<ActiveVisitorWork, VisitorWorkRejection> {
         let VisitorRoute {
             connection,
             authorization,
@@ -554,11 +576,16 @@ impl TunnelRegistry {
                 _ => false,
             };
         if inner.sealed || !remains_current_and_authorized {
+            let rejection = if inner.sealed {
+                VisitorWorkRejection::ShuttingDown
+            } else {
+                VisitorWorkRejection::Unauthorized
+            };
             drop(inner);
             self.visitor_work.quiescent.notify_waiters();
-            return None;
+            return Err(rejection);
         }
-        Some(self.register_active_visitor_work_locked(
+        Ok(self.register_active_visitor_work_locked(
             &mut inner,
             public_hostname.clone(),
             connection.member_id(),
@@ -1031,7 +1058,8 @@ mod tests {
         assert!(
             registry
                 .register_active_visitor_work(&hostname, old_route, permit)
-                .is_none(),
+                .err()
+                == Some(super::VisitorWorkRejection::Unauthorized),
             "registration after commit must reject a route from the prior snapshot"
         );
         assert_eq!(registry.active_stream_count(), 0);
@@ -1083,7 +1111,8 @@ mod tests {
         assert!(
             registry
                 .register_active_visitor_work(&hostname, route, permit)
-                .is_none(),
+                .err()
+                == Some(super::VisitorWorkRejection::ShuttingDown),
             "registration after shutdown seals admission must fail"
         );
         timeout(Duration::from_millis(100), waiter)
@@ -1203,7 +1232,7 @@ mod tests {
             registry
                 .route_tunnel_connection(&public_hostname("app.example.test"))
                 .await,
-            TunnelRouteOutcome::NoActiveTunnelConnection
+            TunnelRouteOutcome::ShuttingDown
         ));
         Ok(())
     }

@@ -228,11 +228,6 @@ impl ServerCertificateController {
         let _ = self.inner.metrics.set(metrics);
     }
 
-    /// A TLS-ALPN-01 challenge connection reached this Server.
-    pub(crate) fn record_challenge_handled(&self) {
-        self.record(crate::metrics::AcmeMetricEvent::ChallengeHandled);
-    }
-
     fn record(&self, event: crate::metrics::AcmeMetricEvent) {
         if let Some(metrics) = self.inner.metrics.get() {
             metrics.acme_event(event);

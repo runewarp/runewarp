@@ -512,3 +512,15 @@ Recorded for [#295](https://github.com/runewarp/runewarp/issues/295) on a local 
 | Subcapacity TTFB p99 ms | 4.576, 2.765, 2.795 | 3.030, 2.992, 5.252 | +8.4% |
 
 The budget is at most 2% throughput loss and 5% p99 stream-open regression. Throughput is within budget. The p99 medians move by less than the run-to-run spread within each side (2.765–4.576 ms on the parent), so these runs show no regression they can attribute to metrics, but they are too noisy to prove the 5% bound. TTFB includes stream open plus forwarding. Runs under concurrent scrapes were not captured.
+
+## Visitor metrics overhead under concurrent scrapes
+
+Recorded for [#296](https://github.com/runewarp/runewarp/issues/296) on a local macOS arm64 VM. Eight alternating rounds of `--scenarios subcapacity throughput --cooldown-seconds 5 --scrape-interval-ms 100` compared the parent commit `e596ca5` (with only the updated harness copied in) with the Visitor metrics branch. Every Server and Client metrics endpoint was scraped every 100 ms throughout each run. Rounds 4 to 8 also required at least one successful scrape of every endpoint during load (47 to 76 per endpoint) and zero failed scrapes. Every run validated all 256 Visitors with no failures. Rounds 5 and 6 overlapped local test runs on the same machine.
+
+| Measure | Parent runs | Branch runs | Median change |
+| --- | --- | --- | ---: |
+| Throughput transfer seconds (256 MiB) | 2.882, 2.822, 2.873, 2.703, 2.967, 2.419, 2.590, 2.649 | 2.655, 2.943, 2.800, 2.689, 2.559, 2.631, 3.132, 2.795 | −0.8% time (faster) |
+| Throughput TTFB p99 ms | 3.785, 2.992, 5.558, 5.563, 2.817, 2.914, 3.055, 4.717 | 2.658, 5.077, 4.578, 5.211, 5.560, 8.645, 2.865, 4.515 | +41% |
+| Subcapacity TTFB p99 ms | 2.893, 3.124, 5.400, 6.124, 5.285, 4.924, 4.545, 6.214 | 5.767, 3.179, 5.688, 5.318, 2.959, 2.957, 2.943, 20.800 | −17% |
+
+Throughput is within the 2% budget. The p99 medians move in opposite directions across the two scenarios, and each side spans roughly 2.8 to 8.6 ms run to run, so these runs show no regression attributable to Visitor metrics but are too noisy to prove the 5% bound. TTFB includes stream open plus forwarding. The parent has no stream-open histogram, so TTFB is the only latency both revisions report.

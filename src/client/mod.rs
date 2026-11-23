@@ -217,7 +217,8 @@ impl Client {
             services,
             termination_tls_configs,
             stream_budget.limits(),
-        );
+        )
+        .with_metrics(stream_budget.metrics().clone());
 
         Ok(Self {
             endpoint,

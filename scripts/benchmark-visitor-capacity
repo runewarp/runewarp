@@ -18,6 +18,7 @@ import subprocess
 import threading
 import time
 import sys
+import urllib.request
 import psutil
 sys.dont_write_bytecode = True
 from lib.visitor_capacity_metadata import portable_invocation, rust_source_sha256, verify_binary_provenance
@@ -25,6 +26,8 @@ from lib.visitor_capacity_metadata import portable_invocation, rust_source_sha25
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--output', type=Path, required=True)
 parser.add_argument('--cooldown-seconds', type=float, default=32)
+parser.add_argument('--scrape-interval-ms', type=float, default=0,
+                    help='scrape every Server and Client metrics endpoint at this interval during load; 0 disables metrics listeners')
 parser.add_argument('--scenarios', nargs='+', choices=['subcapacity', 'hold-one', 'burst', 'hold-two', 'throughput', 'slow-reader'], default=['subcapacity', 'hold-one', 'burst', 'hold-two', 'throughput', 'slow-reader'])
 args = parser.parse_args()
 args.output.mkdir(parents=True, exist_ok=False)
@@ -114,8 +117,13 @@ def scenario(name, count, batch, connections, slow=False, transfer=False):
     sampler = threading.Thread(target=sample)
     sampler.start()
     error = None
+    scraper = None
+    scrape_done = threading.Event()
+    loading = threading.Event()
+    scrapes = {}
     try:
-        launch('setup').wait(timeout=30)
+        scraping = args.scrape_interval_ms > 0
+        launch('setup', **({'RUNEWARP_BENCH_METRICS': '1'} if scraping else {})).wait(timeout=30)
         backend = launch('backend')
         backend_address = wait_json(directory / 'backend.ready')['address']
         servers = []
@@ -123,8 +131,9 @@ def scenario(name, count, batch, connections, slow=False, transfer=False):
             launch('server', str(i))
             servers.append(wait_json(directory / f'server-{i}.ready'))
         addresses = ', '.join(json.dumps('localhost:' + s['tunnel'].split(':')[-1]) for s in servers)
+        metrics_line = 'metrics-bind-address = "127.0.0.1:0"\n' if scraping else ''
         (directory / 'client.toml').write_text(f'''[client]
-server-addresses = [{addresses}]
+{metrics_line}server-addresses = [{addresses}]
 server-trust = "ca-file"
 server-ca-file = "cert/server-ca.crt"
 identity-dir = "identity"
@@ -135,9 +144,33 @@ backend-address = "{backend_address}"
         wait_json(directory / 'client.counts.json', lambda value: value['established_tunnel_connections'] == connections)
         # Session completion is observed directly. Allow the independent idle-credit task to fill.
         time.sleep(0.25)
+        if scraping:
+            targets = [s['metrics'] for s in servers] + [wait_json(directory / 'client.ready')['metrics']]
+            scrapes.update(interval_ms=args.scrape_interval_ms, ok=0, failed=0,
+                           ok_during_load={target: 0 for target in targets})
+
+            def scrape_loop():
+                while not scrape_done.is_set():
+                    for target in targets:
+                        try:
+                            with urllib.request.urlopen(f'http://{target}/metrics', timeout=5) as response:
+                                response.read()
+                            scrapes['ok'] += 1
+                            if loading.is_set():
+                                scrapes['ok_during_load'][target] += 1
+                        except OSError:
+                            scrapes['failed'] += 1
+                    scrape_done.wait(args.scrape_interval_ms / 1000)
+
+            scraper = threading.Thread(target=scrape_loop)
+            scraper.start()
+        loading.set()
         load = launch('load', RUNEWARP_BENCH_COUNT=str(count), RUNEWARP_BENCH_BATCH=str(batch),
                       RUNEWARP_BENCH_TARGETS=','.join(s['public'] for s in servers), RUNEWARP_BENCH_SLOW=str(int(slow)), RUNEWARP_BENCH_TRANSFER=str(int(transfer)))
         load.wait(timeout=90)
+        loading.clear()
+        if scraping and (scrapes['failed'] or not all(scrapes['ok_during_load'].values())):
+            raise RuntimeError(f'concurrent scrapes did not cover the load: {scrapes}')
         if load.returncode:
             raise RuntimeError('Visitor load process failed')
         wait_json(directory / 'load.result.json')
@@ -145,6 +178,9 @@ backend-address = "{backend_address}"
         error = repr(failure)
         raise
     finally:
+        scrape_done.set()
+        if scraper is not None:
+            scraper.join(timeout=10)
         (directory / 'stop').touch()
         deadline = time.monotonic() + 10
         for label, child, log in children:
@@ -168,6 +204,8 @@ backend-address = "{backend_address}"
         (directory / 'process-metrics.json').write_text(json.dumps({'processes': samples, 'error': error}, indent=2))
     result = json.loads((directory / 'load.result.json').read_text())
     result['role_counts'] = {p.name: json.loads(p.read_text()) for p in directory.glob('*.counts.json')}
+    if scrapes:
+        result['scrapes'] = scrapes
     (directory / 'summary.json').write_text(json.dumps(result, indent=2))
     print(f'Results: {name}', flush=True)
     print(f"Established: {result['established_and_byte_validated']}/{result['attempted']}; working after hold: {result['still_working_after_hold']}", flush=True)

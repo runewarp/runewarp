@@ -283,6 +283,7 @@ impl TunnelConnectionStreamHandler {
                 return Err(error);
             }
         };
+        trace.finish("connected");
         let backend_bytes = self.backend_bytes();
         let mut backend_stream =
             CountedIo::new(backend_stream, backend_bytes.read, backend_bytes.written);
@@ -293,7 +294,6 @@ impl TunnelConnectionStreamHandler {
                 backend_address: service.backend_address.as_str(),
             },
         );
-        trace.finish("connected");
 
         if service.proxy_protocol.is_some() {
             write_backend_with_timeout(

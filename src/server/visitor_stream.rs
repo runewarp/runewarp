@@ -238,6 +238,7 @@ impl VisitorIntake {
                 )),
             },
             _ = shutdown => {
+                drop(intake_span);
                 visitor.reject(VisitorRejectReason::Shutdown);
                 trace.finish("shutdown");
                 return;
@@ -281,12 +282,12 @@ impl VisitorIntake {
 
         if public_hostname.as_str() == self.server_hostname.as_str() {
             if serves_acme_tls_alpn_01 {
-                trace.finish("acme_challenge");
                 self.serve_acme_tls_alpn_01(
                     visitor_stream,
                     public_hostname,
                     buffered_bytes,
                     visitor,
+                    trace,
                 )
                 .await;
             } else {
@@ -365,9 +366,11 @@ impl VisitorIntake {
         server_hostname: PublicHostname,
         buffered_bytes: Vec<u8>,
         visitor: VisitorTracker,
+        trace: TracedStage,
     ) {
         if let Some(public_tls_config) = self.public_tls_config.clone() {
             visitor.acme_challenge();
+            trace.finish("acme_challenge");
             self.tunnel_registry
                 .metrics()
                 .acme_event(AcmeMetricEvent::ChallengeHandled);
@@ -390,6 +393,7 @@ impl VisitorIntake {
                 ServerRouteOutcome::MissingAcmeTlsConfig,
             );
             visitor.reject(VisitorRejectReason::UnknownServerHostname);
+            trace.finish("rejected");
         }
     }
 
@@ -425,8 +429,8 @@ impl VisitorIntake {
             .connection()
             .open_tunnel_stream(self.admission_policy.limits().stream_open_timeout)
             .await;
-        drop(stream_open_span);
         let stream_open = open_started.elapsed();
+        drop(stream_open_span);
         let stream = match open_result {
             Ok(stream) => stream,
             Err(_) => {
@@ -901,6 +905,40 @@ mod tests {
             Some("rejected")
         );
         assert!(captured.span("stream_open").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn visitor_span_records_rejection_when_no_acme_config_serves_the_challenge()
+    -> io::Result<()> {
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "visitor_span_records_rejection_when_no_acme_config_serves_the_challenge",
+        ) {
+            return Ok(());
+        }
+        let captured = crate::trace_export::test_support::CapturedSpans::new(1.0);
+        let _trace = captured.set_default();
+        // The fixture has no public TLS config, as with a manual Server certificate.
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        let client_hello = build_client_hello_with_alpn(
+            ServerName::try_from("tunnel.example.test").map_err(io::Error::other)?,
+            vec![ACME_TLS_ALPN.to_vec()],
+        )?;
+        assert_drop_without_opening_a_tunnel_stream(
+            intake,
+            client_hello,
+            Some(tunnel_connection),
+            VisitorRejectReason::UnknownServerHostname,
+        )
+        .await?;
+
+        let root = wait_for_span(&captured, "visitor").await?;
+        assert_eq!(
+            crate::trace_export::test_support::attribute(&root, crate::trace_export::OUTCOME)
+                .as_deref(),
+            Some("rejected")
+        );
         Ok(())
     }
 
@@ -2463,15 +2501,23 @@ mod tests {
     }
 
     fn build_client_hello_for_server_name(server_name: ServerName<'static>) -> io::Result<Vec<u8>> {
+        build_client_hello_with_alpn(server_name, Vec::new())
+    }
+
+    fn build_client_hello_with_alpn(
+        server_name: ServerName<'static>,
+        alpn_protocols: Vec<Vec<u8>>,
+    ) -> io::Result<Vec<u8>> {
         let trusted_cert =
             generate_simple_self_signed(vec!["localhost".to_owned()]).map_err(io::Error::other)?;
         let cert_der = CertificateDer::from(trusted_cert.cert);
         let mut roots = RootCertStore::empty();
         roots.add(cert_der).map_err(io::Error::other)?;
 
-        let config = rustls::ClientConfig::builder()
+        let mut config = rustls::ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
+        config.alpn_protocols = alpn_protocols;
         let mut connection =
             ClientConnection::new(Arc::new(config), server_name).map_err(io::Error::other)?;
         let mut bytes = Vec::new();

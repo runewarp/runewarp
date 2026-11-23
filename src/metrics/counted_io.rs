@@ -7,21 +7,22 @@ use std::task::{Context, Poll};
 use prometheus_client::metrics::counter::Counter;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-/// Counts bytes the inner stream reports as read or written.
+/// Counts bytes the inner stream reports as read or written. A direction without a counter
+/// costs nothing.
 ///
 /// A write adds only the length the inner writer accepted, so partial writes count exactly what
 /// reached the destination. Each count lands as soon as the call returns, so bytes moved before
 /// a cancellation or a failed later write stay counted.
 pub(crate) struct CountedIo<S> {
     inner: S,
-    read: Counter,
-    written: Counter,
+    read: Option<Counter>,
+    written: Option<Counter>,
     /// Leading written bytes left uncounted, such as framing ahead of Visitor bytes.
     uncounted_prefix: usize,
 }
 
 impl<S> CountedIo<S> {
-    pub(crate) fn new(inner: S, read: Counter, written: Counter) -> Self {
+    pub(crate) fn new(inner: S, read: Option<Counter>, written: Option<Counter>) -> Self {
         Self {
             inner,
             read,
@@ -32,7 +33,7 @@ impl<S> CountedIo<S> {
 
     /// Count only written bytes.
     pub(crate) fn writer(inner: S, written: Counter) -> Self {
-        Self::new(inner, Counter::default(), written)
+        Self::new(inner, None, Some(written))
     }
 
     /// Leave the first `len` written bytes uncounted.
@@ -44,8 +45,10 @@ impl<S> CountedIo<S> {
     fn count_written(&mut self, len: usize) {
         let skipped = len.min(self.uncounted_prefix);
         self.uncounted_prefix -= skipped;
-        if len > skipped {
-            self.written.inc_by((len - skipped) as u64);
+        if len > skipped
+            && let Some(written) = &self.written
+        {
+            written.inc_by((len - skipped) as u64);
         }
     }
 }
@@ -58,10 +61,10 @@ impl<S: AsyncRead + Unpin> AsyncRead for CountedIo<S> {
     ) -> Poll<io::Result<()>> {
         let before = buf.filled().len();
         let result = Pin::new(&mut self.inner).poll_read(cx, buf);
-        if let Poll::Ready(Ok(())) = result {
+        if let (Poll::Ready(Ok(())), Some(counter)) = (&result, &self.read) {
             let read = buf.filled().len() - before;
             if read > 0 {
-                self.read.inc_by(read as u64);
+                counter.inc_by(read as u64);
             }
         }
         result
@@ -182,7 +185,7 @@ mod tests {
     async fn reads_count_filled_bytes_and_eof_counts_nothing() {
         let read = Counter::default();
         let (mut peer, inner) = duplex(64);
-        let mut reader = CountedIo::new(inner, read.clone(), Counter::default());
+        let mut reader = CountedIo::new(inner, Some(read.clone()), None);
         peer.write_all(b"response").await.expect("peer write");
         drop(peer);
         let mut received = Vec::new();

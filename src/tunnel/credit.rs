@@ -107,10 +107,9 @@ impl VisitorCredits {
     /// finished QUIC stream while its handler retains capacity; try the budget once in that case.
     pub(super) fn assign(self: &Arc<Self>) -> Option<Arc<dyn StreamResource>> {
         let mut state = self.state();
+        // Only the session task assigns, and it closes credits after its intake loop ends,
+        // so no Visitor stream reaches a closed controller.
         if state.closed {
-            drop(state);
-            self.gauges
-                .reject_unassigned(ClientVisitorRejectReason::NoCredit);
             return None;
         }
         let permit = if let Some(permit) = state.idle.pop() {

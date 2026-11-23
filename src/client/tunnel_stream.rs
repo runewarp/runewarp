@@ -113,7 +113,7 @@ impl TunnelConnectionStreamHandler {
             .unwrap_or_default();
         initial_bytes.extend_from_slice(&buffered_bytes);
         if let Err(error) = write_backend_with_timeout(
-            &mut CountedIo::writer(&mut backend_stream, backend_bytes.written.clone()),
+            &mut CountedIo::new(&mut backend_stream, None, backend_bytes.written.clone()),
             &initial_bytes,
             self.stream_limits.initial_backend_write_timeout,
         )
@@ -154,8 +154,8 @@ impl TunnelConnectionStreamHandler {
     /// Counters at the backend socket: written bytes go to the backend, read bytes come from it.
     fn backend_bytes(&self) -> TcpByteCounters {
         TcpByteCounters {
-            read: self.metrics.backend_bytes(BackendDirection::FromBackend),
-            written: self.metrics.backend_bytes(BackendDirection::ToBackend),
+            read: Some(self.metrics.backend_bytes(BackendDirection::FromBackend)),
+            written: Some(self.metrics.backend_bytes(BackendDirection::ToBackend)),
         }
     }
 

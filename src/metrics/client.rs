@@ -28,7 +28,6 @@ label_enum!(ClientVisitorRejectReason, "reason", {
     IntakeTimeout => "intake_timeout",
     ParseFailed => "parse_failed",
     Saturated => "saturated",
-    NoCredit => "no_credit",
 });
 
 label_enum!(BackendDirection, "direction", {
@@ -271,13 +270,7 @@ mod tests {
         let text = ClientMetrics::new(false).render();
         assert_eq!(
             label_values(&text, "runewarp_client_visitors_rejected_total", "reason"),
-            [
-                "no_service",
-                "intake_timeout",
-                "parse_failed",
-                "saturated",
-                "no_credit"
-            ]
+            ["no_service", "intake_timeout", "parse_failed", "saturated"]
         );
         assert_eq!(
             label_values(&text, "runewarp_client_backend_bytes_total", "direction"),
@@ -329,23 +322,15 @@ mod tests {
         let metrics = ClientMetrics::new(false);
         let credit = metrics.credit_gauges();
         credit.reject_unassigned(ClientVisitorRejectReason::Saturated);
-        credit.reject_unassigned(ClientVisitorRejectReason::NoCredit);
         let text = metrics.render();
         assert_eq!(
             sample(&text, "runewarp_client_visitors_handled_total"),
-            Some(2.0)
-        );
-        assert_eq!(
-            sample(
-                &text,
-                r#"runewarp_client_visitors_rejected_total{reason="saturated"}"#
-            ),
             Some(1.0)
         );
         assert_eq!(
             sample(
                 &text,
-                r#"runewarp_client_visitors_rejected_total{reason="no_credit"}"#
+                r#"runewarp_client_visitors_rejected_total{reason="saturated"}"#
             ),
             Some(1.0)
         );

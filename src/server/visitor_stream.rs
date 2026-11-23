@@ -16,7 +16,8 @@ use crate::acme::ACME_TLS_ALPN;
 use crate::client_hello::ParsedClientHello;
 use crate::client_hello::read_client_hello;
 use crate::metrics::{
-    CountedIo, VisitorCloseOutcome, VisitorDirection, VisitorRejectReason, VisitorTracker,
+    AcmeMetricEvent, CountedIo, VisitorCloseOutcome, VisitorDirection, VisitorRejectReason,
+    VisitorTracker,
 };
 use crate::proxy::{TcpByteCounters, proxy_tcp_over_tunnel};
 use crate::proxy_protocol::read_proxy_v2;
@@ -333,9 +334,9 @@ impl VisitorIntake {
     ) {
         if let Some(public_tls_config) = self.public_tls_config.clone() {
             visitor.acme_challenge();
-            if let Some(certificate) = self.certificate.as_ref() {
-                certificate.record_challenge_handled();
-            }
+            self.tunnel_registry
+                .metrics()
+                .acme_event(AcmeMetricEvent::ChallengeHandled);
             runtime_log::acme(
                 AcmeRole::Server {
                     server_hostname: server_hostname.as_str(),
@@ -442,9 +443,10 @@ impl VisitorIntake {
                 let send =
                     CountedIo::writer(send, metrics.visitor_bytes(VisitorDirection::FromVisitor))
                         .skipping_written_prefix(framing_len);
+                // `from_visitor` is counted at the Tunnel writer, not the Visitor socket.
                 let tcp_bytes = TcpByteCounters {
-                    read: Default::default(),
-                    written: metrics.visitor_bytes(VisitorDirection::ToVisitor),
+                    read: None,
+                    written: Some(metrics.visitor_bytes(VisitorDirection::ToVisitor)),
                 };
                 proxy_tcp_over_tunnel(visitor_stream, initial_bytes, send, recv, tcp_bytes).await
             })
@@ -1327,6 +1329,13 @@ mod tests {
             sample(&text, "runewarp_server_visitors_placed_total"),
             Some(0.0)
         );
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_acme_events_total{event="challenge_handled"}"#
+            ),
+            Some(1.0)
+        );
         for reason in VisitorRejectReason::ALL {
             let series = format!(
                 r#"runewarp_server_visitors_rejected_total{{reason="{}"}}"#,
@@ -1772,6 +1781,52 @@ mod tests {
                 "runewarp_server_visitor_stream_open_duration_seconds_count"
             ),
             Some(1.0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_tunnel_stream_closes_the_placed_visitor_with_an_error() -> io::Result<()> {
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        let metrics = intake.tunnel_registry.metrics();
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let client_hello = build_client_hello("app.example.test")?;
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor.write_all(&client_hello).await?;
+
+        let (tunnel_send, mut tunnel_recv) =
+            timeout(Duration::from_secs(1), tunnel_connection.accept_stream())
+                .await
+                .map_err(|_| timeout_error("intake should open a tunnel stream"))?
+                .map_err(io::Error::other)?;
+        crate::proxy_protocol::read_proxy_v2(&mut tunnel_recv)
+            .await
+            .map_err(io::Error::other)?;
+        eventually_metric(&metrics, "runewarp_server_visitors_active", 1.0).await?;
+        // Dropping both halves without FIN resets the stream in both directions.
+        drop(tunnel_send);
+        drop(tunnel_recv);
+        visitor.shutdown().await?;
+        let _ = timeout(Duration::from_secs(1), visitor.read(&mut [0_u8; 1])).await;
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+
+        let text = eventually_metric(
+            &metrics,
+            r#"runewarp_server_visitors_closed_total{outcome="error"}"#,
+            1.0,
+        )
+        .await?;
+        assert_eq!(sample(&text, "runewarp_server_visitors_active"), Some(0.0));
+        assert_eq!(
+            sample(
+                &text,
+                r#"runewarp_server_visitors_closed_total{outcome="ok"}"#
+            ),
+            Some(0.0)
         );
         Ok(())
     }

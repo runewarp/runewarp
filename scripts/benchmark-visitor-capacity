@@ -119,6 +119,7 @@ def scenario(name, count, batch, connections, slow=False, transfer=False):
     error = None
     scraper = None
     scrape_done = threading.Event()
+    loading = threading.Event()
     scrapes = {}
     try:
         scraping = args.scrape_interval_ms > 0
@@ -145,7 +146,8 @@ backend-address = "{backend_address}"
         time.sleep(0.25)
         if scraping:
             targets = [s['metrics'] for s in servers] + [wait_json(directory / 'client.ready')['metrics']]
-            scrapes.update(interval_ms=args.scrape_interval_ms, ok=0, failed=0)
+            scrapes.update(interval_ms=args.scrape_interval_ms, ok=0, failed=0,
+                           ok_during_load={target: 0 for target in targets})
 
             def scrape_loop():
                 while not scrape_done.is_set():
@@ -154,15 +156,21 @@ backend-address = "{backend_address}"
                             with urllib.request.urlopen(f'http://{target}/metrics', timeout=5) as response:
                                 response.read()
                             scrapes['ok'] += 1
+                            if loading.is_set():
+                                scrapes['ok_during_load'][target] += 1
                         except OSError:
                             scrapes['failed'] += 1
                     scrape_done.wait(args.scrape_interval_ms / 1000)
 
             scraper = threading.Thread(target=scrape_loop)
             scraper.start()
+        loading.set()
         load = launch('load', RUNEWARP_BENCH_COUNT=str(count), RUNEWARP_BENCH_BATCH=str(batch),
                       RUNEWARP_BENCH_TARGETS=','.join(s['public'] for s in servers), RUNEWARP_BENCH_SLOW=str(int(slow)), RUNEWARP_BENCH_TRANSFER=str(int(transfer)))
         load.wait(timeout=90)
+        loading.clear()
+        if scraping and (scrapes['failed'] or not all(scrapes['ok_during_load'].values())):
+            raise RuntimeError(f'concurrent scrapes did not cover the load: {scrapes}')
         if load.returncode:
             raise RuntimeError('Visitor load process failed')
         wait_json(directory / 'load.result.json')

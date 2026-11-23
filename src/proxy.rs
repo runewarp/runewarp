@@ -6,11 +6,11 @@ use tokio::net::TcpStream;
 
 use crate::metrics::CountedIo;
 
-/// Byte counters at the TCP socket of a proxied stream.
+/// Byte counters at the TCP socket of a proxied stream; `None` leaves a direction uncounted.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TcpByteCounters {
-    pub(crate) read: Counter,
-    pub(crate) written: Counter,
+    pub(crate) read: Option<Counter>,
+    pub(crate) written: Option<Counter>,
 }
 
 pub(crate) async fn proxy_tcp_over_tunnel<R, W>(
@@ -25,8 +25,8 @@ where
     W: AsyncWrite + Unpin,
 {
     let (tcp_reader, tcp_writer) = tcp_stream.into_split();
-    let mut tcp_reader = CountedIo::new(tcp_reader, tcp_bytes.read, Counter::default());
-    let mut tcp_writer = CountedIo::writer(tcp_writer, tcp_bytes.written);
+    let mut tcp_reader = CountedIo::new(tcp_reader, tcp_bytes.read, None);
+    let mut tcp_writer = CountedIo::new(tcp_writer, None, tcp_bytes.written);
     let (to_tunnel, to_tcp) = tokio::join!(
         async move {
             tunnel_send.write_all(&initial_bytes).await?;

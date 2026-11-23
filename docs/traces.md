@@ -29,7 +29,7 @@ Nothing leaves the process while `otlp-traces-endpoint` is unset. Any collector 
 
 ## Spans
 
-Every span has the `service.name` resource attribute `runewarp-server` or `runewarp-client`, and `service.version` matching `runewarp --version`.
+Every span has the `service.name` resource attribute `runewarp-server` or `runewarp-client`, and `service.version` matching `runewarp --version`. Every Server span also has the `service.instance.id` resource attribute set to the Server runtime generation, the same value as `service_instance_id` on the `target_info` metric, so spans from overlapping generations stay distinct during a rollout. Client spans have no `service.instance.id`.
 
 | Span | Role | Starts | Ends | Attributes |
 | --- | --- | --- | --- | --- |

@@ -148,7 +148,9 @@ impl InstalledLogger {
 /// Installs the process-wide runtime logger. The first install fixes `format`; later installs
 /// update only the level.
 pub fn install(level: LogLevel, format: LogFormat) -> Result<InstallOutcome, InstallError> {
-    install_with_trace_export(level, format, None, crate::TraceRole::Server)
+    // Without trace export the role and its generation are never used.
+    let role = crate::TraceRole::Server(crate::ServerRuntimeGeneration::generate());
+    install_with_trace_export(level, format, None, role)
 }
 
 /// Installs the process-wide runtime logger with optional OTLP span export for `role`. The first
@@ -1837,7 +1839,7 @@ mod tests {
         let config = TraceExportConfig::new(&endpoint, None).expect("config");
         let provider = crate::trace_export::otlp_provider(
             &config,
-            TraceRole::Server,
+            TraceRole::Server(crate::ServerRuntimeGeneration::generate()),
             runtime.handle().clone(),
         )
         .expect("provider");

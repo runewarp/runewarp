@@ -55,7 +55,13 @@ async fn configured_budget() -> Result<(), Box<dyn Error>> {
         .next()
         .ok_or("localhost has no address")?;
     let server_settings = crate::load_server_config(&directory.path().join("server.toml"))?;
-    let server = crate::ServerRuntime::prepare(&server_settings, address(0), tunnel_bind).await?;
+    let server = crate::ServerRuntime::prepare(
+        &server_settings,
+        address(0),
+        tunnel_bind,
+        crate::ServerRuntimeGeneration::generate(),
+    )
+    .await?;
     let public = server.public_addr()?;
     let port = server.tunnel_addr()?.port();
     let shutdown = server.shutdown();

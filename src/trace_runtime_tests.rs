@@ -14,7 +14,9 @@ async fn runtimes_export_handshake_connect_and_visitor_spans() -> Result<(), Box
     ) {
         return Ok(());
     }
-    let captured = CapturedSpans::new(1.0);
+    // The Server mints its generation before trace export starts, as `runewarp server` does.
+    let generation = crate::ServerRuntimeGeneration::generate();
+    let captured = CapturedSpans::with_role(1.0, crate::TraceRole::Server(generation));
     let _trace = captured.set_default();
     let directory = tempfile::tempdir()?;
     setup(directory.path())?;
@@ -42,7 +44,9 @@ async fn runtimes_export_handshake_connect_and_visitor_spans() -> Result<(), Box
         .next()
         .ok_or("localhost has no address")?;
     let server_settings = crate::load_server_config(&directory.path().join("server.toml"))?;
-    let server = crate::ServerRuntime::prepare(&server_settings, address(0), tunnel_bind).await?;
+    let server =
+        crate::ServerRuntime::prepare(&server_settings, address(0), tunnel_bind, generation)
+            .await?;
     let public = server.public_addr()?;
     let port = server.tunnel_addr()?.port();
     let shutdown = server.shutdown();
@@ -102,7 +106,21 @@ async fn runtimes_export_handshake_connect_and_visitor_spans() -> Result<(), Box
         .iter()
         .find(|span| span.name == "tunnel_connection.handshake")
         .ok_or("handshake span")?;
-    assert!(attribute(handshake, "runewarp.server_generation").is_some());
+    // The resource tags every exported span with the generation, children included.
+    assert_eq!(
+        attribute(handshake, "runewarp.server_generation"),
+        Some(generation.to_string())
+    );
+    assert_eq!(
+        captured.resource_attribute("service.instance.id"),
+        Some(generation.to_string())
+    );
+    for child in ["intake", "route", "stream_open"] {
+        assert!(
+            spans.iter().any(|span| span.name == child),
+            "missing {child} span"
+        );
+    }
     assert_safe_attributes(
         &spans,
         &[

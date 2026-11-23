@@ -126,6 +126,7 @@ client-identity = "{}"
         &settings,
         settings.public_bind_addresses.clone(),
         settings.tunnel_connection_bind_addresses.clone(),
+        runewarp::ServerRuntimeGeneration::generate(),
     )
     .await?;
     let public_addresses = runtime.public_addrs()?;
@@ -227,6 +228,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         &settings,
         settings.public_bind_addresses.clone(),
         settings.tunnel_connection_bind_addresses.clone(),
+        runewarp::ServerRuntimeGeneration::generate(),
     )
     .await?;
     let public_addresses = runtime.public_addrs()?;

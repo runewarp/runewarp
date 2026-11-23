@@ -2120,6 +2120,146 @@ async fn applies_export_managed_apply_spans_with_role_revision_and_outcome() {
     fixture.shutdown().await;
 }
 
+/// Accept OTLP/HTTP exports and forward each request body.
+async fn collect_otlp(listener: TcpListener, bodies: tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    while let Ok((socket, _)) = listener.accept().await {
+        let bodies = bodies.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(socket);
+            loop {
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await.unwrap();
+                let _ = bodies.send(body);
+                reader
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_managed_apply_spans_export_with_the_runtime_generation_resource() {
+    // Installs the process-wide logger, so it runs alone in a child process.
+    const CHILD: &str = "RUNEWARP_TRACE_TEST_CHILD";
+    const NAME: &str = "server_managed_apply_spans_export_with_the_runtime_generation_resource";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let collector = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", collector.local_addr().unwrap());
+    let (body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
+    let collector = tokio::spawn(collect_otlp(collector, body_tx));
+    let generation = runewarp::ServerRuntimeGeneration::generate();
+    let trace_export = runewarp::TraceExportConfig::new(&endpoint, None).unwrap();
+    runewarp::runtime_log::install_with_trace_export(
+        runewarp::LogLevel::Error,
+        runewarp::LogFormat::Text,
+        Some(&trace_export),
+        runewarp::TraceRole::Server(generation),
+    )
+    .unwrap();
+
+    let material = generate_control_mtls_material("runewarp-server-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse("rev-1", "{\"server_addresses\":[]}")],
+    )
+    .await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Server,
+        session_material,
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut EmptyOnlyAdapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+    wait_for_event(
+        &mut event_rx,
+        ManagedSessionEvent::Applied {
+            revision: "rev-1".to_owned(),
+        },
+    )
+    .await;
+    // Let the state report land so stopping does not cut its request short.
+    wait_for_state_bodies(&fixture.metrics, 1).await;
+    let _ = stop_tx.send(());
+    runner.await.unwrap();
+    // Shutdown flushes the batch queue to the collector.
+    runewarp::runtime_log::shutdown_trace_export().await;
+
+    let mut exported = Vec::new();
+    while let Ok(body) = body_rx.try_recv() {
+        exported.extend(body);
+    }
+    let contains = |needle: &[u8]| {
+        exported
+            .windows(needle.len())
+            .any(|window| window == needle)
+    };
+    assert!(contains(b"managed.apply"), "no managed.apply span exported");
+    // The protobuf `KeyValue { key: "service.instance.id", value: AnyValue { string_value } }`:
+    // field 1 (key, 19 bytes), field 2 (AnyValue, 38 bytes) holding field 1 (the 36-byte UUID).
+    let mut instance = vec![0x0a, 19];
+    instance.extend_from_slice(b"service.instance.id");
+    instance.extend_from_slice(&[0x12, 38, 0x0a, 36]);
+    instance.extend_from_slice(generation.to_string().as_bytes());
+    assert!(contains(&instance), "resource lacks the Server generation");
+    collector.abort();
+    fixture.shutdown().await;
+}
+
 async fn wait_for_event(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<ManagedSessionEvent>,
     expected: ManagedSessionEvent,

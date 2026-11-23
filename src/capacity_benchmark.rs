@@ -163,10 +163,13 @@ fn visitor_capacity_role() -> Result<(), Box<dyn Error>> {
                 setup(&directory)?;
             }
             "server" => {
-                install_logger(crate::TraceRole::Server)?;
+                let generation = crate::ServerRuntimeGeneration::generate();
+                install_logger(crate::TraceRole::Server(generation))?;
                 let id = std::env::var("RUNEWARP_BENCH_ID")?;
                 let config = crate::load_server_config(&directory.join("server.toml"))?;
-                let server = crate::ServerRuntime::prepare(&config, address(0), tunnel_bind).await?;
+                let server =
+                    crate::ServerRuntime::prepare(&config, address(0), tunnel_bind, generation)
+                        .await?;
                 write_json(&directory.join(format!("server-{id}.ready")), serde_json::json!({
                     "public": server.public_addr()?.to_string(), "tunnel": server.tunnel_addr()?.to_string(),
                     "metrics": server.metrics_addr().map(|address| address.to_string())

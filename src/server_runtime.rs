@@ -1,3 +1,4 @@
+use crate::ServerRuntimeGeneration;
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
@@ -24,13 +25,22 @@ pub struct ServerRuntime {
     mode: ServerRuntimeMode,
 }
 
+// The caller mints the process's `generation` so trace export can tag its spans before the
+// runtime starts. The runtime reports the same value to Clients, in metrics and in logs.
 impl ServerRuntime {
     pub async fn prepare(
         config: &ServerConfig,
         public_bind_addr: SocketAddr,
         tunnel_bind_addr: SocketAddr,
+        generation: ServerRuntimeGeneration,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::prepare_listeners(config, vec![public_bind_addr], vec![tunnel_bind_addr]).await
+        Self::prepare_listeners(
+            config,
+            vec![public_bind_addr],
+            vec![tunnel_bind_addr],
+            generation,
+        )
+        .await
     }
 
     /// Prepare all listeners as one Server runtime with shared admission and shutdown.
@@ -38,9 +48,16 @@ impl ServerRuntime {
         config: &ServerConfig,
         public_bind_addrs: Vec<SocketAddr>,
         tunnel_bind_addrs: Vec<SocketAddr>,
+        generation: ServerRuntimeGeneration,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::prepare_with_certificate_options(config, public_bind_addrs, tunnel_bind_addrs, None)
-            .await
+        Self::prepare_with_certificate_options(
+            config,
+            public_bind_addrs,
+            tunnel_bind_addrs,
+            None,
+            generation,
+        )
+        .await
     }
 
     /// Prepare the process runtime with an external consumed-route observer and explicit
@@ -50,12 +67,14 @@ impl ServerRuntime {
         public_bind_addrs: Vec<SocketAddr>,
         tunnel_bind_addrs: Vec<SocketAddr>,
         options: crate::server_certificate::ServerAcmeOptions,
+        generation: ServerRuntimeGeneration,
     ) -> Result<Self, Box<dyn Error>> {
         Self::prepare_with_certificate_options(
             config,
             public_bind_addrs,
             tunnel_bind_addrs,
             Some(options),
+            generation,
         )
         .await
     }
@@ -65,6 +84,7 @@ impl ServerRuntime {
         public_bind_addrs: Vec<SocketAddr>,
         tunnel_bind_addrs: Vec<SocketAddr>,
         options: Option<crate::server_certificate::ServerAcmeOptions>,
+        generation: ServerRuntimeGeneration,
     ) -> Result<Self, Box<dyn Error>> {
         let session = if let Some(control) = config.control.as_ref() {
             let identity = config.identity.as_ref().ok_or_else(|| {
@@ -86,20 +106,14 @@ impl ServerRuntime {
             None
         };
 
-        let server = match options {
-            Some(options) => {
-                PreparedServer::bind_listeners_with_acme(
-                    config,
-                    public_bind_addrs,
-                    tunnel_bind_addrs,
-                    options,
-                )
-                .await?
-            }
-            None => {
-                PreparedServer::bind_listeners(config, public_bind_addrs, tunnel_bind_addrs).await?
-            }
-        };
+        let server = PreparedServer::bind_with_acme_options(
+            config,
+            public_bind_addrs,
+            tunnel_bind_addrs,
+            options,
+            generation,
+        )
+        .await?;
         for address in server.public_addrs()? {
             crate::runtime_log::server_public_listener_ready(address);
         }

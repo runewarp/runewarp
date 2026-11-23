@@ -42,8 +42,13 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     let mut previous_connection_id = 0;
     for _ in 0..2 {
         let offset = logs.read().len();
-        let runtime =
-            ServerRuntime::prepare_listeners(&config, addresses.clone(), addresses.clone()).await?;
+        let runtime = ServerRuntime::prepare_listeners(
+            &config,
+            addresses.clone(),
+            addresses.clone(),
+            runewarp::ServerRuntimeGeneration::generate(),
+        )
+        .await?;
         let public = runtime.public_addr()?;
         let trigger = runtime.shutdown();
         let task = tokio::spawn(runtime.run());

@@ -51,6 +51,7 @@ async fn fixture(
         None,
         vec![],
         None,
+        crate::ServerRuntimeGeneration::generate(),
     )
     .await?;
     Ok((server, client_config))

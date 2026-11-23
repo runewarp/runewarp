@@ -56,21 +56,24 @@ const EXPORT_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
 /// Which runtime exports spans. Sets the `service.name` resource attribute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TraceRole {
-    Server,
+    /// A Server runtime. Its generation becomes the `service.instance.id` resource attribute,
+    /// matching the `target_info` metric, so every exported span carries it.
+    Server(crate::ServerRuntimeGeneration),
+    /// A Client runtime. Its resource has no `service.instance.id`.
     Client,
 }
 
 impl TraceRole {
     fn service_name(self) -> &'static str {
         match self {
-            Self::Server => "runewarp-server",
+            Self::Server(_) => "runewarp-server",
             Self::Client => "runewarp-client",
         }
     }
 
     pub(crate) fn log_role(self) -> &'static str {
         match self {
-            Self::Server => "server",
+            Self::Server(_) => "server",
             Self::Client => "client",
         }
     }
@@ -264,15 +267,24 @@ fn provider_builder(
         .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
             sample_ratio,
         ))))
-        .with_resource(
-            Resource::builder_empty()
-                .with_service_name(role.service_name())
-                .with_attribute(KeyValue::new(
-                    "service.version",
-                    crate::metrics::SERVICE_VERSION,
-                ))
-                .build(),
-        )
+        .with_resource(resource(role))
+}
+
+/// Process resource: `service.name`, `service.version` and, for a Server, `service.instance.id`.
+fn resource(role: TraceRole) -> Resource {
+    let resource = Resource::builder_empty()
+        .with_service_name(role.service_name())
+        .with_attribute(KeyValue::new(
+            "service.version",
+            crate::metrics::SERVICE_VERSION,
+        ));
+    match role {
+        TraceRole::Server(generation) => {
+            resource.with_attribute(KeyValue::new("service.instance.id", generation.to_string()))
+        }
+        TraceRole::Client => resource,
+    }
+    .build()
 }
 
 /// Log the enabled exporter once at startup.
@@ -454,21 +466,74 @@ impl HttpClient for TokioHttpClient {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use opentelemetry_sdk::trace::{
+        InMemorySpanExporter, SdkTracerProvider, SpanData, SpanExporter,
+    };
+
+    /// In-memory exporter that also keeps the provider's resource, which
+    /// [`InMemorySpanExporter`] does not expose.
+    #[derive(Clone, Debug, Default)]
+    struct ResourceExporter {
+        spans: InMemorySpanExporter,
+        resource: Arc<Mutex<Option<Resource>>>,
+    }
+
+    impl SpanExporter for ResourceExporter {
+        async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+            self.spans.export(batch).await
+        }
+
+        fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+            self.spans.shutdown_with_timeout(timeout)
+        }
+
+        fn set_resource(&mut self, resource: &Resource) {
+            *self.resource.lock().expect("resource lock") = Some(resource.clone());
+            self.spans.set_resource(resource);
+        }
+    }
 
     /// Captures exported spans synchronously for tests.
     pub(crate) struct CapturedSpans {
         provider: SdkTracerProvider,
         exporter: InMemorySpanExporter,
+        resource: Arc<Mutex<Option<Resource>>>,
     }
 
     impl CapturedSpans {
+        /// Capture as a Server with a fresh generation.
         pub(crate) fn new(sample_ratio: f64) -> Self {
-            let exporter = InMemorySpanExporter::default();
-            let provider = super::provider_builder(sample_ratio, super::TraceRole::Server)
+            Self::with_role(
+                sample_ratio,
+                super::TraceRole::Server(crate::ServerRuntimeGeneration::generate()),
+            )
+        }
+
+        pub(crate) fn with_role(sample_ratio: f64, role: super::TraceRole) -> Self {
+            let exporter = ResourceExporter::default();
+            let provider = super::provider_builder(sample_ratio, role)
                 .with_simple_exporter(exporter.clone())
                 .build();
-            Self { provider, exporter }
+            Self {
+                provider,
+                exporter: exporter.spans,
+                resource: exporter.resource,
+            }
+        }
+
+        /// A resource attribute every exported span carries.
+        pub(crate) fn resource_attribute(&self, key: &str) -> Option<String> {
+            self.resource
+                .lock()
+                .expect("resource lock")
+                .as_ref()?
+                .get(&opentelemetry::Key::from(key.to_owned()))
+                .map(|value| value.to_string())
         }
 
         pub(crate) fn provider(&self) -> &SdkTracerProvider {
@@ -665,6 +730,27 @@ mod tests {
     }
 
     #[test]
+    fn server_resource_carries_the_runtime_generation_and_client_resource_has_no_instance() {
+        let generation = crate::ServerRuntimeGeneration::generate();
+        let server = CapturedSpans::with_role(1.0, TraceRole::Server(generation));
+        assert_eq!(
+            server.resource_attribute("service.instance.id"),
+            Some(generation.to_string())
+        );
+        assert_eq!(
+            server.resource_attribute("service.name").as_deref(),
+            Some("runewarp-server")
+        );
+
+        let client = CapturedSpans::with_role(1.0, TraceRole::Client);
+        assert_eq!(client.resource_attribute("service.instance.id"), None);
+        assert_eq!(
+            client.resource_attribute("service.name").as_deref(),
+            Some("runewarp-client")
+        );
+    }
+
+    #[test]
     fn exports_only_trace_target_spans_without_events() {
         if !crate::trace_export::test_support::isolated(
             module_path!(),
@@ -807,7 +893,7 @@ mod tests {
         let config = TraceExportConfig::new(&endpoint, None)?;
         let provider = otlp_provider(
             &config,
-            TraceRole::Server,
+            TraceRole::Server(crate::ServerRuntimeGeneration::generate()),
             tokio::runtime::Handle::current(),
         )?;
 
@@ -866,8 +952,9 @@ mod tests {
             started,
             release: Mutex::new(Some(release)),
         };
-        let provider = provider_builder(1.0, TraceRole::Server)
-            .with_span_processor(batch_processor(exporter, TraceRole::Server))
+        let role = TraceRole::Server(crate::ServerRuntimeGeneration::generate());
+        let provider = provider_builder(1.0, role)
+            .with_span_processor(batch_processor(exporter, role))
             .build();
         use tracing_subscriber::layer::SubscriberExt;
         let subscriber = tracing_subscriber::registry().with(layer(&provider));

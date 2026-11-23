@@ -286,6 +286,7 @@ impl Server {
             visitor_proxy_protocol,
             visitor_proxy_trusted_networks,
             None,
+            ServerRuntimeGeneration::generate(),
         )
         .await
     }
@@ -295,6 +296,7 @@ impl Server {
         visitor_proxy_protocol: Option<crate::ProxyProtocolVersion>,
         visitor_proxy_trusted_networks: Vec<crate::TrustedNetwork>,
         certificate: Option<crate::server_certificate::ServerCertificateController>,
+        generation: ServerRuntimeGeneration,
     ) -> io::Result<Self> {
         let mut limits = ServerAdmissionLimits::default();
         let effective = crate::fd_capacity::server([
@@ -313,6 +315,7 @@ impl Server {
             visitor_proxy_protocol,
             visitor_proxy_trusted_networks,
             certificate,
+            generation,
         )
         .await
     }
@@ -323,6 +326,7 @@ impl Server {
         visitor_proxy_protocol: Option<crate::ProxyProtocolVersion>,
         visitor_proxy_trusted_networks: Vec<crate::TrustedNetwork>,
         certificate: Option<crate::server_certificate::ServerCertificateController>,
+        generation: ServerRuntimeGeneration,
     ) -> io::Result<Self> {
         if config.admission == ServerAdmission::Static
             && config.authorization.current_tunnel_count() == 0
@@ -333,7 +337,6 @@ impl Server {
             ));
         }
         let admission_policy = ServerAdmissionPolicy::new(admission_limits);
-        let generation = ServerRuntimeGeneration::generate();
         let metrics = ServerMetrics::new(
             generation,
             config.admission == ServerAdmission::Managed,

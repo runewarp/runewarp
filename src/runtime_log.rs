@@ -27,6 +27,8 @@ type ReloadFilter = Box<dyn Fn(LogLevel) -> Result<(), InstallError> + Send + Sy
 struct InstalledLogger {
     reload_filter: ReloadFilter,
     level: Mutex<LogLevel>,
+    /// Process tracer provider, when trace export is on.
+    traces: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,22 +148,56 @@ impl InstalledLogger {
 /// Installs the process-wide runtime logger. The first install fixes `format`; later installs
 /// update only the level.
 pub fn install(level: LogLevel, format: LogFormat) -> Result<InstallOutcome, InstallError> {
+    install_with_trace_export(level, format, None, crate::TraceRole::Server)
+}
+
+/// Installs the process-wide runtime logger with optional OTLP span export for `role`. The first
+/// install fixes `format` and trace export; later installs update only the level. Trace export
+/// needs a Tokio runtime: without one it stays off and an error is logged.
+pub fn install_with_trace_export(
+    level: LogLevel,
+    format: LogFormat,
+    trace_export: Option<&crate::TraceExportConfig>,
+    role: crate::TraceRole,
+) -> Result<InstallOutcome, InstallError> {
     if let Some(logger) = LOGGER.get() {
         logger.set_level(level)?;
         return Ok(InstallOutcome::Updated);
     }
 
+    let (traces, trace_error) = match trace_export.map(|config| {
+        tokio::runtime::Handle::try_current()
+            .map_err(|error| format!("no Tokio runtime: {error}"))
+            .and_then(|runtime| crate::trace_export::otlp_provider(config, role, runtime))
+    }) {
+        None => (None, None),
+        Some(Ok(provider)) => (Some(provider), None),
+        Some(Err(error)) => (None, Some(error)),
+    };
     let use_ansi = io::stderr().is_terminal();
-    let (subscriber, reload_filter) = build_subscriber(level, format, io::stderr, use_ansi);
+    let (subscriber, reload_filter) =
+        build_subscriber(level, format, traces.as_ref(), io::stderr, use_ansi);
     tracing::subscriber::set_global_default(subscriber).map_err(InstallError::SetGlobalDefault)?;
 
+    let enabled = traces.is_some();
     let logger = InstalledLogger {
         reload_filter,
         level: Mutex::new(level),
+        traces,
     };
 
     match LOGGER.set(logger) {
-        Ok(()) => Ok(InstallOutcome::Installed),
+        Ok(()) => {
+            match (trace_export, enabled, trace_error) {
+                (Some(config), true, _) => crate::trace_export::log_enabled(config, role),
+                (_, _, Some(error)) => emit(
+                    EventLevel::Error,
+                    &format!("{} trace export disabled: {error}", role.log_role()),
+                ),
+                _ => {}
+            }
+            Ok(InstallOutcome::Installed)
+        }
         Err(_) => {
             let logger = LOGGER
                 .get()
@@ -170,6 +206,16 @@ pub fn install(level: LogLevel, format: LogFormat) -> Result<InstallOutcome, Ins
             Ok(InstallOutcome::Updated)
         }
     }
+}
+
+/// Flush queued spans and stop span export, waiting at most a few seconds. Call once as the
+/// process finishes; a no-op when trace export is off.
+pub async fn shutdown_trace_export() {
+    let Some(provider) = LOGGER.get().and_then(|logger| logger.traces.clone()) else {
+        return;
+    };
+    // Shutdown blocks while the exporter thread flushes through this runtime.
+    let _ = tokio::task::spawn_blocking(move || crate::trace_export::shutdown(&provider)).await;
 }
 
 pub fn emit(level: EventLevel, message: &str) {
@@ -901,19 +947,22 @@ pub(crate) fn installed_level() -> Option<LogLevel> {
 fn build_subscriber<W>(
     level: LogLevel,
     format: LogFormat,
+    traces: Option<&opentelemetry_sdk::trace::SdkTracerProvider>,
     writer: W,
     use_ansi: bool,
 ) -> (RuntimeSubscriber, ReloadFilter)
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
-    let (filter_layer, reload_handle) = reload::Layer::new(level_filter(level));
+    // The level filters only log output, so spans export at every `log-level`. The log layer
+    // never sees Runewarp trace spans, so lines inside them keep today's text and JSON shape.
+    let (filter, reload_handle) = reload::Layer::new(LogFilter(level_filter(level)));
     let layer = tracing_fmt::layer()
         .with_writer(writer)
         .with_timer(UtcTime::new(log_timestamp_format()))
         .with_target(false);
     // JSON keeps the text envelope's timestamp, level and message as top-level keys, with event
-    // fields flattened beside them. Runtime events use no spans, so span keys are omitted.
+    // fields flattened beside them. Span keys are omitted.
     let layer = match format {
         LogFormat::Text => layer.with_ansi(use_ansi).boxed(),
         LogFormat::Json => layer
@@ -923,17 +972,57 @@ where
             .with_span_list(false)
             .boxed(),
     };
-    let subscriber = tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(layer);
+    let logs = tracing_subscriber::registry().with(layer.with_filter(filter));
+    // Without trace export, no layer enables Runewarp trace spans, so their callsites stay off.
+    // An absent `Option` layer would still enable them and allocate registry spans per Visitor.
+    let subscriber: RuntimeSubscriber = match traces {
+        Some(provider) => Box::new(logs.with(crate::trace_export::layer(provider))),
+        None => Box::new(logs),
+    };
 
     let reload_filter = Box::new(move |level| {
         reload_handle
-            .reload(level_filter(level))
+            .reload(LogFilter(level_filter(level)))
             .map_err(|error| InstallError::Reload(error.to_string()))
     });
 
-    (Box::new(subscriber), reload_filter)
+    (subscriber, reload_filter)
+}
+
+/// Log-layer filter: the runtime log level, minus Runewarp trace spans.
+struct LogFilter(LevelFilter);
+
+impl LogFilter {
+    fn allows(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        self.0 >= *metadata.level() && crate::trace_export::visible_to_logs(metadata)
+    }
+}
+
+impl<S> tracing_subscriber::layer::Filter<S> for LogFilter {
+    fn enabled(
+        &self,
+        metadata: &tracing::Metadata<'_>,
+        _: &tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        self.allows(metadata)
+    }
+
+    // The answer depends only on the callsite, so it is cached. Disabled callsites then cost
+    // one cached check, and a level reload rebuilds the cache.
+    fn callsite_enabled(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        if self.allows(metadata) {
+            tracing::subscriber::Interest::always()
+        } else {
+            tracing::subscriber::Interest::never()
+        }
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(self.0)
+    }
 }
 
 fn log_timestamp_format() -> OwnedFormatItem {
@@ -1662,14 +1751,15 @@ mod tests {
     fn capture_with_ansi(level: LogLevel, ansi: bool, emit_logs: impl FnOnce()) -> String {
         let buffer = SharedBuffer::default();
         // Text tests use the default format so they also guard default output stability.
-        let (subscriber, _) = build_subscriber(level, LogFormat::default(), buffer.clone(), ansi);
+        let (subscriber, _) =
+            build_subscriber(level, LogFormat::default(), None, buffer.clone(), ansi);
         tracing::subscriber::with_default(subscriber, emit_logs);
         buffer.read()
     }
 
     fn capture_json(level: LogLevel, emit_logs: impl FnOnce()) -> Vec<serde_json::Value> {
         let buffer = SharedBuffer::default();
-        let (subscriber, _) = build_subscriber(level, LogFormat::Json, buffer.clone(), true);
+        let (subscriber, _) = build_subscriber(level, LogFormat::Json, None, buffer.clone(), true);
         tracing::subscriber::with_default(subscriber, emit_logs);
         buffer
             .read()
@@ -1679,6 +1769,169 @@ mod tests {
                     .unwrap_or_else(|error| panic!("line is not JSON ({error}): {line}"))
             })
             .collect()
+    }
+
+    /// Emit runtime events inside Runewarp trace spans, with and without a third-party span.
+    fn emit_inside_trace_spans() {
+        let visitor = tracing::info_span!(
+            target: crate::trace_export::TARGET,
+            "visitor",
+            runewarp.outcome = tracing::field::Empty
+        );
+        let _visitor = visitor.enter();
+        tracing::info_span!(target: crate::trace_export::TARGET, parent: &visitor, "route")
+            .in_scope(|| {
+                server_route("app.example.test", ServerRouteOutcome::Forwarded);
+                server_admission_saturated("visitor-global", 4_096, 4_096);
+            });
+        tracing::info_span!("dependency", peer = "kept").in_scope(|| {
+            tracing::warn!("dependency event");
+        });
+        visitor.record(crate::trace_export::OUTCOME, "placed");
+    }
+
+    fn capture_format(
+        format: LogFormat,
+        traces: Option<&opentelemetry_sdk::trace::SdkTracerProvider>,
+        emit_logs: impl FnOnce(),
+    ) -> Vec<String> {
+        let buffer = SharedBuffer::default();
+        let (subscriber, _) =
+            build_subscriber(LogLevel::Debug, format, traces, buffer.clone(), false);
+        tracing::subscriber::with_default(subscriber, emit_logs);
+        // Drop the timestamp so runs compare byte for byte.
+        buffer
+            .read()
+            .lines()
+            .map(|line| match format {
+                LogFormat::Text => line.split_once(' ').expect("timestamp").1.to_owned(),
+                LogFormat::Json => {
+                    let mut value: serde_json::Value =
+                        serde_json::from_str(line).expect("line is JSON");
+                    value.as_object_mut().expect("object").remove("timestamp");
+                    value.to_string()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn trace_export_leaves_text_and_json_log_lines_unchanged() {
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "trace_export_leaves_text_and_json_log_lines_unchanged",
+        ) {
+            return;
+        }
+        for format in [LogFormat::Text, LogFormat::Json] {
+            let plain = capture_format(format, None, emit_inside_trace_spans);
+            let captured = crate::trace_export::test_support::CapturedSpans::new(1.0);
+            let traced = capture_format(format, Some(captured.provider()), emit_inside_trace_spans);
+
+            assert_eq!(plain.len(), 3, "{plain:?}");
+            assert_eq!(traced, plain, "{format:?} output changed with trace export");
+            assert!(
+                plain
+                    .iter()
+                    .all(|line| !line.contains("visitor:") && !line.contains("route:"))
+            );
+            let mut names = captured.names();
+            names.sort_unstable();
+            assert_eq!(names, ["route", "visitor"]);
+        }
+        let text = capture_format(LogFormat::Text, None, emit_inside_trace_spans);
+        assert_eq!(
+            text[0],
+            "DEBUG server route forwarded: public-hostname=app.example.test"
+        );
+        // Spans from other targets keep their place in log lines.
+        assert_eq!(text[2], " WARN dependency{peer=\"kept\"}: dependency event");
+    }
+
+    #[test]
+    fn without_trace_export_runewarp_trace_spans_are_disabled() {
+        let (subscriber, _) = build_subscriber(
+            LogLevel::Trace,
+            LogFormat::Text,
+            None,
+            SharedBuffer::default(),
+            false,
+        );
+        // Ask the subscriber directly: callsite interest is cached process-wide across tests.
+        let visitor = tracing::info_span!(target: crate::trace_export::TARGET, "visitor");
+        let metadata = visitor
+            .metadata()
+            .expect("spans keep metadata when disabled");
+        assert!(
+            subscriber.register_callsite(metadata).is_never(),
+            "no layer may enable trace spans without trace export"
+        );
+    }
+
+    #[test]
+    fn log_filter_caches_callsites_by_level_and_hides_trace_spans() {
+        use tracing_subscriber::layer::Filter;
+        let filter = super::LogFilter(super::level_filter(LogLevel::Info));
+        let interest = |span: tracing::Span| {
+            let metadata = span.metadata().expect("spans keep metadata when disabled");
+            Filter::<tracing_subscriber::Registry>::callsite_enabled(&filter, metadata)
+        };
+
+        assert!(interest(tracing::info_span!("dependency")).is_always());
+        assert!(interest(tracing::debug_span!("dependency")).is_never());
+        assert!(
+            interest(tracing::info_span!(
+                target: crate::trace_export::TARGET,
+                "visitor"
+            ))
+            .is_never()
+        );
+    }
+
+    #[test]
+    fn level_reload_takes_effect_for_cached_callsites() {
+        // Reload rebuilds process-wide callsite interest; run alone so parallel tests can't race.
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "level_reload_takes_effect_for_cached_callsites",
+        ) {
+            return;
+        }
+        let buffer = SharedBuffer::default();
+        let (subscriber, reload) =
+            build_subscriber(LogLevel::Info, LogFormat::Text, None, buffer.clone(), false);
+        tracing::subscriber::with_default(subscriber, || {
+            let debug = || tracing::debug!("reload probe");
+            debug();
+            reload(LogLevel::Debug).expect("reload");
+            debug();
+            reload(LogLevel::Info).expect("reload");
+            debug();
+        });
+        assert_eq!(buffer.read().matches("reload probe").count(), 1);
+    }
+
+    #[test]
+    fn trace_export_runs_when_runtime_logs_are_off() {
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "trace_export_runs_when_runtime_logs_are_off",
+        ) {
+            return;
+        }
+        let captured = crate::trace_export::test_support::CapturedSpans::new(1.0);
+        let buffer = SharedBuffer::default();
+        let (subscriber, _) = build_subscriber(
+            LogLevel::Off,
+            LogFormat::Text,
+            Some(captured.provider()),
+            buffer.clone(),
+            false,
+        );
+        tracing::subscriber::with_default(subscriber, emit_inside_trace_spans);
+
+        assert_eq!(buffer.read(), "");
+        assert_eq!(captured.finished().len(), 2);
     }
 
     #[test]
@@ -1738,7 +1991,7 @@ mod tests {
     fn json_format_flattens_structured_event_fields_and_never_emits_ansi() {
         let buffer = SharedBuffer::default();
         let (subscriber, _) =
-            build_subscriber(LogLevel::Debug, LogFormat::Json, buffer.clone(), true);
+            build_subscriber(LogLevel::Debug, LogFormat::Json, None, buffer.clone(), true);
         tracing::subscriber::with_default(subscriber, || {
             tracing::debug!(reason = "refused", code = 7_u64, "stream open failed");
         });

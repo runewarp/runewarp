@@ -87,6 +87,7 @@ pub(super) struct ConnectionLifecycle<I> {
     report: ReportState,
     role_state: Option<Arc<dyn RoleState>>,
     limits: ManagedSessionLimits,
+    role: ManagedSessionRole,
 }
 
 impl<I> ConnectionLifecycle<I> {
@@ -115,6 +116,7 @@ impl<I> ConnectionLifecycle<I> {
             report: ReportState::default(),
             role_state: None,
             limits,
+            role,
         })
     }
 
@@ -168,6 +170,17 @@ impl<I> ConnectionLifecycle<I> {
                 revision: revision.clone(),
             })
             .await;
+            let span = crate::trace_export::TracedStage::new(tracing::info_span!(
+                target: crate::trace_export::TARGET,
+                parent: None,
+                "managed.apply",
+                runewarp.outcome = tracing::field::Empty,
+                runewarp.role = match self.role {
+                    ManagedSessionRole::Server => "server",
+                    ManagedSessionRole::Client => "client",
+                },
+                runewarp.revision = tracing::field::display(&revision),
+            ));
             let apply = adapter.apply(input);
             tokio::pin!(apply);
             let apply_result = match self
@@ -185,6 +198,11 @@ impl<I> ConnectionLifecycle<I> {
                 }
             };
 
+            span.finish(if apply_result.is_ok() {
+                "applied"
+            } else {
+                "rejected"
+            });
             match apply_result {
                 Ok(()) => {
                     applied.set(revision.clone());

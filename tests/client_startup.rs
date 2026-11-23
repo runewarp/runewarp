@@ -264,6 +264,7 @@ async fn prepared_client_rejects_settings_without_services() {
         server_port: 443,
         log_level: LogLevel::Info,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().to_path_buf(),
         services: Vec::new(),
@@ -329,6 +330,7 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
         server_port: 443,
         log_level: LogLevel::Info,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![
@@ -397,6 +399,7 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
         server_port: 443,
         log_level: LogLevel::Info,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![
@@ -462,6 +465,7 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::System,
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![ServiceConfig {
@@ -556,6 +560,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-ca-not-needed.pem"),
         ),
@@ -687,6 +692,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::System,
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![
@@ -803,6 +809,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![ServiceConfig {
@@ -910,6 +917,7 @@ async fn shared_client_instance_prep_survives_reconnect_style_redials() {
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![ServiceConfig {
@@ -1056,6 +1064,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
         identity_directory: tempdir.path().join("client-identity"),
         services: vec![

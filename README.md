@@ -125,6 +125,7 @@ A simple, open-source client/server tunneling tool whose config model and simple
 
 - [Configuration reference](docs/configuration.md) — config shapes, keys, defaults, and validation
 - [Metrics](docs/metrics.md) — opt-in Prometheus series, labels, and boundaries
+- [Traces](docs/traces.md) — opt-in OTLP span export, sampling, and span boundaries
 - [Architecture](docs/architecture.md) — system structure, data paths, and current limits
 - [Security](docs/security.md) — trust boundaries, visibility, certificates, and deployment trade-offs
 - [Server certificate ownership](docs/server-certificates.md) for passive serving, exclusive renewal, consumed challenge routing and recovery

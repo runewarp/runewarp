@@ -32,6 +32,7 @@ pub(crate) struct PreparedServerConfig {
     pub(crate) hostname: Option<String>,
     pub(crate) log_level: LogLevel,
     pub(crate) log_format: LogFormat,
+    pub(crate) trace_export: Option<crate::TraceExportConfig>,
     pub(crate) public_bind_address: Option<String>,
     pub(crate) public_bind_addresses: Option<Vec<String>>,
     pub(crate) tunnel_bind_address: Option<String>,
@@ -166,6 +167,7 @@ fn prepare_raw_server_config_with_defaults(
         hostname: raw.hostname,
         log_level: log.level,
         log_format: log.format,
+        trace_export: log.trace_export,
         public_bind_address: raw.public_bind_address.or_else(|| {
             raw.public_bind_addresses
                 .is_none()
@@ -575,6 +577,77 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     }
 
     #[test]
+    fn server_config_reads_optional_trace_export_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let path = tempdir.path().join("config.toml");
+        crate::initialize_manual_server_certificate(
+            &tempdir.path().join("cert"),
+            "tunnel.example.test",
+        )?;
+        let body = r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#;
+        fs::write(&path, body)?;
+        assert_eq!(crate::load_server_config(&path)?.trace_export, None);
+
+        fs::write(
+            &path,
+            format!(
+                "otlp-traces-endpoint = \"http://127.0.0.1:4318\"\ntrace-sample-ratio = 0.5\n{body}"
+            ),
+        )?;
+        let trace_export = crate::load_server_config(&path)?
+            .trace_export
+            .ok_or("trace export configured")?;
+        assert_eq!(
+            trace_export.endpoint().to_string(),
+            "http://127.0.0.1:4318/v1/traces"
+        );
+        assert_eq!(trace_export.sample_ratio(), 0.5);
+
+        fs::write(
+            &path,
+            format!(
+                "otlp-traces-endpoint = \"http://127.0.0.1:4318\"\ntrace-sample-ratio = 1\n{body}"
+            ),
+        )?;
+        assert_eq!(
+            crate::load_server_config(&path)?
+                .trace_export
+                .map(|config| config.sample_ratio()),
+            Some(1.0)
+        );
+
+        for (keys, expected) in [
+            (
+                "otlp-traces-endpoint = \"ftp://collector\"\n",
+                "scheme must be http or https",
+            ),
+            (
+                "otlp-traces-endpoint = \"http://127.0.0.1:4318\"\ntrace-sample-ratio = 2.0\n",
+                "trace-sample-ratio must be between 0 and 1",
+            ),
+            (
+                "trace-sample-ratio = 0.5\n",
+                "trace-sample-ratio requires otlp-traces-endpoint",
+            ),
+        ] {
+            fs::write(&path, format!("{keys}{body}"))?;
+            let error = crate::load_server_config(&path)
+                .expect_err("invalid trace export config")
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn server_preparation_uses_injected_xdg_defaults_for_manual_material_and_acme_state()
     -> Result<(), Box<dyn std::error::Error>> {
         let tempdir = tempdir()?;
@@ -589,6 +662,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             GlobalLogConfig {
                 level: LogLevel::Info,
                 format: LogFormat::Text,
+                trace_export: None,
             },
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
@@ -638,6 +712,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             GlobalLogConfig {
                 level: LogLevel::Off,
                 format: LogFormat::Text,
+                trace_export: None,
             },
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
@@ -699,6 +774,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             GlobalLogConfig {
                 level: LogLevel::Off,
                 format: LogFormat::Text,
+                trace_export: None,
             },
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
@@ -774,6 +850,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             GlobalLogConfig {
                 level: LogLevel::Info,
                 format: LogFormat::Text,
+                trace_export: None,
             },
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
@@ -818,6 +895,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             GlobalLogConfig {
                 level: LogLevel::Info,
                 format: LogFormat::Text,
+                trace_export: None,
             },
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),

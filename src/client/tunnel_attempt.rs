@@ -414,7 +414,16 @@ impl ClientTunnelAttempt {
                 }),
             }
         };
-        async move { record_attempt(&metrics, attempt.await) }
+        async move {
+            let span = crate::trace_export::TracedStage::new(tracing::info_span!(
+                    target: crate::trace_export::TARGET,
+            parent: None,
+                    "client.tunnel_connect",
+                    runewarp.outcome = tracing::field::Empty,
+                    runewarp.candidate = candidate,
+                ));
+            record_attempt(&metrics, attempt.await, span)
+        }
     }
 }
 
@@ -423,8 +432,10 @@ impl ClientTunnelAttempt {
 fn record_attempt(
     metrics: &crate::metrics::ClientMetrics,
     outcome: TunnelAttemptOutcome,
+    span: crate::trace_export::TracedStage,
 ) -> TunnelAttemptOutcome {
     use crate::metrics::ClientTunnelAttemptOutcome as Outcome;
+    use crate::metrics::LabelValue as _;
 
     let label = match &outcome {
         TunnelAttemptOutcome::Connected { .. } => Outcome::Connected,
@@ -437,6 +448,7 @@ fn record_attempt(
         TunnelAttemptOutcome::FatalLocalMaterial(_) => Outcome::Failed,
     };
     metrics.tunnel_connection_attempt(label);
+    span.finish(label.as_str());
     match outcome {
         TunnelAttemptOutcome::Connected {
             configured_server_addr,

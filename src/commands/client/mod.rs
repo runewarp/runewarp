@@ -62,7 +62,18 @@ pub(crate) async fn run(command: cli::ClientArgs) -> CommandResult {
     };
     let config = resolve_client_config_from_cli(config.clone(), runtime)
         .map_err(wrap_client_config_resolution_error)?;
-    runewarp::runtime_log::install(config.log_level, config.log_format)?;
+    runewarp::runtime_log::install_with_trace_export(
+        config.log_level,
+        config.log_format,
+        config.trace_export.as_ref(),
+        runewarp::TraceRole::Client,
+    )?;
+    let result = serve(config).await;
+    runewarp::runtime_log::shutdown_trace_export().await;
+    result
+}
+
+async fn serve(config: runewarp::ClientConfig) -> CommandResult {
     // Like the Server, only a first Ctrl-C or SIGQUIT arms graceful-to-fast escalation.
     let escalates = std::sync::atomic::AtomicBool::new(false);
     ClientRuntime::prepare(&config, wildcard(0))

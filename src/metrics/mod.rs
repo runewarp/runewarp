@@ -28,7 +28,7 @@ pub(crate) use self::server::{
 };
 
 /// Crate version plus the short build commit for `-dev` builds, as `--version` prints it.
-const SERVICE_VERSION: &str = env!("RUNEWARP_CLI_VERSION");
+pub(crate) const SERVICE_VERSION: &str = env!("RUNEWARP_CLI_VERSION");
 const BUILD_REVISION: &str = env!("RUNEWARP_BUILD_REVISION");
 
 /// A code-enumerated label value set. `ALL` lists every value in index order.

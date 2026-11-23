@@ -14,6 +14,7 @@ use crate::client::{ClientStreamLimits, ServiceSelector, TerminationTlsConfigs};
 use crate::client_hello::ParsedClientHello;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
+use crate::trace_export::TracedStage;
 use crate::tunnel_framing::read_tunnel_stream;
 use crate::{ClientTlsMode, ServiceConfig, proxy::proxy_tcp_over_tunnel};
 
@@ -38,6 +39,13 @@ impl TunnelConnectionStreamHandler {
     }
 
     pub(crate) async fn handle(&self, mut stream: ClientTunnelStream) -> io::Result<()> {
+        // Ends when the backend is connected or the stream is rejected, not at stream close.
+        let visitor = TracedStage::new(tracing::info_span!(
+            target: crate::trace_export::TARGET,
+        parent: None,
+            "client.visitor",
+            runewarp.outcome = tracing::field::Empty,
+        ));
         let intake = tokio::time::timeout(self.stream_limits.client_hello_timeout, async {
             let decoded = read_tunnel_stream(&mut stream).await?;
             Ok::<_, io::Error>((decoded.addresses, decoded.client_hello))
@@ -52,11 +60,13 @@ impl TunnelConnectionStreamHandler {
                 );
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
                 drop(stream);
+                visitor.finish("rejected");
                 return Err(io::Error::new(io::ErrorKind::TimedOut, error));
             }
             Ok(Err(error)) => {
                 runtime_log::warning("client", &format!("rejected stream: {error}"));
                 drop(stream);
+                visitor.finish("rejected");
                 return Err(error);
             }
         };
@@ -67,12 +77,13 @@ impl TunnelConnectionStreamHandler {
                 ClientRouteOutcome::RejectedNoMatchingService,
             );
             drop(stream);
+            visitor.finish("rejected");
             return Ok(());
         };
 
         if service.tls_mode == ClientTlsMode::Terminate {
             return self
-                .handle_terminate(stream, parsed_client_hello, service, addresses)
+                .handle_terminate(stream, parsed_client_hello, service, addresses, visitor)
                 .await;
         }
 
@@ -93,6 +104,7 @@ impl TunnelConnectionStreamHandler {
                     },
                 );
                 drop(stream);
+                visitor.finish("rejected");
                 return Err(error);
             }
         };
@@ -115,6 +127,7 @@ impl TunnelConnectionStreamHandler {
                 },
             );
             drop(stream);
+            visitor.finish("rejected");
             return Err(error);
         }
         runtime_log::client_route(
@@ -123,6 +136,7 @@ impl TunnelConnectionStreamHandler {
                 backend_address: service.backend_address.as_str(),
             },
         );
+        visitor.finish("connected");
 
         let (recv, send) = stream.into_split();
         proxy_tcp_over_tunnel(backend_stream, Vec::new(), send, recv).await
@@ -134,6 +148,7 @@ impl TunnelConnectionStreamHandler {
         parsed_client_hello: ParsedClientHello,
         service: &ServiceConfig,
         addresses: crate::VisitorTcpAddresses,
+        visitor: TracedStage,
     ) -> io::Result<()> {
         let public_hostname = parsed_client_hello.public_hostname().clone();
         if parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN)
@@ -141,6 +156,7 @@ impl TunnelConnectionStreamHandler {
                 .termination_tls_configs
                 .acme_challenge_server_config(public_hostname.as_str())
         {
+            visitor.finish("acme_challenge");
             return self
                 .handle_acme_tls_alpn_challenge(
                     stream,
@@ -160,6 +176,7 @@ impl TunnelConnectionStreamHandler {
                 ClientRouteOutcome::MissingTlsConfig,
             );
             drop(stream);
+            visitor.finish("rejected");
             return Err(io::Error::other(format!(
                 "no TLS config for {public_hostname}"
             )));
@@ -178,11 +195,13 @@ impl TunnelConnectionStreamHandler {
         {
             Ok(Ok(stream)) => stream,
             Ok(Err(error)) => {
+                visitor.finish("rejected");
                 return Err(io::Error::other(format!(
                     "TLS termination handshake failed for {public_hostname}: {error}"
                 )));
             }
             Err(_) => {
+                visitor.finish("rejected");
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
@@ -207,6 +226,7 @@ impl TunnelConnectionStreamHandler {
                         backend_address: service.backend_address.as_str(),
                     },
                 );
+                visitor.finish("rejected");
                 return Err(error);
             }
         };
@@ -217,6 +237,7 @@ impl TunnelConnectionStreamHandler {
                 backend_address: service.backend_address.as_str(),
             },
         );
+        visitor.finish("connected");
 
         if service.proxy_protocol.is_some() {
             write_backend_with_timeout(

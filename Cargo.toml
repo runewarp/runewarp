@@ -40,8 +40,15 @@ http = "1.4.2"
 http-body = "1.0.1"
 http-body-util = "0.1.3"
 hyper = { version = "1.10.1", features = ["client", "server", "http1", "http2"] }
-hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "http2", "client", "service"] }
+hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "http2", "client", "client-legacy", "service"] }
 prometheus-client = "0.26.0"
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "trace"] }
+opentelemetry-http = { version = "0.33.1", default-features = false }
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "ring", "tls12"] }
+async-trait = "0.1.92"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
@@ -51,7 +58,7 @@ http = "1.4.2"
 http-body = "1.0.1"
 http-body-util = "0.1.3"
 hyper = { version = "1.10.1", features = ["client", "server", "http1", "http2"] }
-hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "http2", "client", "service"] }
+hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "http2", "client", "client-legacy", "service"] }
 proptest = "1.6.0"
 rcgen = { version = "0.14.8", features = ["x509-parser"] }
 rustls = { version = "0.23.35", default-features = false, features = ["logging", "ring", "std", "tls12"] }
@@ -60,6 +67,7 @@ tempfile = "3.27.0"
 time = "0.3.47"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "ring", "tls12"] }
 tokio = { version = "1.52.3", features = ["test-util"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "testing"] }
 
 [[bin]]
 name = "runewarp"

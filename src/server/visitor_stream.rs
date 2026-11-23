@@ -17,6 +17,7 @@ use crate::proxy::proxy_tcp_over_tunnel;
 use crate::proxy_protocol::read_proxy_v2;
 use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ServerRouteOutcome};
+use crate::trace_export::{TARGET, TracedStage};
 use crate::tunnel_framing::encode_tunnel_stream;
 use crate::{
     ProxyProtocolVersion, PublicHostname, ServerHostname, TrustedNetwork, VisitorTcpAddresses,
@@ -105,11 +106,13 @@ impl VisitorIntake {
         visitor_stream: TcpStream,
         shutdown: Option<crate::shutdown::OrderlyShutdown>,
     ) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
+        let visitor = visitor_span();
         let permit = match self.admission_policy.try_admit_visitor_global() {
             Ok(permit) => permit,
             Err(rejection) => {
                 drop(visitor_stream);
                 self.admission_policy.report_saturation(rejection);
+                visitor.finish("rejected");
                 return None;
             }
         };
@@ -123,14 +126,20 @@ impl VisitorIntake {
             match shutdown {
                 Some(shutdown) => {
                     let _ = intake
-                        .intake_until(visitor_stream, timeout, permit, async move {
+                        .intake_until(visitor_stream, timeout, permit, visitor, async move {
                             let _ = shutdown.wait_started().await;
                         })
                         .await;
                 }
                 None => {
                     let _ = intake
-                        .intake_until(visitor_stream, timeout, permit, std::future::pending())
+                        .intake_until(
+                            visitor_stream,
+                            timeout,
+                            permit,
+                            visitor,
+                            std::future::pending(),
+                        )
                         .await;
                 }
             }
@@ -142,6 +151,7 @@ impl VisitorIntake {
         mut visitor_stream: TcpStream,
         timeout: std::time::Duration,
         mut admission_permit: VisitorAdmissionPermit,
+        visitor: TracedStage,
         shutdown: Shutdown,
     ) -> io::Result<()>
     where
@@ -149,6 +159,7 @@ impl VisitorIntake {
     {
         let direct_addresses = VisitorTcpAddresses::from_socket(&visitor_stream)?;
         let peer_ip = direct_addresses.source.ip();
+        let intake_span = tracing::info_span!(target: TARGET, parent: visitor.span(), "intake");
         let parsed_client_hello = tokio::select! {
             parsed = tokio::time::timeout(timeout, async {
                 let addresses = if self.visitor_proxy_protocol.is_some() {
@@ -184,20 +195,29 @@ impl VisitorIntake {
                     "Visitor pre-routing intake timed out",
                 )),
             },
-            _ = shutdown => return Ok(()),
+            _ = shutdown => {
+                drop(intake_span);
+                visitor.finish("shutdown");
+                return Ok(());
+            }
         };
+        drop(intake_span);
         // Pre-routing capacity protects ClientHello completion only. Existing routed
         // Visitor traffic must remain independent from admission saturation.
         drop(admission_permit);
         let (parsed_client_hello, addresses) = match parsed_client_hello {
             Ok(Some(parsed)) => parsed,
-            Ok(None) => return Ok(()),
+            Ok(None) => {
+                visitor.finish("rejected");
+                return Ok(());
+            }
             Err(error) => {
                 runtime_log::warning("server", &format!("rejected Visitor stream: {error}"));
+                visitor.finish("rejected");
                 return Ok(());
             }
         };
-        self.handle_parsed(visitor_stream, parsed_client_hello, addresses)
+        self.handle_parsed(visitor_stream, parsed_client_hello, addresses, visitor)
             .await
     }
 
@@ -206,12 +226,14 @@ impl VisitorIntake {
         visitor_stream: TcpStream,
         parsed_client_hello: ParsedClientHello,
         addresses: VisitorTcpAddresses,
+        visitor: TracedStage,
     ) -> io::Result<()> {
         let serves_acme_tls_alpn_01 = parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN);
         let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
 
         if public_hostname.as_str() == self.server_hostname.as_str() {
             return if serves_acme_tls_alpn_01 {
+                visitor.finish("acme_challenge");
                 self.serve_acme_tls_alpn_01(visitor_stream, public_hostname, buffered_bytes)
                     .await
             } else {
@@ -219,6 +241,7 @@ impl VisitorIntake {
                     public_hostname.as_str(),
                     ServerRouteOutcome::RejectedServerHostname,
                 );
+                visitor.finish("rejected");
                 Ok(())
             };
         }
@@ -228,19 +251,23 @@ impl VisitorIntake {
             .as_ref()
             .is_some_and(|certificate| !certificate.is_serving())
         {
+            visitor.finish("rejected");
             return Ok(());
         }
 
-        let selected_tunnel_connection = match self
+        let route_span = tracing::info_span!(target: TARGET, parent: visitor.span(), "route");
+        let route = self
             .tunnel_registry
             .route_tunnel_connection(&public_hostname)
-            .await
-        {
+            .await;
+        drop(route_span);
+        let selected_tunnel_connection = match route {
             TunnelRouteOutcome::Unauthorized => {
                 runtime_log::server_route(
                     public_hostname.as_str(),
                     ServerRouteOutcome::RejectedUnauthorized,
                 );
+                visitor.finish("rejected");
                 return Ok(());
             }
             TunnelRouteOutcome::NoActiveTunnelConnection => {
@@ -251,6 +278,7 @@ impl VisitorIntake {
                     public_hostname.as_str(),
                     ServerRouteOutcome::NoActiveTunnelConnection,
                 );
+                visitor.finish("rejected");
                 return Ok(());
             }
             TunnelRouteOutcome::Connected(tunnel_connection) => tunnel_connection,
@@ -262,6 +290,7 @@ impl VisitorIntake {
             buffered_bytes,
             selected_tunnel_connection,
             addresses,
+            visitor,
         )
         .await
     }
@@ -305,21 +334,26 @@ impl VisitorIntake {
         buffered_bytes: Vec<u8>,
         tunnel_connection: VisitorRoute,
         addresses: VisitorTcpAddresses,
+        visitor: TracedStage,
     ) -> io::Result<()> {
         let pending_open_permit = match self.admission_policy.try_admit_pending_stream_open() {
             Ok(permit) => permit,
             Err(rejection) => {
                 self.admission_policy.report_saturation(rejection);
+                visitor.finish("rejected");
                 return Ok(());
             }
         };
         self.admission_policy
             .report_recovery(&[AdmissionLimit::PendingStreamOpens]);
 
+        let stream_open_span =
+            tracing::info_span!(target: TARGET, parent: visitor.span(), "stream_open");
         let open_result = tunnel_connection
             .connection()
             .open_tunnel_stream(self.admission_policy.limits().stream_open_timeout)
             .await;
+        drop(stream_open_span);
         let stream = match open_result {
             Ok(stream) => stream,
             Err(_) => {
@@ -328,6 +362,7 @@ impl VisitorIntake {
                     public_hostname.as_str(),
                     ServerRouteOutcome::NoActiveTunnelConnection,
                 );
+                visitor.finish("rejected");
                 return Ok(());
             }
         };
@@ -338,6 +373,7 @@ impl VisitorIntake {
                 drop(pending_open_permit);
                 drop(stream);
                 self.admission_policy.report_saturation(rejection);
+                visitor.finish("rejected");
                 return Ok(());
             }
         };
@@ -356,10 +392,13 @@ impl VisitorIntake {
             Some(work) => work,
             None => {
                 drop(stream);
+                visitor.finish("rejected");
                 return Ok(());
             }
         };
         runtime_log::server_route(public_hostname.as_str(), ServerRouteOutcome::Forwarded);
+        // The Visitor span ends at placement, not when the proxied stream closes.
+        visitor.finish("placed");
         match work
             .run(async move {
                 let initial_bytes = encode_tunnel_stream(addresses, &buffered_bytes);
@@ -372,6 +411,26 @@ impl VisitorIntake {
             Err(_) => Ok(()),
         }
     }
+}
+
+/// Root span for one Server Visitor, from accept to placement or rejection.
+fn visitor_span() -> TracedStage {
+    let span = tracing::info_span!(
+        target: TARGET,
+        parent: None,
+        "visitor",
+        runewarp.outcome = tracing::field::Empty,
+        runewarp.server_generation = tracing::field::Empty,
+    );
+    if !span.is_disabled()
+        && let Some(context) = crate::server_connection_log::current()
+    {
+        span.record(
+            "runewarp.server_generation",
+            tracing::field::display(context.generation),
+        );
+    }
+    TracedStage::new(span)
 }
 
 struct PrefixedStream<S> {
@@ -626,6 +685,101 @@ mod tests {
         intake_task
             .await
             .map_err(|error| join_error("intake task failed", error))??;
+        Ok(())
+    }
+
+    async fn wait_for_span(
+        captured: &crate::trace_export::test_support::CapturedSpans,
+        name: &str,
+    ) -> io::Result<opentelemetry_sdk::trace::SpanData> {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(span) = captured.span(name) {
+                    return span;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .map_err(|_| timeout_error("span should be exported"))
+    }
+
+    #[tokio::test]
+    async fn visitor_span_ends_at_placement_with_stage_children() -> io::Result<()> {
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "visitor_span_ends_at_placement_with_stage_children",
+        ) {
+            return Ok(());
+        }
+        use crate::trace_export::test_support::{CapturedSpans, assert_safe_attributes, attribute};
+        let captured = CapturedSpans::new(1.0);
+        let _trace = captured.set_default();
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor
+            .write_all(&build_client_hello("app.example.test")?)
+            .await?;
+        let (_tunnel_send, _tunnel_recv) =
+            timeout(Duration::from_secs(1), tunnel_connection.accept_stream())
+                .await
+                .map_err(|_| timeout_error("intake should open a tunnel stream"))?
+                .map_err(io::Error::other)?;
+
+        // The Visitor stream is still open: the span ends at placement, not at close.
+        let root = wait_for_span(&captured, "visitor").await?;
+        assert_eq!(
+            attribute(&root, crate::trace_export::OUTCOME).as_deref(),
+            Some("placed")
+        );
+        for stage in ["intake", "route", "stream_open"] {
+            let child = captured.span(stage).expect("stage span");
+            assert_eq!(child.parent_span_id, root.span_context.span_id(), "{stage}");
+            assert_eq!(child.span_context.trace_id(), root.span_context.trace_id());
+        }
+        assert_safe_attributes(
+            &captured.finished(),
+            &[
+                "app.example.test",
+                "127.0.0.1",
+                &visitor_addr.port().to_string(),
+            ],
+        );
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+        drop(visitor);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn visitor_span_records_rejection() -> io::Result<()> {
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "visitor_span_records_rejection",
+        ) {
+            return Ok(());
+        }
+        let captured = crate::trace_export::test_support::CapturedSpans::new(1.0);
+        let _trace = captured.set_default();
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        assert_admitted_drop_without_opening_a_tunnel_stream(
+            intake,
+            build_client_hello("other.example.test")?,
+            tunnel_connection,
+        )
+        .await?;
+
+        let root = wait_for_span(&captured, "visitor").await?;
+        assert_eq!(
+            crate::trace_export::test_support::attribute(&root, crate::trace_export::OUTCOME)
+                .as_deref(),
+            Some("rejected")
+        );
+        assert!(captured.span("stream_open").is_none());
         Ok(())
     }
 

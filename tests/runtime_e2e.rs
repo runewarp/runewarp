@@ -2225,6 +2225,7 @@ client-identity = "{}"
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
@@ -2399,6 +2400,7 @@ client-identity = "{}"
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
@@ -2561,6 +2563,7 @@ client-identity = "{}"
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
@@ -2758,6 +2761,7 @@ client-identity = "{}"
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
@@ -2904,6 +2908,7 @@ client-identity = "{}"
         server_port: 443,
         log_level: LogLevel::Off,
         log_format: runewarp::LogFormat::Text,
+        trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),

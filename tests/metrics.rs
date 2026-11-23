@@ -176,6 +176,22 @@ fn client_config(
     tunnel_port: u16,
     metrics_bind_address: SocketAddr,
 ) -> Result<ClientConfig> {
+    client_config_with_backend(
+        directory,
+        fixture,
+        tunnel_port,
+        metrics_bind_address,
+        "127.0.0.1:9",
+    )
+}
+
+fn client_config_with_backend(
+    directory: &std::path::Path,
+    fixture: &Fixture,
+    tunnel_port: u16,
+    metrics_bind_address: SocketAddr,
+    backend_address: &str,
+) -> Result<ClientConfig> {
     fs::write(directory.join("server-ca.pem"), fixture.cert.cert.pem())?;
     let identity_directory = directory.join("client-identity");
     fs::create_dir(&identity_directory)?;
@@ -205,7 +221,7 @@ fn client_config(
         identity_directory,
         services: vec![ServiceConfig {
             public_hostnames: None,
-            backend_address: "127.0.0.1:9".to_owned(),
+            backend_address: backend_address.to_owned(),
             tls_mode: ClientTlsMode::Passthrough,
             proxy_protocol: None,
         }],
@@ -388,6 +404,168 @@ async fn metrics_bind_failure_logs_an_error_and_keeps_serving() -> Result<()> {
         "ERROR server metrics listener disabled: config-key=server.metrics-bind-address bind-address={taken}: bind failed:"
     );
     assert!(logs.read().contains(&expected), "{}", logs.read());
+    server_shutdown.begin_fast();
+    timeout(Duration::from_secs(5), server_task).await???;
+    Ok(())
+}
+
+fn client_hello(hostname: &str) -> Result<Vec<u8>> {
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+    let mut tls = rustls::ClientConnection::new(
+        Arc::new(tls_config),
+        rustls::pki_types::ServerName::try_from(hostname.to_owned())?,
+    )?;
+    let mut hello = Vec::new();
+    tls.write_tls(&mut hello)?;
+    Ok(hello)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scrapes_track_visitor_stages_latency_and_bytes_on_both_roles() -> Result<()> {
+    logs();
+    let fixture = Fixture::new()?;
+    let tunnel_addrs = dual_stack_tunnel_addrs()?;
+    let server = fixture.bind(tunnel_addrs.clone(), ephemeral()).await?;
+    let server_metrics = server.metrics_addr().expect("server metrics bound");
+    let public = server.public_addr()?;
+    let shutdown = OrderlyShutdown::new(Duration::ZERO, Duration::ZERO);
+    let server_shutdown = shutdown.clone();
+    let server_task = tokio::spawn(async move { server.run_with_shutdown(&shutdown).await });
+
+    // A plain TCP backend: passthrough forwards the Visitor's bytes untouched.
+    let backend = tokio::net::TcpListener::bind(ephemeral()).await?;
+    let backend_address = backend.local_addr()?.to_string();
+    let backend_task = tokio::spawn(async move {
+        let (mut stream, _) = backend.accept().await?;
+        let mut received = Vec::new();
+        stream.read_to_end(&mut received).await?;
+        stream.write_all(b"pong").await?;
+        stream.shutdown().await?;
+        Ok::<_, std::io::Error>(received.len())
+    });
+
+    let directory = tempfile::tempdir()?;
+    let settings = client_config_with_backend(
+        directory.path(),
+        &fixture,
+        tunnel_addrs[0].port(),
+        ephemeral(),
+        &backend_address,
+    )?;
+    let client =
+        ClientRuntime::prepare(&settings, SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))).await?;
+    let client_metrics = client.metrics_addr().expect("client metrics bound");
+    let (client_stop, client_stopped) = oneshot::channel::<()>();
+    let client_run = client.run(async move {
+        let _ = client_stopped.await;
+        Ok(ShutdownMode::Fast)
+    });
+    tokio::pin!(client_run);
+
+    let hello = client_hello("app.example.test")?;
+    let visitors = async {
+        eventually(
+            server_metrics,
+            &[("runewarp_server_tunnels_connected", 1.0)],
+        )
+        .await?;
+
+        // An unauthorized hostname is rejected with a typed reason.
+        let mut stranger = TcpStream::connect(public).await?;
+        stranger
+            .write_all(&client_hello("other.example.test")?)
+            .await?;
+        let _ = timeout(Duration::from_secs(5), stranger.read(&mut [0])).await?;
+
+        let mut visitor = TcpStream::connect(public).await?;
+        visitor.write_all(&hello).await?;
+        visitor.write_all(b"ping").await?;
+        visitor.shutdown().await?;
+        let mut response = Vec::new();
+        timeout(Duration::from_secs(5), visitor.read_to_end(&mut response)).await??;
+        assert_eq!(response, b"pong");
+        let received = timeout(Duration::from_secs(5), backend_task).await???;
+        assert_eq!(received, hello.len() + 4);
+
+        let visitor_bytes = (hello.len() + 4) as f64;
+        let server_text = eventually(
+            server_metrics,
+            &[
+                ("runewarp_server_visitors_accepted_total", 2.0),
+                (
+                    r#"runewarp_server_visitors_rejected_total{reason="unauthorized_hostname"}"#,
+                    1.0,
+                ),
+                ("runewarp_server_visitors_placed_total", 1.0),
+                (
+                    r#"runewarp_server_visitors_closed_total{outcome="ok"}"#,
+                    1.0,
+                ),
+                ("runewarp_server_visitors_active", 0.0),
+                (
+                    r#"runewarp_server_visitor_bytes_total{direction="from_visitor"}"#,
+                    visitor_bytes,
+                ),
+                (
+                    r#"runewarp_server_visitor_bytes_total{direction="to_visitor"}"#,
+                    4.0,
+                ),
+                ("runewarp_server_visitor_duration_seconds_count", 1.0),
+                (
+                    "runewarp_server_visitor_stream_open_duration_seconds_count",
+                    1.0,
+                ),
+            ],
+        )
+        .await?;
+        let rejected: f64 = server_text
+            .lines()
+            .filter(|line| line.starts_with("runewarp_server_visitors_rejected_total{"))
+            .filter_map(|line| line.rsplit_once(' ')?.1.parse::<f64>().ok())
+            .sum();
+        assert_eq!(rejected, 1.0, "{server_text}");
+        eventually(
+            client_metrics,
+            &[
+                ("runewarp_client_visitors_handled_total", 1.0),
+                ("runewarp_client_visitors_active", 0.0),
+                (
+                    "runewarp_client_backend_connect_duration_seconds_count",
+                    1.0,
+                ),
+                ("runewarp_client_backend_connect_failures_total", 0.0),
+                (
+                    r#"runewarp_client_backend_bytes_total{direction="to_backend"}"#,
+                    visitor_bytes,
+                ),
+                (
+                    r#"runewarp_client_backend_bytes_total{direction="from_backend"}"#,
+                    4.0,
+                ),
+            ],
+        )
+        .await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    tokio::select! {
+        result = &mut client_run => {
+            return Err(format!("client exited early: {:?}", result.err().map(|e| e.to_string())).into());
+        }
+        result = visitors => {
+            if let Err(error) = result {
+                return Err(format!("{error}\nclient: {}\nlogs: {}", scrape(client_metrics).await?, logs().read()).into());
+            }
+        }
+    }
+
+    client_stop
+        .send(())
+        .map_err(|()| "client already stopped")?;
+    timeout(Duration::from_secs(10), client_run)
+        .await?
+        .map_err(|error| error.to_string())?;
     server_shutdown.begin_fast();
     timeout(Duration::from_secs(5), server_task).await???;
     Ok(())

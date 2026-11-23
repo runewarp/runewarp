@@ -26,7 +26,19 @@ use super::readiness::ReadinessGate;
 pub(crate) enum TunnelRouteOutcome {
     Unauthorized,
     NoActiveTunnelConnection,
+    /// Shutdown or drain sealed new Visitor placement.
+    ShuttingDown,
     Connected(VisitorRoute),
+}
+
+/// Why a routed Visitor could not register as active work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VisitorWorkRejection {
+    /// Shutdown or drain sealed new Visitor placement after routing.
+    ShuttingDown,
+    /// An Authorization replacement after routing no longer maps the hostname to this
+    /// connection's Tunnel.
+    Unauthorized,
 }
 
 pub(crate) enum TunnelRegistrationOutcome {
@@ -306,7 +318,6 @@ impl TunnelRegistry {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn metrics(&self) -> ServerMetrics {
         self.metrics.clone()
     }
@@ -448,7 +459,7 @@ impl TunnelRegistry {
         public_hostname: &PublicHostname,
     ) -> TunnelRouteOutcome {
         let Some(admission) = self.begin_active_visitor_admission() else {
-            return TunnelRouteOutcome::NoActiveTunnelConnection;
+            return TunnelRouteOutcome::ShuttingDown;
         };
         // Lock pools before reading authorization so the index→pool view stays
         // coherent with replace_authorization's write-locked swap+realign.
@@ -529,7 +540,7 @@ impl TunnelRegistry {
         public_hostname: &PublicHostname,
         route: VisitorRoute,
         active_stream_permit: OwnedSemaphorePermit,
-    ) -> Option<ActiveVisitorWork> {
+    ) -> Result<ActiveVisitorWork, VisitorWorkRejection> {
         let VisitorRoute {
             connection,
             authorization,
@@ -554,11 +565,16 @@ impl TunnelRegistry {
                 _ => false,
             };
         if inner.sealed || !remains_current_and_authorized {
+            let rejection = if inner.sealed {
+                VisitorWorkRejection::ShuttingDown
+            } else {
+                VisitorWorkRejection::Unauthorized
+            };
             drop(inner);
             self.visitor_work.quiescent.notify_waiters();
-            return None;
+            return Err(rejection);
         }
-        Some(self.register_active_visitor_work_locked(
+        Ok(self.register_active_visitor_work_locked(
             &mut inner,
             public_hostname.clone(),
             connection.member_id(),
@@ -1031,7 +1047,8 @@ mod tests {
         assert!(
             registry
                 .register_active_visitor_work(&hostname, old_route, permit)
-                .is_none(),
+                .err()
+                == Some(super::VisitorWorkRejection::Unauthorized),
             "registration after commit must reject a route from the prior snapshot"
         );
         assert_eq!(registry.active_stream_count(), 0);
@@ -1083,7 +1100,8 @@ mod tests {
         assert!(
             registry
                 .register_active_visitor_work(&hostname, route, permit)
-                .is_none(),
+                .err()
+                == Some(super::VisitorWorkRejection::ShuttingDown),
             "registration after shutdown seals admission must fail"
         );
         timeout(Duration::from_millis(100), waiter)
@@ -1203,7 +1221,7 @@ mod tests {
             registry
                 .route_tunnel_connection(&public_hostname("app.example.test"))
                 .await,
-            TunnelRouteOutcome::NoActiveTunnelConnection
+            TunnelRouteOutcome::ShuttingDown
         ));
         Ok(())
     }

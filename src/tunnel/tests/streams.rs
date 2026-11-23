@@ -712,6 +712,44 @@ async fn credit_gauges_follow_offer_assignment_release_and_idle_stop() {
 }
 
 #[tokio::test]
+async fn unassignable_streams_count_saturated_or_no_credit_rejections() {
+    use crate::metrics::test_support::sample;
+    let fixture = Fixture::new().expect("fixture");
+    let (_server, client) = fixture.connect().await.expect("handshake");
+    let metrics = crate::metrics::ClientMetrics::new(false);
+    let credits = crate::tunnel::credit::VisitorCredits::new(
+        client,
+        budget(1),
+        None,
+        metrics.credit_gauges(),
+    );
+    let held = credits.assign().expect("the only permit");
+    assert!(credits.assign().is_none(), "the budget is exhausted");
+    credits.close();
+    assert!(credits.assign().is_none(), "closed credits assign nothing");
+    drop(held);
+    let text = metrics.render();
+    assert_eq!(
+        sample(
+            &text,
+            r#"runewarp_client_visitors_rejected_total{reason="saturated"}"#
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(
+            &text,
+            r#"runewarp_client_visitors_rejected_total{reason="no_credit"}"#
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&text, "runewarp_client_visitors_handled_total"),
+        Some(2.0)
+    );
+}
+
+#[tokio::test]
 async fn explicit_reserved_credit_eight_to_nine_is_advertised_without_extra_capacity() {
     let fixture = Fixture::new().expect("fixture");
     let (server, client) = fixture.connect().await.expect("handshake");

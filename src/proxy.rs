@@ -1,19 +1,32 @@
 use std::io;
 
+use prometheus_client::metrics::counter::Counter;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, copy};
 use tokio::net::TcpStream;
+
+use crate::metrics::CountedIo;
+
+/// Byte counters at the TCP socket of a proxied stream.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TcpByteCounters {
+    pub(crate) read: Counter,
+    pub(crate) written: Counter,
+}
 
 pub(crate) async fn proxy_tcp_over_tunnel<R, W>(
     tcp_stream: TcpStream,
     initial_bytes: Vec<u8>,
     mut tunnel_send: W,
     mut tunnel_recv: R,
+    tcp_bytes: TcpByteCounters,
 ) -> io::Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let (mut tcp_reader, mut tcp_writer) = tcp_stream.into_split();
+    let (tcp_reader, tcp_writer) = tcp_stream.into_split();
+    let mut tcp_reader = CountedIo::new(tcp_reader, tcp_bytes.read, Counter::default());
+    let mut tcp_writer = CountedIo::writer(tcp_writer, tcp_bytes.written);
     let (to_tunnel, to_tcp) = tokio::join!(
         async move {
             tunnel_send.write_all(&initial_bytes).await?;
@@ -55,6 +68,7 @@ mod tests {
                 b"request".to_vec(),
                 tunnel_send,
                 tunnel_recv,
+                Default::default(),
             ));
             let sends_response = async move {
                 response_writer.write_all(&response).await?;

@@ -6,7 +6,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use super::MAX_IDLE_VISITOR_CREDIT;
 use super::stream::StreamResource;
-use crate::metrics::CreditGauges;
+use crate::metrics::{ClientVisitorRejectReason, CreditGauges};
 
 struct State {
     idle: Vec<OwnedSemaphorePermit>,
@@ -108,6 +108,9 @@ impl VisitorCredits {
     pub(super) fn assign(self: &Arc<Self>) -> Option<Arc<dyn StreamResource>> {
         let mut state = self.state();
         if state.closed {
+            drop(state);
+            self.gauges
+                .reject_unassigned(ClientVisitorRejectReason::NoCredit);
             return None;
         }
         let permit = if let Some(permit) = state.idle.pop() {
@@ -128,6 +131,8 @@ impl VisitorCredits {
                     self.guard_rejections
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     drop(state);
+                    self.gauges
+                        .reject_unassigned(ClientVisitorRejectReason::Saturated);
                     self.note_budget(false);
                     return None;
                 }

@@ -210,9 +210,11 @@ impl<I> ConnectionLifecycle<I> {
                     self.schedule_report(revision);
                 }
                 Err(error) => {
-                    // Log inside the held span, so the rejection lines carry its trace IDs, then
-                    // end it with ERROR status.
+                    // Record ERROR first, so stopping during the callback cannot cancel the
+                    // outcome. The held handle keeps the span open, so the rejection lines
+                    // logged inside it carry its trace IDs.
                     let trace = span.span().clone();
+                    span.fail("rejected");
                     trace.in_scope(|| {
                         tracing::warn!(error = %error, "managed session role input rejected");
                     });
@@ -220,7 +222,6 @@ impl<I> ConnectionLifecycle<I> {
                         .in_scope(|| on_event(ManagedSessionEvent::Rejected { revision }))
                         .instrument(trace.clone())
                         .await;
-                    span.fail("rejected");
                 }
             }
             self.queue.finish_apply();

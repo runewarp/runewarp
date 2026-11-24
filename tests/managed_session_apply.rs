@@ -2120,6 +2120,105 @@ async fn applies_export_managed_apply_spans_with_role_revision_and_outcome() {
     fixture.shutdown().await;
 }
 
+#[tokio::test]
+async fn shutdown_during_the_rejection_callback_keeps_the_rejected_error_span() {
+    // Callsite interest is process-wide, so run alone in a child process.
+    const CHILD: &str = "RUNEWARP_TRACE_TEST_CHILD";
+    const NAME: &str = "shutdown_during_the_rejection_callback_keeps_the_rejected_error_span";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let _trace = tracing::subscriber::set_default(
+        tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
+    );
+
+    let material = generate_control_mtls_material("runewarp-client-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse(
+            "rev-1",
+            "{\"server_addresses\":[\"tunnel.example.test\"]}",
+        )],
+    )
+    .await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Client,
+        session_material,
+    )
+    .unwrap();
+    let (rejected_tx, rejected_rx) = tokio::sync::oneshot::channel::<()>();
+    let rejected_tx = Arc::new(Mutex::new(Some(rejected_tx)));
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut EmptyOnlyAdapter,
+                move |event| {
+                    let rejected_tx = Arc::clone(&rejected_tx);
+                    async move {
+                        if matches!(event, ManagedSessionEvent::Rejected { .. }) {
+                            if let Some(tx) = rejected_tx.lock().unwrap().take() {
+                                let _ = tx.send(());
+                            }
+                            // Shutdown arrives while the rejection is still being reported.
+                            std::future::pending::<()>().await;
+                        }
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+    tokio::time::timeout(Duration::from_secs(5), rejected_rx)
+        .await
+        .expect("rejection reported")
+        .unwrap();
+    let _ = stop_tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), runner)
+        .await
+        .expect("session stops")
+        .unwrap();
+
+    let spans = exporter.get_finished_spans().unwrap();
+    let apply = spans
+        .iter()
+        .find(|span| span.name == "managed.apply")
+        .expect("managed.apply exported");
+    let outcome = apply
+        .attributes
+        .iter()
+        .find(|attribute| attribute.key.as_str() == "runewarp.outcome")
+        .map(|attribute| attribute.value.to_string());
+    assert_eq!(outcome.as_deref(), Some("rejected"));
+    assert_eq!(apply.status, opentelemetry::trace::Status::error(""));
+    fixture.shutdown().await;
+}
+
 /// Accept OTLP/HTTP exports and forward each request body.
 async fn collect_otlp(listener: TcpListener, bodies: tokio::sync::mpsc::UnboundedSender<Vec<u8>>) {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -2433,6 +2532,7 @@ async fn reject_one_apply_with_json_logs(export: bool) {
 
     if export {
         use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::any_value::Value;
         use opentelemetry_proto::tonic::trace::v1::status::StatusCode;
         use prost::Message as _;
         let mut applies = Vec::new();
@@ -2447,15 +2547,36 @@ async fn reject_one_apply_with_json_logs(export: bool) {
                     .filter(|span| span.name == "managed.apply"),
             );
         }
-        let status = |span: &opentelemetry_proto::tonic::trace::v1::Span| {
-            span.status.as_ref().map_or(0, |status| status.code)
-        };
         assert_eq!(applies.len(), 2, "{applies:?}");
-        let (rejected, applied): (Vec<_>, Vec<_>) = applies
-            .into_iter()
-            .partition(|span| status(span) == StatusCode::Error as i32);
-        assert_eq!(rejected.len(), 1, "one rejected apply has ERROR status");
-        assert_ne!(status(&applied[0]), StatusCode::Error as i32);
+        let revision = |name: &str| {
+            applies
+                .iter()
+                .find(|span| {
+                    span.attributes.iter().any(|attribute| {
+                        attribute.key == "runewarp.revision"
+                            && attribute
+                                .value
+                                .as_ref()
+                                .and_then(|value| value.value.as_ref())
+                                == Some(&Value::StringValue(name.to_owned()))
+                    })
+                })
+                .unwrap_or_else(|| panic!("no managed.apply span for {name}"))
+        };
+        let status = |span: &opentelemetry_proto::tonic::trace::v1::Span| {
+            let status = span.status.clone().unwrap_or_default();
+            (status.code, status.message)
+        };
+        assert_eq!(
+            status(revision("rev-1")),
+            (StatusCode::Unset as i32, String::new())
+        );
+        // ERROR carries no description, so no error text leaves the process.
+        assert_eq!(
+            status(revision("rev-2")),
+            (StatusCode::Error as i32, String::new())
+        );
+        let rejected = [revision("rev-2")];
         let hex = |bytes: &[u8]| {
             bytes
                 .iter()

@@ -40,7 +40,7 @@ Every span has the `service.name` resource attribute `runewarp-server` or `runew
 | `tunnel_connection.handshake` | Server | A Tunnel connection's QUIC handshake is admitted. | The connection is registered in a Tunnel pool or rejected. | `runewarp.outcome`, `runewarp.server_generation` |
 | `client.tunnel_connect` | Client | A primary or candidate Tunnel connection attempt starts. | The connection is established or the attempt fails. | `runewarp.outcome`, `runewarp.candidate` |
 | `client.visitor` | Client | A Visitor stream is accepted. | The backend is connected or the stream is rejected. | `runewarp.outcome` |
-| `managed.apply` | Both | A validated Managed snapshot starts applying. | The apply succeeds or is rejected. | `runewarp.outcome`, `runewarp.role`, `runewarp.revision` |
+| `managed.apply` | Both | A validated Managed snapshot starts applying. | The apply succeeds or is rejected. A rejected apply ends with ERROR status. | `runewarp.outcome`, `runewarp.role`, `runewarp.revision` |
 
 `runewarp.outcome` values:
 
@@ -52,13 +52,22 @@ Every span has the `service.name` resource attribute `runewarp-server` or `runew
 
 `cancelled` means the work ended without an outcome, for example when its task stopped.
 
+Only a rejected `managed.apply` sets a span status: ERROR, with no description, so Server and Client error ratios count rejected applies. Every other span leaves its status unset.
+
 ## Privacy
 
 - Span attributes come only from code-enumerated values, the Server runtime generation, Control revisions and the Client candidate flag. They never carry hostnames, IP addresses, ports, Client identities or Tunnel IDs.
-- Log events are never attached to spans, so log message fields do not reach the collector.
+- Log events are never attached to spans, so log message fields do not reach the collector. JSON log lines carry only the trace and span IDs, described under [Logs](#logs).
 - Runewarp does not propagate trace context over the Tunnel. Correlate Server and Control activity by Server generation, revision and time.
 - Spans from dependencies are never exported.
 
 ## Logs
 
-Trace export does not change runtime log output. Text and JSON lines are identical with and without it, and `log-level` does not affect which spans export.
+Trace export does not change text log lines, and `log-level` does not affect which spans export.
+
+With `log-format = "json"` and trace export on, a line emitted inside a sampled Runewarp span also carries two top-level keys, so the line links to its trace:
+
+- `trace_id`: the span's trace ID, 32 lowercase hex digits.
+- `span_id`: the span's ID, 16 lowercase hex digits.
+
+The IDs come from the nearest enclosing Runewarp span, skipping spans from dependencies. A rejected `managed.apply` logs its rejection lines inside its span, so they carry that span's IDs. Lines outside every Runewarp span, lines inside a sampled-out span, and every line without trace export carry neither key.

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::Instant;
+use tracing::Instrument as _;
 
 use super::adapter::{ApplyError, RoleAdapter};
 use super::connection::{ConnectionError, ManagedSessionConnection};
@@ -198,13 +199,9 @@ impl<I> ConnectionLifecycle<I> {
                 }
             };
 
-            span.finish(if apply_result.is_ok() {
-                "applied"
-            } else {
-                "rejected"
-            });
             match apply_result {
                 Ok(()) => {
+                    span.finish("applied");
                     applied.set(revision.clone());
                     on_event(ManagedSessionEvent::Applied {
                         revision: revision.clone(),
@@ -213,8 +210,18 @@ impl<I> ConnectionLifecycle<I> {
                     self.schedule_report(revision);
                 }
                 Err(error) => {
-                    tracing::warn!(error = %error, "managed session role input rejected");
-                    on_event(ManagedSessionEvent::Rejected { revision }).await;
+                    // Record ERROR first, so stopping during the callback cannot cancel the
+                    // outcome. The held handle keeps the span open, so the rejection lines
+                    // logged inside it carry its trace IDs.
+                    let trace = span.span().clone();
+                    span.fail("rejected");
+                    trace.in_scope(|| {
+                        tracing::warn!(error = %error, "managed session role input rejected");
+                    });
+                    trace
+                        .in_scope(|| on_event(ManagedSessionEvent::Rejected { revision }))
+                        .instrument(trace.clone())
+                        .await;
                 }
             }
             self.queue.finish_apply();

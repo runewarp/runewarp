@@ -4,15 +4,19 @@ use std::fmt;
 use std::io;
 use std::io::IsTerminal;
 use std::net::SocketAddr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use time::format_description::{self, OwnedFormatItem};
-use tracing::Subscriber;
+use tracing::dispatcher::{Dispatch, WeakDispatch};
+use tracing::{Event, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::time::UtcTime;
 use tracing_subscriber::fmt::writer::MakeWriter;
+use tracing_subscriber::fmt::{FmtContext, format::JsonFields};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{fmt as tracing_fmt, reload};
 
 use crate::client_hello::ClientHelloError;
@@ -179,7 +183,7 @@ pub fn install_with_trace_export(
     let use_ansi = io::stderr().is_terminal();
     let (subscriber, reload_filter) =
         build_subscriber(level, format, traces.as_ref(), io::stderr, use_ansi);
-    tracing::subscriber::set_global_default(subscriber).map_err(InstallError::SetGlobalDefault)?;
+    tracing::dispatcher::set_global_default(subscriber).map_err(InstallError::SetGlobalDefault)?;
 
     let enabled = traces.is_some();
     let logger = InstalledLogger {
@@ -952,27 +956,45 @@ fn build_subscriber<W>(
     traces: Option<&opentelemetry_sdk::trace::SdkTracerProvider>,
     writer: W,
     use_ansi: bool,
-) -> (RuntimeSubscriber, ReloadFilter)
+) -> (Dispatch, ReloadFilter)
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
     // The level filters only log output, so spans export at every `log-level`. The log layer
-    // never sees Runewarp trace spans, so lines inside them keep today's text and JSON shape.
+    // never sees Runewarp trace spans, so text lines inside them keep today's shape.
     let (filter, reload_handle) = reload::Layer::new(LogFilter(level_filter(level)));
-    let layer = tracing_fmt::layer()
-        .with_writer(writer)
-        .with_timer(UtcTime::new(log_timestamp_format()))
-        .with_target(false);
+    let timer = UtcTime::new(log_timestamp_format());
+    let layer = tracing_fmt::layer().with_writer(writer);
+    // Set once the dispatch exists. Only JSON lines read it, and only with trace export.
+    let dispatch = Arc::new(OnceLock::new());
     // JSON keeps the text envelope's timestamp, level and message as top-level keys, with event
     // fields flattened beside them. Span keys are omitted.
     let layer = match format {
-        LogFormat::Text => layer.with_ansi(use_ansi).boxed(),
-        LogFormat::Json => layer
-            .json()
-            .flatten_event(true)
-            .with_current_span(false)
-            .with_span_list(false)
+        LogFormat::Text => layer
+            .with_timer(timer)
+            .with_target(false)
+            .with_ansi(use_ansi)
             .boxed(),
+        LogFormat::Json => {
+            let json = tracing_fmt::format()
+                .json()
+                .flatten_event(true)
+                .with_current_span(false)
+                .with_span_list(false)
+                .with_timer(timer)
+                .with_target(false);
+            let layer = layer.fmt_fields(JsonFields::new());
+            if traces.is_some() {
+                layer
+                    .event_format(TraceCorrelatedJson {
+                        inner: json,
+                        dispatch: Arc::clone(&dispatch),
+                    })
+                    .boxed()
+            } else {
+                layer.event_format(json).boxed()
+            }
+        }
     };
     let logs = tracing_subscriber::registry().with(layer.with_filter(filter));
     // Without trace export, no layer enables Runewarp trace spans, so their callsites stay off.
@@ -981,6 +1003,9 @@ where
         Some(provider) => Box::new(logs.with(crate::trace_export::layer(provider))),
         None => Box::new(logs),
     };
+    let subscriber = Dispatch::new(subscriber);
+    // The formatter holds a weak handle, so the dispatch does not keep itself alive.
+    let _ = dispatch.set(subscriber.downgrade());
 
     let reload_filter = Box::new(move |level| {
         reload_handle
@@ -989,6 +1014,48 @@ where
     });
 
     (subscriber, reload_filter)
+}
+
+/// JSON event format that adds `trace_id` and `span_id` of the nearest Runewarp trace span, so a
+/// log line links to its trace. Lines outside every trace span keep the plain JSON shape.
+struct TraceCorrelatedJson<F> {
+    inner: F,
+    dispatch: Arc<OnceLock<WeakDispatch>>,
+}
+
+impl<S, N, F> FormatEvent<S, N> for TraceCorrelatedJson<F>
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+    F: FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let ids = self
+            .dispatch
+            .get()
+            .and_then(WeakDispatch::upgrade)
+            .and_then(|dispatch| crate::trace_export::log_ids(&dispatch, event));
+        let Some((trace_id, span_id)) = ids else {
+            return self.inner.format_event(ctx, writer, event);
+        };
+        let mut line = String::new();
+        self.inner
+            .format_event(ctx, Writer::new(&mut line), event)?;
+        // The JSON formatter writes one object and a newline. The IDs are hex, so they need no
+        // escaping.
+        match line.strip_suffix("}\n") {
+            Some(object) => writeln!(
+                writer,
+                "{object},\"trace_id\":\"{trace_id}\",\"span_id\":\"{span_id}\"}}"
+            ),
+            None => writer.write_str(&line),
+        }
+    }
 }
 
 /// Log-layer filter: the runtime log level, minus Runewarp trace spans.
@@ -1755,14 +1822,14 @@ mod tests {
         // Text tests use the default format so they also guard default output stability.
         let (subscriber, _) =
             build_subscriber(level, LogFormat::default(), None, buffer.clone(), ansi);
-        tracing::subscriber::with_default(subscriber, emit_logs);
+        tracing::dispatcher::with_default(&subscriber, emit_logs);
         buffer.read()
     }
 
     fn capture_json(level: LogLevel, emit_logs: impl FnOnce()) -> Vec<serde_json::Value> {
         let buffer = SharedBuffer::default();
         let (subscriber, _) = build_subscriber(level, LogFormat::Json, None, buffer.clone(), true);
-        tracing::subscriber::with_default(subscriber, emit_logs);
+        tracing::dispatcher::with_default(&subscriber, emit_logs);
         buffer
             .read()
             .lines()
@@ -1800,7 +1867,7 @@ mod tests {
         let buffer = SharedBuffer::default();
         let (subscriber, _) =
             build_subscriber(LogLevel::Debug, format, traces, buffer.clone(), false);
-        tracing::subscriber::with_default(subscriber, emit_logs);
+        tracing::dispatcher::with_default(&subscriber, emit_logs);
         // Drop the timestamp so runs compare byte for byte.
         buffer
             .read()
@@ -1851,7 +1918,7 @@ mod tests {
             buffer.clone(),
             false,
         );
-        tracing::subscriber::set_global_default(subscriber).expect("global subscriber");
+        tracing::dispatcher::set_global_default(subscriber).expect("global subscriber");
 
         for _ in 0..3 {
             tracing::info_span!(target: TARGET, "probe").in_scope(|| {});
@@ -1870,36 +1937,123 @@ mod tests {
     }
 
     #[test]
-    fn trace_export_leaves_text_and_json_log_lines_unchanged() {
+    fn trace_export_leaves_text_log_lines_unchanged() {
         if !crate::trace_export::test_support::isolated(
             module_path!(),
-            "trace_export_leaves_text_and_json_log_lines_unchanged",
+            "trace_export_leaves_text_log_lines_unchanged",
         ) {
             return;
         }
-        for format in [LogFormat::Text, LogFormat::Json] {
-            let plain = capture_format(format, None, emit_inside_trace_spans);
-            let captured = crate::trace_export::test_support::CapturedSpans::new(1.0);
-            let traced = capture_format(format, Some(captured.provider()), emit_inside_trace_spans);
+        let plain = capture_format(LogFormat::Text, None, emit_inside_trace_spans);
+        let captured = crate::trace_export::test_support::CapturedSpans::new(1.0);
+        let traced = capture_format(
+            LogFormat::Text,
+            Some(captured.provider()),
+            emit_inside_trace_spans,
+        );
 
-            assert_eq!(plain.len(), 3, "{plain:?}");
-            assert_eq!(traced, plain, "{format:?} output changed with trace export");
-            assert!(
-                plain
-                    .iter()
-                    .all(|line| !line.contains("visitor:") && !line.contains("route:"))
-            );
-            let mut names = captured.names();
-            names.sort_unstable();
-            assert_eq!(names, ["route", "visitor"]);
-        }
-        let text = capture_format(LogFormat::Text, None, emit_inside_trace_spans);
+        assert_eq!(plain.len(), 3, "{plain:?}");
+        assert_eq!(traced, plain, "text output changed with trace export");
+        assert!(
+            plain
+                .iter()
+                .all(|line| !line.contains("visitor:") && !line.contains("route:"))
+        );
+        let mut names = captured.names();
+        names.sort_unstable();
+        assert_eq!(names, ["route", "visitor"]);
+        let text = plain;
         assert_eq!(
             text[0],
             "DEBUG server route forwarded: public-hostname=app.example.test"
         );
         // Spans from other targets keep their place in log lines.
         assert_eq!(text[2], " WARN dependency{peer=\"kept\"}: dependency event");
+    }
+
+    #[test]
+    fn json_lines_inside_trace_spans_carry_the_nearest_trace_span_ids() {
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "json_lines_inside_trace_spans_carry_the_nearest_trace_span_ids",
+        ) {
+            return;
+        }
+        let emit_logs = || {
+            emit_inside_trace_spans();
+            emit(EventLevel::Info, "server outside spans");
+        };
+        let parse = |lines: Vec<String>| {
+            lines
+                .iter()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON"))
+                .collect::<Vec<_>>()
+        };
+        let plain = parse(capture_format(LogFormat::Json, None, emit_logs));
+        let captured = crate::trace_export::test_support::CapturedSpans::new(1.0);
+        let traced = parse(capture_format(
+            LogFormat::Json,
+            Some(captured.provider()),
+            emit_logs,
+        ));
+
+        assert_eq!(plain.len(), 4, "{plain:?}");
+        for line in &plain {
+            assert!(line.get("trace_id").is_none() && line.get("span_id").is_none());
+        }
+        let ids = |name: &str| {
+            let context = captured.span(name).expect("span exported").span_context;
+            (
+                context.trace_id().to_string(),
+                context.span_id().to_string(),
+            )
+        };
+        let ids_of = |line: &serde_json::Value| {
+            (
+                line["trace_id"].as_str().expect("trace_id").to_owned(),
+                line["span_id"].as_str().expect("span_id").to_owned(),
+            )
+        };
+        // Both route lines carry the route span; the third-party span defers to its Runewarp
+        // parent, and the line outside every span carries neither field.
+        assert_eq!(ids_of(&traced[0]), ids("route"));
+        assert_eq!(ids_of(&traced[1]), ids("route"));
+        assert_eq!(ids_of(&traced[2]), ids("visitor"));
+        assert!(traced[3].get("trace_id").is_none() && traced[3].get("span_id").is_none());
+        // Apart from the two IDs, each line is the plain line.
+        for (traced, plain) in traced.iter().zip(&plain) {
+            let mut traced = traced.clone();
+            let object = traced.as_object_mut().expect("object");
+            object.remove("trace_id");
+            object.remove("span_id");
+            assert_eq!(&traced, plain);
+        }
+    }
+
+    #[test]
+    fn json_lines_inside_sampled_out_trace_spans_carry_no_ids() {
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "json_lines_inside_sampled_out_trace_spans_carry_no_ids",
+        ) {
+            return;
+        }
+        // A sampled-out span is never exported, so its IDs would link to no trace.
+        let captured = crate::trace_export::test_support::CapturedSpans::new(0.0);
+        let lines = capture_format(
+            LogFormat::Json,
+            Some(captured.provider()),
+            emit_inside_trace_spans,
+        );
+
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| !line.contains("trace_id") && !line.contains("span_id")),
+            "{lines:?}"
+        );
+        assert!(captured.finished().is_empty());
     }
 
     #[test]
@@ -1954,7 +2108,7 @@ mod tests {
         let buffer = SharedBuffer::default();
         let (subscriber, reload) =
             build_subscriber(LogLevel::Info, LogFormat::Text, None, buffer.clone(), false);
-        tracing::subscriber::with_default(subscriber, || {
+        tracing::dispatcher::with_default(&subscriber, || {
             let debug = || tracing::debug!("reload probe");
             debug();
             reload(LogLevel::Debug).expect("reload");
@@ -1982,7 +2136,7 @@ mod tests {
             buffer.clone(),
             false,
         );
-        tracing::subscriber::with_default(subscriber, emit_inside_trace_spans);
+        tracing::dispatcher::with_default(&subscriber, emit_inside_trace_spans);
 
         assert_eq!(buffer.read(), "");
         assert_eq!(captured.finished().len(), 2);
@@ -2046,7 +2200,7 @@ mod tests {
         let buffer = SharedBuffer::default();
         let (subscriber, _) =
             build_subscriber(LogLevel::Debug, LogFormat::Json, None, buffer.clone(), true);
-        tracing::subscriber::with_default(subscriber, || {
+        tracing::dispatcher::with_default(&subscriber, || {
             tracing::debug!(reason = "refused", code = 7_u64, "stream open failed");
         });
         let output = buffer.read();

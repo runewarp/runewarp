@@ -8,7 +8,8 @@
 //!
 //! Span attributes come only from code-enumerated values and runtime generations or Control
 //! revisions. Hostnames, IP addresses, Client identities and Tunnel IDs never become attributes,
-//! and log events are never attached to spans.
+//! and log events are never attached to spans. JSON log lines inside a sampled span carry its
+//! trace and span IDs, through [`log_ids`].
 
 use std::fmt;
 use std::sync::Mutex;
@@ -18,7 +19,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use opentelemetry::KeyValue;
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::trace::{SpanId, TraceContextExt as _, TraceId, TracerProvider as _};
 use opentelemetry_http::{HttpClient, HttpError, Request, Response};
 use opentelemetry_otlp::{Protocol, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::Resource;
@@ -26,7 +27,7 @@ use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{
     BatchConfigBuilder, BatchSpanProcessor, Sampler, SdkTracerProvider, SpanData, SpanExporter,
 };
-use tracing::{Metadata, Span, Subscriber};
+use tracing::{Dispatch, Event, Metadata, Span, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::registry::LookupSpan;
@@ -182,6 +183,15 @@ impl TracedStage {
         self.span.record(OUTCOME, outcome);
         self.finished = true;
     }
+
+    /// Like [`Self::finish`], and set ERROR status so error ratios count the span. The status
+    /// has no description, so no error text leaves the process.
+    pub(crate) fn fail(self, outcome: &'static str) {
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        self.span
+            .set_status(opentelemetry::trace::Status::error(""));
+        self.finish(outcome);
+    }
 }
 
 impl Drop for TracedStage {
@@ -205,6 +215,31 @@ const EXPORTER_HTTP_TARGET: &str = "hyper_util::client";
 /// client diagnostics never appear in log lines.
 pub(crate) fn visible_to_logs(metadata: &Metadata<'_>) -> bool {
     !is_trace_span(metadata) && !metadata.target().starts_with(EXPORTER_HTTP_TARGET)
+}
+
+/// The trace and span IDs of the Runewarp trace span nearest `event`, for log correlation. The
+/// search starts at the event's explicit parent, else the current span, and skips spans from
+/// other targets. `None` outside every trace span, for a sampled-out span, which is never
+/// exported, or when `dispatch` has no trace layer.
+pub(crate) fn log_ids(dispatch: &Dispatch, event: &Event<'_>) -> Option<(TraceId, SpanId)> {
+    if event.is_root() {
+        return None;
+    }
+    let registry = dispatch.downcast_ref::<tracing_subscriber::Registry>()?;
+    let id = match event.parent() {
+        Some(id) => id.clone(),
+        None => registry.current_span().id()?.clone(),
+    };
+    let span = registry
+        .span(&id)?
+        .scope()
+        .find(|span| is_trace_span(span.metadata()))?;
+    let context = tracing_opentelemetry::get_otel_context(&span.id(), dispatch)?;
+    let span = context.span();
+    let span_context = span.span_context();
+    span_context
+        .is_sampled()
+        .then(|| (span_context.trace_id(), span_context.span_id()))
 }
 
 /// The `tracing` layer that turns Runewarp trace spans into OpenTelemetry spans.

@@ -2274,6 +2274,204 @@ async fn server_managed_apply_spans_export_with_the_runtime_generation_resource(
     fixture.shutdown().await;
 }
 
+/// Mode of the child process in the JSON log correlation test.
+const JSON_TRACE_CHILD: &str = "RUNEWARP_JSON_TRACE_TEST_CHILD";
+
+#[test]
+fn rejected_apply_logs_json_lines_with_its_trace_ids_and_exports_error_status() {
+    const NAME: &str = "rejected_apply_logs_json_lines_with_its_trace_ids_and_exports_error_status";
+    if let Ok(mode) = std::env::var(JSON_TRACE_CHILD) {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(reject_one_apply_with_json_logs(mode == "export"));
+        return;
+    }
+    // Each child installs the process-wide logger on its real stderr, as `runewarp` does.
+    let run_child = |mode: &str| {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(JSON_TRACE_CHILD, mode)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{stderr}"
+        );
+        let lines = stderr
+            .lines()
+            .filter(|line| line.starts_with('{'))
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        (stdout, lines)
+    };
+    let rejection_lines = |lines: &[Value]| {
+        lines
+            .iter()
+            .filter(|line| {
+                let message = line["message"].as_str().unwrap_or_default();
+                message == "managed session role input rejected"
+                    || message.starts_with("managed session revision rejected")
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let (stdout, lines) = run_child("export");
+    // The child prints the rejected span's IDs after reading them from the OTLP export.
+    let exported = stdout
+        .lines()
+        // libtest may print the test name on the same line first.
+        .find_map(|line| Some(line.split_once("rejected managed.apply ")?.1))
+        .unwrap_or_else(|| panic!("child reports the rejected span:\n{stdout}"));
+    let (trace_id, span_id) = exported.split_once(' ').unwrap();
+    let rejected = rejection_lines(&lines);
+    assert_eq!(rejected.len(), 2, "{lines:?}");
+    for line in &rejected {
+        assert_eq!(line["trace_id"], trace_id, "{line}");
+        assert_eq!(line["span_id"], span_id, "{line}");
+    }
+    // Lines outside the span, such as the applied revision, carry neither field.
+    let applied = lines
+        .iter()
+        .find(|line| {
+            line["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("managed session revision applied"))
+        })
+        .expect("applied line");
+    assert!(applied.get("trace_id").is_none() && applied.get("span_id").is_none());
+
+    let (_, lines) = run_child("plain");
+    assert_eq!(rejection_lines(&lines).len(), 2, "{lines:?}");
+    for line in &lines {
+        assert!(
+            line.get("trace_id").is_none() && line.get("span_id").is_none(),
+            "{line}"
+        );
+    }
+}
+
+/// Apply `rev-1`, reject `rev-2`, and with `export` check the exported spans.
+async fn reject_one_apply_with_json_logs(export: bool) {
+    let collector = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", collector.local_addr().unwrap());
+    let (body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
+    let collector = tokio::spawn(collect_otlp(collector, body_tx));
+    let trace_export = runewarp::TraceExportConfig::new(&endpoint, None).unwrap();
+    runewarp::runtime_log::install_with_trace_export(
+        runewarp::LogLevel::Info,
+        runewarp::LogFormat::Json,
+        export.then_some(&trace_export),
+        runewarp::TraceRole::Server(runewarp::ServerRuntimeGeneration::generate()),
+    )
+    .unwrap();
+
+    let material = generate_control_mtls_material("runewarp-server-a");
+    let fixture = ControlFixture::start(
+        &material,
+        vec![snapshot_sse("rev-1", "{\"server_addresses\":[]}")],
+    )
+    .await;
+    let dir = tempdir().unwrap();
+    let paths = write_control_ca_and_certs(dir.path(), &material);
+    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let mut session = ManagedSession::new(
+        fixture.control_address(),
+        ManagedSessionRole::Server,
+        session_material,
+    )
+    .unwrap();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let runner = tokio::spawn(async move {
+        session
+            .run(
+                &mut EmptyOnlyAdapter,
+                move |event| {
+                    let event_tx = event_tx.clone();
+                    async move {
+                        // Log each event as the Server runtime does.
+                        runewarp::runtime_log::managed_session_event(
+                            ManagedSessionRole::Server,
+                            &event,
+                        );
+                        let _ = event_tx.send(event);
+                    }
+                },
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await;
+    });
+    wait_for_event(
+        &mut event_rx,
+        ManagedSessionEvent::Applied {
+            revision: "rev-1".to_owned(),
+        },
+    )
+    .await;
+    fixture.push_snapshot(snapshot_sse(
+        "rev-2",
+        "{\"server_addresses\":[\"tunnel.example.test\"]}",
+    ));
+    wait_for_event(
+        &mut event_rx,
+        ManagedSessionEvent::Rejected {
+            revision: "rev-2".to_owned(),
+        },
+    )
+    .await;
+    let _ = stop_tx.send(());
+    runner.await.unwrap();
+    runewarp::runtime_log::shutdown_trace_export().await;
+
+    if export {
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use opentelemetry_proto::tonic::trace::v1::status::StatusCode;
+        use prost::Message as _;
+        let mut applies = Vec::new();
+        while let Ok(body) = body_rx.try_recv() {
+            let request = ExportTraceServiceRequest::decode(body.as_slice()).unwrap();
+            applies.extend(
+                request
+                    .resource_spans
+                    .into_iter()
+                    .flat_map(|resource| resource.scope_spans)
+                    .flat_map(|scope| scope.spans)
+                    .filter(|span| span.name == "managed.apply"),
+            );
+        }
+        let status = |span: &opentelemetry_proto::tonic::trace::v1::Span| {
+            span.status.as_ref().map_or(0, |status| status.code)
+        };
+        assert_eq!(applies.len(), 2, "{applies:?}");
+        let (rejected, applied): (Vec<_>, Vec<_>) = applies
+            .into_iter()
+            .partition(|span| status(span) == StatusCode::Error as i32);
+        assert_eq!(rejected.len(), 1, "one rejected apply has ERROR status");
+        assert_ne!(status(&applied[0]), StatusCode::Error as i32);
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        println!(
+            "rejected managed.apply {} {}",
+            hex(&rejected[0].trace_id),
+            hex(&rejected[0].span_id)
+        );
+    }
+    collector.abort();
+    fixture.shutdown().await;
+}
+
 async fn wait_for_event(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<ManagedSessionEvent>,
     expected: ManagedSessionEvent,

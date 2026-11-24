@@ -10,14 +10,18 @@ Runewarp welcomes focused changes to the open-source Client, Server, protocols, 
 
 ## Validate changes
 
-Run the full Rust checks before committing:
+Run the full Rust checks before committing, once with default features and once with all features. Trace export code and its tests build only with the `otel` feature:
 
 ```bash
 cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
+cargo test
 cargo test --all-features
 ./scripts/audit-dependencies
 ```
+
+CI runs Clippy, tests and docs once per feature combination listed in the `rust-contract` matrix in `.github/workflows/ci.yml`. A new feature combination is one entry there.
 
 For repository automation changes, also run:
 

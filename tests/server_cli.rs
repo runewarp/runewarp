@@ -622,6 +622,7 @@ tunnel-bind-address = "127.0.0.1:0"
     Ok(())
 }
 
+#[cfg(feature = "otel")]
 #[test]
 fn server_rejects_endpoint_credentials_without_printing_them() {
     let tempdir = tempdir().unwrap();

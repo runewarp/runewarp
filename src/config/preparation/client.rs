@@ -934,6 +934,38 @@ hostname = "tunnel.example.test"
         Ok(())
     }
 
+    #[cfg(not(feature = "otel"))]
+    #[test]
+    fn client_preparation_without_the_otel_feature_rejects_each_trace_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let path = tempdir.path().join("config.toml");
+        for (keys, key) in [
+            (
+                "otlp-traces-endpoint = \"https://otel.example.test/v1/traces\"\n",
+                "otlp-traces-endpoint",
+            ),
+            ("trace-sample-ratio = 0.1\n", "trace-sample-ratio"),
+            (
+                "otlp-traces-endpoint = \"https://otel.example.test/v1/traces\"\ntrace-sample-ratio = 0.1\n",
+                "otlp-traces-endpoint",
+            ),
+        ] {
+            fs::write(&path, format!("{keys}\n[client]\n"))?;
+            let error = super::prepare_client_config_from_path(&path)
+                .expect_err("trace keys need the otel feature")
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "{key} requires the otel feature, which this build does not include; rebuild with --features otel"
+                )),
+                "{error}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "otel")]
     #[test]
     fn client_preparation_reads_trace_export_from_the_config_file()
     -> Result<(), Box<dyn std::error::Error>> {

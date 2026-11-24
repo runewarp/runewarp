@@ -222,7 +222,7 @@ Set `server.metrics-bind-address` or `client.metrics-bind-address` to serve Prom
 
 ## Traces
 
-Set top-level `otlp-traces-endpoint` to export Visitor, Tunnel handshake, Client connect and Managed-apply spans to an OTLP/HTTP collector. `trace-sample-ratio` lowers the share of exported spans. The [traces reference](traces.md) lists every span with its boundaries and attributes.
+Set top-level `otlp-traces-endpoint` to export Visitor, Tunnel handshake, Client connect and Managed-apply spans to an OTLP/HTTP collector. Trace export needs a build with the `otel` Cargo feature. The Server Docker image has it; for a source install, run `cargo install runewarp --features otel`. `trace-sample-ratio` lowers the share of exported spans. The [traces reference](traces.md) lists every span with its boundaries and attributes.
 
 ## Runtime logs
 

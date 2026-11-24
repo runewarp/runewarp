@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Breaking: trace export now needs the `otel` Cargo feature, which is off by default. Default builds, including `cargo install runewarp`, carry no OpenTelemetry dependencies, and setting `otlp-traces-endpoint` or `trace-sample-ratio` in them fails startup with an error naming the key and the feature. The Server Docker image is built with `otel`. Metrics are unchanged. See [traces](docs/traces.md#build). ([#307](https://github.com/runewarp/runewarp/pull/307))
 - Breaking for library embedders: `ServerRuntime::prepare`, `prepare_listeners`, `prepare_listeners_with_acme` and `PreparedServer::bind_listeners_with_acme` take a caller-minted `ServerRuntimeGeneration`, and `TraceRole::Server` carries it. Mint a fresh generation for every start and pass the same value to both. ([#304](https://github.com/runewarp/runewarp/pull/304))
 - The `client stream handlers saturated` warning now reports active stream handlers as `active-work` instead of repeating the limit. ([#299](https://github.com/runewarp/runewarp/pull/299))
 

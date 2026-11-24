@@ -1,6 +1,6 @@
 # Traces
 
-Server and Client runtimes can export spans over OTLP/HTTP with protobuf encoding. Export is off by default and opts in with one top-level key:
+Server and Client runtimes can export spans over OTLP/HTTP with protobuf encoding. The exporter is behind the `otel` Cargo feature, which is off by default, so a default build carries no OpenTelemetry dependencies. In a build with the feature, export is still off until one top-level key opts in:
 
 ```toml
 otlp-traces-endpoint = "http://127.0.0.1:4318"
@@ -8,6 +8,23 @@ trace-sample-ratio = 0.1
 ```
 
 Nothing leaves the process while `otlp-traces-endpoint` is unset. Any collector or backend that accepts OTLP/HTTP protobuf works.
+
+## Build
+
+The Server Docker image is built with `otel`. A source install needs the feature named:
+
+```bash
+cargo install runewarp --features otel
+cargo build --release --features otel
+```
+
+Without the feature, setting either trace key fails startup before the runtime starts. The error names the key, for example:
+
+```text
+otlp-traces-endpoint requires the otel feature, which this build does not include; rebuild with --features otel
+```
+
+With both keys set, the error names `otlp-traces-endpoint`. Metrics are always built in and need no feature.
 
 ## Configuration
 

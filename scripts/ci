@@ -24,16 +24,20 @@ Runewarp::Core.run_cli do
     Runewarp::Core.section("Checking Rust formatting")
     Runewarp::Shell.run!("cargo", "fmt", "--check")
 
-    Runewarp::Core.section("Running Clippy")
-    Runewarp::Shell.run!("cargo", "clippy", "--all-targets", "--", "-D", "warnings")
-
     Runewarp::Shell.run!("./scripts/audit-dependencies")
 
-    Runewarp::Core.section("Running Rust tests")
-    Runewarp::Shell.run!("cargo", "test", "--quiet")
+    # Keep in step with the rust-contract matrix in .github/workflows/ci.yml.
+    ["", "otel"].each do |features|
+      label = features.empty? ? "default" : features
+      Runewarp::Core.section("Running Clippy (#{label})")
+      Runewarp::Shell.run!("cargo", "clippy", "--all-targets", "--features", features, "--", "-D", "warnings")
 
-    Runewarp::Core.section("Building documentation")
-    Runewarp::Shell.run!("cargo", "doc", "--no-deps")
+      Runewarp::Core.section("Running Rust tests (#{label})")
+      Runewarp::Shell.run!("cargo", "test", "--quiet", "--features", features)
+
+      Runewarp::Core.section("Building documentation (#{label})")
+      Runewarp::Shell.run!("cargo", "doc", "--no-deps", "--features", features)
+    end
 
     Runewarp::Core.section("Running Docker example smoke")
     Runewarp::Shell.run!("./scripts/docker-example", "smoke")

@@ -812,10 +812,11 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "otel")]
     async fn wait_for_span(
         captured: &crate::trace_export::test_support::CapturedSpans,
         name: &str,
-    ) -> io::Result<opentelemetry_sdk::trace::SpanData> {
+    ) -> io::Result<crate::trace_export::test_support::SpanData> {
         timeout(Duration::from_secs(1), async {
             loop {
                 if let Some(span) = captured.span(name) {
@@ -828,6 +829,7 @@ mod tests {
         .map_err(|_| timeout_error("span should be exported"))
     }
 
+    #[cfg(feature = "otel")]
     #[tokio::test]
     async fn visitor_span_ends_at_placement_with_stage_children() -> io::Result<()> {
         if !crate::trace_export::test_support::isolated(
@@ -879,6 +881,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "otel")]
     #[tokio::test]
     async fn visitor_span_records_rejection() -> io::Result<()> {
         if !crate::trace_export::test_support::isolated(
@@ -908,6 +911,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "otel")]
     #[tokio::test]
     async fn visitor_span_records_rejection_when_no_acme_config_serves_the_challenge()
     -> io::Result<()> {

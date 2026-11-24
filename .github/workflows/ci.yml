@@ -148,12 +148,22 @@ jobs:
         run: ./scripts/check-distribution package-readiness
 
   rust-contract:
-    name: Rust contract
+    name: Rust contract (${{ matrix.name }})
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      # One entry per supported Cargo feature combination.
+      matrix:
+        include:
+          - name: default
+            features: ""
+          - name: otel
+            features: otel
     env:
       RUNEWARP_BUILD_COMMIT: ${{ github.sha }}
       RUST_CACHE_SCOPE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'trusted-main' }}
+      CARGO_FEATURES: ${{ matrix.features }}
       CARGO_BINSTALL_VERSION: 1.21.0
       CARGO_BINSTALL_SHA256: b1880b3631d1ff0fd1f286a0d20f82f373355651f9fbd7f4d0d7fbfe218bf562
     steps:
@@ -166,9 +176,9 @@ jobs:
           path: |
             ${{ env.RUST_DEPENDENCY_CACHE_PATHS }}
             target/
-          key: ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-rust-ci-${{ matrix.name }}-${{ env.RUST_CACHE_SCOPE }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-ci-${{ env.RUST_CACHE_SCOPE }}-
+            ${{ runner.os }}-rust-ci-${{ matrix.name }}-${{ env.RUST_CACHE_SCOPE }}-
 
       - name: Install Rust toolchain
         run: |
@@ -180,7 +190,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features "$CARGO_FEATURES" -- -D warnings
 
       - name: Install cargo-binstall
         run: |
@@ -196,10 +206,10 @@ jobs:
         run: ./scripts/audit-dependencies
 
       - name: Run Rust tests
-        run: cargo test --quiet
+        run: cargo test --quiet --features "$CARGO_FEATURES"
 
       - name: Build documentation
-        run: cargo doc --no-deps
+        run: cargo doc --no-deps --features "$CARGO_FEATURES"
 
   docker-contract:
     name: Docker contract

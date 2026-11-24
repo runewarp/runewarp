@@ -576,6 +576,51 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
         Ok(())
     }
 
+    #[cfg(not(feature = "otel"))]
+    #[test]
+    fn server_config_without_the_otel_feature_rejects_each_trace_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tempdir = tempdir()?;
+        let path = tempdir.path().join("config.toml");
+        crate::initialize_manual_server_certificate(
+            &tempdir.path().join("cert"),
+            "tunnel.example.test",
+        )?;
+        let body = r#"
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#;
+        for (keys, key) in [
+            (
+                "otlp-traces-endpoint = \"http://127.0.0.1:4318\"\n",
+                "otlp-traces-endpoint",
+            ),
+            ("trace-sample-ratio = 0.5\n", "trace-sample-ratio"),
+            (
+                "otlp-traces-endpoint = \"http://127.0.0.1:4318\"\ntrace-sample-ratio = 0.5\n",
+                "otlp-traces-endpoint",
+            ),
+        ] {
+            fs::write(&path, format!("{keys}{body}"))?;
+            let error = crate::load_server_config(&path)
+                .expect_err("trace keys need the otel feature")
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "{key} requires the otel feature, which this build does not include; rebuild with --features otel"
+                )),
+                "{error}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "otel")]
     #[test]
     fn server_config_reads_optional_trace_export_keys() -> Result<(), Box<dyn std::error::Error>> {
         let tempdir = tempdir()?;

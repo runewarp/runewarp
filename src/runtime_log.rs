@@ -28,7 +28,7 @@ struct InstalledLogger {
     reload_filter: ReloadFilter,
     level: Mutex<LogLevel>,
     /// Process tracer provider, when trace export is on.
-    traces: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    traces: Option<crate::trace_export::Provider>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -949,7 +949,7 @@ pub(crate) fn installed_level() -> Option<LogLevel> {
 fn build_subscriber<W>(
     level: LogLevel,
     format: LogFormat,
-    traces: Option<&opentelemetry_sdk::trace::SdkTracerProvider>,
+    traces: Option<&crate::trace_export::Provider>,
     writer: W,
     use_ansi: bool,
 ) -> (RuntimeSubscriber, ReloadFilter)
@@ -1773,6 +1773,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(feature = "otel")]
     /// Emit runtime events inside Runewarp trace spans, with and without a third-party span.
     fn emit_inside_trace_spans() {
         let visitor = tracing::info_span!(
@@ -1792,9 +1793,10 @@ mod tests {
         visitor.record(crate::trace_export::OUTCOME, "placed");
     }
 
+    #[cfg(feature = "otel")]
     fn capture_format(
         format: LogFormat,
-        traces: Option<&opentelemetry_sdk::trace::SdkTracerProvider>,
+        traces: Option<&crate::trace_export::Provider>,
         emit_logs: impl FnOnce(),
     ) -> Vec<String> {
         let buffer = SharedBuffer::default();
@@ -1817,6 +1819,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(feature = "otel")]
     #[test]
     fn unreachable_collector_logs_only_the_rate_limited_failure_line() {
         use crate::trace_export::{TARGET, TraceExportConfig, TraceRole};
@@ -1869,6 +1872,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "otel")]
     #[test]
     fn trace_export_leaves_text_and_json_log_lines_unchanged() {
         if !crate::trace_export::test_support::isolated(
@@ -1965,6 +1969,7 @@ mod tests {
         assert_eq!(buffer.read().matches("reload probe").count(), 1);
     }
 
+    #[cfg(feature = "otel")]
     #[test]
     fn trace_export_runs_when_runtime_logs_are_off() {
         if !crate::trace_export::test_support::isolated(

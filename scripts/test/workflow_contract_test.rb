@@ -48,6 +48,18 @@ class WorkflowContractTest < Minitest::Test
     assert_includes(ci_workflow, "RUST_CONTRACT_RESULT: ${{ needs.rust-contract.result }}")
   end
 
+  def test_rust_contract_checks_every_cargo_feature_combination
+    assert_match(
+      /rust-contract:[\s\S]*matrix:\n        include:\n          - name: default\n            features: ""\n          - name: otel\n            features: otel\n/,
+      ci_workflow
+    )
+    assert_includes(ci_workflow, "CARGO_FEATURES: ${{ matrix.features }}")
+    assert_includes(ci_workflow, 'run: cargo clippy --all-targets --features "$CARGO_FEATURES" -- -D warnings')
+    assert_includes(ci_workflow, 'run: cargo test --quiet --features "$CARGO_FEATURES"')
+    assert_includes(ci_workflow, 'run: cargo doc --no-deps --features "$CARGO_FEATURES"')
+    assert_includes(dockerfile, "RUN cargo build --release --locked --features otel --bin runewarp")
+  end
+
   def test_release_workflow_uses_ruby_release_helpers
     assert_includes(release_workflow, "run: ./scripts/resolve-release-metadata")
     assert_includes(release_workflow, "run: ./scripts/validate-release-gates rehearsal")

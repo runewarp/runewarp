@@ -134,7 +134,8 @@ mod capacity_benchmark;
 
 #[cfg(test)]
 mod runtime_capacity_tests;
-#[cfg(test)]
+// Asserts exported spans, so it needs the OpenTelemetry exporter.
+#[cfg(all(test, feature = "otel"))]
 mod trace_runtime_tests;
 
 mod visitor_capacity;

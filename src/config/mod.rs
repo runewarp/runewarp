@@ -415,14 +415,10 @@ pub(crate) fn load_global_log_config_from_path(
             section: "config",
             source: Box::new(source),
         })?;
-    let trace_export = match (raw.otlp_traces_endpoint, raw.trace_sample_ratio) {
-        (Some(endpoint), ratio) => Some(crate::TraceExportConfig::new(&endpoint, ratio)),
-        (None, Some(_)) => Some(Err(
-            "trace-sample-ratio requires otlp-traces-endpoint".to_owned()
-        )),
-        (None, None) => None,
-    }
-    .transpose()
+    let trace_export = crate::TraceExportConfig::from_config_keys(
+        raw.otlp_traces_endpoint.as_deref(),
+        raw.trace_sample_ratio,
+    )
     .map_err(|message| ConfigFileError::Validation {
         path: path.to_path_buf(),
         section: "top-level",

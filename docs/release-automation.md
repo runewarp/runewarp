@@ -17,7 +17,7 @@ The `CI` workflow is the required aggregate check for normal changes. It current
 - Linux Cargo install from source through `./scripts/check-distribution cargo-install`
 - macOS Cargo install from source through the same distribution-check script
 - crate packaging readiness through `./scripts/check-distribution package-readiness`, which runs `cargo publish --dry-run` unless [crates.io publishing is paused](#cratesio-publishing-pause)
-- Rust formatting, Clippy, dependency advisory scanning through `./scripts/audit-dependencies`, tests, and docs
+- Rust formatting, Clippy, dependency advisory scanning through `./scripts/audit-dependencies`, tests, and docs, once per Cargo feature combination in the `rust-contract` matrix (default features and `otel`)
 - Docker image build plus `--version` startup through `./scripts/check-distribution docker-image`
 - the end-to-end Docker example smoke test
 - workflow syntax through `./scripts/lint-workflows`
@@ -30,7 +30,7 @@ Local workflow edits can run `./scripts/lint-workflows` directly, and `./scripts
 
 CI cache scope stays intentionally split by trust level:
 
-- pull request runs share Rust dependency and Docker Buildx layer caches only with later runs of that same pull request
+- pull request runs share Rust dependency and Docker Buildx layer caches only with later runs of that same pull request; each `rust-contract` matrix entry keeps its own Rust cache
 - trusted `main` pushes use their own Rust dependency caches and one shared trusted-`main` Docker Buildx cache namespace
 - release jobs do not read from the CI cache namespace
 
@@ -162,4 +162,5 @@ Before the first real tag release, the `release` environment should allow rehear
 - stable public Docker tags are created by promoting the exact trusted commit-tag manifest
 - `latest` only moves on stable releases
 - the released manifest list is signed keylessly with Sigstore
+- the Server image builds with the `otel` Cargo feature, so it ships trace export; crates.io installs keep default features
 - base images stay pinned by digest in `Dockerfile`; refreshing those digests is an intentional release-prep review step

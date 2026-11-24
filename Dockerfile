@@ -8,7 +8,8 @@ ENV RUNEWARP_BUILD_COMMIT=${RUNEWARP_BUILD_COMMIT}
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 
-RUN cargo build --release --locked --bin runewarp
+# The Server image ships trace export; see docs/traces.md.
+RUN cargo build --release --locked --features otel --bin runewarp
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e1fd250ce83d94603e9887ec991156a6c26905a6b0001039b7a43699018c0733
 

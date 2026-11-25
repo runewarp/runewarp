@@ -70,4 +70,12 @@ With `log-format = "json"` and trace export on, a line emitted inside a sampled 
 - `trace_id`: the span's trace ID, 32 lowercase hex digits.
 - `span_id`: the span's ID, 16 lowercase hex digits.
 
-The IDs come from the nearest enclosing Runewarp span, skipping spans from dependencies. A rejected `managed.apply` logs its rejection lines inside its span, so they carry that span's IDs. Lines outside every Runewarp span, lines inside a sampled-out span, and every line without trace export carry neither key.
+The IDs come from the nearest enclosing Runewarp span, skipping spans from dependencies, so a dependency's line logged during a span's work carries that span's IDs too. Each span covers these lines:
+
+- `visitor`: Server lines from accept to placement or rejection, including admission saturation at accept, `rejected Visitor stream` warnings, route rejections and `server route forwarded`. A line logged during `intake`, `route` or `stream_open`, such as `server Visitor stream open failed`, carries that child's IDs.
+- `tunnel_connection.handshake`: lines from handshake admission to registration or rejection, including handshake failures and `server tunnel connection accepted`.
+- `client.tunnel_connect`: lines from the start of an attempt to its result, including `client tunnel connection connecting` and `client tunnel connection connected`.
+- `client.visitor`: Client lines from stream accept to backend connect or rejection, including `rejected stream` warnings and route rejections.
+- `managed.apply`: a rejected apply's rejection lines.
+
+Work after a span ends logs outside it: a placed Visitor's proxied traffic, ACME TLS-ALPN-01 challenge handshakes, the Client's passthrough and termination lines after backend connect, an established Tunnel connection's later lines, and the address worker's report of a failed attempt. Lines outside every Runewarp span, lines inside a sampled-out span, and every line without trace export carry neither key.

@@ -22,12 +22,12 @@ pub trait RoleState: Send + Sync + 'static {
 }
 
 /// State document body: `revision` first, then role facts in order.
-pub(super) struct StateDocument<'a> {
+pub(super) struct ManagedStateDocument<'a> {
     pub(super) revision: &'a str,
     pub(super) fields: &'a [(&'static str, Value)],
 }
 
-impl Serialize for StateDocument<'_> {
+impl Serialize for ManagedStateDocument<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let fields = self
             .fields
@@ -43,7 +43,7 @@ impl Serialize for StateDocument<'_> {
 mod tests {
     use serde_json::json;
 
-    use super::StateDocument;
+    use super::ManagedStateDocument;
 
     #[test]
     fn documents_put_the_revision_first_and_ignore_a_role_revision() {
@@ -52,7 +52,7 @@ mod tests {
             ("revision", json!("spoofed")),
             ("tunnels", json!({"b": 1, "a": 2})),
         ];
-        let body = serde_json::to_string(&StateDocument {
+        let body = serde_json::to_string(&ManagedStateDocument {
             revision: "srv-42",
             fields: &fields,
         })

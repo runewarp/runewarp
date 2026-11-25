@@ -706,7 +706,7 @@ mod tests {
 
     use super::*;
     use crate::AddressController;
-    use crate::AssignmentConvergence;
+    use crate::ClientAssignmentConvergence;
     use crate::ServerAddress;
     use crate::managed_session::{ClientManagedInput, RoleAdapter};
 
@@ -859,7 +859,7 @@ mod tests {
         wait_until(|| connected_hold.load(Ordering::SeqCst)).await;
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::Converged
         );
         assert_eq!(dial_count.load(Ordering::SeqCst), 1);
 
@@ -873,7 +873,7 @@ mod tests {
         assert_eq!(dial_count.load(Ordering::SeqCst), 1);
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::Converged
         );
         assert_eq!(view.worker_count(), 1);
 
@@ -917,7 +917,7 @@ mod tests {
         );
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::Converged
         );
         assert_eq!(view.worker_count(), 1);
 

@@ -19,7 +19,7 @@ pub use address_worker::{
 };
 #[cfg(test)]
 pub(crate) use address_worker::{wait_for_retry_delay, wait_for_shutdown};
-pub use assignment_convergence::AssignmentConvergence;
+pub use assignment_convergence::ClientAssignmentConvergence;
 pub use managed_adapter::ClientAssignmentAdapter;
 pub use tunnel_attempt::{
     ClientTunnelAttempt, TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionEnd,

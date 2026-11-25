@@ -19,7 +19,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, watch};
 
 use super::assignment_convergence::{
-    AssignmentConvergence, AssignmentConvergenceTracker, CarryingCredit,
+    CarryingCredit, ClientAssignmentConvergence, ClientAssignmentConvergenceTracker,
 };
 use super::managed_adapter::ClientAssignmentApply;
 use crate::ServerAddress;
@@ -50,7 +50,7 @@ pub struct AddressWorkerControl {
     orderly: OrderlyShutdown,
     ready_logged: Arc<AtomicBool>,
     client_ready_enabled: bool,
-    convergence: Option<AssignmentConvergenceTracker>,
+    convergence: Option<ClientAssignmentConvergenceTracker>,
 }
 
 impl AddressWorkerControl {
@@ -95,7 +95,10 @@ impl AddressWorkerControl {
 
     /// Record that this worker reached Connected. Returns the new **Assignment
     /// convergence** when it changed. No-op in static mode (no tracker).
-    pub fn observe_connected(&self, address: &ServerAddress) -> Option<AssignmentConvergence> {
+    pub fn observe_connected(
+        &self,
+        address: &ServerAddress,
+    ) -> Option<ClientAssignmentConvergence> {
         self.convergence
             .as_ref()
             .and_then(|tracker| tracker.mark_connected(address))
@@ -115,7 +118,10 @@ impl AddressWorkerControl {
 
     /// Record that this worker lost Connected. Returns the new **Assignment
     /// convergence** when it changed. No-op in static mode (no tracker).
-    pub fn observe_disconnected(&self, address: &ServerAddress) -> Option<AssignmentConvergence> {
+    pub fn observe_disconnected(
+        &self,
+        address: &ServerAddress,
+    ) -> Option<ClientAssignmentConvergence> {
         self.convergence
             .as_ref()
             .and_then(|tracker| tracker.mark_disconnected(address))
@@ -135,7 +141,7 @@ enum ControllerMode {
     /// / [`AddressController::seed_static`].
     Manual {
         client_ready_enabled: bool,
-        convergence: Option<AssignmentConvergenceTracker>,
+        convergence: Option<ClientAssignmentConvergenceTracker>,
     },
     /// Static Client startup via [`AddressController::for_static`]: factory-driven seeding,
     /// **Client-ready** enabled, no managed apply loop.
@@ -145,7 +151,7 @@ enum ControllerMode {
     Managed {
         factory: AddressWorkerFactory,
         apply_rx: Option<mpsc::UnboundedReceiver<ClientAssignmentApply>>,
-        convergence: AssignmentConvergenceTracker,
+        convergence: ClientAssignmentConvergenceTracker,
     },
 }
 
@@ -165,18 +171,18 @@ pub struct AddressController {
 /// Read-only observation handle for integration tests and harnesses.
 #[derive(Clone, Debug)]
 pub struct AddressControllerView {
-    convergence: Option<AssignmentConvergenceTracker>,
+    convergence: Option<ClientAssignmentConvergenceTracker>,
     worker_count: Arc<AtomicUsize>,
 }
 
 impl AddressControllerView {
     /// Current **Assignment convergence**. Static mode without a tracker is always
-    /// [`AssignmentConvergence::Converged`].
-    pub fn assignment_convergence(&self) -> AssignmentConvergence {
+    /// [`ClientAssignmentConvergence::Converged`].
+    pub fn assignment_convergence(&self) -> ClientAssignmentConvergence {
         self.convergence
             .as_ref()
-            .map(AssignmentConvergenceTracker::current)
-            .unwrap_or(AssignmentConvergence::Converged)
+            .map(ClientAssignmentConvergenceTracker::current)
+            .unwrap_or(ClientAssignmentConvergence::Converged)
     }
 
     /// Number of live address-worker slots.
@@ -262,7 +268,7 @@ impl AddressController {
     /// Production obtains [`crate::ClientAssignmentAdapter`] only through this constructor.
     pub fn for_managed(factory: AddressWorkerFactory) -> (Self, crate::ClientAssignmentAdapter) {
         let (apply_tx, apply_rx) = mpsc::unbounded_channel();
-        let convergence = AssignmentConvergenceTracker::new();
+        let convergence = ClientAssignmentConvergenceTracker::new();
         let adapter = crate::ClientAssignmentAdapter::new(apply_tx, convergence.clone());
         let controller = Self::new_with_mode(ControllerMode::Managed {
             factory,
@@ -287,7 +293,7 @@ impl AddressController {
         }
     }
 
-    fn convergence_tracker(&self) -> Option<&AssignmentConvergenceTracker> {
+    fn convergence_tracker(&self) -> Option<&ClientAssignmentConvergenceTracker> {
         match &self.mode {
             ControllerMode::Manual { convergence, .. } => convergence.as_ref(),
             ControllerMode::Static { .. } => None,
@@ -320,11 +326,11 @@ impl AddressController {
     }
 
     /// Current **Assignment convergence**. Static mode without a tracker is always
-    /// [`AssignmentConvergence::Converged`].
-    pub fn assignment_convergence(&self) -> AssignmentConvergence {
+    /// [`ClientAssignmentConvergence::Converged`].
+    pub fn assignment_convergence(&self) -> ClientAssignmentConvergence {
         self.convergence_tracker()
-            .map(AssignmentConvergenceTracker::current)
-            .unwrap_or(AssignmentConvergence::Converged)
+            .map(ClientAssignmentConvergenceTracker::current)
+            .unwrap_or(ClientAssignmentConvergence::Converged)
     }
 
     /// True while at least one address-worker future is still outstanding.
@@ -659,7 +665,7 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::{
-        AddressController, AddressWorkerControl, AddressWorkerFactory, AssignmentConvergence,
+        AddressController, AddressWorkerControl, AddressWorkerFactory, ClientAssignmentConvergence,
         MaintenanceIntent,
     };
     use crate::ServerAddress;
@@ -1365,7 +1371,7 @@ mod tests {
         assert_eq!(controller.worker_count(), 0);
         assert_eq!(
             controller.assignment_convergence(),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::Converged
         );
 
         let runtime = tokio::spawn(async move { controller.run().await });
@@ -1426,7 +1432,7 @@ mod tests {
         assert_eq!(view.worker_count(), 1);
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Unconverged
+            ClientAssignmentConvergence::Unconverged
         );
 
         let _ = gate_tx.send(());
@@ -1465,7 +1471,7 @@ mod tests {
 
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::Converged
         );
 
         let ab = parse_server_addresses(&[a.clone(), b.clone()]).await;
@@ -1476,19 +1482,19 @@ mod tests {
         apply_server_addresses(&mut adapter, &[a.clone(), b.clone()]).await;
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Unconverged
+            ClientAssignmentConvergence::Unconverged
         );
         wait_until_or("workers for a and b spawned", || view.worker_count() == 2).await;
 
         connect_a.send(true).expect("connect a");
         wait_until_or("connect a -> partially converged", || {
-            view.assignment_convergence() == AssignmentConvergence::PartiallyConverged
+            view.assignment_convergence() == ClientAssignmentConvergence::PartiallyConverged
         })
         .await;
 
         connect_b.send(true).expect("connect b");
         wait_until_or("connect b -> converged", || {
-            view.assignment_convergence() == AssignmentConvergence::Converged
+            view.assignment_convergence() == ClientAssignmentConvergence::Converged
         })
         .await;
 
@@ -1497,7 +1503,7 @@ mod tests {
         apply_server_addresses(&mut adapter, std::slice::from_ref(&b)).await;
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::Converged
         );
 
         let cd = parse_server_addresses(&[c.clone(), d.clone()]).await;
@@ -1508,30 +1514,30 @@ mod tests {
         apply_server_addresses(&mut adapter, &[c.clone(), d.clone()]).await;
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Unconverged
+            ClientAssignmentConvergence::Unconverged
         );
 
         connect_c.send(true).expect("connect c");
         wait_until_or("connect c -> partially converged", || {
-            view.assignment_convergence() == AssignmentConvergence::PartiallyConverged
+            view.assignment_convergence() == ClientAssignmentConvergence::PartiallyConverged
         })
         .await;
 
         connect_d.send(true).expect("connect d");
         wait_until_or("connect d -> converged", || {
-            view.assignment_convergence() == AssignmentConvergence::Converged
+            view.assignment_convergence() == ClientAssignmentConvergence::Converged
         })
         .await;
 
         disconnect_c.send(true).expect("disconnect c");
         wait_until_or("disconnect c -> partially converged", || {
-            view.assignment_convergence() == AssignmentConvergence::PartiallyConverged
+            view.assignment_convergence() == ClientAssignmentConvergence::PartiallyConverged
         })
         .await;
 
         disconnect_d.send(true).expect("disconnect d");
         wait_until_or("disconnect d -> unconverged", || {
-            view.assignment_convergence() == AssignmentConvergence::Unconverged
+            view.assignment_convergence() == ClientAssignmentConvergence::Unconverged
         })
         .await;
 

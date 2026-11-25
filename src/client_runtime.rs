@@ -234,7 +234,7 @@ where
     let material = crate::SessionMaterial {
         control_hostname: control.address.hostname().as_str().to_owned(),
         trust: control.trust.clone(),
-        identity: crate::ControlClientIdentityMaterial::from_client_identity_dir(
+        identity: crate::ControlRoleIdentityMaterial::from_client_identity_dir(
             &settings.identity_directory,
         ),
     };

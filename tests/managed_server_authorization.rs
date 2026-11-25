@@ -26,7 +26,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ControlAddress,
-    ControlClientIdentityMaterial, ControlTrust, GeneratedClientIdentity, ManagedSession,
+    ControlRoleIdentityMaterial, ControlTrust, GeneratedClientIdentity, ManagedSession,
     ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PreparedClient, PreparedServer,
     QUIC_CLOSE_FLUSH_DURATION, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_KEY_FILENAME,
     ServerHostname, SessionMaterial, ShutdownMode, generate_client_identity,
@@ -289,7 +289,7 @@ tunnel-bind-address = "127.0.0.1:0"
         let session_material = SessionMaterial {
             control_hostname: "localhost".to_owned(),
             trust: ControlTrust::CaFile(control_paths.ca_cert),
-            identity: ControlClientIdentityMaterial {
+            identity: ControlRoleIdentityMaterial {
                 cert_path: tempdir
                     .path()
                     .join("server-identity")

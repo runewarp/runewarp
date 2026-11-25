@@ -465,7 +465,7 @@ pub fn client_ready(configured_server_addr: &str) {
     emit(EventLevel::Info, &client_ready_line(configured_server_addr));
 }
 
-pub fn client_assignment_convergence(status: crate::AssignmentConvergence) {
+pub fn client_assignment_convergence(status: crate::ClientAssignmentConvergence) {
     emit(
         EventLevel::Info,
         &client_assignment_convergence_line(status),
@@ -1579,11 +1579,11 @@ fn client_ready_line(configured_server_addr: &str) -> String {
     )
 }
 
-fn client_assignment_convergence_line(status: crate::AssignmentConvergence) -> String {
+fn client_assignment_convergence_line(status: crate::ClientAssignmentConvergence) -> String {
     let status = match status {
-        crate::AssignmentConvergence::Unconverged => "unconverged",
-        crate::AssignmentConvergence::PartiallyConverged => "partially-converged",
-        crate::AssignmentConvergence::Converged => "converged",
+        crate::ClientAssignmentConvergence::Unconverged => "unconverged",
+        crate::ClientAssignmentConvergence::PartiallyConverged => "partially-converged",
+        crate::ClientAssignmentConvergence::Converged => "converged",
     };
     event_line(
         "client assignment convergence",

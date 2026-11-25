@@ -33,5 +33,5 @@ pub use role::ManagedSessionRole;
 pub use session::{ManagedSession, ManagedSessionEvent};
 pub use state::{RoleState, StateFields};
 pub use tls::{
-    ControlClientIdentityMaterial, ControlTlsMaterialError, SessionMaterial, TrustLoadError,
+    ControlRoleIdentityMaterial, ControlTlsMaterialError, SessionMaterial, TrustLoadError,
 };

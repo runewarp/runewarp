@@ -1,13 +1,13 @@
 #[cfg(test)]
 mod listener_tests;
 
-mod active_client;
 mod admission;
 mod authorization;
 mod drain;
 mod managed_adapter;
 mod readiness;
-mod tunnel_registry;
+mod tunnel_pool;
+mod tunnel_router;
 mod visitor_stream;
 
 pub use self::authorization::{AuthorizationSnapshot, ServerAuthorization};
@@ -42,7 +42,7 @@ use self::admission::{
     AcceptBackoff, AdmissionLimit, ServerAdmissionLimits, ServerAdmissionPolicy,
 };
 use self::readiness::ReadinessGate;
-use self::tunnel_registry::{TunnelRegistrationOutcome, TunnelRegistry};
+use self::tunnel_router::{TunnelRegistrationOutcome, TunnelRouter};
 use self::visitor_stream::VisitorIntake;
 
 pub const QUIC_CLOSE_FLUSH_DURATION: Duration = Duration::from_millis(100);
@@ -100,7 +100,7 @@ pub struct Server {
     public_listeners: Vec<TcpListener>,
     tunnel_endpoints: Vec<Endpoint>,
     readiness_probe: Option<ReadinessProbe>,
-    tunnel_registry: TunnelRegistry,
+    tunnel_router: TunnelRouter,
     visitor_intake: VisitorIntake,
     authorization_adapter: ServerAuthorizationAdapter,
     fatal: FatalSignal,
@@ -343,14 +343,14 @@ impl Server {
             config.admission == ServerAdmission::Managed,
             admission_policy.metrics_gauges(),
         );
-        let tunnel_registry = TunnelRegistry::from_authorization_with_admission(
+        let tunnel_router = TunnelRouter::from_authorization_with_admission(
             config.authorization,
             admission_policy.tunnel_connections(),
             metrics.clone(),
         )?;
         let visitor_intake = VisitorIntake::new_with_proxy(
             config.server_hostname.clone(),
-            tunnel_registry.clone(),
+            tunnel_router.clone(),
             config.public_tls_config.clone(),
             admission_policy.clone(),
             visitor_proxy_protocol,
@@ -438,7 +438,7 @@ impl Server {
                 runtime_log::server_readiness_gained(readiness_probe.bind_address());
             }
         }
-        tunnel_registry.set_readiness(readiness_gate.clone());
+        tunnel_router.set_readiness(readiness_gate.clone());
         let readiness_metric = AbortOnDrop(Some(tokio::spawn(track_readiness(
             readiness_gate,
             metrics.clone(),
@@ -462,7 +462,7 @@ impl Server {
         let drain = ServerDrain::new();
         let authorization_adapter = ServerAuthorizationAdapter::new(
             config.server_hostname.clone(),
-            tunnel_registry.clone(),
+            tunnel_router.clone(),
             tunnel_events.clone(),
             drain.clone(),
         );
@@ -471,7 +471,7 @@ impl Server {
             public_listeners,
             tunnel_endpoints,
             readiness_probe,
-            tunnel_registry,
+            tunnel_router,
             visitor_intake,
             authorization_adapter,
             fatal,
@@ -605,7 +605,7 @@ impl Server {
             public_listeners,
             tunnel_endpoints,
             readiness_probe,
-            tunnel_registry,
+            tunnel_router,
             visitor_intake,
             authorization_adapter: _,
             fatal,
@@ -687,7 +687,7 @@ impl Server {
                     crate::server_connection_log::CONNECTION_LOG.sync_scope(context, || {
                         admit_tunnel_handshake(
                             &admission_policy,
-                            tunnel_registry.clone(),
+                            tunnel_router.clone(),
                             incoming,
                             &mut handshakes,
                             server_hostname.clone(),
@@ -702,7 +702,7 @@ impl Server {
         let mode = shutdown
             .mode()
             .expect("shutdown must be started before the server leaves the accept loop");
-        tunnel_registry.stop_accepting_new_work();
+        tunnel_router.stop_accepting_new_work();
         readiness_metric.stop().await;
         metrics.set_ready(false);
         metrics.set_draining();
@@ -725,14 +725,14 @@ impl Server {
             tokio::select! {
                 _ = async {
                     tokio::join!(
-                        tunnel_registry.shutdown_connections(shutdown.graceful_shutdown_duration()),
-                        tunnel_registry.wait_quiescent(),
+                        tunnel_router.shutdown_connections(shutdown.graceful_shutdown_duration()),
+                        tunnel_router.wait_quiescent(),
                     );
                 } => {}
                 _ = tokio::time::sleep(shutdown.graceful_shutdown_duration()) => {
-                    if tunnel_registry.has_outstanding_visitor_work() {
+                    if tunnel_router.has_outstanding_visitor_work() {
                         runtime_log::server_graceful_shutdown_deadline_expired(
-                            tunnel_registry.active_connection_count().await,
+                            tunnel_router.active_connection_count().await,
                         );
                     }
                 }
@@ -740,9 +740,9 @@ impl Server {
             }
         }
 
-        let active_connections = tunnel_registry.active_connection_count().await;
+        let active_connections = tunnel_router.active_connection_count().await;
         runtime_log::server_orderly_shutdown_closing_tunnel_connections(mode, active_connections);
-        let _ = tunnel_registry.close_all(b"graceful shutdown").await;
+        let _ = tunnel_router.close_all(b"graceful shutdown").await;
         visitor_intakes.abort_all();
         while visitor_intakes.join_next().await.is_some() {}
         tokio::time::sleep(shutdown.quic_close_flush_duration()).await;
@@ -830,7 +830,7 @@ fn process_public_accept(
 
 fn admit_tunnel_handshake(
     admission_policy: &ServerAdmissionPolicy,
-    tunnel_registry: TunnelRegistry,
+    tunnel_router: TunnelRouter,
     incoming: quinn::Incoming,
     handshakes: &mut JoinSet<()>,
     server_hostname: ServerHostname,
@@ -860,7 +860,7 @@ fn admit_tunnel_handshake(
         let connecting = incoming.accept();
         let span = handshake.span().clone();
         let outcome = register_tunnel_connection(
-            tunnel_registry,
+            tunnel_router,
             connecting,
             handshake_permit,
             admission_policy,
@@ -895,7 +895,7 @@ fn handshake_span() -> TracedStage {
 }
 
 async fn register_tunnel_connection(
-    tunnel_registry: TunnelRegistry,
+    tunnel_router: TunnelRouter,
     connecting: Result<quinn::Connecting, quinn::ConnectionError>,
     handshake_permit: tokio::sync::OwnedSemaphorePermit,
     admission_policy: ServerAdmissionPolicy,
@@ -942,7 +942,7 @@ async fn register_tunnel_connection(
             if admission_policy.take_tunnel_handshake_failure_recovered() {
                 runtime_log::server_admission_recovered("quic-handshake-failure");
             }
-            let rejected = match tunnel_registry.register(connection).await {
+            let rejected = match tunnel_router.register(connection).await {
                 TunnelRegistrationOutcome::Rejected(rejection) => {
                     admission_policy.report_saturation(rejection);
                     TunnelRejectReason::PoolFull

@@ -11,7 +11,7 @@ use tokio::time::Instant;
 
 use super::*;
 use crate::managed_session::{ClientManagedInput, RoleAdapter};
-use crate::{AddressController, AssignmentConvergence, ShutdownMode};
+use crate::{AddressController, ClientAssignmentConvergence, ShutdownMode};
 
 const CANDIDATE_DELAY: Duration = Duration::from_secs(1);
 const GRACEFUL: Duration = Duration::from_secs(30);
@@ -646,14 +646,14 @@ async fn convergence_ignores_candidates_and_survives_a_join_and_handover() {
     let view = controller.view();
     let runtime = tokio::spawn(async move { controller.run().await });
     apply(&mut adapter, vec![address()]).await;
-    wait_until(|| view.assignment_convergence() == AssignmentConvergence::Converged).await;
+    wait_until(|| view.assignment_convergence() == ClientAssignmentConvergence::Converged).await;
 
     dial.script(CandidateScript::Connect(Arc::clone(&new)));
     old.set_hint(hint(Some(generation()), 0));
     wait_until(|| !dial.attempts().is_empty()).await;
     assert_eq!(
         view.assignment_convergence(),
-        AssignmentConvergence::Converged
+        ClientAssignmentConvergence::Converged
     );
     wait_until(|| new.started()).await;
     old.close();
@@ -662,7 +662,7 @@ async fn convergence_ignores_candidates_and_survives_a_join_and_handover() {
 
     assert_eq!(
         view.assignment_convergence(),
-        AssignmentConvergence::Converged
+        ClientAssignmentConvergence::Converged
     );
     assert_eq!(view.worker_count(), 1);
     assert_eq!(dial.primary_dials(), 1);
@@ -678,7 +678,7 @@ async fn removal_aborts_a_warming_candidate_and_re_adding_restarts_it() {
     let view = controller.view();
     let runtime = tokio::spawn(async move { controller.run().await });
     apply(&mut adapter, vec![address()]).await;
-    wait_until(|| view.assignment_convergence() == AssignmentConvergence::Converged).await;
+    wait_until(|| view.assignment_convergence() == ClientAssignmentConvergence::Converged).await;
     let target = generation();
 
     primary.set_hint(hint(Some(target), 0));

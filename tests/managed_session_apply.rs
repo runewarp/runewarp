@@ -22,7 +22,7 @@ use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
-    ApplyError, ClientManagedInput, ControlAddress, ControlClientIdentityMaterial, ControlTrust,
+    ApplyError, ClientManagedInput, ControlAddress, ControlRoleIdentityMaterial, ControlTrust,
     ManagedSession, ManagedSessionEvent, ManagedSessionLimits, ManagedSessionRole, RoleAdapter,
     RoleState, ServerManagedInput, SessionMaterial, StateFields, parse_client_input,
     parse_server_input,
@@ -415,7 +415,7 @@ fn session_material(
     SessionMaterial {
         control_hostname: "localhost".to_owned(),
         trust: ControlTrust::CaFile(ca_cert.to_path_buf()),
-        identity: ControlClientIdentityMaterial {
+        identity: ControlRoleIdentityMaterial {
             cert_path: client_cert.to_path_buf(),
             key_path: client_key.to_path_buf(),
         },

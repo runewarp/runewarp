@@ -13,7 +13,6 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, RwLock};
 use crate::metrics::ServerMetrics;
 use crate::{ClientIdentity, PublicHostname, ServerHostname, ServerTunnelConfig};
 
-use super::active_client::{ActiveClientPool, ActiveStreamGuard, SelectedTunnelConnection};
 #[cfg(test)]
 use super::admission::ServerAdmissionLimits;
 use super::admission::{AdmissionRejection, TunnelConnectionAdmission};
@@ -22,6 +21,7 @@ use super::authorization::{
     ServerAuthorization,
 };
 use super::readiness::ReadinessGate;
+use super::tunnel_pool::{ActiveStreamGuard, SelectedTunnelConnection, TunnelPool};
 
 pub(crate) enum TunnelRouteOutcome {
     Unauthorized,
@@ -160,9 +160,9 @@ impl Drop for ActiveVisitorWork {
 }
 
 #[derive(Clone)]
-pub(crate) struct TunnelRegistry {
+pub(crate) struct TunnelRouter {
     authorization: Arc<AuthorizationState>,
-    tunnel_pools: Arc<RwLock<Vec<ActiveClientPool>>>,
+    tunnel_pools: Arc<RwLock<Vec<TunnelPool>>>,
     // std lock so registration, revocation, and drop cleanup stay synchronous.
     visitor_work: Arc<ActiveVisitorWorkState>,
     next_stream_id: Arc<AtomicU64>,
@@ -176,7 +176,7 @@ pub(crate) struct TunnelRegistry {
     metrics: ServerMetrics,
 }
 
-impl TunnelRegistry {
+impl TunnelRouter {
     /// Whether new Visitor placement could still be admitted.
     #[cfg(test)]
     pub(crate) fn admits_new_visitor_work(&self) -> bool {
@@ -228,7 +228,7 @@ impl TunnelRegistry {
             TunnelConnectionAdmission::new(ServerAdmissionLimits::default());
         Ok(Self {
             authorization: Arc::new(AuthorizationState::from_snapshot_for_test(snapshot)),
-            tunnel_pools: Arc::new(RwLock::new(vec![ActiveClientPool::with_admission(
+            tunnel_pools: Arc::new(RwLock::new(vec![TunnelPool::with_admission(
                 tunnel_connection_admission.clone(),
                 ServerMetrics::for_test(),
             )])),
@@ -296,7 +296,7 @@ impl TunnelRegistry {
         let tunnel_count = authorization.current_tunnel_count();
         let mut tunnel_pools = Vec::with_capacity(tunnel_count);
         for _ in 0..tunnel_count {
-            tunnel_pools.push(ActiveClientPool::with_admission(
+            tunnel_pools.push(TunnelPool::with_admission(
                 tunnel_connection_admission.clone(),
                 metrics.clone(),
             ));
@@ -420,7 +420,7 @@ impl TunnelRegistry {
                 let mut rebuilt = Vec::with_capacity(next_ids.len());
                 for id in next_ids {
                     rebuilt.push(pools_by_id.remove(id).unwrap_or_else(|| {
-                        ActiveClientPool::with_admission(
+                        TunnelPool::with_admission(
                             self.tunnel_connection_admission.clone(),
                             self.metrics.clone(),
                         )
@@ -863,7 +863,7 @@ mod tests {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use tokio::time::timeout;
 
-    use super::{TunnelRegistrationOutcome, TunnelRegistry, TunnelRouteOutcome};
+    use super::{TunnelRegistrationOutcome, TunnelRouteOutcome, TunnelRouter};
     use crate::server::admission::{
         AdmissionLimit, AdmissionRejection, ServerAdmissionLimits, TunnelConnectionAdmission,
     };
@@ -883,7 +883,7 @@ mod tests {
     }
 
     async fn admitted_work(
-        registry: &TunnelRegistry,
+        registry: &TunnelRouter,
         policy: &super::super::admission::ServerAdmissionPolicy,
         hostname: &PublicHostname,
     ) -> (super::ActiveVisitorWork, super::SelectedTunnelConnection) {
@@ -902,7 +902,7 @@ mod tests {
     }
 
     fn assert_work_accounting(
-        registry: &TunnelRegistry,
+        registry: &TunnelRouter,
         policy: &super::super::admission::ServerAdmissionPolicy,
         connection: &super::SelectedTunnelConnection,
         active: bool,
@@ -919,7 +919,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_unauthorized_when_public_hostname_is_not_authorized() -> io::Result<()> {
-        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
+        let registry = TunnelRouter::single(vec![public_hostname("app.example.test")])?;
 
         assert!(matches!(
             registry
@@ -933,7 +933,7 @@ mod tests {
     #[tokio::test]
     async fn returns_no_active_tunnel_connection_for_authorized_public_hostname() -> io::Result<()>
     {
-        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
+        let registry = TunnelRouter::single(vec![public_hostname("app.example.test")])?;
 
         assert!(matches!(
             registry
@@ -949,7 +949,7 @@ mod tests {
     {
         let client_identity = generate_test_client_identity()?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let registry = TunnelRegistry::configured(
+        let registry = TunnelRouter::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: None,
@@ -973,7 +973,7 @@ mod tests {
     -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let registry = TunnelRegistry::configured(
+        let registry = TunnelRouter::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: None,
@@ -1021,7 +1021,7 @@ mod tests {
     {
         let old_identity = generate_test_client_identity()?;
         let hostname = public_hostname("app.example.test");
-        let registry = TunnelRegistry::configured_managed(
+        let registry = TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: Some(TunnelId::parse("tunnel-1").unwrap()),
@@ -1077,7 +1077,7 @@ mod tests {
         let client_identity = generate_test_client_identity()?;
         let hostname = public_hostname("app.example.test");
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let registry = TunnelRegistry::configured(
+        let registry = TunnelRouter::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: None,
@@ -1130,7 +1130,7 @@ mod tests {
         let client_identity = generate_test_client_identity()?;
         let hostname = public_hostname("app.example.test");
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let registry = TunnelRegistry::configured(
+        let registry = TunnelRouter::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: None,
@@ -1187,7 +1187,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_quiescent_cannot_miss_the_last_work_drop() -> io::Result<()> {
-        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
+        let registry = TunnelRouter::single(vec![public_hostname("app.example.test")])?;
         let identity = generate_test_client_identity()?.client_identity;
         let work = registry.spawn_active_visitor_work_for_test(
             public_hostname("app.example.test"),
@@ -1216,7 +1216,7 @@ mod tests {
     async fn stopped_registry_rejects_late_tunnel_registration() -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let registry = TunnelRegistry::configured(
+        let registry = TunnelRouter::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: None,
@@ -1242,7 +1242,7 @@ mod tests {
     -> io::Result<()> {
         let first_identity = generate_test_client_identity()?;
         let second_identity = generate_test_client_identity()?;
-        let registry = TunnelRegistry::configured_managed(
+        let registry = TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[
                 ServerTunnelConfig {
@@ -1334,7 +1334,7 @@ mod tests {
             max_tunnel_connections_per_identity: 4,
             ..ServerAdmissionLimits::for_test()
         };
-        let registry = TunnelRegistry::from_authorization_with_admission(
+        let registry = TunnelRouter::from_authorization_with_admission(
             authorization,
             TunnelConnectionAdmission::new(limits),
             ServerMetrics::for_test(),
@@ -1410,7 +1410,7 @@ mod tests {
         let second_identity = generate_test_client_identity()?;
         let id_a = TunnelId::parse("tunnel-a").unwrap();
         let id_b = TunnelId::parse("tunnel-b").unwrap();
-        let registry = TunnelRegistry::configured_managed(
+        let registry = TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[
                 ServerTunnelConfig {
@@ -1474,7 +1474,7 @@ mod tests {
         let other = generate_test_client_identity()?;
         let id_a = TunnelId::parse("tunnel-a").unwrap();
         let id_b = TunnelId::parse("tunnel-b").unwrap();
-        let registry = TunnelRegistry::configured_managed(
+        let registry = TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[
                 ServerTunnelConfig {
@@ -1540,7 +1540,7 @@ mod tests {
     async fn replace_authorization_grows_pools_and_revokes_removed_identities() -> io::Result<()> {
         let first_identity = generate_test_client_identity()?;
         let second_identity = generate_test_client_identity()?;
-        let registry = TunnelRegistry::configured_managed(
+        let registry = TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: Some(TunnelId::parse("tunnel-1").unwrap()),
@@ -1607,7 +1607,7 @@ mod tests {
     async fn connection_metrics_follow_revocation_realignment_and_shutdown() -> io::Result<()> {
         use crate::metrics::test_support::sample;
 
-        async fn eventually(registry: &TunnelRegistry, expected: &[(&str, f64)]) {
+        async fn eventually(registry: &TunnelRouter, expected: &[(&str, f64)]) {
             for _ in 0..100 {
                 let text = registry.metrics().render();
                 if expected
@@ -1629,7 +1629,7 @@ mod tests {
                 public_hostnames: vec![public_hostname(hostname)],
                 authorized_client_identities: vec![identity.client_identity.clone()],
             };
-        let registry = TunnelRegistry::configured_managed(
+        let registry = TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[
                 tunnel("tunnel-1", "app.example.test", &revoked),
@@ -1701,7 +1701,7 @@ mod tests {
     #[tokio::test]
     async fn reset_streams_for_public_hostname_aborts_only_matching_tracked_streams()
     -> io::Result<()> {
-        let registry = TunnelRegistry::single(vec![
+        let registry = TunnelRouter::single(vec![
             public_hostname("app.example.test"),
             public_hostname("api.example.test"),
         ])?;
@@ -1757,7 +1757,7 @@ mod tests {
     -> io::Result<()> {
         let first_identity = generate_test_client_identity()?;
         let second_identity = generate_test_client_identity()?;
-        let registry = TunnelRegistry::configured_managed(
+        let registry = TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: Some(TunnelId::parse("tunnel-1").unwrap()),
@@ -1875,7 +1875,7 @@ mod tests {
     #[tokio::test]
     async fn replace_authorization_resets_only_removed_hostname_streams() -> io::Result<()> {
         let identity = generate_test_client_identity()?;
-        let registry = TunnelRegistry::configured_managed(
+        let registry = TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: Some(TunnelId::parse("tunnel-1").unwrap()),
@@ -1945,7 +1945,7 @@ mod tests {
     {
         let first = generate_test_client_identity()?;
         let second = generate_test_client_identity()?;
-        let registry = TunnelRegistry::configured_managed(
+        let registry = TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: Some(TunnelId::parse("tunnel-1").unwrap()),
@@ -2004,7 +2004,7 @@ mod tests {
     #[tokio::test]
     async fn replace_authorization_rejects_static_authorization() -> io::Result<()> {
         let identity = generate_test_client_identity()?;
-        let registry = TunnelRegistry::configured(
+        let registry = TunnelRouter::configured(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: None,
@@ -2043,7 +2043,7 @@ mod tests {
     #[tokio::test]
     async fn replace_authorization_opens_readiness_only_after_first_success() -> io::Result<()> {
         let identity = generate_test_client_identity()?;
-        let registry = TunnelRegistry::empty_managed();
+        let registry = TunnelRouter::empty_managed();
         let gate = ReadinessGate::new(false);
         registry.set_readiness(gate.clone());
         assert!(!gate.is_ready());
@@ -2103,7 +2103,7 @@ mod tests {
 
     #[tokio::test]
     async fn replace_authorization_empty_candidate_opens_readiness() -> io::Result<()> {
-        let registry = TunnelRegistry::empty_managed();
+        let registry = TunnelRouter::empty_managed();
         let gate = ReadinessGate::new(false);
         registry.set_readiness(gate.clone());
 
@@ -2124,7 +2124,7 @@ mod tests {
         let old_identity = generate_test_client_identity()?;
         let new_identity = generate_test_client_identity()?;
         let tunnel_id = TunnelId::parse("tunnel-a").unwrap();
-        let registry = Arc::new(TunnelRegistry::configured_managed(
+        let registry = Arc::new(TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: Some(tunnel_id.clone()),
@@ -2194,7 +2194,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_streams_for_member_aborts_only_matching_serving_connection() -> io::Result<()> {
-        let registry = TunnelRegistry::single(vec![public_hostname("app.example.test")])?;
+        let registry = TunnelRouter::single(vec![public_hostname("app.example.test")])?;
         let keep_running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let first_keep = keep_running.clone();
         let second_keep = keep_running.clone();

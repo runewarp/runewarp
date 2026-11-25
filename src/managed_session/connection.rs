@@ -20,7 +20,7 @@ use tokio_rustls::TlsConnector;
 
 use super::limits::ManagedSessionLimits;
 use super::role::{ManagedSessionRole, events_path, state_path};
-use super::state::{RoleState, StateDocument};
+use super::state::{ManagedStateDocument, RoleState};
 use super::status::{
     SseResponseClass, StateResponseClass, classify_sse_response, classify_state_incoming,
 };
@@ -186,7 +186,7 @@ impl ManagedSessionConnection {
                 Some(role_state) => role_state.fields().await,
                 None => Vec::new(),
             };
-            let payload = serde_json::to_vec(&StateDocument {
+            let payload = serde_json::to_vec(&ManagedStateDocument {
                 revision: &revision,
                 fields: &fields,
             })

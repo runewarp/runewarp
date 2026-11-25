@@ -142,7 +142,7 @@ impl ActiveStreamGuard {
 }
 
 #[derive(Clone)]
-pub(crate) struct ActiveClientPool {
+pub(crate) struct TunnelPool {
     members: Arc<RwLock<Vec<PoolMember>>>,
     next_member_id: Arc<AtomicU64>,
     next_round_robin_offset: Arc<AtomicU64>,
@@ -189,7 +189,7 @@ fn least_active_index(
         .map(|(index, _)| index)
 }
 
-impl ActiveClientPool {
+impl TunnelPool {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::with_admission(
@@ -523,7 +523,7 @@ mod tests {
     use tracing_subscriber::fmt::writer::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
 
-    use super::ActiveClientPool;
+    use super::TunnelPool;
 
     use crate::server::admission::{
         AdmissionLimit, ServerAdmissionLimits, TunnelConnectionAdmission,
@@ -537,7 +537,7 @@ mod tests {
         let second_identity = generate_test_client_identity()?;
         let first_fixture = TunnelConnectionFixture::connect(&first_identity).await?;
         let second_fixture = TunnelConnectionFixture::connect(&second_identity).await?;
-        let pool = ActiveClientPool::new();
+        let pool = TunnelPool::new();
         pool.register(
             first_fixture.server_connection.clone(),
             first_identity.client_identity.clone(),
@@ -591,7 +591,7 @@ mod tests {
         let client_identity = generate_test_client_identity()?;
         let first_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         let second_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let pool = ActiveClientPool::new();
+        let pool = TunnelPool::new();
         let first_remote_addr = first_fixture.server_connection.remote_address();
         let second_remote_addr = second_fixture.server_connection.remote_address();
         let expected_first_log = format!(
@@ -645,7 +645,7 @@ mod tests {
             max_tunnel_connections_per_identity: 4,
             ..ServerAdmissionLimits::for_test()
         };
-        let pool = ActiveClientPool::with_admission(
+        let pool = TunnelPool::with_admission(
             TunnelConnectionAdmission::new(limits),
             ServerMetrics::for_test(),
         );
@@ -698,7 +698,7 @@ mod tests {
         let client_identity = generate_test_client_identity()?;
         let first_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
         let second_fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let pool = ActiveClientPool::new();
+        let pool = TunnelPool::new();
         pool.register(
             first_fixture.server_connection.clone(),
             client_identity.client_identity.clone(),
@@ -759,7 +759,7 @@ mod tests {
         let client_identity = generate_test_client_identity()?;
         let withdrawn = TunnelConnectionFixture::connect(&client_identity).await?;
         let eligible = TunnelConnectionFixture::connect(&client_identity).await?;
-        let pool = ActiveClientPool::new();
+        let pool = TunnelPool::new();
         for fixture in [&withdrawn, &eligible] {
             pool.register(
                 fixture.server_connection.clone(),
@@ -810,7 +810,7 @@ mod tests {
     async fn closes_all_connections_and_clears_the_pool() -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        let pool = ActiveClientPool::new();
+        let pool = TunnelPool::new();
         let remote_addr = fixture.server_connection.remote_address();
         let expected_closed_log = format!(
             "server tunnel connection closed: client-identity={}",

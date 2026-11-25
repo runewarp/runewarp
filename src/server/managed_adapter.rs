@@ -21,13 +21,13 @@ use crate::tunnel::ServerTunnelEvents;
 use crate::{ServerHostname, ServerTunnelConfig};
 
 use super::drain::ServerDrain;
-use super::tunnel_registry::TunnelRegistry;
+use super::tunnel_router::TunnelRouter;
 
 /// Applies validated Server Managed-session input onto live authorization state.
 #[derive(Clone)]
 pub struct ServerAuthorizationAdapter {
     server_hostname: ServerHostname,
-    registry: TunnelRegistry,
+    registry: TunnelRouter,
     tunnel_events: ServerTunnelEvents,
     drain: ServerDrain,
 }
@@ -35,7 +35,7 @@ pub struct ServerAuthorizationAdapter {
 impl ServerAuthorizationAdapter {
     pub(crate) fn new(
         server_hostname: ServerHostname,
-        registry: TunnelRegistry,
+        registry: TunnelRouter,
         tunnel_events: ServerTunnelEvents,
         drain: ServerDrain,
     ) -> Self {
@@ -105,7 +105,7 @@ impl RoleAdapter for ServerAuthorizationAdapter {
 struct ServerReportedState {
     generation: String,
     drain: ServerDrain,
-    registry: TunnelRegistry,
+    registry: TunnelRouter,
     changed: Arc<Notify>,
 }
 
@@ -138,7 +138,7 @@ impl RoleState for ServerReportedState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerAuthorizationAdapter, ServerDrain, TunnelRegistry};
+    use super::{ServerAuthorizationAdapter, ServerDrain, TunnelRouter};
     use crate::managed_session::{RoleAdapter, ServerManagedInput};
     use crate::tunnel::{ServerRuntimeGeneration, ServerTunnelEvents};
     use crate::{ServerHostname, ServerTunnelConfig};
@@ -147,7 +147,7 @@ mod tests {
     async fn a_reported_drain_has_already_sealed_new_placement() {
         let hostname = ServerHostname::try_from("tunnel.example.test").expect("hostname");
         let tunnels: Vec<ServerTunnelConfig> = Vec::new();
-        let registry = TunnelRegistry::configured_managed(&hostname, &tunnels).expect("registry");
+        let registry = TunnelRouter::configured_managed(&hostname, &tunnels).expect("registry");
         let drain = ServerDrain::new();
         let mut adapter = ServerAuthorizationAdapter::new(
             hostname,

@@ -11,7 +11,7 @@ This document describes what Core implements today. Product policy (lifecycle la
 - **Audience:** Control implementers and Core runtime integrators
 - **Session:** one mutually authenticated HTTP/2 connection per Server or Client runtime
 - **Downlink:** one role-specific SSE stream carrying versioned full snapshots, with one required `runewarp-session-id` response header echoed on every state PUT
-- **State document:** a full role state document carrying the applied revision, sent after each successfully handled snapshot and when a reported fact changes, at most once per second; no periodic heartbeat
+- **Managed state document:** a full role state document carrying the applied revision, sent after each successfully handled snapshot and when a reported fact changes, at most once per second; no periodic heartbeat
 - **Role inputs:** Server authorization and Client Server-address assignment use separate schemas
 - **Failure model:** protocol or reporting failure replaces the session; reconnect retains last-applied in-memory state after the first successful apply
 
@@ -35,17 +35,17 @@ This document describes what Core implements today. Product policy (lifecycle la
 | **Control** | HTTPS endpoint that publishes desired inputs and observes applied revisions |
 | **Control address** | DNS hostname with optional port; HTTPS is mandatory and inferred |
 | **Managed mode** | Startup-selected shape when an effective Control address is present |
-| **Managed session** | Authenticated live relationship between one Server or Client instance and Control for versioned snapshots and state documents; Core implements it as one mutually authenticated HTTP/2 connection behind the `ManagedSession` domain seam |
-| **Server** / **Client instance** | Runtimes that open a Managed session; they still own the data-path listeners and Tunnel connections |
-| **Tunnel connection** | QUIC data-path session between Client and Server; separate from the Managed session |
+| **Managed session** | Authenticated live relationship between one Server instance or Client instance and Control for versioned snapshots and **Managed state documents**; Core implements it as one mutually authenticated HTTP/2 connection behind the `ManagedSession` domain seam |
+| **Server instance** / **Client instance** | Running processes that open a Managed session; they still own the data-path listeners and Tunnel connections |
+| **Tunnel connection** | QUIC data-path session between Client instance and Server instance; separate from the Managed session |
 | **Authorization snapshot** | Server-side Public-hostname routing plus trusted Client identities applied from Control; managed tunnels are keyed by **Tunnel ID** |
 | **Tunnel ID** | Control-owned opaque identifier for one managed Server **Tunnel**; continuity key for live pools; absent in static mode |
-| **Address controller** | Client-owned complete assigned Server-address lifecycle (intent, workers, production Retiring policy, Assignment convergence, apply completion, reported connection generations, static Client readiness, shutdown) |
-| **Client admission** | Prepared Client static-vs-managed outcome set once during Config validation; startup wires the Address controller from it |
-| **Assignment convergence** | Client aggregate of whether assigned Server addresses are Connected (separate from the reported revision) |
+| **Managed state document** | Complete current state a Managed Server instance or Client instance sends with `PUT .../state`, carrying its applied **Revision** and current role facts |
+| **Client assignment convergence** | Client aggregate of whether assigned Server addresses are Connected (separate from the reported revision) |
 | **Retiring** | Connected address removed from assignment intent: reconnect stops; live Tunnel connection stays until remote Server closure |
 | **Server readiness** | Ingress-admission signal; gated on first successful Server input apply in managed mode |
-| **Managed drain** | One-way, bounded drain of a running Managed Server, requested by `drain: true` in its input; the Server keeps running and reporting until the process is terminated |
+| **Managed drain** | One-way, bounded drain of a running Managed Server instance, requested by `drain: true` in its input; the Server instance keeps running and reporting until the process is terminated |
+| **Reported quiescence** | A live Managed Server instance's report in its **Managed state document** that it is draining with zero in-flight Visitors |
 
 Visitor TLS and Tunnel QUIC traffic never share the Control connection.
 
@@ -204,9 +204,9 @@ Runtime reconciliation events (no status endpoint):
 
 A Server state document reports a revision only after the atomic authorization swap, dispatch of required local revocation work, publication of the input's replacement hint to Tunnel event streams, and the start of any requested drain, without awaiting peer closure, event writes, or drain completion. A Client state document reports a revision after Address-controller maintenance intent is replaced, without awaiting DNS, handshake, or connection success.
 
-## State documents
+## Managed state documents
 
-`PUT .../state` carries the peer's full current state document. There is no separate acknowledgment or heartbeat: the document reports the applied revision together with the role's facts.
+`PUT .../state` carries the peer's full current **Managed state document**. There is no separate acknowledgment or heartbeat: the document reports the applied **Revision** together with the role's facts.
 
 Server document:
 
@@ -217,8 +217,8 @@ Server document:
 - `generation` is the **Server runtime generation** as a canonical lowercase hyphenated UUIDv7.
 - `draining` is `true` from the start of a [Managed drain](#managed-drain) until the process ends.
 - `tunnels` maps every authorized **Tunnel ID** to the number of its open Tunnel connections that have established their WebTransport session, which is when a Client offers Visitor credit. A Tunnel with no such connection reports `0`. Connections leave the count when they close, not at GOAWAY or withdrawal.
-- `visitors` counts in-flight Visitors placed on this Server.
-- Quiescence is `draining` with `visitors` equal to `0`.
+- `visitors` counts in-flight Visitors placed on this Server instance.
+- **Reported quiescence** is `draining` with `visitors` equal to `0`.
 
 Client document:
 
@@ -240,7 +240,7 @@ Sending rules:
 5. Treat exact `204` with an already-ended empty body as success. Non-204 and body-bearing responses are rejected without collecting an unbounded body.
 6. On any state-write failure or deadline miss, replace the whole Managed session while retaining the latest successfully applied revision in memory for reporting after reconnect.
 
-Rejected and superseded revisions are never reported. Documents never include desired revision, **Server readiness**, the **Assignment convergence** aggregate, or rejection reasons. Control health and staleness classification remain outside this protocol. SSE reads, snapshot application, silence/first-snapshot timers, and Authorization revocations stay responsive while a state request is slow or failed.
+Rejected and superseded revisions are never reported. Documents never include desired revision, **Server readiness**, the **Client assignment convergence** aggregate, or rejection reasons. Control health and staleness classification remain outside this protocol. SSE reads, snapshot application, silence/first-snapshot timers, and Authorization revocations stay responsive while a state request is slow or failed.
 
 ## Input and reporting limits
 
@@ -300,7 +300,7 @@ Control drains a Managed Server by publishing an input with `drain: true`. The d
 2. drops **Server readiness** and closes its public and Tunnel listeners, as graceful shutdown does;
 3. sends GOAWAY on every Tunnel connection, so Clients leave it under the Server-drain rules in [`protocol.md`](protocol.md);
 4. lets in-flight Visitors finish within `server.graceful-shutdown-duration`, measured from the start of the drain, then closes the remaining Tunnel connections;
-5. keeps running, applying input, and sending state documents until the process is terminated. `tunnels` falls to `0` per Tunnel as connections close, and `visitors` reaching `0` marks quiescence.
+5. keeps running, applying input, and sending Managed state documents until the process is terminated. `tunnels` falls to `0` per Tunnel as connections close, and `visitors` reaching `0` marks **Reported quiescence**.
 
 Drain is one-way for the life of the process. A later input without `drain` updates authorization and the replacement hint as usual, but the Server never reopens its listeners or readiness. Process shutdown during a drain joins it under the drain's original deadline; a second signal still escalates to Fast shutdown. Static Servers have no Control and never drain this way.
 
@@ -315,7 +315,7 @@ With Server ACME, completion of drain stops local ACME polling and challenge han
 5. Removing a Connected address marks it **Retiring** without local closure; remote Server shutdown owns Tunnel-connection closure. Assignment removal is not **Infrastructure drain**.
 6. Re-adding a Retiring address before remote closure re-adopts that connection without duplicate dialing.
 7. A valid empty assignment applies and is Converged; it does not locally close Retiring connections.
-8. **Assignment convergence** is separate from applied revision: Unconverged / Partially converged / Converged; empty assignments are Converged; Retiring connections are excluded.
+8. **Client assignment convergence** is separate from applied revision: Unconverged / Partially converged / Converged; empty assignments are Converged; Retiring connections are excluded.
 9. Healthy assigned Servers keep serving during partial convergence; one unavailable address never blocks others.
 10. After the first successful apply, Control loss retains the last assignment and independent reconnect loops while the session reconnects.
 11. Process restart restores no managed input or applied revision and dials nothing until a fresh snapshot applies.
@@ -364,7 +364,7 @@ data: {"revision":"cli-7","input":{"server_addresses":["tunnel.example.com"]}}
 
 ```
 
-### State documents
+### Managed state documents
 
 ```http
 PUT /v1/server/state HTTP/2

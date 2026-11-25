@@ -13,7 +13,7 @@ use crate::tunnel::ServerRuntimeGeneration;
 
 /// Aggregate progress of the current managed Client assignment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AssignmentConvergence {
+pub enum ClientAssignmentConvergence {
     /// None of a non-empty assignment are connected.
     Unconverged,
     /// Some, but not all, assigned addresses are connected.
@@ -22,7 +22,7 @@ pub enum AssignmentConvergence {
     Converged,
 }
 
-impl AssignmentConvergence {
+impl ClientAssignmentConvergence {
     /// Derive convergence from assigned and connected counts.
     ///
     /// `connected` must count only assigned addresses that are currently
@@ -61,15 +61,18 @@ impl ConvergenceState {
             .count()
     }
 
-    fn current(&self) -> AssignmentConvergence {
-        AssignmentConvergence::from_counts(self.assigned.len(), self.assigned_connected_count())
+    fn current(&self) -> ClientAssignmentConvergence {
+        ClientAssignmentConvergence::from_counts(
+            self.assigned.len(),
+            self.assigned_connected_count(),
+        )
     }
 }
 
 /// Shared tracker updated when assignment intent changes or address workers
 /// gain/lose Connected status.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct AssignmentConvergenceTracker {
+pub(crate) struct ClientAssignmentConvergenceTracker {
     inner: Arc<Mutex<ConvergenceState>>,
     /// Signals the Managed state reporter that the assignment or a connection changed.
     reported_state_changed: Arc<Notify>,
@@ -78,7 +81,7 @@ pub(crate) struct AssignmentConvergenceTracker {
 /// Records one connection carrying Visitor credit until dropped.
 #[derive(Debug)]
 pub(crate) struct CarryingCredit {
-    tracker: AssignmentConvergenceTracker,
+    tracker: ClientAssignmentConvergenceTracker,
     address: ServerAddress,
     token: u64,
 }
@@ -98,7 +101,7 @@ impl Drop for CarryingCredit {
     }
 }
 
-impl AssignmentConvergenceTracker {
+impl ClientAssignmentConvergenceTracker {
     pub fn new() -> Self {
         Self::default()
     }
@@ -163,7 +166,7 @@ impl AssignmentConvergenceTracker {
         self.reported_state_changed.clone()
     }
 
-    pub fn current(&self) -> AssignmentConvergence {
+    pub fn current(&self) -> ClientAssignmentConvergence {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -173,7 +176,7 @@ impl AssignmentConvergenceTracker {
     /// Replace the assigned address set. Retiring connections remain tracked as
     /// Connected but are excluded from aggregate convergence until re-adopted.
     /// Returns the new status when it changed.
-    pub fn set_assigned(&self, addresses: &[ServerAddress]) -> Option<AssignmentConvergence> {
+    pub fn set_assigned(&self, addresses: &[ServerAddress]) -> Option<ClientAssignmentConvergence> {
         let mut state = self
             .inner
             .lock()
@@ -188,7 +191,7 @@ impl AssignmentConvergenceTracker {
     /// Record that an address reached Connected. Returns the new convergence
     /// when it changed. Connected Retiring addresses are recorded so a later
     /// re-adopt can restore them without waiting for a new dial.
-    pub fn mark_connected(&self, address: &ServerAddress) -> Option<AssignmentConvergence> {
+    pub fn mark_connected(&self, address: &ServerAddress) -> Option<ClientAssignmentConvergence> {
         let mut state = self
             .inner
             .lock()
@@ -201,7 +204,10 @@ impl AssignmentConvergenceTracker {
 
     /// Record that an address is no longer Connected. Returns the new
     /// convergence when it changed.
-    pub fn mark_disconnected(&self, address: &ServerAddress) -> Option<AssignmentConvergence> {
+    pub fn mark_disconnected(
+        &self,
+        address: &ServerAddress,
+    ) -> Option<ClientAssignmentConvergence> {
         let mut state = self
             .inner
             .lock()
@@ -217,7 +223,7 @@ impl AssignmentConvergenceTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::{AssignmentConvergence, AssignmentConvergenceTracker};
+    use super::{ClientAssignmentConvergence, ClientAssignmentConvergenceTracker};
     use crate::ServerAddress;
 
     fn address(value: &str) -> ServerAddress {
@@ -227,85 +233,85 @@ mod tests {
     #[test]
     fn empty_assignment_is_converged() {
         assert_eq!(
-            AssignmentConvergence::from_counts(0, 0),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::from_counts(0, 0),
+            ClientAssignmentConvergence::Converged
         );
     }
 
     #[test]
     fn non_empty_with_no_connections_is_unconverged() {
         assert_eq!(
-            AssignmentConvergence::from_counts(2, 0),
-            AssignmentConvergence::Unconverged
+            ClientAssignmentConvergence::from_counts(2, 0),
+            ClientAssignmentConvergence::Unconverged
         );
     }
 
     #[test]
     fn some_connected_is_partially_converged() {
         assert_eq!(
-            AssignmentConvergence::from_counts(3, 1),
-            AssignmentConvergence::PartiallyConverged
+            ClientAssignmentConvergence::from_counts(3, 1),
+            ClientAssignmentConvergence::PartiallyConverged
         );
     }
 
     #[test]
     fn all_assigned_connected_is_converged() {
         assert_eq!(
-            AssignmentConvergence::from_counts(2, 2),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::from_counts(2, 2),
+            ClientAssignmentConvergence::Converged
         );
     }
 
     #[test]
     fn set_assigned_empty_is_converged_and_excludes_retiring_connected() {
-        let tracker = AssignmentConvergenceTracker::new();
+        let tracker = ClientAssignmentConvergenceTracker::new();
         let a = address("a.example.test");
         let b = address("b.example.test");
         assert_eq!(
             tracker.set_assigned(&[a.clone(), b.clone()]),
-            Some(AssignmentConvergence::Unconverged)
+            Some(ClientAssignmentConvergence::Unconverged)
         );
         assert_eq!(
             tracker.mark_connected(&a),
-            Some(AssignmentConvergence::PartiallyConverged)
+            Some(ClientAssignmentConvergence::PartiallyConverged)
         );
         assert_eq!(
             tracker.set_assigned(&[]),
-            Some(AssignmentConvergence::Converged)
+            Some(ClientAssignmentConvergence::Converged)
         );
-        assert_eq!(tracker.current(), AssignmentConvergence::Converged);
+        assert_eq!(tracker.current(), ClientAssignmentConvergence::Converged);
         // Still Connected but Retiring: excluded until re-adopted.
         assert_eq!(tracker.mark_connected(&a), None);
-        assert_eq!(tracker.current(), AssignmentConvergence::Converged);
+        assert_eq!(tracker.current(), ClientAssignmentConvergence::Converged);
         // Re-adopt restores Converged without a status change from empty Converged.
         assert_eq!(tracker.set_assigned(std::slice::from_ref(&a)), None);
-        assert_eq!(tracker.current(), AssignmentConvergence::Converged);
+        assert_eq!(tracker.current(), ClientAssignmentConvergence::Converged);
     }
 
     #[test]
     fn connected_transitions_follow_assignment() {
-        let tracker = AssignmentConvergenceTracker::new();
+        let tracker = ClientAssignmentConvergenceTracker::new();
         let a = address("a.example.test");
         let b = address("b.example.test");
         assert_eq!(
             tracker.set_assigned(&[a.clone(), b.clone()]),
-            Some(AssignmentConvergence::Unconverged)
+            Some(ClientAssignmentConvergence::Unconverged)
         );
         assert_eq!(
             tracker.mark_connected(&a),
-            Some(AssignmentConvergence::PartiallyConverged)
+            Some(ClientAssignmentConvergence::PartiallyConverged)
         );
         assert_eq!(
             tracker.mark_connected(&b),
-            Some(AssignmentConvergence::Converged)
+            Some(ClientAssignmentConvergence::Converged)
         );
         assert_eq!(
             tracker.mark_disconnected(&a),
-            Some(AssignmentConvergence::PartiallyConverged)
+            Some(ClientAssignmentConvergence::PartiallyConverged)
         );
         assert_eq!(
             tracker.mark_disconnected(&b),
-            Some(AssignmentConvergence::Unconverged)
+            Some(ClientAssignmentConvergence::Unconverged)
         );
     }
 }

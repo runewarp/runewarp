@@ -16,7 +16,7 @@ pub(crate) const CONTROL_ALPN_H2: &[u8] = b"h2";
 
 /// Role identity presented to Control over mTLS.
 #[derive(Clone, Debug)]
-pub struct ControlClientIdentityMaterial {
+pub struct ControlRoleIdentityMaterial {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
 }
@@ -26,7 +26,7 @@ pub struct ControlClientIdentityMaterial {
 pub struct SessionMaterial {
     pub control_hostname: String,
     pub trust: ControlTrust,
-    pub identity: ControlClientIdentityMaterial,
+    pub identity: ControlRoleIdentityMaterial,
 }
 
 /// Loaded rustls client config for one Control connection attempt.
@@ -118,7 +118,7 @@ pub(crate) fn load_control_tls_material(
 }
 
 fn load_identity_files(
-    identity: &ControlClientIdentityMaterial,
+    identity: &ControlRoleIdentityMaterial,
 ) -> Result<
     (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>),
     crate::tls_material::TlsMaterialError,
@@ -163,7 +163,7 @@ fn load_control_root_store(trust: &ControlTrust) -> Result<RootCertStore, TrustL
     Ok(roots)
 }
 
-impl ControlClientIdentityMaterial {
+impl ControlRoleIdentityMaterial {
     pub fn from_client_identity_dir(directory: &Path) -> Self {
         Self {
             cert_path: directory.join(CLIENT_CERT_FILENAME),

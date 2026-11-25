@@ -4,7 +4,7 @@
 //! the Connected-tunnel policy every production factory must follow: Retire cancels
 //! Establishing / Reconnecting work immediately, leaves a live Connected tunnel until
 //! remote close or process **Infrastructure drain**, re-adopts without a duplicate dial,
-//! and observes connect/disconnect for **Assignment convergence**.
+//! and observes connect/disconnect for **Client assignment convergence**.
 //!
 //! While a primary connection is live, the worker also owns at most one **Candidate Tunnel
 //! connection** for its address. A replacement hint on the primary starts a candidate after a
@@ -706,7 +706,7 @@ mod tests {
 
     use super::*;
     use crate::AddressController;
-    use crate::AssignmentConvergence;
+    use crate::ClientAssignmentConvergence;
     use crate::ServerAddress;
     use crate::managed_session::{ClientManagedInput, RoleAdapter};
 
@@ -859,7 +859,7 @@ mod tests {
         wait_until(|| connected_hold.load(Ordering::SeqCst)).await;
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::Converged
         );
         assert_eq!(dial_count.load(Ordering::SeqCst), 1);
 
@@ -873,7 +873,7 @@ mod tests {
         assert_eq!(dial_count.load(Ordering::SeqCst), 1);
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::Converged
         );
         assert_eq!(view.worker_count(), 1);
 
@@ -917,7 +917,7 @@ mod tests {
         );
         assert_eq!(
             view.assignment_convergence(),
-            AssignmentConvergence::Converged
+            ClientAssignmentConvergence::Converged
         );
         assert_eq!(view.worker_count(), 1);
 

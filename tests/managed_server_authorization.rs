@@ -26,7 +26,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ControlAddress,
-    ControlClientIdentityMaterial, ControlTrust, GeneratedClientIdentity, ManagedSession,
+    ControlRoleIdentityMaterial, ControlTrust, GeneratedClientIdentity, ManagedSession,
     ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PreparedClient, PreparedServer,
     QUIC_CLOSE_FLUSH_DURATION, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_KEY_FILENAME,
     ServerHostname, SessionMaterial, ShutdownMode, generate_client_identity,
@@ -289,7 +289,7 @@ tunnel-bind-address = "127.0.0.1:0"
         let session_material = SessionMaterial {
             control_hostname: "localhost".to_owned(),
             trust: ControlTrust::CaFile(control_paths.ca_cert),
-            identity: ControlClientIdentityMaterial {
+            identity: ControlRoleIdentityMaterial {
                 cert_path: tempdir
                     .path()
                     .join("server-identity")
@@ -740,7 +740,7 @@ async fn managed_server_state_document_reports_tunnel_connections_and_visitors()
     let generation = wait_for_state_revision(&harness.control.metrics, "rev-1").await;
 
     let client = connect_event_follower(&harness, &harness.trusted_client).await;
-    wait_for_state_document(&harness.control.metrics, "t1 connected", |body| {
+    wait_for_managed_state_document(&harness.control.metrics, "t1 connected", |body| {
         body["tunnels"]["t1"] == json!(1)
     })
     .await;
@@ -768,17 +768,19 @@ async fn managed_server_state_document_reports_tunnel_connections_and_visitors()
         ),
     );
     wait_for_applied(&mut harness.event_rx, "rev-2").await;
-    let moved =
-        wait_for_state_document_after(&harness.control.metrics, before_move, "rev-2", |body| {
-            body["revision"] == json!("rev-2")
-        })
-        .await;
+    let moved = wait_for_managed_state_document_after(
+        &harness.control.metrics,
+        before_move,
+        "rev-2",
+        |body| body["revision"] == json!("rev-2"),
+    )
+    .await;
     assert_eq!(moved["tunnels"], json!({"t1": 0, "t2": 1}), "{moved}");
 
     // Closing the connection is a fact change: a new document reports it without a snapshot.
     let before_close = state_document_count(&harness.control.metrics);
     drop(client);
-    wait_for_state_document_after(
+    wait_for_managed_state_document_after(
         &harness.control.metrics,
         before_close,
         "t2 disconnected",
@@ -851,7 +853,7 @@ async fn assert_server_drain_finishes_at_visitor_completion(managed_drain: bool)
     let mut initial = [0_u8; 2];
     tls_stream.read_exact(&mut initial).await.unwrap();
     assert_eq!(&initial, b"on");
-    wait_for_state_document(&harness.control.metrics, "one Visitor", |body| {
+    wait_for_managed_state_document(&harness.control.metrics, "one Visitor", |body| {
         body["visitors"] == json!(1) && body["tunnels"]["t1"] == json!(1)
     })
     .await;
@@ -862,7 +864,7 @@ async fn assert_server_drain_finishes_at_visitor_completion(managed_drain: bool)
             &format!(r#"{{"tunnels":{tunnels},"drain":true}}"#),
         );
         wait_for_applied(&mut harness.event_rx, "rev-drain").await;
-        wait_for_state_document(
+        wait_for_managed_state_document(
             &harness.control.metrics,
             "draining with a Visitor",
             |body| {
@@ -933,7 +935,7 @@ async fn assert_server_drain_finishes_at_visitor_completion(managed_drain: bool)
         .expect("server task")
         .expect("drain is not a failure");
     if managed_drain {
-        wait_for_state_document(&harness.control.metrics, "quiescent", |body| {
+        wait_for_managed_state_document(&harness.control.metrics, "quiescent", |body| {
             body["draining"] == json!(true)
                 && body["visitors"] == json!(0)
                 && body["tunnels"]["t1"] == json!(0)
@@ -943,7 +945,7 @@ async fn assert_server_drain_finishes_at_visitor_completion(managed_drain: bool)
         // A later input without drain applies and reports, but serving never resumes.
         harness.push_authorization("rev-after", &format!(r#"{{"tunnels":{tunnels}}}"#));
         wait_for_applied(&mut harness.event_rx, "rev-after").await;
-        wait_for_state_document(&harness.control.metrics, "still draining", |body| {
+        wait_for_managed_state_document(&harness.control.metrics, "still draining", |body| {
             body["revision"] == json!("rev-after") && body["draining"] == json!(true)
         })
         .await;
@@ -1568,12 +1570,12 @@ async fn wait_for_reconnecting(event_rx: &mut mpsc::UnboundedReceiver<ManagedSes
 }
 
 /// Wait for a state document matching `predicate` and return it.
-async fn wait_for_state_document(
+async fn wait_for_managed_state_document(
     metrics: &FixtureMetrics,
     description: &str,
     predicate: impl Fn(&Value) -> bool,
 ) -> Value {
-    wait_for_state_document_after(metrics, 0, description, predicate).await
+    wait_for_managed_state_document_after(metrics, 0, description, predicate).await
 }
 
 /// Number of state documents received so far, to wait only for later ones.
@@ -1582,7 +1584,7 @@ fn state_document_count(metrics: &FixtureMetrics) -> usize {
 }
 
 /// Wait for a state document sent after the first `skip` documents that matches `predicate`.
-async fn wait_for_state_document_after(
+async fn wait_for_managed_state_document_after(
     metrics: &FixtureMetrics,
     skip: usize,
     description: &str,

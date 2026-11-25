@@ -22,8 +22,8 @@ use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use runewarp::{
-    ControlAddress, ControlClientIdentityMaterial, ControlTrust, ManagedSession,
-    ManagedSessionEvent, ManagedSessionRole, SessionMaterial,
+    ControlAddress, ControlRoleIdentityMaterial, ControlTrust, ManagedSession, ManagedSessionEvent,
+    ManagedSessionRole, SessionMaterial,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -497,7 +497,7 @@ fn session_material(
     SessionMaterial {
         control_hostname: control_hostname.to_owned(),
         trust: ControlTrust::CaFile(ca_cert.to_path_buf()),
-        identity: ControlClientIdentityMaterial {
+        identity: ControlRoleIdentityMaterial {
             cert_path: client_cert.to_path_buf(),
             key_path: client_key.to_path_buf(),
         },

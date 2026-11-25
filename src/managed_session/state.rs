@@ -1,6 +1,6 @@
-//! Role facts reported in Managed-session state documents.
+//! Role facts reported in Managed state documents.
 //!
-//! Every `PUT .../state` body is the role's full current state document: the session-owned
+//! Every `PUT .../state` body is the role's full current Managed state document: the session-owned
 //! applied `revision`, then the role's facts in order. The session stays role-agnostic: a role
 //! supplies a [`RoleState`] that renders its facts and signals when they may have changed.
 
@@ -11,7 +11,7 @@ use serde_json::Value;
 /// Role facts in wire order. A fact named `revision` is ignored: the session owns it.
 pub type StateFields = Vec<(&'static str, Value)>;
 
-/// Source of the facts one Managed role reports after `revision` in every state document.
+/// Source of the facts one Managed role reports after `revision` in every Managed state document.
 pub trait RoleState: Send + Sync + 'static {
     /// Render the current facts. Called when a state request starts, so it sees the latest state.
     fn fields(&self) -> BoxFuture<'_, StateFields>;
@@ -21,13 +21,13 @@ pub trait RoleState: Send + Sync + 'static {
     fn changed(&self) -> BoxFuture<'_, ()>;
 }
 
-/// State document body: `revision` first, then role facts in order.
-pub(super) struct StateDocument<'a> {
+/// Managed state document body: `revision` first, then role facts in order.
+pub(super) struct ManagedStateDocument<'a> {
     pub(super) revision: &'a str,
     pub(super) fields: &'a [(&'static str, Value)],
 }
 
-impl Serialize for StateDocument<'_> {
+impl Serialize for ManagedStateDocument<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let fields = self
             .fields
@@ -43,7 +43,7 @@ impl Serialize for StateDocument<'_> {
 mod tests {
     use serde_json::json;
 
-    use super::StateDocument;
+    use super::ManagedStateDocument;
 
     #[test]
     fn documents_put_the_revision_first_and_ignore_a_role_revision() {
@@ -52,7 +52,7 @@ mod tests {
             ("revision", json!("spoofed")),
             ("tunnels", json!({"b": 1, "a": 2})),
         ];
-        let body = serde_json::to_string(&StateDocument {
+        let body = serde_json::to_string(&ManagedStateDocument {
             revision: "srv-42",
             fields: &fields,
         })

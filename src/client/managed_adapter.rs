@@ -13,7 +13,7 @@ use futures_util::future::BoxFuture;
 use serde_json::Value;
 use tokio::sync::{Notify, mpsc, oneshot};
 
-use super::assignment_convergence::AssignmentConvergenceTracker;
+use super::assignment_convergence::ClientAssignmentConvergenceTracker;
 use crate::ServerAddress;
 use crate::managed_session::{
     ApplyError, ClientManagedInput, InputError, ManagedSessionLimits, RoleAdapter, RoleState,
@@ -31,13 +31,13 @@ pub(crate) struct ClientAssignmentApply {
 #[derive(Debug)]
 pub struct ClientAssignmentAdapter {
     apply_tx: mpsc::UnboundedSender<ClientAssignmentApply>,
-    convergence: AssignmentConvergenceTracker,
+    convergence: ClientAssignmentConvergenceTracker,
 }
 
 impl ClientAssignmentAdapter {
     pub(crate) fn new(
         apply_tx: mpsc::UnboundedSender<ClientAssignmentApply>,
-        convergence: AssignmentConvergenceTracker,
+        convergence: ClientAssignmentConvergenceTracker,
     ) -> Self {
         Self {
             apply_tx,
@@ -49,7 +49,7 @@ impl ClientAssignmentAdapter {
 /// Facts a Managed Client reports: the generations of the connections carrying Visitor credit
 /// for each assigned Server address.
 struct ClientReportedState {
-    convergence: AssignmentConvergenceTracker,
+    convergence: ClientAssignmentConvergenceTracker,
     changed: Arc<Notify>,
 }
 
@@ -113,7 +113,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut adapter = ClientAssignmentAdapter::new(
             tx,
-            super::super::assignment_convergence::AssignmentConvergenceTracker::new(),
+            super::super::assignment_convergence::ClientAssignmentConvergenceTracker::new(),
         );
         let apply = tokio::spawn(async move {
             adapter
@@ -143,7 +143,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut adapter = ClientAssignmentAdapter::new(
             tx,
-            super::super::assignment_convergence::AssignmentConvergenceTracker::new(),
+            super::super::assignment_convergence::ClientAssignmentConvergenceTracker::new(),
         );
         let apply = tokio::spawn(async move {
             adapter
@@ -173,7 +173,7 @@ mod tests {
         drop(rx);
         let mut adapter = ClientAssignmentAdapter::new(
             tx,
-            super::super::assignment_convergence::AssignmentConvergenceTracker::new(),
+            super::super::assignment_convergence::ClientAssignmentConvergenceTracker::new(),
         );
         let error = adapter
             .apply(

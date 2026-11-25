@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Breaking for library embedders: renamed `ControlClientIdentityMaterial` to `ControlRoleIdentityMaterial` and `AssignmentConvergence` to `ClientAssignmentConvergence` to align with the updated domain glossary. CLI, configuration, metrics, traces, and wire protocols are unchanged. ([#312](https://github.com/runewarp/runewarp/pull/312))
 - Breaking for library embedders: `ServerRuntime::prepare`, `prepare_listeners`, `prepare_listeners_with_acme` and `PreparedServer::bind_listeners_with_acme` take a caller-minted `ServerRuntimeGeneration`, and `TraceRole::Server` carries it. Mint a fresh generation for every start and pass the same value to both. ([#304](https://github.com/runewarp/runewarp/pull/304))
 - The `client stream handlers saturated` warning now reports active stream handlers as `active-work` instead of repeating the limit. ([#299](https://github.com/runewarp/runewarp/pull/299))
 

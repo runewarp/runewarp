@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use tokio::sync::oneshot;
 
 use crate::{
-    ControlClientIdentityMaterial, ManagedSession, ManagedSessionRole, OrderlyShutdown,
+    ControlRoleIdentityMaterial, ManagedSession, ManagedSessionRole, OrderlyShutdown,
     PreparedServer, QUIC_CLOSE_FLUSH_DURATION, ServerAuthorizationAdapter, ServerConfig,
     SessionMaterial, ShutdownMode,
 };
@@ -96,7 +96,7 @@ impl ServerRuntime {
             let material = SessionMaterial {
                 control_hostname: control.address.hostname().as_str().to_owned(),
                 trust: control.trust.clone(),
-                identity: ControlClientIdentityMaterial::from_server_identity_dir(
+                identity: ControlRoleIdentityMaterial::from_server_identity_dir(
                     &identity.directory,
                 ),
             };

@@ -39,8 +39,8 @@ mod tunnel_id;
 
 pub use client::{
     AddressController, AddressControllerShutdown, AddressControllerView, AddressWorkerBackoff,
-    AddressWorkerControl, AddressWorkerDial, AddressWorkerFactory, AddressWorkerHooks,
-    AssignmentConvergence, Client, ClientAssignmentAdapter, ClientConfigResolutionDefaults,
+    AddressWorkerControl, AddressWorkerDial, AddressWorkerFactory, AddressWorkerHooks, Client,
+    ClientAssignmentAdapter, ClientAssignmentConvergence, ClientConfigResolutionDefaults,
     ClientConfigResolutionError, ClientConnectConfig, ClientConnectError, ClientRuntimeArgs,
     ClientTunnelAttempt, FixedBackoff, MaintenanceIntent, SelectedClientConfig,
     SilentAddressWorkerHooks, TunnelAttemptFailure, TunnelAttemptOutcome, TunnelConnectionEnd,
@@ -83,7 +83,7 @@ pub use identity::{
     rotate_client_identity,
 };
 pub use managed_session::{
-    ApplyError, ClientManagedInput, ControlClientIdentityMaterial, ControlTlsMaterialError,
+    ApplyError, ClientManagedInput, ControlRoleIdentityMaterial, ControlTlsMaterialError,
     InputError, ManagedSession, ManagedSessionEvent, ManagedSessionLimitKind, ManagedSessionLimits,
     ManagedSessionRole, RoleAdapter, RoleState, ServerManagedInput, SessionMaterial, StateFields,
     TrustLoadError, parse_client_input, parse_server_input,

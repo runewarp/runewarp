@@ -427,13 +427,17 @@ impl VisitorIntake {
         self.admission_policy
             .report_recovery(&[AdmissionLimit::PendingStreamOpens]);
 
+        // Create and close the span outside the timed section, so the latency excludes it.
+        let stream_open_span =
+            tracing::info_span!(target: TARGET, parent: trace.span(), "stream_open");
         let open_started = std::time::Instant::now();
         let open_result = tunnel_connection
             .connection()
             .open_tunnel_stream(self.admission_policy.limits().stream_open_timeout)
-            .instrument(tracing::info_span!(target: TARGET, parent: trace.span(), "stream_open"))
+            .instrument(stream_open_span.clone())
             .await;
         let stream_open = open_started.elapsed();
+        drop(stream_open_span);
         let stream = match open_result {
             Ok(stream) => stream,
             Err(_) => {
@@ -1119,6 +1123,9 @@ mod tests {
         let (visitor_stream, _) = listener.accept().await?;
         intake.accept(visitor_stream, None);
         first.write_all(head).await?;
+        // On this current-thread runtime, yielding polls the first task, which reads the head
+        // and waits mid-intake before the second Visitor arrives.
+        tokio::task::yield_now().await;
         let mut second = TcpStream::connect(visitor_addr).await?;
         let (visitor_stream, _) = listener.accept().await?;
         intake.accept(visitor_stream, None);

@@ -211,7 +211,9 @@ fn is_trace_span(metadata: &Metadata<'_>) -> bool {
 /// diagnostics would repeat on every export retry, bypassing the rate-limited failure line.
 const EXPORTER_HTTP_TARGET: &str = "hyper_util::client";
 
-/// Run `f` with no span entered on this thread, then re-enter the spans it left.
+/// Run `f` outside the Runewarp trace spans entered on this thread, and any spans entered
+/// inside them, then re-enter them. Spans entered before them, such as an embedder's, stay
+/// current.
 ///
 /// Quinn's endpoint and connection drivers adopt the current span, and they live as long as the
 /// endpoint or connection. Created inside a trace span's work, they would hold the span open
@@ -232,11 +234,32 @@ pub(crate) fn outside_spans<T>(f: impl FnOnce() -> T) -> T {
 
     let mut exited = Reenter(Vec::new());
     // Each exit pops one entry off this thread's span stack, so the loop ends.
-    while let Some(id) = Span::current().id() {
-        exited.0.push(Span::current());
-        tracing::dispatcher::get_default(|dispatch| dispatch.exit(&id));
+    loop {
+        let current = Span::current();
+        let Some(id) = current.id() else { break };
+        let exit = tracing::dispatcher::get_default(|dispatch| {
+            let in_trace_span = in_trace_span(dispatch, &current, &id);
+            if in_trace_span {
+                dispatch.exit(&id);
+            }
+            in_trace_span
+        });
+        if !exit {
+            break;
+        }
+        exited.0.push(current);
     }
     f()
+}
+
+/// Whether `span` is a Runewarp trace span or a descendant of one.
+fn in_trace_span(dispatch: &Dispatch, span: &Span, id: &tracing::Id) -> bool {
+    match dispatch.downcast_ref::<tracing_subscriber::Registry>() {
+        Some(registry) => registry
+            .span(id)
+            .is_some_and(|span| span.scope().any(|span| is_trace_span(span.metadata()))),
+        None => span.metadata().is_some_and(is_trace_span),
+    }
 }
 
 /// Whether the log formatter may see `metadata`. Runewarp trace spans and the exporter's HTTP
@@ -710,6 +733,30 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{CapturedSpans, attribute};
     use super::*;
+
+    #[test]
+    fn outside_spans_leaves_only_trace_spans_and_their_descendants() {
+        if !test_support::isolated(
+            module_path!(),
+            "outside_spans_leaves_only_trace_spans_and_their_descendants",
+        ) {
+            return;
+        }
+        let captured = CapturedSpans::new(1.0);
+        let _logs = crate::runtime_log::test_support::JsonLogs::install(captured.provider());
+        // An embedder's span entered before Runewarp's stays current for Quinn to adopt.
+        let embedder = tracing::info_span!("embedder");
+        let _embedder = embedder.enter();
+        let trace = tracing::info_span!(target: TARGET, parent: None, "visitor");
+        trace.in_scope(|| {
+            let dependency = tracing::info_span!("dependency");
+            dependency.in_scope(|| {
+                assert_eq!(outside_spans(Span::current).id(), embedder.id());
+                assert_eq!(Span::current().id(), dependency.id());
+            });
+            assert_eq!(Span::current().id(), trace.id());
+        });
+    }
 
     #[test]
     fn config_accepts_http_and_https_and_defaults_the_path_and_ratio() {

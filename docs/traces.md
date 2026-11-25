@@ -73,8 +73,8 @@ With `log-format = "json"` and trace export on, a line emitted inside a sampled 
 The IDs come from the nearest enclosing Runewarp span, skipping spans from dependencies, so a dependency's line logged during a span's work carries that span's IDs too. Each span covers these lines:
 
 - `visitor`: Server lines from accept to placement or rejection, including admission saturation at accept, `rejected Visitor stream` warnings, route rejections and `server route forwarded`. A line logged during `intake`, `route` or `stream_open`, such as `server Visitor stream open failed`, carries that child's IDs.
-- `tunnel_connection.handshake`: lines from handshake admission to registration or rejection, including handshake failures and `server tunnel connection accepted`.
-- `client.tunnel_connect`: lines from the start of an attempt to its result, including `client tunnel connection connecting` and `client tunnel connection connected`.
+- `tunnel_connection.handshake`: lines from handshake admission to registration or rejection, including handshake failures and `server tunnel connection accepted`. The `server tunnel connection unauthorized` warning comes from the QUIC connection driver, which runs outside the span because it outlives it, so that warning carries no IDs. The handshake failure line that follows it does.
+- `client.tunnel_connect`: lines from the start of an attempt to its result, including `client tunnel connection connecting` and `client tunnel connection connected`. QUIC socket and connection setup runs outside the span, because its drivers outlive it, so dependency diagnostics from that setup carry no IDs.
 - `client.visitor`: Client lines from stream accept to backend connect or rejection, including `rejected stream` warnings and route rejections.
 - `managed.apply`: a rejected apply's rejection lines.
 

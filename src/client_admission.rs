@@ -13,7 +13,7 @@ pub enum ClientAdmission {
     /// emit the one-shot Client-ready event when first Connected.
     #[default]
     Static,
-    /// Managed mode: start with an empty assignment, track Assignment convergence,
+    /// Managed mode: start with an empty assignment, track Client assignment convergence,
     /// and acknowledge applies through the Managed-session adapter.
     Managed,
 }

@@ -276,7 +276,7 @@ impl Server {
         Self::bind_with_proxy(config, None, Vec::new()).await
     }
 
-    /// Like `bind`, including its process-wide Unix fd-limit preparation, with trusted PROXY ingress.
+    /// Like `bind`, including its process-wide Unix fd-limit preparation, with Visitor PROXY v2 ingress.
     pub async fn bind_with_proxy(
         config: ServerBindConfig,
         visitor_proxy_protocol: Option<crate::ProxyProtocolVersion>,

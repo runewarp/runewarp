@@ -87,13 +87,13 @@ impl AddressWorkerControl {
 
     /// Returns true exactly once across all workers for the one-shot Client-ready log.
     ///
-    /// Managed mode disables this so **Assignment convergence** replaces the static
+    /// Managed mode disables this so **Client assignment convergence** replaces the static
     /// one-shot Client-ready event.
     pub fn claim_client_ready_log(&self) -> bool {
         self.client_ready_enabled && !self.ready_logged.swap(true, Ordering::SeqCst)
     }
 
-    /// Record that this worker reached Connected. Returns the new **Assignment
+    /// Record that this worker reached Connected. Returns the new **Client assignment
     /// convergence** when it changed. No-op in static mode (no tracker).
     pub fn observe_connected(
         &self,
@@ -116,7 +116,7 @@ impl AddressWorkerControl {
             .map(|tracker| tracker.carrying_credit(address, generation))
     }
 
-    /// Record that this worker lost Connected. Returns the new **Assignment
+    /// Record that this worker lost Connected. Returns the new **Client assignment
     /// convergence** when it changed. No-op in static mode (no tracker).
     pub fn observe_disconnected(
         &self,
@@ -147,7 +147,7 @@ enum ControllerMode {
     /// **Client-ready** enabled, no managed apply loop.
     Static { factory: AddressWorkerFactory },
     /// Managed-session reconciliation via [`AddressController::for_managed`]: factory,
-    /// apply channel, and **Assignment convergence**; **Client-ready** disabled.
+    /// apply channel, and **Client assignment convergence**; **Client-ready** disabled.
     Managed {
         factory: AddressWorkerFactory,
         apply_rx: Option<mpsc::UnboundedReceiver<ClientAssignmentApply>>,
@@ -176,7 +176,7 @@ pub struct AddressControllerView {
 }
 
 impl AddressControllerView {
-    /// Current **Assignment convergence**. Static mode without a tracker is always
+    /// Current **Client assignment convergence**. Static mode without a tracker is always
     /// [`ClientAssignmentConvergence::Converged`].
     pub fn assignment_convergence(&self) -> ClientAssignmentConvergence {
         self.convergence
@@ -262,7 +262,7 @@ impl AddressController {
         Self::new_with_mode(ControllerMode::Static { factory })
     }
 
-    /// Managed Client controller with **Assignment convergence** tracking and an apply
+    /// Managed Client controller with **Client assignment convergence** tracking and an apply
     /// channel owned by [`Self::run`]. Disables the static one-shot **Client-ready** log.
     ///
     /// Production obtains [`crate::ClientAssignmentAdapter`] only through this constructor.
@@ -312,7 +312,7 @@ impl AddressController {
         }
     }
 
-    /// Clone a read-only view for observing worker count and **Assignment convergence**
+    /// Clone a read-only view for observing worker count and **Client assignment convergence**
     /// from another task (for example integration-test harnesses).
     pub fn view(&self) -> AddressControllerView {
         AddressControllerView {
@@ -325,7 +325,7 @@ impl AddressController {
         self.workers.len()
     }
 
-    /// Current **Assignment convergence**. Static mode without a tracker is always
+    /// Current **Client assignment convergence**. Static mode without a tracker is always
     /// [`ClientAssignmentConvergence::Converged`].
     pub fn assignment_convergence(&self) -> ClientAssignmentConvergence {
         self.convergence_tracker()

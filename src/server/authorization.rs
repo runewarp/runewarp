@@ -2,7 +2,7 @@
 //!
 //! Public-hostname routing and Client-identity handshake admission consult one
 //! immutable **Authorization snapshot**. Live **Authorization replacement** is
-//! owned by the Tunnel registry: validate a candidate beside the live snapshot,
+//! owned by the Tunnel router: validate a candidate beside the live snapshot,
 //! commit routing and admission together, realign Tunnel pools, revoke selective
 //! live work, and open first-success Server readiness.
 //!
@@ -286,7 +286,7 @@ fn build_authorization_maps(
 ///
 /// Not a complete Authorization replacement by itself: callers must still
 /// realign Tunnel pools, revoke live work, and open readiness through the
-/// registry replacement operation.
+/// Tunnel router replacement operation.
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedAuthorization {
     snapshot: Arc<AuthorizationSnapshot>,

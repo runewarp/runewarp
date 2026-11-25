@@ -145,7 +145,7 @@ impl ControlFixture {
     }
 }
 
-struct QuicServerNode {
+struct QuicServerInstance {
     public_addr: SocketAddr,
     tunnel_addr: SocketAddr,
     shutdown: OrderlyShutdown,
@@ -154,7 +154,7 @@ struct QuicServerNode {
     tunnels: Vec<ServerTunnelConfig>,
 }
 
-impl QuicServerNode {
+impl QuicServerInstance {
     /// Advertise `replacement` on every Tunnel event stream, as a Control input would.
     async fn publish_hint(&self, replacement: Option<runewarp::ServerRuntimeGeneration>) {
         use runewarp::RoleAdapter;
@@ -339,18 +339,21 @@ impl ManagedClientHarness {
         }
     }
 
-    async fn spawn_server_node(&self) -> QuicServerNode {
-        self.spawn_server_node_with(ServerAdmission::Static).await
+    async fn spawn_server_instance(&self) -> QuicServerInstance {
+        self.spawn_server_instance_with(ServerAdmission::Static)
+            .await
     }
 
     /// A Managed Server whose authorization a test applies directly, hints included.
-    async fn spawn_managed_server_node(&self) -> QuicServerNode {
-        let node = self.spawn_server_node_with(ServerAdmission::Managed).await;
+    async fn spawn_managed_server_instance(&self) -> QuicServerInstance {
+        let node = self
+            .spawn_server_instance_with(ServerAdmission::Managed)
+            .await;
         node.publish_hint(None).await;
         node
     }
 
-    async fn spawn_server_node_with(&self, admission: ServerAdmission) -> QuicServerNode {
+    async fn spawn_server_instance_with(&self, admission: ServerAdmission) -> QuicServerInstance {
         let managed = admission == ServerAdmission::Managed;
         let tunnels = vec![ServerTunnelConfig {
             id: managed.then(|| runewarp::TunnelId::parse("app").unwrap()),
@@ -390,7 +393,7 @@ impl ManagedClientHarness {
         let shutdown = OrderlyShutdown::new(Duration::from_millis(50), QUIC_CLOSE_FLUSH_DURATION);
         let server_shutdown = shutdown.clone();
         let task = tokio::spawn(async move { server.run_with_shutdown(&server_shutdown).await });
-        QuicServerNode {
+        QuicServerInstance {
             public_addr,
             tunnel_addr,
             shutdown,
@@ -428,8 +431,8 @@ async fn managed_client_reconciles_assignments_across_real_servers() {
     let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
     let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
     let mut harness = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
-    let server_a = harness.spawn_server_node().await;
-    let server_b = harness.spawn_server_node().await;
+    let server_a = harness.spawn_server_instance().await;
+    let server_b = harness.spawn_server_instance().await;
     let failing_port = {
         let sock = std::net::UdpSocket::bind(localhost(0)).unwrap();
         let port = sock.local_addr().unwrap().port();
@@ -484,7 +487,7 @@ async fn managed_client_reconciles_assignments_across_real_servers() {
     );
 
     // 6. Fresh assignment after empty starts a new independent worker.
-    let server_c = harness.spawn_server_node().await;
+    let server_c = harness.spawn_server_instance().await;
     let addr_c = format!("localhost:{}", server_c.tunnel_addr.port());
     harness.push_assignment("rev-3", &[&addr_c]);
     wait_for_applied(&mut harness.event_rx, "rev-3").await;
@@ -502,7 +505,7 @@ async fn managed_client_state_document_reports_generations_per_assigned_address(
     let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
     let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
     let mut harness = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
-    let server_a = harness.spawn_server_node().await;
+    let server_a = harness.spawn_server_instance().await;
     let failing_port = {
         let sock = std::net::UdpSocket::bind(localhost(0)).unwrap();
         let port = sock.local_addr().unwrap().port();
@@ -560,7 +563,7 @@ async fn managed_client_retires_re_adopts_and_preserves_assignment_through_contr
     let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
     let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
     let mut harness = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
-    let server_a = harness.spawn_server_node().await;
+    let server_a = harness.spawn_server_instance().await;
     let addr_a = format!("localhost:{}", server_a.tunnel_addr.port());
 
     harness.push_assignment("rev-1", &[&addr_a]);
@@ -669,7 +672,7 @@ async fn managed_client_restart_fail_closed_requires_fresh_snapshot() {
     let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
     let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
     let mut first = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
-    let server = first.spawn_server_node().await;
+    let server = first.spawn_server_instance().await;
     let addr = format!("localhost:{}", server.tunnel_addr.port());
 
     first.push_assignment("rev-live", &[&addr]);
@@ -685,7 +688,7 @@ async fn managed_client_restart_fail_closed_requires_fresh_snapshot() {
     assert_eq!(second.worker_count(), 0);
     assert_eq!(second.convergence(), ClientAssignmentConvergence::Converged);
 
-    let server_fresh = second.spawn_server_node().await;
+    let server_fresh = second.spawn_server_instance().await;
     let addr_fresh = format!("localhost:{}", server_fresh.tunnel_addr.port());
     second.push_assignment("rev-fresh", &[&addr_fresh]);
     wait_for_applied(&mut second.event_rx, "rev-fresh").await;
@@ -701,7 +704,7 @@ async fn managed_client_isolates_per_address_failures() {
     let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
     let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
     let mut harness = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
-    let server_ok = harness.spawn_server_node().await;
+    let server_ok = harness.spawn_server_instance().await;
     let failing_port = {
         let sock = std::net::UdpSocket::bind(localhost(0)).unwrap();
         let port = sock.local_addr().unwrap().port();
@@ -820,7 +823,7 @@ async fn managed_client_candidates_pause_while_retiring_and_never_count_toward_c
     let (backend_cert, backend_key) = make_self_signed_cert(APP_HOSTNAME);
     let backend = spawn_tls_backend(&backend_cert, &backend_key, *b"pong").await;
     let mut harness = ManagedClientHarness::start(backend.0, backend_cert.clone()).await;
-    let server = harness.spawn_managed_server_node().await;
+    let server = harness.spawn_managed_server_instance().await;
     let forwarder =
         udp_forwarder::UdpForwarder::start(first_localhost_address(0).await, server.tunnel_addr)
             .await;

@@ -467,10 +467,10 @@ impl VisitorIntake {
         self.admission_policy
             .report_recovery(&[AdmissionLimit::ActiveRoutedStreams]);
 
-        let registry = self.tunnel_router.clone();
+        let router = self.tunnel_router.clone();
         // Registration is synchronous and precedes proxy progress, so a concurrent
         // Authorization replacement cannot miss already-admitted Visitor work.
-        let work = match registry.register_active_visitor_work(
+        let work = match router.register_active_visitor_work(
             &public_hostname,
             tunnel_connection,
             active_stream_permit,
@@ -491,7 +491,7 @@ impl VisitorIntake {
         trace.finish("placed");
         visitor.placed(stream_open);
         Some(AfterVisitorSpan::Placed(Box::new(PlacedVisitor {
-            registry,
+            router,
             work,
             stream,
             addresses,
@@ -521,7 +521,7 @@ impl AfterVisitorSpan {
 
 /// A placed Visitor, proxied over its Tunnel stream until either side closes.
 struct PlacedVisitor {
-    registry: TunnelRouter,
+    router: TunnelRouter,
     work: ActiveVisitorWork,
     stream: ServerTunnelStream,
     addresses: VisitorTcpAddresses,
@@ -533,7 +533,7 @@ struct PlacedVisitor {
 impl PlacedVisitor {
     async fn proxy(self) {
         let Self {
-            registry,
+            router,
             work,
             stream,
             addresses,
@@ -541,7 +541,7 @@ impl PlacedVisitor {
             visitor_stream,
             visitor,
         } = self;
-        let metrics = registry.metrics();
+        let metrics = router.metrics();
         let outcome = work
             .run(async move {
                 let initial_bytes = encode_tunnel_stream(addresses, &buffered_bytes);
@@ -563,7 +563,7 @@ impl PlacedVisitor {
         visitor.closed(match outcome {
             Ok(Ok(())) => VisitorCloseOutcome::Ok,
             // Shutdown closing the Tunnel connection under the Visitor is a cancellation.
-            Ok(Err(_)) if registry.is_closing_all() => VisitorCloseOutcome::Cancelled,
+            Ok(Err(_)) if router.is_closing_all() => VisitorCloseOutcome::Cancelled,
             Ok(Err(_)) => VisitorCloseOutcome::Error,
             Err(_) => VisitorCloseOutcome::Cancelled,
         });
@@ -843,7 +843,7 @@ mod tests {
     async fn forwards_authorized_public_hostname_through_active_tunnel_connection() -> io::Result<()>
     {
         let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRouter::configured(
+        let router = TunnelRouter::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 id: None,
@@ -852,10 +852,10 @@ mod tests {
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        registry.register(fixture.server_connection.clone()).await;
+        router.register(fixture.server_connection.clone()).await;
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
-            registry,
+            router,
             None,
             test_admission_policy(),
         )?;
@@ -1045,7 +1045,7 @@ mod tests {
         let captured = crate::trace_export::test_support::CapturedSpans::new(1.0);
         let logs = JsonLogs::install(captured.provider());
         let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRouter::configured(
+        let router = TunnelRouter::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 id: None,
@@ -1055,10 +1055,10 @@ mod tests {
         )?;
         let fixture =
             TunnelConnectionFixture::connect_with_stream_budget(&client_identity, 1).await?;
-        registry.register(fixture.server_connection.clone()).await;
+        router.register(fixture.server_connection.clone()).await;
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
-            registry,
+            router,
             None,
             ServerAdmissionPolicy::new(ServerAdmissionLimits {
                 stream_open_timeout: Duration::from_millis(50),
@@ -1345,7 +1345,7 @@ mod tests {
     async fn established_forwarded_stream_survives_active_saturation_and_recovers() -> io::Result<()>
     {
         let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRouter::configured(
+        let router = TunnelRouter::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 id: None,
@@ -1354,14 +1354,14 @@ mod tests {
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        registry.register(fixture.server_connection.clone()).await;
+        router.register(fixture.server_connection.clone()).await;
         let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
             max_active_routed_streams: 1,
             ..ServerAdmissionLimits::for_test()
         });
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
-            registry.clone(),
+            router.clone(),
             None,
             policy.clone(),
         )?;
@@ -1393,7 +1393,7 @@ mod tests {
         .map_err(|_| timeout_error("established stream should receive ClientHello"))?
         .map_err(io::Error::other)?;
         assert_eq!(forwarded, client_hello);
-        assert_eq!(registry.tracked_visitor_stream_count(), 1);
+        assert_eq!(router.tracked_visitor_stream_count(), 1);
         assert_eq!(
             policy.try_admit_active_routed_stream().unwrap_err().limit,
             AdmissionLimit::ActiveRoutedStreams
@@ -1417,13 +1417,13 @@ mod tests {
             .await
             .map_err(|error| join_error("intake task failed", error))??;
         timeout(Duration::from_secs(1), async {
-            while registry.tracked_visitor_stream_count() != 0 {
+            while router.tracked_visitor_stream_count() != 0 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .map_err(|_| timeout_error("finished Visitor should be untracked"))?;
-        assert_eq!(registry.tracked_visitor_stream_count(), 0);
+        assert_eq!(router.tracked_visitor_stream_count(), 0);
         assert!(policy.try_admit_active_routed_stream().is_ok());
 
         // Recovery: a new Visitor can be admitted after the established stream exits.
@@ -1458,7 +1458,7 @@ mod tests {
     #[tokio::test]
     async fn pending_stream_open_saturation_rejects_new_visitors_then_recovers() -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRouter::configured(
+        let router = TunnelRouter::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 id: None,
@@ -1467,7 +1467,7 @@ mod tests {
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        registry.register(fixture.server_connection.clone()).await;
+        router.register(fixture.server_connection.clone()).await;
         let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
             max_pending_stream_opens: 1,
             ..ServerAdmissionLimits::for_test()
@@ -1475,10 +1475,10 @@ mod tests {
         let held_pending = policy
             .try_admit_pending_stream_open()
             .expect("pending open should fit");
-        let metrics = registry.metrics();
+        let metrics = router.metrics();
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
-            registry,
+            router,
             None,
             policy.clone(),
         )?;
@@ -1522,7 +1522,7 @@ mod tests {
     async fn active_routed_stream_saturation_resets_opened_stream_then_recovers() -> io::Result<()>
     {
         let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRouter::configured(
+        let router = TunnelRouter::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 id: None,
@@ -1531,7 +1531,7 @@ mod tests {
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        registry.register(fixture.server_connection.clone()).await;
+        router.register(fixture.server_connection.clone()).await;
         let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
             max_active_routed_streams: 1,
             ..ServerAdmissionLimits::for_test()
@@ -1541,7 +1541,7 @@ mod tests {
             .expect("active stream should fit");
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
-            registry.clone(),
+            router.clone(),
             None,
             policy.clone(),
         )?;
@@ -1565,9 +1565,9 @@ mod tests {
         intake_task
             .await
             .map_err(|error| join_error("intake task failed", error))??;
-        assert_eq!(registry.tracked_visitor_stream_count(), 0);
+        assert_eq!(router.tracked_visitor_stream_count(), 0);
         assert_only_rejection(
-            &registry.metrics(),
+            &router.metrics(),
             VisitorRejectReason::AdmissionActiveRoutedStream,
         )
         .await?;
@@ -1580,7 +1580,7 @@ mod tests {
     #[tokio::test]
     async fn stream_open_deadline_drops_visitor_and_releases_pending_capacity() -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRouter::configured(
+        let router = TunnelRouter::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 id: None,
@@ -1590,16 +1590,16 @@ mod tests {
         )?;
         let fixture =
             TunnelConnectionFixture::connect_with_stream_budget(&client_identity, 1).await?;
-        registry.register(fixture.server_connection.clone()).await;
+        router.register(fixture.server_connection.clone()).await;
         let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
             stream_open_timeout: Duration::from_millis(50),
             max_pending_stream_opens: 1,
             ..ServerAdmissionLimits::for_test()
         });
-        let metrics = registry.metrics();
+        let metrics = router.metrics();
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
-            registry,
+            router,
             None,
             policy.clone(),
         )?;
@@ -1753,11 +1753,11 @@ mod tests {
 
     #[tokio::test]
     async fn serves_acme_tls_for_the_server_hostname() -> io::Result<()> {
-        let registry = TunnelRouter::single(vec![public_hostname("app.example.test")])?;
+        let router = TunnelRouter::single(vec![public_hostname("app.example.test")])?;
         let (certificate, public_tls_config) = make_public_tls_config("tunnel.example.test")?;
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
-            registry,
+            router,
             Some(public_tls_config),
             test_admission_policy(),
         )?;
@@ -1820,12 +1820,12 @@ mod tests {
             LogLevel::Debug,
             "DEBUG server acme challenge handled: server-hostname=tunnel.example.test",
             async {
-                let registry = TunnelRouter::single(vec![public_hostname("app.example.test")])?;
+                let router = TunnelRouter::single(vec![public_hostname("app.example.test")])?;
                 let (certificate, public_tls_config) =
                     make_public_tls_config("tunnel.example.test")?;
                 let intake = VisitorIntake::new(
                     server_hostname("Tunnel.Example.Test."),
-                    registry,
+                    router,
                     Some(public_tls_config),
                     test_admission_policy(),
                 )?;
@@ -2022,10 +2022,10 @@ mod tests {
 
     #[tokio::test]
     async fn drops_public_hostname_when_the_tunnel_has_no_active_connection() -> io::Result<()> {
-        let registry = TunnelRouter::single(vec![public_hostname("app.example.test")])?;
+        let router = TunnelRouter::single(vec![public_hostname("app.example.test")])?;
         let intake = VisitorIntake::new(
             server_hostname("tunnel.example.test"),
-            registry,
+            router,
             None,
             test_admission_policy(),
         )?;
@@ -2043,7 +2043,7 @@ mod tests {
     async fn drops_public_hostname_cleanly_after_the_active_tunnel_connection_closes()
     -> io::Result<()> {
         let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRouter::configured(
+        let router = TunnelRouter::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 id: None,
@@ -2052,13 +2052,13 @@ mod tests {
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        registry.register(fixture.server_connection.clone()).await;
+        router.register(fixture.server_connection.clone()).await;
         fixture
             .server_connection
             .close(b"closed before visitor handling");
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
-            registry,
+            router,
             None,
             test_admission_policy(),
         )?;
@@ -2152,7 +2152,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drops_visitors_after_the_registry_stops_accepting_work() -> io::Result<()> {
+    async fn drops_visitors_after_the_router_stops_accepting_work() -> io::Result<()> {
         let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
         intake.tunnel_router.stop_accepting_new_work();
         assert_drop_without_opening_a_tunnel_stream(
@@ -2302,8 +2302,8 @@ mod tests {
     #[tokio::test]
     async fn shutdown_closing_the_tunnel_cancels_the_placed_visitor() -> io::Result<()> {
         let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
-        let registry = intake.tunnel_router.clone();
-        let metrics = registry.metrics();
+        let router = intake.tunnel_router.clone();
+        let metrics = router.metrics();
         let listener = TcpListener::bind(localhost(0)).await?;
         let visitor_addr = listener.local_addr()?;
         let intake_task = spawn_intake_task(listener, intake);
@@ -2319,7 +2319,7 @@ mod tests {
             .await
             .map_err(io::Error::other)?;
         eventually_metric(&metrics, "runewarp_server_visitors_active", 1.0).await?;
-        registry.close_all(b"graceful shutdown").await;
+        router.close_all(b"graceful shutdown").await;
         // The closed Tunnel fails the response direction; finishing the request lets the
         // proxy return that error instead of waiting on the Visitor.
         let _ = timeout(Duration::from_secs(1), visitor.read(&mut [0_u8; 1])).await;
@@ -2396,7 +2396,7 @@ mod tests {
     async fn revoked_visitor_closes_cancelled_and_keeps_bytes_already_forwarded() -> io::Result<()>
     {
         let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRouter::configured_managed(
+        let router = TunnelRouter::configured_managed(
             &server_hostname("tunnel.example.test"),
             &[ServerTunnelConfig {
                 id: Some(crate::TunnelId::parse("tunnel-1").unwrap()),
@@ -2405,11 +2405,11 @@ mod tests {
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        registry.register(fixture.server_connection.clone()).await;
-        let metrics = registry.metrics();
+        router.register(fixture.server_connection.clone()).await;
+        let metrics = router.metrics();
         let intake = VisitorIntake::new(
             server_hostname("tunnel.example.test"),
-            registry.clone(),
+            router.clone(),
             None,
             test_admission_policy(),
         )?;
@@ -2444,7 +2444,7 @@ mod tests {
             .await
             .map_err(|_| timeout_error("Visitor should receive the partial response"))??;
 
-        let dispatch = registry
+        let dispatch = router
             .replace_authorization(
                 &server_hostname("tunnel.example.test"),
                 &[ServerTunnelConfig {
@@ -2492,7 +2492,7 @@ mod tests {
         policy: ServerAdmissionPolicy,
     ) -> io::Result<(VisitorIntake, ClientPeer)> {
         let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRouter::configured(
+        let router = TunnelRouter::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 id: None,
@@ -2501,10 +2501,10 @@ mod tests {
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        registry.register(fixture.server_connection.clone()).await;
+        router.register(fixture.server_connection.clone()).await;
         let intake = VisitorIntake::new(
             server_hostname("Tunnel.Example.Test."),
-            registry,
+            router,
             None,
             policy,
         )?;
@@ -2516,7 +2516,7 @@ mod tests {
         trusted_network: &str,
     ) -> io::Result<(VisitorIntake, ClientPeer)> {
         let client_identity = generate_test_client_identity()?;
-        let registry = TunnelRouter::configured(
+        let router = TunnelRouter::configured(
             &server_hostname("Tunnel.Example.Test."),
             &[ServerTunnelConfig {
                 id: None,
@@ -2525,10 +2525,10 @@ mod tests {
             }],
         )?;
         let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
-        registry.register(fixture.server_connection.clone()).await;
+        router.register(fixture.server_connection.clone()).await;
         let intake = VisitorIntake::new_with_proxy(
             server_hostname("Tunnel.Example.Test."),
-            registry,
+            router,
             None,
             test_admission_policy(),
             Some(ProxyProtocolVersion::V2),

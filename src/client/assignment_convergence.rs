@@ -1,4 +1,4 @@
-//! Assignment convergence for managed Client Server-address maintenance.
+//! Client assignment convergence for managed Client Server-address maintenance.
 //!
 //! Convergence is separate from applied revision. Retiring connections are
 //! excluded: only currently assigned addresses contribute to the aggregate.

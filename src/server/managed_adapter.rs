@@ -27,7 +27,7 @@ use super::tunnel_router::TunnelRouter;
 #[derive(Clone)]
 pub struct ServerAuthorizationAdapter {
     server_hostname: ServerHostname,
-    registry: TunnelRouter,
+    router: TunnelRouter,
     tunnel_events: ServerTunnelEvents,
     drain: ServerDrain,
 }
@@ -35,13 +35,13 @@ pub struct ServerAuthorizationAdapter {
 impl ServerAuthorizationAdapter {
     pub(crate) fn new(
         server_hostname: ServerHostname,
-        registry: TunnelRouter,
+        router: TunnelRouter,
         tunnel_events: ServerTunnelEvents,
         drain: ServerDrain,
     ) -> Self {
         Self {
             server_hostname,
-            registry,
+            router,
             tunnel_events,
             drain,
         }
@@ -56,7 +56,7 @@ impl ServerAuthorizationAdapter {
         &self,
         tunnels: &[ServerTunnelConfig],
     ) -> Result<(), ApplyError> {
-        self.registry
+        self.router
             .replace_authorization(&self.server_hostname, tunnels)
             .await
             .map(|_| ())
@@ -84,7 +84,7 @@ impl RoleAdapter for ServerAuthorizationAdapter {
         if input.drain {
             // Seal new Tunnel connections and placement before `draining` becomes visible, so
             // a document reporting `draining` with zero Visitors means no Visitor can still land.
-            self.registry.stop_accepting_new_work();
+            self.router.stop_accepting_new_work();
             self.drain.begin();
         }
         Ok(())
@@ -94,8 +94,8 @@ impl RoleAdapter for ServerAuthorizationAdapter {
         Some(Arc::new(ServerReportedState {
             generation: self.tunnel_events.server_generation().to_string(),
             drain: self.drain.clone(),
-            registry: self.registry.clone(),
-            changed: self.registry.reported_state_changed(),
+            router: self.router.clone(),
+            changed: self.router.reported_state_changed(),
         }))
     }
 }
@@ -105,7 +105,7 @@ impl RoleAdapter for ServerAuthorizationAdapter {
 struct ServerReportedState {
     generation: String,
     drain: ServerDrain,
-    registry: TunnelRouter,
+    router: TunnelRouter,
     changed: Arc<Notify>,
 }
 
@@ -113,7 +113,7 @@ impl RoleState for ServerReportedState {
     fn fields(&self) -> BoxFuture<'_, StateFields> {
         Box::pin(async move {
             let tunnels: serde_json::Map<String, Value> = self
-                .registry
+                .router
                 .reported_tunnel_connections()
                 .await
                 .into_iter()
@@ -125,7 +125,7 @@ impl RoleState for ServerReportedState {
                 ("tunnels", Value::Object(tunnels)),
                 (
                     "visitors",
-                    Value::from(self.registry.in_flight_visitor_count()),
+                    Value::from(self.router.in_flight_visitor_count()),
                 ),
             ]
         })
@@ -147,15 +147,15 @@ mod tests {
     async fn a_reported_drain_has_already_sealed_new_placement() {
         let hostname = ServerHostname::try_from("tunnel.example.test").expect("hostname");
         let tunnels: Vec<ServerTunnelConfig> = Vec::new();
-        let registry = TunnelRouter::configured_managed(&hostname, &tunnels).expect("registry");
+        let router = TunnelRouter::configured_managed(&hostname, &tunnels).expect("router");
         let drain = ServerDrain::new();
         let mut adapter = ServerAuthorizationAdapter::new(
             hostname,
-            registry.clone(),
+            router.clone(),
             ServerTunnelEvents::new(ServerRuntimeGeneration::generate()),
             drain.clone(),
         );
-        assert!(registry.admits_new_visitor_work());
+        assert!(router.admits_new_visitor_work());
 
         adapter
             .apply(ServerManagedInput {
@@ -168,6 +168,6 @@ mod tests {
 
         // `draining` with zero Visitors means quiescent only if no Visitor can still be placed.
         assert!(drain.is_draining());
-        assert!(!registry.admits_new_visitor_work());
+        assert!(!router.admits_new_visitor_work());
     }
 }

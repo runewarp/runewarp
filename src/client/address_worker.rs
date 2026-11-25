@@ -4,7 +4,7 @@
 //! the Connected-tunnel policy every production factory must follow: Retire cancels
 //! Establishing / Reconnecting work immediately, leaves a live Connected tunnel until
 //! remote close or process **Infrastructure drain**, re-adopts without a duplicate dial,
-//! and observes connect/disconnect for **Assignment convergence**.
+//! and observes connect/disconnect for **Client assignment convergence**.
 //!
 //! While a primary connection is live, the worker also owns at most one **Candidate Tunnel
 //! connection** for its address. A replacement hint on the primary starts a candidate after a

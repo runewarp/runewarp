@@ -8,6 +8,8 @@ use crate::tunnel::ClientTunnelStream;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
+use tokio_rustls::server::TlsStream;
+use tracing::Instrument as _;
 
 use crate::acme::ACME_TLS_ALPN;
 use crate::client::{ClientStreamLimits, ServiceSelector, TerminationTlsConfigs};
@@ -20,7 +22,7 @@ use crate::runtime_log;
 use crate::runtime_log::{AcmeEvent, AcmeRole, ClientRouteOutcome};
 use crate::trace_export::TracedStage;
 use crate::tunnel_framing::read_tunnel_stream;
-use crate::{ClientTlsMode, ServiceConfig, proxy::proxy_tcp_over_tunnel};
+use crate::{ClientTlsMode, PublicHostname, ServiceConfig, proxy::proxy_tcp_over_tunnel};
 
 /// Start the `client.visitor` span. It ends when the backend TCP connection is established or
 /// the stream is rejected, not at stream close.
@@ -69,9 +71,25 @@ impl TunnelConnectionStreamHandler {
     /// Handle a stream whose `client.visitor` span started when the stream was accepted.
     pub(crate) async fn handle_traced(
         &self,
-        mut stream: ClientTunnelStream,
+        stream: ClientTunnelStream,
         trace: TracedStage,
     ) -> io::Result<()> {
+        // Lines logged until the span ends carry its trace IDs. The work after it runs outside
+        // it, so the span still ends at backend connect or rejection.
+        let span = trace.span().clone();
+        match self.connect_visitor(stream, trace).instrument(span).await? {
+            Some(connected) => connected.run(self).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Run a stream until its `client.visitor` span ends. Returns the work left after it, or
+    /// `None` for a rejection that is not an error.
+    async fn connect_visitor(
+        &self,
+        mut stream: ClientTunnelStream,
+        trace: TracedStage,
+    ) -> io::Result<Option<AfterClientVisitorSpan<'_>>> {
         let visitor = self.metrics.visitor_handled();
         let intake = tokio::time::timeout(self.stream_limits.client_hello_timeout, async {
             let decoded = read_tunnel_stream(&mut stream).await?;
@@ -108,7 +126,7 @@ impl TunnelConnectionStreamHandler {
             drop(stream);
             visitor.reject(ClientVisitorRejectReason::NoService);
             trace.finish("rejected");
-            return Ok(());
+            return Ok(None);
         };
 
         if service.tls_mode == ClientTlsMode::Terminate {
@@ -126,8 +144,7 @@ impl TunnelConnectionStreamHandler {
 
         let (_, buffered_bytes) = parsed_client_hello.into_parts();
 
-        let mut backend_stream = match self.connect_backend(service.backend_address.as_str()).await
-        {
+        let backend_stream = match self.connect_backend(service.backend_address.as_str()).await {
             Ok(stream) => stream,
             Err(error) => {
                 runtime_log::client_route(
@@ -143,37 +160,15 @@ impl TunnelConnectionStreamHandler {
         };
         // The span measures accept to backend connect, so the initial write is outside it.
         trace.finish("connected");
-        let backend_bytes = self.backend_bytes();
-        let mut initial_bytes = service
-            .proxy_protocol
-            .map(|_| addresses.encode_proxy_v2())
-            .unwrap_or_default();
-        initial_bytes.extend_from_slice(&buffered_bytes);
-        if let Err(error) = write_backend_with_timeout(
-            &mut CountedIo::new(&mut backend_stream, None, backend_bytes.written.clone()),
-            &initial_bytes,
-            self.stream_limits.initial_backend_write_timeout,
-        )
-        .await
-        {
-            runtime_log::client_route(
-                public_hostname.as_str(),
-                ClientRouteOutcome::BackendWriteFailed {
-                    backend_address: service.backend_address.as_str(),
-                },
-            );
-            drop(stream);
-            return Err(error);
-        }
-        runtime_log::client_route(
-            public_hostname.as_str(),
-            ClientRouteOutcome::Passthrough {
-                backend_address: service.backend_address.as_str(),
-            },
-        );
-
-        let (recv, send) = stream.into_split();
-        proxy_tcp_over_tunnel(backend_stream, Vec::new(), send, recv, backend_bytes).await
+        Ok(Some(AfterClientVisitorSpan::Passthrough(Passthrough {
+            stream,
+            backend_stream,
+            public_hostname,
+            service,
+            addresses,
+            buffered_bytes,
+            _visitor: visitor,
+        })))
     }
 
     /// Connect to the Local backend, recording latency or the failure.
@@ -196,15 +191,15 @@ impl TunnelConnectionStreamHandler {
         }
     }
 
-    async fn handle_terminate(
-        &self,
+    async fn handle_terminate<'a>(
+        &'a self,
         stream: ClientTunnelStream,
         parsed_client_hello: ParsedClientHello,
-        service: &ServiceConfig,
+        service: &'a ServiceConfig,
         addresses: crate::VisitorTcpAddresses,
         visitor: ClientVisitor,
         trace: TracedStage,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<AfterClientVisitorSpan<'a>>> {
         let public_hostname = parsed_client_hello.public_hostname().clone();
         if parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN)
             && let Some(challenge_tls_config) = self
@@ -212,14 +207,13 @@ impl TunnelConnectionStreamHandler {
                 .acme_challenge_server_config(public_hostname.as_str())
         {
             trace.finish("acme_challenge");
-            return self
-                .handle_acme_tls_alpn_challenge(
-                    stream,
-                    public_hostname.as_str(),
-                    parsed_client_hello.into_buffered_bytes(),
-                    challenge_tls_config,
-                )
-                .await;
+            return Ok(Some(AfterClientVisitorSpan::AcmeChallenge {
+                stream,
+                public_hostname,
+                buffered_bytes: parsed_client_hello.into_buffered_bytes(),
+                challenge_tls_config,
+                _visitor: visitor,
+            }));
         }
 
         let Some(tls_config) = self
@@ -243,7 +237,7 @@ impl TunnelConnectionStreamHandler {
         // complete the handshake from the beginning of the TLS record stream.
         let tunnel_stream =
             ReplayedTunnelStream::new(stream, parsed_client_hello.into_buffered_bytes());
-        let mut tls_stream = match tokio::time::timeout(
+        let tls_stream = match tokio::time::timeout(
             self.stream_limits.terminate_handshake_timeout,
             acceptor.accept(tunnel_stream),
         )
@@ -284,29 +278,16 @@ impl TunnelConnectionStreamHandler {
             }
         };
         trace.finish("connected");
-        let backend_bytes = self.backend_bytes();
-        let mut backend_stream =
-            CountedIo::new(backend_stream, backend_bytes.read, backend_bytes.written);
-
-        runtime_log::client_route(
-            public_hostname.as_str(),
-            ClientRouteOutcome::Terminated {
-                backend_address: service.backend_address.as_str(),
+        Ok(Some(AfterClientVisitorSpan::Terminated(Box::new(
+            Terminated {
+                tls_stream,
+                backend_stream,
+                public_hostname,
+                service,
+                addresses,
+                _visitor: visitor,
             },
-        );
-
-        if service.proxy_protocol.is_some() {
-            write_backend_with_timeout(
-                &mut backend_stream,
-                &addresses.encode_proxy_v2(),
-                self.stream_limits.initial_backend_write_timeout,
-            )
-            .await?;
-        }
-
-        copy_bidirectional(&mut tls_stream, &mut backend_stream)
-            .await
-            .map(|_| ())
+        ))))
     }
 
     async fn handle_acme_tls_alpn_challenge(
@@ -369,6 +350,148 @@ impl TunnelConnectionStreamHandler {
                 ))
             }
         }
+    }
+}
+
+/// A stream's work after its `client.visitor` span ends, run outside the span. Each variant
+/// holds the Visitor's metrics guard, so the Visitor stays active until the work ends.
+enum AfterClientVisitorSpan<'a> {
+    Passthrough(Passthrough<'a>),
+    /// Boxed: the TLS session makes it several times the size of the other variants.
+    Terminated(Box<Terminated<'a>>),
+    AcmeChallenge {
+        stream: ClientTunnelStream,
+        public_hostname: PublicHostname,
+        buffered_bytes: Vec<u8>,
+        challenge_tls_config: &'a Arc<rustls::ServerConfig>,
+        _visitor: ClientVisitor,
+    },
+}
+
+impl AfterClientVisitorSpan<'_> {
+    async fn run(self, handler: &TunnelConnectionStreamHandler) -> io::Result<()> {
+        match self {
+            Self::Passthrough(passthrough) => passthrough.proxy(handler).await,
+            Self::Terminated(terminated) => terminated.proxy(handler).await,
+            Self::AcmeChallenge {
+                stream,
+                public_hostname,
+                buffered_bytes,
+                challenge_tls_config,
+                _visitor,
+            } => {
+                handler
+                    .handle_acme_tls_alpn_challenge(
+                        stream,
+                        public_hostname.as_str(),
+                        buffered_bytes,
+                        challenge_tls_config,
+                    )
+                    .await
+            }
+        }
+    }
+}
+
+/// A passthrough stream with its backend connected.
+struct Passthrough<'a> {
+    stream: ClientTunnelStream,
+    backend_stream: TcpStream,
+    public_hostname: PublicHostname,
+    service: &'a ServiceConfig,
+    addresses: crate::VisitorTcpAddresses,
+    buffered_bytes: Vec<u8>,
+    _visitor: ClientVisitor,
+}
+
+impl Passthrough<'_> {
+    async fn proxy(self, handler: &TunnelConnectionStreamHandler) -> io::Result<()> {
+        let Self {
+            stream,
+            mut backend_stream,
+            public_hostname,
+            service,
+            addresses,
+            buffered_bytes,
+            _visitor,
+        } = self;
+        let backend_bytes = handler.backend_bytes();
+        let mut initial_bytes = service
+            .proxy_protocol
+            .map(|_| addresses.encode_proxy_v2())
+            .unwrap_or_default();
+        initial_bytes.extend_from_slice(&buffered_bytes);
+        if let Err(error) = write_backend_with_timeout(
+            &mut CountedIo::new(&mut backend_stream, None, backend_bytes.written.clone()),
+            &initial_bytes,
+            handler.stream_limits.initial_backend_write_timeout,
+        )
+        .await
+        {
+            runtime_log::client_route(
+                public_hostname.as_str(),
+                ClientRouteOutcome::BackendWriteFailed {
+                    backend_address: service.backend_address.as_str(),
+                },
+            );
+            drop(stream);
+            return Err(error);
+        }
+        runtime_log::client_route(
+            public_hostname.as_str(),
+            ClientRouteOutcome::Passthrough {
+                backend_address: service.backend_address.as_str(),
+            },
+        );
+
+        let (recv, send) = stream.into_split();
+        proxy_tcp_over_tunnel(backend_stream, Vec::new(), send, recv, backend_bytes).await
+    }
+}
+
+/// A terminated stream with its TLS handshake done and its backend connected.
+struct Terminated<'a> {
+    tls_stream: TlsStream<ReplayedTunnelStream>,
+    backend_stream: TcpStream,
+    public_hostname: PublicHostname,
+    service: &'a ServiceConfig,
+    addresses: crate::VisitorTcpAddresses,
+    _visitor: ClientVisitor,
+}
+
+impl Terminated<'_> {
+    async fn proxy(self, handler: &TunnelConnectionStreamHandler) -> io::Result<()> {
+        let Self {
+            mut tls_stream,
+            backend_stream,
+            public_hostname,
+            service,
+            addresses,
+            _visitor,
+        } = self;
+        let backend_bytes = handler.backend_bytes();
+        let mut backend_stream =
+            CountedIo::new(backend_stream, backend_bytes.read, backend_bytes.written);
+
+        runtime_log::client_route(
+            public_hostname.as_str(),
+            ClientRouteOutcome::Terminated {
+                backend_address: service.backend_address.as_str(),
+            },
+        );
+
+        if service.proxy_protocol.is_some() {
+            write_backend_with_timeout(
+                &mut backend_stream,
+                &addresses.encode_proxy_v2(),
+                handler.stream_limits.initial_backend_write_timeout,
+            )
+            .await?;
+        }
+
+        copy_bidirectional(&mut tls_stream, &mut backend_stream)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -487,6 +610,7 @@ mod tests {
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
     use tokio_rustls::{TlsAcceptor, TlsConnector};
+    use tracing_subscriber::Layer as _;
     use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::fmt::writer::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
@@ -729,6 +853,43 @@ mod tests {
             ],
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn rejected_stream_lines_carry_the_client_visitor_span_ids() -> io::Result<()> {
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "rejected_stream_lines_carry_the_client_visitor_span_ids",
+        ) {
+            return Ok(());
+        }
+        use crate::runtime_log::test_support::{JsonLogs, ids};
+        let captured = crate::trace_export::test_support::CapturedSpans::with_role(
+            1.0,
+            crate::TraceRole::Client,
+        );
+        let logs = JsonLogs::install(captured.provider());
+        assert_rejected_stream(
+            vec![ServiceConfig {
+                public_hostnames: Some(vec![public_hostname("app.example.test")]),
+                backend_address: "127.0.0.1:443".to_owned(),
+                tls_mode: ClientTlsMode::Passthrough,
+                proxy_protocol: None,
+            }],
+            "api.example.test",
+            |result: io::Result<()>| assert!(result.is_ok()),
+            &[],
+        )
+        .await?;
+
+        let span = captured.span("client.visitor").expect("span exported");
+        let lines = logs.containing("client route unavailable");
+        assert_eq!(lines.len(), 1, "{:?}", logs.lines());
+        assert_eq!(
+            ids(&lines[0]),
+            Some(crate::trace_export::test_support::ids(&span))
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1361,7 +1522,11 @@ mod tests {
                     .with_writer(buffer.clone())
                     .with_ansi(false)
                     .without_time()
-                    .with_target(false),
+                    .with_target(false)
+                    // Hide Runewarp trace spans, as the shipped log layer does.
+                    .with_filter(tracing_subscriber::filter::filter_fn(
+                        crate::trace_export::visible_to_logs,
+                    )),
             );
         let _guard = tracing::subscriber::set_default(subscriber);
         action.await?;

@@ -422,7 +422,10 @@ impl ClientTunnelAttempt {
                     runewarp.outcome = tracing::field::Empty,
                     runewarp.candidate = candidate,
                 ));
-            record_attempt(&metrics, attempt.await, span)
+            // Lines logged during the attempt carry the span's trace IDs. The connection's run
+            // happens later, outside it.
+            let outcome = tracing::Instrument::instrument(attempt, span.span().clone()).await;
+            record_attempt(&metrics, outcome, span)
         }
     }
 }

@@ -638,6 +638,14 @@ pub(crate) mod test_support {
         "runewarp.candidate",
     ];
 
+    /// A span's trace and span IDs as JSON log lines write them.
+    pub(crate) fn ids(span: &SpanData) -> (String, String) {
+        (
+            span.span_context.trace_id().to_string(),
+            span.span_context.span_id().to_string(),
+        )
+    }
+
     pub(crate) fn attribute(span: &SpanData, key: &str) -> Option<String> {
         span.attributes
             .iter()

@@ -1739,6 +1739,61 @@ fn summarize_error(error: &str) -> &str {
     }
 }
 
+/// JSON log capture through the shipped subscriber, for tests in other modules.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::tests::SharedBuffer;
+    use super::{LogFormat, LogLevel, build_subscriber};
+
+    /// JSON lines from the shipped subscriber with trace export, installed as the thread
+    /// default until dropped. Run under `trace_export::test_support::isolated`.
+    pub(crate) struct JsonLogs {
+        buffer: SharedBuffer,
+        _default: tracing::dispatcher::DefaultGuard,
+    }
+
+    impl JsonLogs {
+        pub(crate) fn install(traces: &opentelemetry_sdk::trace::SdkTracerProvider) -> Self {
+            let buffer = SharedBuffer::default();
+            let (dispatch, _) = build_subscriber(
+                LogLevel::Debug,
+                LogFormat::Json,
+                Some(traces),
+                buffer.clone(),
+                false,
+            );
+            Self {
+                buffer,
+                _default: tracing::dispatcher::set_default(&dispatch),
+            }
+        }
+
+        pub(crate) fn lines(&self) -> Vec<serde_json::Value> {
+            self.buffer
+                .read()
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("line is JSON"))
+                .collect()
+        }
+
+        /// Every line whose message contains `text`.
+        pub(crate) fn containing(&self, text: &str) -> Vec<serde_json::Value> {
+            self.lines()
+                .into_iter()
+                .filter(|line| line["message"].as_str().is_some_and(|m| m.contains(text)))
+                .collect()
+        }
+    }
+
+    /// The `trace_id` and `span_id` a line carries.
+    pub(crate) fn ids(line: &serde_json::Value) -> Option<(String, String)> {
+        Some((
+            line.get("trace_id")?.as_str()?.to_owned(),
+            line.get("span_id")?.as_str()?.to_owned(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
@@ -1779,12 +1834,12 @@ mod tests {
     static INSTALL_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Clone, Default)]
-    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+    pub(super) struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
 
-    struct BufferWriter(SharedBuffer);
+    pub(super) struct BufferWriter(SharedBuffer);
 
     impl SharedBuffer {
-        fn read(&self) -> String {
+        pub(super) fn read(&self) -> String {
             String::from_utf8(self.0.lock().expect("buffer mutex poisoned").clone())
                 .expect("runtime log output must be valid UTF-8")
         }

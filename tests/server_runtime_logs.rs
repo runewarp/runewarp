@@ -7,6 +7,7 @@ use runewarp::{ServerRuntime, initialize_manual_server_certificate, load_server_
 #[path = "common/log_capture.rs"]
 mod log_capture;
 use log_capture::Logs;
+use tracing_subscriber::layer::SubscriberExt as _;
 
 #[tokio::test]
 async fn server_runtime_logs_identify_each_start_before_listeners()
@@ -19,7 +20,11 @@ async fn server_runtime_logs_identify_each_start_before_listeners()
             .without_time()
             .with_target(false)
             .with_max_level(tracing::Level::INFO)
-            .finish(),
+            .finish()
+            // Hide Runewarp trace spans from line prefixes, as the shipped logger does.
+            .with(tracing_subscriber::filter::filter_fn(|metadata| {
+                !(metadata.is_span() && metadata.target() == "runewarp::trace")
+            })),
     )?;
     let directory = tempfile::tempdir()?;
     initialize_manual_server_certificate(&directory.path().join("cert"), "tunnel.example.test")?;

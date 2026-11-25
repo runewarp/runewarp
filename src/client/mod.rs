@@ -180,16 +180,20 @@ impl Client {
         let hostname = crate::ServerHostname::try_from(server_name.as_str()).map_err(|_| {
             ClientConnectError::Connect(quinn::ConnectError::InvalidServerName(server_name.clone()))
         })?;
-        let mut endpoint = Endpoint::client(local_bind_addr).map_err(ClientConnectError::Bind)?;
-        endpoint.set_default_client_config(quic_client_config);
-
-        let connection = with_handshake_timeout(
-            endpoint
+        // The drivers outlive the `client.tunnel_connect` span, so they must not adopt it.
+        let (endpoint, connecting) = crate::trace_export::outside_spans(|| {
+            let mut endpoint =
+                Endpoint::client(local_bind_addr).map_err(ClientConnectError::Bind)?;
+            endpoint.set_default_client_config(quic_client_config);
+            let connecting = endpoint
                 .connect(server_addr, &server_name)
-                .map_err(ClientConnectError::Connect)?,
-            HANDSHAKE_TIMEOUT,
-            || quinn::ConnectionError::TimedOut,
-        )
+                .map_err(ClientConnectError::Connect)?;
+            Ok::<_, ClientConnectError>((endpoint, connecting))
+        })?;
+
+        let connection = with_handshake_timeout(connecting, HANDSHAKE_TIMEOUT, || {
+            quinn::ConnectionError::TimedOut
+        })
         .await
         .map_err(ClientConnectError::Handshake)?;
         let (services, termination_tls_configs, stream_budget) =

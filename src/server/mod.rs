@@ -29,6 +29,7 @@ use quinn::Endpoint;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
+use tracing::Instrument as _;
 
 use crate::{
     HANDSHAKE_TIMEOUT, ServerHostname,
@@ -842,23 +843,32 @@ fn admit_tunnel_handshake(
         Err(rejection) => {
             incoming.refuse();
             metrics.tunnel_connection_rejected(TunnelRejectReason::HandshakeFailed);
-            admission_policy.report_saturation(rejection);
+            handshake
+                .span()
+                .in_scope(|| admission_policy.report_saturation(rejection));
             handshake.finish(TunnelRejectReason::HandshakeFailed.as_str());
             return;
         }
     };
-    admission_policy.report_recovery(&[AdmissionLimit::Handshakes]);
+    handshake
+        .span()
+        .in_scope(|| admission_policy.report_recovery(&[AdmissionLimit::Handshakes]));
     let admission_policy = admission_policy.clone();
     handshakes.spawn(crate::server_connection_log::inherit(async move {
+        // Quinn's connection driver adopts the current span and lives as long as the
+        // connection, so accept outside the span, which ends at registration.
+        let connecting = incoming.accept();
+        let span = handshake.span().clone();
         let outcome = register_tunnel_connection(
             tunnel_registry,
-            incoming,
+            connecting,
             handshake_permit,
             admission_policy,
             server_hostname,
             tunnel_events,
             metrics,
         )
+        .instrument(span)
         .await;
         handshake.finish(outcome);
     }));
@@ -886,14 +896,14 @@ fn handshake_span() -> TracedStage {
 
 async fn register_tunnel_connection(
     tunnel_registry: TunnelRegistry,
-    incoming: quinn::Incoming,
+    connecting: Result<quinn::Connecting, quinn::ConnectionError>,
     handshake_permit: tokio::sync::OwnedSemaphorePermit,
     admission_policy: ServerAdmissionPolicy,
     server_hostname: ServerHostname,
     tunnel_events: ServerTunnelEvents,
     metrics: ServerMetrics,
 ) -> &'static str {
-    let connecting = match incoming.accept() {
+    let connecting = match connecting {
         Ok(connecting) => connecting,
         Err(error) => {
             metrics.tunnel_connection_rejected(TunnelRejectReason::HandshakeFailed);

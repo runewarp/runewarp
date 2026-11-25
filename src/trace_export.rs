@@ -211,6 +211,34 @@ fn is_trace_span(metadata: &Metadata<'_>) -> bool {
 /// diagnostics would repeat on every export retry, bypassing the rate-limited failure line.
 const EXPORTER_HTTP_TARGET: &str = "hyper_util::client";
 
+/// Run `f` with no span entered on this thread, then re-enter the spans it left.
+///
+/// Quinn's endpoint and connection drivers adopt the current span, and they live as long as the
+/// endpoint or connection. Created inside a trace span's work, they would hold the span open
+/// long after that work ends, so create them through this.
+pub(crate) fn outside_spans<T>(f: impl FnOnce() -> T) -> T {
+    /// Re-enters the exited spans, innermost last, even if `f` panics.
+    struct Reenter(Vec<Span>);
+
+    impl Drop for Reenter {
+        fn drop(&mut self) {
+            for span in self.0.iter().rev() {
+                if let Some(id) = span.id() {
+                    tracing::dispatcher::get_default(|dispatch| dispatch.enter(&id));
+                }
+            }
+        }
+    }
+
+    let mut exited = Reenter(Vec::new());
+    // Each exit pops one entry off this thread's span stack, so the loop ends.
+    while let Some(id) = Span::current().id() {
+        exited.0.push(Span::current());
+        tracing::dispatcher::get_default(|dispatch| dispatch.exit(&id));
+    }
+    f()
+}
+
 /// Whether the log formatter may see `metadata`. Runewarp trace spans and the exporter's HTTP
 /// client diagnostics never appear in log lines.
 pub(crate) fn visible_to_logs(metadata: &Metadata<'_>) -> bool {

@@ -1,5 +1,6 @@
-//! Span export through real in-process Server and Client runtimes.
+//! Span export and log correlation through real in-process Server and Client runtimes.
 use crate::capacity_benchmark::{address, client_hello, connect_visitor, setup};
+use crate::runtime_log::test_support::{JsonLogs, ids};
 use crate::trace_export::OUTCOME;
 use crate::trace_export::test_support::{CapturedSpans, assert_safe_attributes, attribute};
 use std::error::Error;
@@ -17,7 +18,7 @@ async fn runtimes_export_handshake_connect_and_visitor_spans() -> Result<(), Box
     // The Server mints its generation before trace export starts, as `runewarp server` does.
     let generation = crate::ServerRuntimeGeneration::generate();
     let captured = CapturedSpans::with_role(1.0, crate::TraceRole::Server(generation));
-    let _trace = captured.set_default();
+    let logs = JsonLogs::install(captured.provider());
     let directory = tempfile::tempdir()?;
     setup(directory.path())?;
     let identity = std::fs::read_to_string(
@@ -115,6 +116,36 @@ async fn runtimes_export_handshake_connect_and_visitor_spans() -> Result<(), Box
         captured.resource_attribute("service.instance.id"),
         Some(generation.to_string())
     );
+    // Lines logged during each span's work carry its IDs.
+    for (text, name, outcome) in [
+        (
+            "server tunnel connection accepted",
+            "tunnel_connection.handshake",
+            "accepted",
+        ),
+        (
+            "client tunnel connection connecting",
+            "client.tunnel_connect",
+            "connected",
+        ),
+        (
+            "client tunnel connection connected",
+            "client.tunnel_connect",
+            "connected",
+        ),
+        ("server route forwarded", "visitor", "placed"),
+    ] {
+        let lines = logs.containing(text);
+        assert!(!lines.is_empty(), "no {text:?} line in {:?}", logs.lines());
+        for line in lines {
+            let span = spans
+                .iter()
+                .find(|span| Some(crate::trace_export::test_support::ids(span)) == ids(&line))
+                .ok_or_else(|| format!("{text:?} line has no exported span's IDs: {line}"))?;
+            assert_eq!(span.name, name, "{line}");
+            assert_eq!(attribute(span, OUTCOME).as_deref(), Some(outcome), "{line}");
+        }
+    }
     for child in ["intake", "route", "stream_open"] {
         assert!(
             spans.iter().any(|span| span.name == child),

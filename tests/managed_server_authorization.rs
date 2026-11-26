@@ -41,7 +41,7 @@ use rustls::{ServerConfig, ServerConfig as RustlsServerConfig};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -1072,9 +1072,10 @@ async fn managed_server_hostname_only_revocation_resets_only_affected_streams() 
         .expect("APP hostname must work before hostname-only revocation");
     assert_eq!(app_response, *b"pong");
     // Hold one placed API Visitor session open across the revocation.
-    let mut api_session = connect_tls(harness.public_addr, &harness.api_backend_cert, API_HOSTNAME)
-        .await
-        .expect("API hostname must work before hostname-only revocation");
+    let (mut api_session, api_wire) =
+        connect_recorded_tls(harness.public_addr, &harness.api_backend_cert, API_HOSTNAME)
+            .await
+            .expect("API hostname must work before hostname-only revocation");
     api_session.write_all(b"ping").await.unwrap();
     let mut first_chunk = [0_u8; 2];
     api_session.read_exact(&mut first_chunk).await.unwrap();
@@ -1083,6 +1084,7 @@ async fn managed_server_hostname_only_revocation_resets_only_affected_streams() 
         .await
         .expect("staged backend must signal")
         .expect("staged backend signals");
+    let wire_before_revocation = api_wire.lock().unwrap().len();
 
     harness.push_authorization(
         "rev-app-only",
@@ -1093,23 +1095,20 @@ async fn managed_server_hostname_only_revocation_resets_only_affected_streams() 
     wait_for_applied(&mut harness.event_rx, "rev-app-only").await;
     wait_for_state_revision(&harness.control.metrics, "rev-app-only").await;
 
-    // The placed session is reset, never handed plaintext alert bytes mid-stream.
+    // The placed session is closed, never handed plaintext alert bytes mid-stream: no
+    // wire bytes at all arrive after revocation.
     let mut rest = Vec::new();
-    let placed = timeout(Duration::from_secs(2), api_session.read_to_end(&mut rest))
+    let _ = timeout(Duration::from_secs(2), api_session.read_to_end(&mut rest))
         .await
         .expect("revoked placed Visitor must close");
-    if let Err(error) = &placed {
-        assert_ne!(
-            rustls_error(error),
-            Some(&rustls::Error::AlertReceived(
-                rustls::AlertDescription::UnrecognisedName
-            )),
-            "placed Visitor must not receive an alert: {error:?}"
-        );
-    }
     assert!(
         rest.is_empty(),
         "revoked placed Visitor must receive no more bytes"
+    );
+    let after_revocation = api_wire.lock().unwrap()[wire_before_revocation..].to_vec();
+    assert!(
+        after_revocation.is_empty(),
+        "revoked placed Visitor must receive no wire bytes after revocation: {after_revocation:02x?}"
     );
     api_backend_release.notify_one();
 
@@ -2013,19 +2012,67 @@ fn rustls_error(error: &io::Error) -> Option<&rustls::Error> {
     error.get_ref()?.downcast_ref::<rustls::Error>()
 }
 
-async fn connect_tls(
+/// Every byte read from the Visitor TCP socket, beneath TLS.
+type WireRecord = Arc<Mutex<Vec<u8>>>;
+
+async fn connect_recorded_tls(
     public_addr: SocketAddr,
     backend_cert: &CertificateDer<'static>,
     server_name: &str,
-) -> io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+) -> io::Result<(tokio_rustls::client::TlsStream<RecordingStream>, WireRecord)> {
     let connector = TlsConnector::from(Arc::new(
         rustls::ClientConfig::builder()
             .with_root_certificates(root_store_with(backend_cert))
             .with_no_client_auth(),
     ));
-    let tcp_stream = TcpStream::connect(public_addr).await?;
+    let record = WireRecord::default();
+    let tcp_stream = RecordingStream {
+        inner: TcpStream::connect(public_addr).await?,
+        record: record.clone(),
+    };
     let server_name = ServerName::try_from(server_name.to_owned()).map_err(io::Error::other)?;
-    connector.connect(server_name, tcp_stream).await
+    Ok((connector.connect(server_name, tcp_stream).await?, record))
+}
+
+struct RecordingStream {
+    inner: TcpStream,
+    record: WireRecord,
+}
+
+impl AsyncRead for RecordingStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let filled = buf.filled().len();
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = poll {
+            self.record
+                .lock()
+                .unwrap()
+                .extend_from_slice(&buf.filled()[filled..]);
+        }
+        poll
+    }
+}
+
+impl AsyncWrite for RecordingStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 async fn request_tls_response(

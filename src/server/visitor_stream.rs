@@ -2591,13 +2591,18 @@ mod tests {
                 .write_all(&build_client_hello("other.example.test")?)
                 .await?;
             // Yield, not sleep: paused time must not advance while the write stalls.
-            while sample(
-                &metrics.render(),
-                r#"runewarp_server_visitors_rejected_total{reason="unauthorized_hostname"}"#,
-            ) != Some(1.0)
-            {
+            for _ in 0..100_000 {
+                if sample(
+                    &metrics.render(),
+                    r#"runewarp_server_visitors_rejected_total{reason="unauthorized_hostname"}"#,
+                ) == Some(1.0)
+                {
+                    break;
+                }
+                assert!(!task.is_finished(), "intake ended before the alert write");
                 tokio::task::yield_now().await;
             }
+            assert!(!task.is_finished(), "intake ended before the alert write");
             Ok(Self {
                 policy,
                 metrics,

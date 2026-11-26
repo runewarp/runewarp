@@ -597,7 +597,7 @@ pub(crate) const UNRECOGNIZED_NAME_ALERT: [u8; 7] = [0x15, 0x03, 0x03, 0x00, 0x0
 /// Upper bound on the alert write and TCP write shutdown, also capped by the intake deadline.
 const UNRECOGNIZED_NAME_ALERT_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Best-effort: write the alert and shut down the write half (FIN) by `deadline`. Shutdown
+/// Best-effort: write the alert and shut down the write half (FIN) before `deadline`. Shutdown
 /// wins over an expired deadline, and both win over a ready writer, so a ready socket cannot
 /// delay shutdown or outlive the deadline. Write errors and timeouts are ignored.
 async fn send_unrecognized_name_alert<W, Shutdown>(
@@ -608,17 +608,31 @@ async fn send_unrecognized_name_alert<W, Shutdown>(
     W: AsyncWrite + Unpin,
     Shutdown: std::future::Future<Output = ()>,
 {
-    if tokio::time::Instant::now() >= deadline {
-        return;
-    }
+    let mut written = 0;
+    // Timers fire on millisecond ticks, so the write also checks the absolute deadline
+    // before every poll: a stalled write that resumes late writes nothing more.
+    let write = std::future::poll_fn(|cx| {
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Poll::Ready(());
+            }
+            let Some(remaining) = UNRECOGNIZED_NAME_ALERT
+                .get(written..)
+                .filter(|rest| !rest.is_empty())
+            else {
+                return Pin::new(&mut *writer).poll_shutdown(cx).map(|_| ());
+            };
+            match std::task::ready!(Pin::new(&mut *writer).poll_write(cx, remaining)) {
+                Ok(0) | Err(_) => return Poll::Ready(()),
+                Ok(count) => written += count,
+            }
+        }
+    });
     tokio::select! {
         biased;
         () = shutdown => {}
         () = tokio::time::sleep_until(deadline) => {}
-        _ = async {
-            writer.write_all(&UNRECOGNIZED_NAME_ALERT).await?;
-            writer.shutdown().await
-        } => {}
+        () = write => {}
     }
 }
 
@@ -2493,6 +2507,29 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn alert_helper_writes_nothing_more_once_a_stalled_write_passes_the_deadline()
+    -> io::Result<()> {
+        // A sub-millisecond deadline: the timer fires only on the next millisecond tick.
+        let (mut visitor, mut server) = tokio::io::duplex(4);
+        let deadline = tokio::time::Instant::now() + Duration::from_micros(1_000_500);
+        let alert = tokio::spawn(async move {
+            send_unrecognized_name_alert(&mut server, deadline, std::future::pending()).await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_micros(1_000_750)).await;
+        // Drain the stalled bytes after the deadline, so the writer becomes ready again.
+        let mut stalled = [0_u8; 4];
+        visitor.read_exact(&mut stalled).await?;
+        alert
+            .await
+            .map_err(|error| join_error("alert task failed", error))?;
+        let mut rest = Vec::new();
+        visitor.read_to_end(&mut rest).await?;
+        assert!(rest.is_empty(), "wrote {rest:02x?} after the deadline");
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stalled_alert_write_keeps_admission_until_the_deadline() -> io::Result<()> {
         let started = tokio::time::Instant::now();
         let stalled = StalledAlert::start(std::future::pending()).await?;
@@ -2522,13 +2559,16 @@ mod tests {
         })
         .await?;
         stalled.assert_admission_held();
+        // The span ended before the alert write, which is still stalled.
+        let root = captured
+            .span("visitor")
+            .expect("visitor span ends before the alert write");
         tokio::time::advance(Duration::from_millis(100)).await;
         stalled.assert_admission_held();
         let _ = shutdown_tx.send(());
         stalled.finish().await?;
         assert_eq!(started.elapsed(), Duration::from_millis(100));
 
-        let root = wait_for_span(&captured, "visitor").await?;
         assert_eq!(
             crate::trace_export::test_support::attribute(&root, crate::trace_export::OUTCOME)
                 .as_deref(),

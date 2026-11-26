@@ -69,6 +69,8 @@ Runtime diagnostics follow the same boundary.
 - the Server routes only **Public hostnames** explicitly authorized on the matched **Tunnel**
 - public traffic must be TLS
 - non-TLS traffic and TLS without SNI are dropped
+- a Visitor naming an unauthorized **Public hostname** receives only a fixed plaintext TLS `unrecognized_name(112)` alert, with no certificate, TLS termination or Tunnel stream; the write is bounded by the Visitor's pre-routing admission slots, a deadline of at most one second, and shutdown, and the Server never drains bytes the Visitor sends after its ClientHello
+- unauthorized and authorized-but-offline hostnames are distinguishable on the wire: the first gets the alert and the second a silent close; neither discloses a certificate or customer identity
 - **Local backends** must terminate TLS when `tls-mode = "passthrough"` (default)
 - the **Client** terminates TLS when `tls-mode = "terminate"`; the Local backend receives plaintext
 

@@ -19,14 +19,14 @@ For each inbound TCP connection on any configured `server.public-bind-address` o
 1. Acquire one pre-routing admission slot before starting per-Visitor work.
 2. In direct mode, derive the canonical Visitor tuple from the socket. In strict PROXY v2 mode, verify the accepted peer against configured CIDRs and consume a bounded valid header.
 3. Buffer bytes until the TLS ClientHello can be parsed. PROXY header plus ClientHello intake shares a **5-second** deadline; each has a **16 KB** cap.
-4. Release pre-routing capacity as soon as ClientHello parsing succeeds or fails; routed Visitor streams do not retain it.
+4. Hold pre-routing capacity through the routing decision. Release it on any intake or routing drop, immediately before ACME challenge handling or Tunnel stream opening, or after the unauthorized alert write in step 11. Routed Visitor streams do not retain it.
 5. If the deadline or byte cap is hit before SNI is extracted, drop the connection.
 6. If the bytes are not valid TLS, drop the connection.
 7. If TLS is valid but SNI is missing, drop the connection.
 8. If SNI equals `server.hostname` and ALPN is `acme-tls/1`, handle the ACME challenge.
 9. If SNI equals `server.hostname` and ALPN is anything else, drop the connection.
 10. Otherwise, select a **Tunnel** by exact normalized **Public hostname** from the current **Authorization snapshot**. Static config supplies `server.tunnels[].public-hostnames`; Managed mode receives authorization from Control.
-11. If no Tunnel owns that hostname, drop the connection.
+11. If no Tunnel owns that hostname, send a best-effort fatal TLS `unrecognized_name(112)` alert, shut down the TCP write half, then close the connection. See [Unauthorized Public hostname alert](#unauthorized-public-hostname-alert).
 12. If the selected Tunnel has no active **Tunnel connection**, drop the connection.
 13. Acquire one pending stream-open permit, then wait up to **5 seconds** for permit-backed QUIC credit to open a WebTransport Visitor stream on the selected Tunnel connection. On success, acquire one active routed-stream permit, release the pending permit, write a regenerated PROXY v2 header containing the canonical Visitor TCP tuple, then forward the buffered ClientHello as raw WebTransport stream bytes and continue streaming in both directions. A failed or expired stream open drops the Visitor without retrying another pool member. Successfully established proxies have no additional lifetime or idle deadline.
 
@@ -50,10 +50,23 @@ Server ACME uses independent ordinary-serving and challenge resolvers from initi
 | Non-TLS traffic on the public TCP listener | Drop immediately |
 | TLS without SNI | Drop immediately |
 | Application traffic addressed to the **Server hostname** | Drop unless it is ACME TLS-ALPN-01 |
-| **Public hostname** not authorized by the selected **Tunnel** | Drop immediately |
+| **Public hostname** not owned by any **Tunnel** in the current **Authorization snapshot** | Best-effort fatal TLS `unrecognized_name(112)` alert, then close |
+| Authorization snapshot superseded between Tunnel selection and placement | Drop silently, even when the new snapshot still authorizes the hostname |
 | No active **Tunnel connection** for the selected **Tunnel** | Drop immediately |
 | No matching Client **Service** | Reject the stream on the Client |
 | Terminating hostname with no ready ACME certificate | TLS handshake failure at the Client (fail closed) |
+
+Every Server-side drop other than the unauthorized alert writes zero bytes. That includes non-TLS or malformed, incomplete or oversized ClientHellos, missing or invalid SNI, untrusted or malformed PROXY v2 headers, intake timeout, admission saturation, the Server hostname without `acme-tls/1` or without ACME TLS config, a managed Server certificate that is not serving, no active Tunnel connection, stream-open failure, and shutdown.
+
+### Unauthorized Public hostname alert
+
+The Server sends the fixed 7-byte plaintext TLS alert record `15 03 03 00 02 02 70`: content type alert, legacy record version TLS 1.2, length 2, level fatal, description `unrecognized_name(112)` (RFC 6066 §3). An alert is valid before ServerHello in both TLS 1.2 and TLS 1.3, so the Server builds no TLS configuration, certificate or connection state and still terminates no customer TLS. The decision is made only at the pre-stream Authorization snapshot lookup, after ClientHello and SNI parsing succeed, the hostname is not the **Server hostname**, and any managed Server certificate is serving. Never-authorized and revoked hostnames receive the same alert.
+
+- **Accounting first.** The debug route line, the `unauthorized_hostname` rejection and the `visitor` span outcome `rejected` are recorded before the write starts, so a slow, failed or cancelled write never changes them. The alert is not counted in Visitor stream bytes, and write failures and timeouts log nothing.
+- **Bounds.** The Visitor keeps its global and per-source pre-routing admission slots during the write, so rejected Visitors stay inside the existing pending-Visitor limits and file-descriptor sizing. The write and TCP write shutdown end by `min(now + 1 second, intake deadline)`; once that deadline passes, nothing more is written, even if a stalled write becomes ready. Shutdown takes priority over the deadline, and both take priority over a writer that is ready, so rejected Visitors never delay shutdown or drain.
+- **Best-effort delivery.** A ClientHello-only exchange receives the alert and then EOF. The Server stops reading once the ClientHello parses and never drains bytes left unread, so if a Visitor sends more (such as TLS 1.3 early data or pipelined bytes), closing with them unread can reset the connection (RFC 9293 §3.6.1) before the alert is read.
+- **Distinguishability.** Because a Tunnel with no active Tunnel connection still drops silently, a Visitor can tell an unauthorized hostname from an authorized one whose Client is offline. No certificate or customer identity is disclosed either way.
+- **Placed Visitors.** Revoking a hostname under an already placed Visitor resets its Tunnel stream and closes the Visitor connection. No plaintext alert is ever written into an established TLS session.
 
 ## Server admission and overload
 
@@ -70,7 +83,7 @@ Server admission uses fixed production maxima; these are runtime safety policy, 
 | Active Tunnel connections in one Tunnel pool | **256** | Close the newest connection; keep existing pool members |
 | Active Tunnel connections for one Client identity | **64** globally | Close the newest connection; keep existing connections for that identity |
 
-The global slot protects PROXY header and ClientHello intake. The per-source slot uses the direct socket source or the validated tuple from a trusted strict-PROXY peer. Core never trusts `Forwarded`, `X-Forwarded-For`, or PROXY bytes from an untrusted peer. Completed ClientHellos release both slots before Tunnel selection and proxying.
+The global slot protects PROXY header and ClientHello intake. The per-source slot uses the direct socket source or the validated tuple from a trusted strict-PROXY peer. Core never trusts `Forwarded`, `X-Forwarded-For`, or PROXY bytes from an untrusted peer. Both slots stay held through Tunnel selection and are released on any intake or routing drop, before ACME challenge handling or Tunnel stream opening, or after the bounded unauthorized alert write.
 
 Pending stream-open capacity is acquired immediately before waiting for Visitor stream credit and released on assignment, failure, the **5-second** stream-open deadline, active-stream rejection, cancellation, and shutdown. Tunnel selection reserves registration at the active-Visitor-work gate before the stream open. After a successful open, synchronous registration under that gate requires the route's Authorization snapshot to remain current and revalidates its Public hostname and Client identity, then atomically converts the reservation into one lease owning active routed-stream capacity, Tunnel-pool member load, routing identity, revocation, and cleanup for the proxy lifetime. Authorization commit and selective revocation use the same gate, so old-route registration cannot escape a replacement scan. Shutdown seals the gate; later registration is rejected and resets the assigned Tunnel stream. Normal return, error, revocation, cancellation, panic, and unpolled drop all release accounting exactly once. Graceful shutdown waits through event notification until both pre-seal reservations and leases are gone, not periodic polling. Established proxies have no additional lifetime or idle deadline in this policy.
 

@@ -104,10 +104,10 @@ Both shapes still use **Server-authoritative routing** for public ingress.
 ### Passthrough (default)
 
 1. A **Visitor** connects to the **Server** on any configured public TCP listener in `server.public-bind-address` or `server.public-bind-addresses`, which defaults to the single address `0.0.0.0:443`.
-2. One Server Visitor-intake module owns global admission, trusted direct-or-strict-PROXY tuple resolution, canonical-source admission, the shared intake deadline, ClientHello parsing, permit release, shutdown cancellation, and rejection/recovery reporting.
+2. One Server Visitor-intake module owns global admission, trusted direct-or-strict-PROXY tuple resolution, canonical-source admission, the shared intake deadline, ClientHello parsing, routing, permit release, the unauthorized-hostname alert, shutdown cancellation, and rejection/recovery reporting.
 3. The Server buffers enough of the ClientHello to extract SNI.
 4. The Server rejects non-TLS traffic, missing-SNI traffic, and non-ACME application traffic addressed to the **Server hostname**.
-5. The Server selects a **Tunnel** by exact **Public hostname**.
+5. The Server selects a **Tunnel** by exact **Public hostname**. If no Tunnel owns it, the Server sends a best-effort fatal TLS `unrecognized_name(112)` alert under the Visitor's pre-routing admission and a bounded deadline, then closes the connection.
 6. If that Tunnel has no active **Tunnel connection**, the Server drops the connection.
 7. Otherwise, one Tunnel-framing module writes the canonical Visitor tuple followed by the original encrypted bytes over the selected Tunnel connection.
 8. The receiving **Client instance** crosses the same framing seam to validate and consume the tuple before re-reading the forwarded ClientHello, selecting a **Service**, and connecting to the **Local backend**.

@@ -41,7 +41,7 @@ use rustls::{ServerConfig, ServerConfig as RustlsServerConfig};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -481,6 +481,9 @@ async fn managed_server_authorization_apply_controls_traffic_and_readiness() {
         .await
         .expect("authorized visitor traffic must succeed after first apply");
     assert_eq!(response, *b"pong");
+    wait_for_unrecognized_name(harness.public_addr, "unknown.example.test")
+        .await
+        .expect("never-authorized public hostname must receive unrecognized_name");
     harness.stop_clients().await;
 
     // 3. Replacement apply: new authorization works; prior identity is denied.
@@ -505,18 +508,18 @@ async fn managed_server_authorization_apply_controls_traffic_and_readiness() {
         .expect("replacement authorization must route visitor traffic");
     assert_eq!(api_response, *b"pong");
     harness.stop_clients().await;
-    wait_for_tls_failure(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
+    wait_for_unrecognized_name(harness.public_addr, APP_HOSTNAME)
         .await
-        .expect("prior public hostname must stop routing after replacement apply");
+        .expect("revoked public hostname must receive unrecognized_name after replacement");
 
     // 4. Empty tunnels apply: readiness stays ready; visitor and tunnel are unauthorized.
     harness.push_authorization("rev-empty", r#"{"tunnels":[]}"#);
     wait_for_applied(&mut harness.event_rx, "rev-empty").await;
     harness.stop_clients().await;
     wait_for_readiness_open(harness.readiness_addr).await;
-    wait_for_tls_failure(harness.public_addr, &harness.api_backend_cert, API_HOSTNAME)
+    wait_for_unrecognized_name(harness.public_addr, API_HOSTNAME)
         .await
-        .expect("visitor traffic must fail with empty authorization");
+        .expect("empty authorization must answer unrecognized_name");
     if harness
         .spawn_client("client-two", api_backend.0)
         .await
@@ -1039,12 +1042,14 @@ async fn managed_server_hostname_only_revocation_resets_only_affected_streams() 
         *b"pong",
     )
     .await;
-    let api_backend = spawn_tls_backend(
-        &harness.api_backend_cert,
-        &harness.api_backend_key,
-        *b"pong",
-    )
-    .await;
+    let (api_backend_addr, api_backend_started, api_backend_release, api_backend_task) =
+        spawn_staged_tls_backend(
+            &harness.api_backend_cert,
+            &harness.api_backend_key,
+            *b"po",
+            *b"ng",
+        )
+        .await;
 
     let identity = harness.trusted_client.client_identity.to_string();
     harness.push_authorization(
@@ -1057,7 +1062,7 @@ async fn managed_server_hostname_only_revocation_resets_only_affected_streams() 
     wait_for_readiness_open(harness.readiness_addr).await;
 
     harness
-        .spawn_dual_hostname_client("client-one", app_backend.0, api_backend.0)
+        .spawn_dual_hostname_client("client-one", app_backend.0, api_backend_addr)
         .await
         .expect("dual-hostname tunnel client must connect");
     sleep(Duration::from_millis(50)).await;
@@ -1066,10 +1071,20 @@ async fn managed_server_hostname_only_revocation_resets_only_affected_streams() 
         .await
         .expect("APP hostname must work before hostname-only revocation");
     assert_eq!(app_response, *b"pong");
-    let api_response = visitor_ping(harness.public_addr, &harness.api_backend_cert, API_HOSTNAME)
+    // Hold one placed API Visitor session open across the revocation.
+    let (mut api_session, api_wire) =
+        connect_recorded_tls(harness.public_addr, &harness.api_backend_cert, API_HOSTNAME)
+            .await
+            .expect("API hostname must work before hostname-only revocation");
+    api_session.write_all(b"ping").await.unwrap();
+    let mut first_chunk = [0_u8; 2];
+    api_session.read_exact(&mut first_chunk).await.unwrap();
+    assert_eq!(&first_chunk, b"po");
+    timeout(Duration::from_secs(2), api_backend_started)
         .await
-        .expect("API hostname must work before hostname-only revocation");
-    assert_eq!(api_response, *b"pong");
+        .expect("staged backend must signal")
+        .expect("staged backend signals");
+    let wire_before_revocation = api_wire.lock().unwrap().len();
 
     harness.push_authorization(
         "rev-app-only",
@@ -1080,18 +1095,35 @@ async fn managed_server_hostname_only_revocation_resets_only_affected_streams() 
     wait_for_applied(&mut harness.event_rx, "rev-app-only").await;
     wait_for_state_revision(&harness.control.metrics, "rev-app-only").await;
 
-    wait_for_tls_failure(harness.public_addr, &harness.api_backend_cert, API_HOSTNAME)
+    // The placed session is closed, never handed plaintext alert bytes mid-stream: no
+    // wire bytes at all arrive after revocation.
+    let mut rest = Vec::new();
+    let _ = timeout(Duration::from_secs(2), api_session.read_to_end(&mut rest))
         .await
-        .expect("revoked hostname must stop routing");
+        .expect("revoked placed Visitor must close");
+    assert!(
+        rest.is_empty(),
+        "revoked placed Visitor must receive no more bytes"
+    );
+    let after_revocation = api_wire.lock().unwrap()[wire_before_revocation..].to_vec();
+    assert!(
+        after_revocation.is_empty(),
+        "revoked placed Visitor must receive no wire bytes after revocation: {after_revocation:02x?}"
+    );
+    api_backend_release.notify_one();
+
+    wait_for_unrecognized_name(harness.public_addr, API_HOSTNAME)
+        .await
+        .expect("revoked hostname must receive unrecognized_name");
     let still_app = visitor_ping(harness.public_addr, &harness.app_backend_cert, APP_HOSTNAME)
         .await
         .expect("retained hostname must keep working on the same connected client");
     assert_eq!(still_app, *b"pong");
 
     app_backend.1.abort();
-    api_backend.1.abort();
+    api_backend_task.abort();
     let _ = app_backend.1.await;
-    let _ = api_backend.1.await;
+    let _ = api_backend_task.await;
     harness.shutdown().await;
 }
 
@@ -1947,6 +1979,100 @@ async fn wait_for_tls_failure(
     })
     .await
     .map_err(io::Error::other)?
+}
+
+/// Retry new Visitor handshakes until one fails with a fatal `unrecognized_name` alert.
+async fn wait_for_unrecognized_name(public_addr: SocketAddr, server_name: &str) -> io::Result<()> {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            // The alert precedes any certificate, so the client trusts nothing.
+            let connector = TlsConnector::from(Arc::new(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(RootCertStore::empty())
+                    .with_no_client_auth(),
+            ));
+            let tcp_stream = TcpStream::connect(public_addr).await?;
+            let name = ServerName::try_from(server_name.to_owned()).map_err(io::Error::other)?;
+            if let Err(error) = connector.connect(name, tcp_stream).await
+                && rustls_error(&error)
+                    == Some(&rustls::Error::AlertReceived(
+                        rustls::AlertDescription::UnrecognisedName,
+                    ))
+            {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+fn rustls_error(error: &io::Error) -> Option<&rustls::Error> {
+    error.get_ref()?.downcast_ref::<rustls::Error>()
+}
+
+/// Every byte read from the Visitor TCP socket, beneath TLS.
+type WireRecord = Arc<Mutex<Vec<u8>>>;
+
+async fn connect_recorded_tls(
+    public_addr: SocketAddr,
+    backend_cert: &CertificateDer<'static>,
+    server_name: &str,
+) -> io::Result<(tokio_rustls::client::TlsStream<RecordingStream>, WireRecord)> {
+    let connector = TlsConnector::from(Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store_with(backend_cert))
+            .with_no_client_auth(),
+    ));
+    let record = WireRecord::default();
+    let tcp_stream = RecordingStream {
+        inner: TcpStream::connect(public_addr).await?,
+        record: record.clone(),
+    };
+    let server_name = ServerName::try_from(server_name.to_owned()).map_err(io::Error::other)?;
+    Ok((connector.connect(server_name, tcp_stream).await?, record))
+}
+
+struct RecordingStream {
+    inner: TcpStream,
+    record: WireRecord,
+}
+
+impl AsyncRead for RecordingStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let filled = buf.filled().len();
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = poll {
+            self.record
+                .lock()
+                .unwrap()
+                .extend_from_slice(&buf.filled()[filled..]);
+        }
+        poll
+    }
+}
+
+impl AsyncWrite for RecordingStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 async fn request_tls_response(

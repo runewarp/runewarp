@@ -14,7 +14,6 @@ use super::tunnel_router::{
     ActiveVisitorWork, TunnelRouteOutcome, TunnelRouter, VisitorRoute, VisitorWorkRejection,
 };
 use crate::acme::ACME_TLS_ALPN;
-use crate::client_hello::ParsedClientHello;
 use crate::client_hello::read_client_hello;
 use crate::metrics::{
     AcmeMetricEvent, CountedIo, VisitorCloseOutcome, VisitorDirection, VisitorRejectReason,
@@ -114,13 +113,38 @@ impl VisitorIntake {
         visitor_stream: TcpStream,
         shutdown: Option<crate::shutdown::OrderlyShutdown>,
     ) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
+        let Some(admitted) = self.admit() else {
+            drop(visitor_stream);
+            return None;
+        };
+        let intake = self.clone();
+        Some(async move {
+            // Lines logged until the span ends carry its trace IDs. The work after placement
+            // or rejection runs outside it, so the span still ends there.
+            let span = admitted.trace.span().clone();
+            let after = intake
+                .intake_until(
+                    visitor_stream,
+                    admitted,
+                    wait_for_shutdown(shutdown.clone()),
+                )
+                .instrument(span)
+                .await;
+            if let Some(after) = after {
+                after.run(wait_for_shutdown(shutdown)).await;
+            }
+        })
+    }
+
+    /// Admit one accepted Visitor against the global pre-routing limit, starting its metrics
+    /// tracker and `visitor` span. A rejection is counted and ends the span.
+    fn admit(&self) -> Option<AdmittedVisitor> {
         // The task owns the tracker, so an abort during shutdown still records an outcome.
         let visitor = self.tunnel_router.metrics().visitor_accepted();
         let trace = visitor_span();
         let permit = match self.admission_policy.try_admit_visitor_global() {
             Ok(permit) => permit,
             Err(rejection) => {
-                drop(visitor_stream);
                 trace
                     .span()
                     .in_scope(|| self.admission_policy.report_saturation(rejection));
@@ -135,55 +159,17 @@ impl VisitorIntake {
                 AdmissionLimit::VisitorSource,
             ]);
         });
-        let intake = self.clone();
-        let timeout = self.admission_policy.limits().client_hello_timeout;
-        Some(async move {
-            // Lines logged until the span ends carry its trace IDs. The work after placement
-            // runs outside it, so the span still ends at placement.
-            let span = trace.span().clone();
-            let after = match shutdown {
-                Some(shutdown) => {
-                    intake
-                        .intake_until(
-                            visitor_stream,
-                            timeout,
-                            permit,
-                            visitor,
-                            trace,
-                            async move {
-                                let _ = shutdown.wait_started().await;
-                            },
-                        )
-                        .instrument(span)
-                        .await
-                }
-                None => {
-                    intake
-                        .intake_until(
-                            visitor_stream,
-                            timeout,
-                            permit,
-                            visitor,
-                            trace,
-                            std::future::pending(),
-                        )
-                        .instrument(span)
-                        .await
-                }
-            };
-            if let Some(after) = after {
-                after.run().await;
-            }
+        Some(AdmittedVisitor {
+            permit,
+            visitor,
+            trace,
         })
     }
 
     async fn intake_until<Shutdown>(
         &self,
         mut visitor_stream: TcpStream,
-        timeout: std::time::Duration,
-        mut admission_permit: VisitorAdmissionPermit,
-        visitor: VisitorTracker,
-        trace: TracedStage,
+        admitted: AdmittedVisitor,
         shutdown: Shutdown,
     ) -> Option<AfterVisitorSpan>
     where
@@ -193,16 +179,55 @@ impl VisitorIntake {
             Ok(addresses) => addresses,
             Err(error) => {
                 runtime_log::warning("server", &format!("rejected Visitor stream: {error}"));
-                visitor.reject(VisitorRejectReason::ParseFailed);
-                trace.finish("rejected");
+                admitted.visitor.reject(VisitorRejectReason::ParseFailed);
+                admitted.trace.finish("rejected");
                 return None;
             }
         };
+        match self
+            .route_visitor(&mut visitor_stream, direct_addresses, admitted, shutdown)
+            .await?
+        {
+            RoutedVisitor::Tunnel(visitor) => self.forward_to_tunnel(visitor_stream, visitor).await,
+            RoutedVisitor::AcmeChallenge(route) => {
+                Some(AfterVisitorSpan::AcmeChallenge(AcmeChallenge {
+                    route,
+                    visitor_stream,
+                }))
+            }
+            RoutedVisitor::Unauthorized(rejection) => Some(AfterVisitorSpan::Unauthorized {
+                rejection,
+                visitor_stream,
+            }),
+        }
+    }
+
+    /// Pre-placement intake and routing over any Visitor stream: PROXY v2 and ClientHello
+    /// intake under one deadline, then Server-hostname, certificate and Authorization checks.
+    /// The admission permit is held until this returns, or across the unauthorized alert.
+    async fn route_visitor<S, Shutdown>(
+        &self,
+        visitor_stream: &mut S,
+        direct_addresses: VisitorTcpAddresses,
+        admitted: AdmittedVisitor,
+        shutdown: Shutdown,
+    ) -> Option<RoutedVisitor>
+    where
+        S: AsyncRead + Unpin,
+        Shutdown: std::future::Future<Output = ()>,
+    {
+        let AdmittedVisitor {
+            permit: mut admission_permit,
+            visitor,
+            trace,
+        } = admitted;
+        let intake_deadline =
+            tokio::time::Instant::now() + self.admission_policy.limits().client_hello_timeout;
         let peer_ip = direct_addresses.source.ip();
         let intake_span = tracing::info_span!(target: TARGET, parent: trace.span(), "intake");
         // `select!` drops the intake future, and its span handle, before either arm runs.
         let parsed_client_hello = tokio::select! {
-            parsed = tokio::time::timeout(timeout, async {
+            parsed = tokio::time::timeout_at(intake_deadline, async {
                 let addresses = if self.visitor_proxy_protocol.is_some() {
                     if !self.visitor_proxy_trusted_networks.iter()
                         .any(|network| network.contains(peer_ip))
@@ -215,7 +240,7 @@ impl VisitorIntake {
                             ),
                         ));
                     }
-                    read_proxy_v2(&mut visitor_stream).await.map_err(|error| {
+                    read_proxy_v2(&mut *visitor_stream).await.map_err(|error| {
                         IntakeRejection::logged(
                             VisitorRejectReason::ParseFailed,
                             io::Error::other(error),
@@ -236,7 +261,7 @@ impl VisitorIntake {
                         error: None,
                     });
                 }
-                let hello = read_client_hello(&mut visitor_stream).await.map_err(|error| {
+                let hello = read_client_hello(&mut *visitor_stream).await.map_err(|error| {
                     IntakeRejection::logged(
                         VisitorRejectReason::ParseFailed,
                         io::Error::other(error),
@@ -259,9 +284,6 @@ impl VisitorIntake {
                 return None;
             }
         };
-        // Pre-routing capacity protects ClientHello completion only. Existing routed
-        // Visitor traffic must remain independent from admission saturation.
-        drop(admission_permit);
         let (parsed_client_hello, addresses) = match parsed_client_hello {
             Ok(parsed) => parsed,
             Err(rejection) => {
@@ -273,31 +295,15 @@ impl VisitorIntake {
                 return None;
             }
         };
-        self.handle_parsed(
-            visitor_stream,
-            parsed_client_hello,
-            addresses,
-            visitor,
-            trace,
-        )
-        .await
-    }
 
-    async fn handle_parsed(
-        &self,
-        visitor_stream: TcpStream,
-        parsed_client_hello: ParsedClientHello,
-        addresses: VisitorTcpAddresses,
-        visitor: VisitorTracker,
-        trace: TracedStage,
-    ) -> Option<AfterVisitorSpan> {
         let serves_acme_tls_alpn_01 = parsed_client_hello.offers_alpn_protocol(ACME_TLS_ALPN);
         let (public_hostname, buffered_bytes) = parsed_client_hello.into_parts();
 
         if public_hostname.as_str() == self.server_hostname.as_str() {
             if serves_acme_tls_alpn_01 {
-                return self.serve_acme_tls_alpn_01(
-                    visitor_stream,
+                // Pre-routing capacity ends where ACME challenge handling begins.
+                drop(admission_permit);
+                return self.route_acme_tls_alpn_01(
                     public_hostname,
                     buffered_bytes,
                     visitor,
@@ -330,13 +336,19 @@ impl VisitorIntake {
             .await;
         let selected_tunnel_connection = match route {
             TunnelRouteOutcome::Unauthorized => {
+                // Count the rejection and end the span before the best-effort alert, so a
+                // slow, failed or cancelled write cannot reclassify it.
                 runtime_log::server_route(
                     public_hostname.as_str(),
                     ServerRouteOutcome::RejectedUnauthorized,
                 );
                 visitor.reject(VisitorRejectReason::UnauthorizedHostname);
                 trace.finish("rejected");
-                return None;
+                return Some(RoutedVisitor::Unauthorized(UnauthorizedVisitor {
+                    _admission_permit: admission_permit,
+                    alert_deadline: intake_deadline
+                        .min(tokio::time::Instant::now() + UNRECOGNIZED_NAME_ALERT_LIMIT),
+                }));
             }
             outcome @ (TunnelRouteOutcome::NoActiveTunnelConnection
             | TunnelRouteOutcome::ShuttingDown) => {
@@ -357,39 +369,38 @@ impl VisitorIntake {
             TunnelRouteOutcome::Connected(tunnel_connection) => tunnel_connection,
         };
 
-        self.forward_to_tunnel(
-            visitor_stream,
+        // Pre-routing capacity ends where Tunnel forwarding begins. Routed Visitor traffic
+        // must remain independent from admission saturation.
+        drop(admission_permit);
+        Some(RoutedVisitor::Tunnel(Box::new(TunnelBoundVisitor {
             public_hostname,
             buffered_bytes,
-            selected_tunnel_connection,
+            route: selected_tunnel_connection,
             addresses,
-            VisitorRecord {
+            record: VisitorRecord {
                 metrics: visitor,
                 trace,
             },
-        )
-        .await
+        })))
     }
 
-    fn serve_acme_tls_alpn_01(
+    fn route_acme_tls_alpn_01(
         &self,
-        visitor_stream: TcpStream,
         server_hostname: PublicHostname,
         buffered_bytes: Vec<u8>,
         visitor: VisitorTracker,
         trace: TracedStage,
-    ) -> Option<AfterVisitorSpan> {
+    ) -> Option<RoutedVisitor> {
         if let Some(public_tls_config) = self.public_tls_config.clone() {
             visitor.acme_challenge();
             trace.finish("acme_challenge");
             self.tunnel_router
                 .metrics()
                 .acme_event(AcmeMetricEvent::ChallengeHandled);
-            Some(AfterVisitorSpan::AcmeChallenge(AcmeChallenge {
+            Some(RoutedVisitor::AcmeChallenge(AcmeChallengeRoute {
                 public_tls_config,
                 server_hostname,
                 buffered_bytes,
-                visitor_stream,
             }))
         } else {
             runtime_log::server_route(
@@ -405,16 +416,19 @@ impl VisitorIntake {
     async fn forward_to_tunnel(
         &self,
         visitor_stream: TcpStream,
-        public_hostname: PublicHostname,
-        buffered_bytes: Vec<u8>,
-        tunnel_connection: VisitorRoute,
-        addresses: VisitorTcpAddresses,
-        record: VisitorRecord,
+        visitor: Box<TunnelBoundVisitor>,
     ) -> Option<AfterVisitorSpan> {
-        let VisitorRecord {
-            metrics: mut visitor,
-            trace,
-        } = record;
+        let TunnelBoundVisitor {
+            public_hostname,
+            buffered_bytes,
+            route: tunnel_connection,
+            addresses,
+            record:
+                VisitorRecord {
+                    metrics: mut visitor,
+                    trace,
+                },
+        } = *visitor;
         let pending_open_permit = match self.admission_policy.try_admit_pending_stream_open() {
             Ok(permit) => permit,
             Err(rejection) => {
@@ -503,19 +517,132 @@ impl VisitorIntake {
 }
 
 /// A Visitor's work after its `visitor` span ends, run outside the span so the span still
-/// ends at placement or at the ACME challenge.
+/// ends at placement, at the ACME challenge, or at an unauthorized rejection.
 enum AfterVisitorSpan {
-    /// Boxed: the open Tunnel stream makes it several times the size of the other variant.
+    /// Boxed: the open Tunnel stream makes it several times the size of the other variants.
     Placed(Box<PlacedVisitor>),
     AcmeChallenge(AcmeChallenge),
+    Unauthorized {
+        rejection: UnauthorizedVisitor,
+        visitor_stream: TcpStream,
+    },
 }
 
 impl AfterVisitorSpan {
-    async fn run(self) {
+    async fn run<Shutdown>(self, shutdown: Shutdown)
+    where
+        Shutdown: std::future::Future<Output = ()>,
+    {
         match self {
             Self::Placed(placed) => placed.proxy().await,
             Self::AcmeChallenge(challenge) => challenge.serve().await,
+            Self::Unauthorized {
+                rejection,
+                mut visitor_stream,
+            } => rejection.send_alert(&mut visitor_stream, shutdown).await,
         }
+    }
+}
+
+/// One admitted Visitor before routing: its global pre-routing permit, metrics tracker and
+/// `visitor` span.
+struct AdmittedVisitor {
+    permit: VisitorAdmissionPermit,
+    visitor: VisitorTracker,
+    trace: TracedStage,
+}
+
+/// A Visitor's pre-placement routing decision.
+enum RoutedVisitor {
+    /// Boxed: the route makes it several times the size of the other variants.
+    Tunnel(Box<TunnelBoundVisitor>),
+    AcmeChallenge(AcmeChallengeRoute),
+    Unauthorized(UnauthorizedVisitor),
+}
+
+/// A Visitor routed to a Tunnel connection, not yet placed on a Tunnel stream.
+struct TunnelBoundVisitor {
+    public_hostname: PublicHostname,
+    buffered_bytes: Vec<u8>,
+    route: VisitorRoute,
+    addresses: VisitorTcpAddresses,
+    record: VisitorRecord,
+}
+
+/// A Visitor whose Public hostname the current Authorization snapshot does not own. It is
+/// already counted and its span ended; it is owed only the best-effort alert. Holding the
+/// admission permit keeps the alert write inside the pre-routing admission limits.
+struct UnauthorizedVisitor {
+    _admission_permit: VisitorAdmissionPermit,
+    alert_deadline: tokio::time::Instant,
+}
+
+impl UnauthorizedVisitor {
+    /// Send the alert, then release the admission permit. Unread Visitor bytes are never
+    /// drained: closing with them still buffered may reset the connection instead.
+    async fn send_alert<W, Shutdown>(self, writer: &mut W, shutdown: Shutdown)
+    where
+        W: AsyncWrite + Unpin,
+        Shutdown: std::future::Future<Output = ()>,
+    {
+        send_unrecognized_name_alert(writer, self.alert_deadline, shutdown).await;
+    }
+}
+
+/// Fatal TLS `unrecognized_name(112)` alert record (RFC 6066 §3): content type alert,
+/// legacy record version TLS 1.2, length 2, level fatal. Valid before ServerHello in both
+/// TLS 1.2 and TLS 1.3, so no TLS state is needed to send it.
+pub(crate) const UNRECOGNIZED_NAME_ALERT: [u8; 7] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x70];
+
+/// Upper bound on the alert write and TCP write shutdown, also capped by the intake deadline.
+const UNRECOGNIZED_NAME_ALERT_LIMIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Best-effort: write the alert and shut down the write half (FIN) before `deadline`. Shutdown
+/// wins over an expired deadline, and both win over a ready writer, so a ready socket cannot
+/// delay shutdown or outlive the deadline. Write errors and timeouts are ignored.
+async fn send_unrecognized_name_alert<W, Shutdown>(
+    writer: &mut W,
+    deadline: tokio::time::Instant,
+    shutdown: Shutdown,
+) where
+    W: AsyncWrite + Unpin,
+    Shutdown: std::future::Future<Output = ()>,
+{
+    let mut written = 0;
+    // Timers fire on millisecond ticks, so the write also checks the absolute deadline
+    // before every poll: a stalled write that resumes late writes nothing more.
+    let write = std::future::poll_fn(|cx| {
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Poll::Ready(());
+            }
+            let Some(remaining) = UNRECOGNIZED_NAME_ALERT
+                .get(written..)
+                .filter(|rest| !rest.is_empty())
+            else {
+                return Pin::new(&mut *writer).poll_shutdown(cx).map(|_| ());
+            };
+            match std::task::ready!(Pin::new(&mut *writer).poll_write(cx, remaining)) {
+                Ok(0) | Err(_) => return Poll::Ready(()),
+                Ok(count) => written += count,
+            }
+        }
+    });
+    tokio::select! {
+        biased;
+        () = shutdown => {}
+        () = tokio::time::sleep_until(deadline) => {}
+        () = write => {}
+    }
+}
+
+/// Resolve when orderly shutdown starts, or never without one.
+async fn wait_for_shutdown(shutdown: Option<crate::shutdown::OrderlyShutdown>) {
+    match shutdown {
+        Some(shutdown) => {
+            let _ = shutdown.wait_started().await;
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -570,28 +697,39 @@ impl PlacedVisitor {
     }
 }
 
-/// A TLS-ALPN-01 challenge for the Server hostname, answered with the ACME certificate.
-struct AcmeChallenge {
+/// A TLS-ALPN-01 challenge for the Server hostname, routed before the Visitor stream joins.
+struct AcmeChallengeRoute {
     public_tls_config: Arc<rustls::ServerConfig>,
     server_hostname: PublicHostname,
     buffered_bytes: Vec<u8>,
+}
+
+/// A TLS-ALPN-01 challenge for the Server hostname, answered with the ACME certificate.
+struct AcmeChallenge {
+    route: AcmeChallengeRoute,
     visitor_stream: TcpStream,
 }
 
 impl AcmeChallenge {
     async fn serve(self) {
+        let Self {
+            route:
+                AcmeChallengeRoute {
+                    public_tls_config,
+                    server_hostname,
+                    buffered_bytes,
+                },
+            visitor_stream,
+        } = self;
         runtime_log::acme(
             AcmeRole::Server {
-                server_hostname: self.server_hostname.as_str(),
+                server_hostname: server_hostname.as_str(),
             },
             AcmeEvent::ChallengeHandled,
         );
-        let acceptor = TlsAcceptor::from(self.public_tls_config);
+        let acceptor = TlsAcceptor::from(public_tls_config);
         if let Ok(mut tls_stream) = acceptor
-            .accept(PrefixedStream::new(
-                self.buffered_bytes,
-                self.visitor_stream,
-            ))
+            .accept(PrefixedStream::new(buffered_bytes, visitor_stream))
             .await
         {
             let _ = tls_stream.shutdown().await;
@@ -984,11 +1122,10 @@ mod tests {
         let captured = crate::trace_export::test_support::CapturedSpans::new(1.0);
         let _trace = captured.set_default();
         let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
-        assert_admitted_drop_without_opening_a_tunnel_stream(
+        assert_alert_without_opening_a_tunnel_stream(
             intake,
             build_client_hello("other.example.test")?,
             tunnel_connection,
-            VisitorRejectReason::UnauthorizedHostname,
         )
         .await?;
 
@@ -2007,15 +2144,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drops_unauthorized_public_hostname_without_opening_a_tunnel_stream() -> io::Result<()>
-    {
+    async fn unauthorized_public_hostname_receives_unrecognized_name_alert_then_eof()
+    -> io::Result<()> {
         let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
 
-        assert_drop_without_opening_a_tunnel_stream(
+        assert_alert_without_opening_a_tunnel_stream(
             intake,
             build_client_hello("api.example.test")?,
-            Some(tunnel_connection),
-            VisitorRejectReason::UnauthorizedHostname,
+            tunnel_connection,
         )
         .await
     }
@@ -2106,6 +2242,474 @@ mod tests {
 
     #[tokio::test]
     async fn drops_visitors_while_the_server_certificate_is_not_serving() -> io::Result<()> {
+        let (certificate, _store) = certificate_controller(RootCertStore::empty())?;
+        assert!(!certificate.is_serving());
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        assert_drop_without_opening_a_tunnel_stream(
+            intake.with_certificate(Some(certificate)),
+            build_client_hello("app.example.test")?,
+            Some(tunnel_connection),
+            VisitorRejectReason::CertificateNotServing,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn unknown_public_hostname_drops_silently_until_the_server_certificate_serves()
+    -> io::Result<()> {
+        let (pem, roots) = ca_signed_certificate("tunnel.example.test")?;
+        let (certificate, _store) = certificate_controller(roots.clone())?;
+
+        // Certificate readiness gates precede hostname authorization.
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        assert_drop_without_opening_a_tunnel_stream(
+            intake.with_certificate(Some(certificate.clone())),
+            build_client_hello("other.example.test")?,
+            Some(tunnel_connection),
+            VisitorRejectReason::CertificateNotServing,
+        )
+        .await?;
+
+        let validation = crate::server_certificate::CertificateValidation::new(
+            server_hostname("tunnel.example.test"),
+            Arc::new(roots),
+            Duration::from_secs(3_600),
+            Duration::from_secs(60),
+        )?;
+        certificate.install_snapshot(crate::server_certificate::CertificateSnapshot::validate(
+            &pem,
+            &validation,
+            std::time::SystemTime::now(),
+        )?)?;
+        assert!(certificate.is_serving());
+        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
+        assert_alert_without_opening_a_tunnel_stream(
+            intake.with_certificate(Some(certificate)),
+            build_client_hello("other.example.test")?,
+            tunnel_connection,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn rustls_clients_decode_the_unrecognized_name_alert() -> io::Result<()> {
+        for version in [&rustls::version::TLS13, &rustls::version::TLS12] {
+            let intake = VisitorIntake::new(
+                server_hostname("tunnel.example.test"),
+                TunnelRouter::single(vec![public_hostname("app.example.test")])?,
+                None,
+                test_admission_policy(),
+            )?;
+            let metrics = intake.tunnel_router.metrics();
+            let listener = TcpListener::bind(localhost(0)).await?;
+            let visitor_addr = listener.local_addr()?;
+            let intake_task = spawn_intake_task(listener, intake);
+            let connector = TlsConnector::from(Arc::new(
+                rustls::ClientConfig::builder_with_protocol_versions(&[version])
+                    .with_root_certificates(RootCertStore::empty())
+                    .with_no_client_auth(),
+            ));
+            let visitor = TcpStream::connect(visitor_addr).await?;
+            let error = match timeout(
+                Duration::from_secs(1),
+                connector.connect(ServerName::try_from("other.example.test").unwrap(), visitor),
+            )
+            .await
+            .map_err(|_| timeout_error("TLS client should observe the alert"))?
+            {
+                Ok(_) => panic!("{version:?} handshake unexpectedly succeeded"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error
+                    .get_ref()
+                    .and_then(|error| error.downcast_ref::<rustls::Error>()),
+                Some(&rustls::Error::AlertReceived(
+                    rustls::AlertDescription::UnrecognisedName
+                )),
+                "{version:?}: {error:?}"
+            );
+            intake_task
+                .await
+                .map_err(|error| join_error("intake task failed", error))??;
+            assert_only_rejection(&metrics, VisitorRejectReason::UnauthorizedHostname).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthorized_trailing_bytes_are_never_drained() -> io::Result<()> {
+        let intake = VisitorIntake::new(
+            server_hostname("tunnel.example.test"),
+            TunnelRouter::single(vec![public_hostname("app.example.test")])?,
+            None,
+            test_admission_policy(),
+        )?;
+        let metrics = intake.tunnel_router.metrics();
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+        let visitor = TcpStream::connect(visitor_addr).await?;
+        let (mut reader, mut writer) = visitor.into_split();
+        // Far more than kernel socket buffers hold: the write completes only if the Server
+        // drains it.
+        let mut visitor_bytes = build_client_hello("other.example.test")?;
+        visitor_bytes.resize(visitor_bytes.len() + 16 * 1024 * 1024, 0x17);
+        let writer_task = tokio::spawn(async move { writer.write_all(&visitor_bytes).await });
+
+        let mut received = Vec::new();
+        match timeout(Duration::from_secs(2), reader.read_to_end(&mut received))
+            .await
+            .map_err(|_| timeout_error("trailing bytes must not extend the close deadline"))?
+        {
+            Ok(_) => assert_eq!(received, UNRECOGNIZED_NAME_ALERT),
+            // Closing with unread bytes may reset the connection before the alert arrives.
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            Err(error) => return Err(error),
+        }
+        let written = timeout(Duration::from_secs(2), writer_task)
+            .await
+            .map_err(|_| timeout_error("rejected Visitor write should fail"))?
+            .map_err(|error| join_error("writer task failed", error))?;
+        assert!(written.is_err(), "the Server must not drain trailing bytes");
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+        assert_only_rejection(&metrics, VisitorRejectReason::UnauthorizedHostname).await?;
+        assert_no_visitor_bytes(&metrics);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn superseded_snapshot_after_stream_open_drops_silently() -> io::Result<()> {
+        let client_identity = generate_test_client_identity()?;
+        let tunnels = [ServerTunnelConfig {
+            id: Some(crate::TunnelId::parse("tunnel-1").unwrap()),
+            public_hostnames: vec![public_hostname("app.example.test")],
+            authorized_client_identities: vec![client_identity.client_identity.clone()],
+        }];
+        let router =
+            TunnelRouter::configured_managed(&server_hostname("tunnel.example.test"), &tunnels)?;
+        let fixture = TunnelConnectionFixture::connect(&client_identity).await?;
+        router.register(fixture.server_connection.clone()).await;
+        let metrics = router.metrics();
+        let intake = VisitorIntake::new(
+            server_hostname("tunnel.example.test"),
+            router.clone(),
+            None,
+            test_admission_policy(),
+        )?;
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let mut visitor = TcpStream::connect(listener.local_addr()?).await?;
+        let (mut visitor_stream, _) = listener.accept().await?;
+        visitor
+            .write_all(&build_client_hello("app.example.test")?)
+            .await?;
+        let addresses = VisitorTcpAddresses::from_socket(&visitor_stream)?;
+        let admitted = intake.admit().expect("Visitor should be admitted");
+        let Some(RoutedVisitor::Tunnel(routed)) = intake
+            .route_visitor(
+                &mut visitor_stream,
+                addresses,
+                admitted,
+                std::future::pending(),
+            )
+            .await
+        else {
+            panic!("authorized Visitor should route to its Tunnel connection");
+        };
+
+        // An unrelated update supersedes the snapshot; the hostname stays authorized.
+        router
+            .replace_authorization(&server_hostname("tunnel.example.test"), &tunnels)
+            .await?;
+        assert!(
+            intake
+                .forward_to_tunnel(visitor_stream, routed)
+                .await
+                .is_none()
+        );
+
+        let mut received = Vec::new();
+        timeout(Duration::from_secs(1), visitor.read_to_end(&mut received))
+            .await
+            .map_err(|_| timeout_error("superseded Visitor should be dropped"))??;
+        assert!(
+            received.is_empty(),
+            "no alert may follow a stream-open race"
+        );
+        assert_only_rejection(&metrics, VisitorRejectReason::UnauthorizedHostname).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn alert_helper_writes_the_record_then_shuts_down() -> io::Result<()> {
+        let (mut visitor, mut server) = tokio::io::duplex(64);
+        send_unrecognized_name_alert(
+            &mut server,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            std::future::pending(),
+        )
+        .await;
+        let mut received = Vec::new();
+        visitor.read_to_end(&mut received).await?;
+        assert_eq!(received, [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x70]);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn alert_helper_prefers_ready_shutdown_over_a_ready_writer() -> io::Result<()> {
+        let (mut visitor, mut server) = tokio::io::duplex(64);
+        send_unrecognized_name_alert(
+            &mut server,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            std::future::ready(()),
+        )
+        .await;
+        drop(server);
+        let mut received = Vec::new();
+        visitor.read_to_end(&mut received).await?;
+        assert!(received.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn alert_helper_skips_the_write_once_the_deadline_has_elapsed() -> io::Result<()> {
+        for elapsed_by in [Duration::ZERO, Duration::from_millis(1)] {
+            let (mut visitor, mut server) = tokio::io::duplex(64);
+            let deadline = tokio::time::Instant::now();
+            tokio::time::advance(elapsed_by).await;
+            send_unrecognized_name_alert(&mut server, deadline, std::future::pending()).await;
+            drop(server);
+            let mut received = Vec::new();
+            visitor.read_to_end(&mut received).await?;
+            assert!(received.is_empty(), "{elapsed_by:?}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn alert_helper_stops_a_stalled_write_at_the_deadline() -> io::Result<()> {
+        // The 4-byte buffer stalls the 7-byte record while the Visitor reads nothing.
+        let (mut visitor, mut server) = tokio::io::duplex(4);
+        let started = tokio::time::Instant::now();
+        send_unrecognized_name_alert(
+            &mut server,
+            started + Duration::from_secs(1),
+            std::future::pending(),
+        )
+        .await;
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        drop(server);
+        let mut received = Vec::new();
+        visitor.read_to_end(&mut received).await?;
+        assert_eq!(received, UNRECOGNIZED_NAME_ALERT[..4]);
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn alert_helper_writes_nothing_more_once_a_stalled_write_passes_the_deadline()
+    -> io::Result<()> {
+        // A sub-millisecond deadline: the timer fires only on the next millisecond tick.
+        let (mut visitor, mut server) = tokio::io::duplex(4);
+        let deadline = tokio::time::Instant::now() + Duration::from_micros(1_000_500);
+        let alert = tokio::spawn(async move {
+            send_unrecognized_name_alert(&mut server, deadline, std::future::pending()).await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_micros(1_000_750)).await;
+        // Drain the stalled bytes after the deadline, so the writer becomes ready again.
+        let mut stalled = [0_u8; 4];
+        visitor.read_exact(&mut stalled).await?;
+        alert
+            .await
+            .map_err(|error| join_error("alert task failed", error))?;
+        let mut rest = Vec::new();
+        visitor.read_to_end(&mut rest).await?;
+        assert!(rest.is_empty(), "wrote {rest:02x?} after the deadline");
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_alert_write_keeps_admission_until_the_deadline() -> io::Result<()> {
+        let started = tokio::time::Instant::now();
+        let stalled = StalledAlert::start(std::future::pending()).await?;
+        stalled.assert_admission_held();
+        tokio::time::advance(Duration::from_millis(999)).await;
+        stalled.assert_admission_held();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        stalled.finish().await?;
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_alert_write_keeps_admission_until_shutdown() -> io::Result<()> {
+        if !crate::trace_export::test_support::isolated(
+            module_path!(),
+            "stalled_alert_write_keeps_admission_until_shutdown",
+        ) {
+            return Ok(());
+        }
+        let captured = crate::trace_export::test_support::CapturedSpans::new(1.0);
+        let _trace = captured.set_default();
+        let started = tokio::time::Instant::now();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let stalled = StalledAlert::start(async move {
+            let _ = shutdown_rx.await;
+        })
+        .await?;
+        stalled.assert_admission_held();
+        // The span ended before the alert write, which is still stalled.
+        let root = captured
+            .span("visitor")
+            .expect("visitor span ends before the alert write");
+        tokio::time::advance(Duration::from_millis(100)).await;
+        stalled.assert_admission_held();
+        let _ = shutdown_tx.send(());
+        stalled.finish().await?;
+        assert_eq!(started.elapsed(), Duration::from_millis(100));
+
+        assert_eq!(
+            crate::trace_export::test_support::attribute(&root, crate::trace_export::OUTCOME)
+                .as_deref(),
+            Some("rejected")
+        );
+        Ok(())
+    }
+
+    /// One unauthorized Visitor fed through Visitor intake over a 4-byte duplex stream, so its
+    /// alert write stalls with the pre-routing admission permit held.
+    struct StalledAlert {
+        policy: ServerAdmissionPolicy,
+        metrics: ServerMetrics,
+        source: std::net::IpAddr,
+        _visitor: tokio::io::DuplexStream,
+        task: JoinHandle<()>,
+    }
+
+    impl StalledAlert {
+        async fn start<Shutdown>(shutdown: Shutdown) -> io::Result<Self>
+        where
+            Shutdown: std::future::Future<Output = ()> + Send + 'static,
+        {
+            let policy = ServerAdmissionPolicy::new(ServerAdmissionLimits {
+                client_hello_timeout: Duration::from_secs(5),
+                max_pending_visitors: 2,
+                max_pending_visitors_per_source: 1,
+                ..ServerAdmissionLimits::for_test()
+            });
+            let intake = VisitorIntake::new(
+                server_hostname("tunnel.example.test"),
+                TunnelRouter::single(vec![public_hostname("app.example.test")])?,
+                None,
+                policy.clone(),
+            )?;
+            let metrics = intake.tunnel_router.metrics();
+            let addresses = VisitorTcpAddresses {
+                source: SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 40_000)),
+                destination: SocketAddr::from((Ipv4Addr::new(192, 0, 2, 10), 443)),
+            };
+            let (mut visitor, mut visitor_stream) = tokio::io::duplex(4);
+            let admitted = intake.admit().expect("Visitor should be admitted");
+            let span = admitted.trace.span().clone();
+            let task = tokio::spawn(async move {
+                let routed = intake
+                    .route_visitor(
+                        &mut visitor_stream,
+                        addresses,
+                        admitted,
+                        std::future::pending(),
+                    )
+                    .instrument(span)
+                    .await;
+                let Some(RoutedVisitor::Unauthorized(rejection)) = routed else {
+                    panic!("unknown Public hostname should be unauthorized");
+                };
+                rejection.send_alert(&mut visitor_stream, shutdown).await;
+            });
+            visitor
+                .write_all(&build_client_hello("other.example.test")?)
+                .await?;
+            // Yield, not sleep: paused time must not advance while the write stalls.
+            for _ in 0..100_000 {
+                if sample(
+                    &metrics.render(),
+                    r#"runewarp_server_visitors_rejected_total{reason="unauthorized_hostname"}"#,
+                ) == Some(1.0)
+                {
+                    break;
+                }
+                assert!(!task.is_finished(), "intake ended before the alert write");
+                tokio::task::yield_now().await;
+            }
+            assert!(!task.is_finished(), "intake ended before the alert write");
+            Ok(Self {
+                policy,
+                metrics,
+                source: addresses.source.ip(),
+                _visitor: visitor,
+                task,
+            })
+        }
+
+        fn assert_admission_held(&self) {
+            assert!(!self.task.is_finished());
+            assert!(matches!(
+                self.policy.try_admit_visitor(self.source),
+                Err(crate::server::admission::AdmissionRejection {
+                    limit: AdmissionLimit::VisitorSource,
+                    ..
+                })
+            ));
+            let other = self
+                .policy
+                .try_admit_visitor(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)))
+                .expect("another source should take the last global slot");
+            assert!(matches!(
+                self.policy
+                    .try_admit_visitor(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3))),
+                Err(crate::server::admission::AdmissionRejection {
+                    limit: AdmissionLimit::VisitorsGlobal,
+                    ..
+                })
+            ));
+            drop(other);
+        }
+
+        async fn finish(self) -> io::Result<()> {
+            self.task
+                .await
+                .map_err(|error| join_error("intake task failed", error))?;
+            let first = self.policy.try_admit_visitor(self.source);
+            assert!(first.is_ok(), "same-source admission should recover");
+            assert!(
+                self.policy
+                    .try_admit_visitor(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)))
+                    .is_ok(),
+                "global admission should recover"
+            );
+            assert_only_rejection(&self.metrics, VisitorRejectReason::UnauthorizedHostname).await?;
+            assert_no_visitor_bytes(&self.metrics);
+            Ok(())
+        }
+    }
+
+    fn assert_no_visitor_bytes(metrics: &ServerMetrics) {
+        let text = metrics.render();
+        for direction in ["from_visitor", "to_visitor"] {
+            let series =
+                format!(r#"runewarp_server_visitor_bytes_total{{direction="{direction}"}}"#);
+            assert_eq!(sample(&text, &series), Some(0.0), "{series}\n{text}");
+        }
+    }
+
+    /// A managed Server certificate controller over an empty store, so it is not serving.
+    fn certificate_controller(
+        roots: RootCertStore,
+    ) -> io::Result<(
+        crate::server_certificate::ServerCertificateController,
+        tempfile::TempDir,
+    )> {
         struct UnusedRoute;
         impl crate::server_certificate::ChallengeRouteObserver for UnusedRoute {
             fn observe(
@@ -2120,7 +2724,7 @@ mod tests {
         }
         let validation = crate::server_certificate::CertificateValidation::new(
             server_hostname("tunnel.example.test"),
-            Arc::new(RootCertStore::empty()),
+            Arc::new(roots),
             Duration::from_secs(3_600),
             Duration::from_secs(60),
         )?;
@@ -2134,21 +2738,40 @@ mod tests {
             Arc::new(UnusedRoute),
         )?;
         let store = tempfile::tempdir()?;
-        // An empty store holds no committed snapshot, so the certificate is not serving.
         let certificate = crate::server_certificate::ServerCertificateController::new(
             store.path().to_path_buf(),
             "ops@example.test".to_owned(),
             options,
         )?;
-        assert!(!certificate.is_serving());
-        let (intake, tunnel_connection) = configured_intake_with_active_tunnel_connection().await?;
-        assert_drop_without_opening_a_tunnel_stream(
-            intake.with_certificate(Some(certificate)),
-            build_client_hello("app.example.test")?,
-            Some(tunnel_connection),
-            VisitorRejectReason::CertificateNotServing,
-        )
-        .await
+        Ok((certificate, store))
+    }
+
+    /// A PEM key, leaf and CA chain for `hostname`, with roots trusting the CA.
+    fn ca_signed_certificate(hostname: &str) -> io::Result<(Vec<u8>, RootCertStore)> {
+        let ca_key = rcgen::KeyPair::generate().map_err(io::Error::other)?;
+        let mut ca = rcgen::CertificateParams::new(Vec::new()).map_err(io::Error::other)?;
+        ca.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_certificate = ca.self_signed(&ca_key).map_err(io::Error::other)?;
+        let issuer = rcgen::Issuer::new(ca, ca_key);
+        let leaf_key = rcgen::KeyPair::generate().map_err(io::Error::other)?;
+        let leaf = rcgen::CertificateParams::new(vec![hostname.to_owned()])
+            .map_err(io::Error::other)?
+            .signed_by(&leaf_key, &issuer)
+            .map_err(io::Error::other)?;
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(ca_certificate.der().clone())
+            .map_err(io::Error::other)?;
+        Ok((
+            format!(
+                "{}{}{}",
+                leaf_key.serialize_pem(),
+                leaf.pem(),
+                ca_certificate.pem()
+            )
+            .into_bytes(),
+            roots,
+        ))
     }
 
     #[tokio::test]
@@ -2572,6 +3195,43 @@ mod tests {
             .await
             .map_err(|error| join_error("intake task failed", error))??;
         assert_only_rejection(&metrics, expected).await
+    }
+
+    /// The Visitor receives exactly the alert then EOF, and nothing reaches the Tunnel.
+    async fn assert_alert_without_opening_a_tunnel_stream(
+        intake: VisitorIntake,
+        visitor_bytes: Vec<u8>,
+        tunnel_connection: ClientPeer,
+    ) -> io::Result<()> {
+        let metrics = intake.tunnel_router.metrics();
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let visitor_addr = listener.local_addr()?;
+        let intake_task = spawn_intake_task(listener, intake);
+
+        let mut visitor = TcpStream::connect(visitor_addr).await?;
+        visitor.write_all(&visitor_bytes).await?;
+        visitor.shutdown().await?;
+
+        let mut received = Vec::new();
+        timeout(Duration::from_secs(1), visitor.read_to_end(&mut received))
+            .await
+            .map_err(|_| timeout_error("visitor should receive the alert then EOF"))??;
+        assert_eq!(received, UNRECOGNIZED_NAME_ALERT);
+        match timeout(
+            Duration::from_millis(100),
+            tunnel_connection.accept_stream(),
+        )
+        .await
+        {
+            Err(_) | Ok(Err(_)) => {}
+            Ok(Ok(_)) => panic!("intake unexpectedly opened a tunnel stream"),
+        }
+        intake_task
+            .await
+            .map_err(|error| join_error("intake task failed", error))??;
+        assert_only_rejection(&metrics, VisitorRejectReason::UnauthorizedHostname).await?;
+        assert_no_visitor_bytes(&metrics);
+        Ok(())
     }
 
     async fn assert_drop_without_opening_a_tunnel_stream(

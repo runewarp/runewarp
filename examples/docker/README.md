@@ -72,6 +72,8 @@ To smoke a published image instead, pass `--image-ref`:
 ./scripts/docker-example smoke --image-ref docker.io/runewarp/runewarp:<12-char-commit>
 ```
 
+The helper expects an image that writes a single Client identity key to `runewarp/client/identity.key`. For an image built before that layout, run the example from a checkout of the same commit.
+
 That path reuses the same generated runtime material and Compose stack, but points both Runewarp services at the published image instead of the local build.
 
 This helper is intentionally example-specific. For a normal operator setup, run `runewarp server cert init --hostname ...` on the machine that will run the Server and `runewarp client identity init` on the machine that will run the Client, then place the resulting material in the usual config and data locations described in [`docs/usage.md`](../../docs/usage.md) and [`docs/configuration.md`](../../docs/configuration.md). The example helper just stages those same artifacts into `examples/docker/generated` so Compose can mount them read-only.

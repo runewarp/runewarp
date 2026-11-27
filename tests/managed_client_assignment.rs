@@ -26,18 +26,16 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    AddressController, CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
-    ClientAssignmentConvergence, ClientConfig, ClientIdentity, ClientInstancePrep, ClientTlsMode,
-    ClientTunnelAttempt, ControlAddress, ControlRoleIdentityMaterial, ControlTrust, LogLevel,
-    ManagedSession, ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PublicHostname,
-    QUIC_CLOSE_FLUSH_DURATION, Server, ServerAdmission, ServerAuthorization, ServerBindConfig,
-    ServerHostname, ServerTunnelConfig, ServiceConfig, SessionMaterial,
-    client_identity_from_certificate_der, make_server_tunnel_h3_config,
+    AddressController, ClientAssignmentConvergence, ClientConfig, ClientIdentity,
+    ClientInstancePrep, ClientTlsMode, ClientTunnelAttempt, ControlAddress,
+    ControlRoleIdentityMaterial, ControlTrust, LogLevel, ManagedSession, ManagedSessionEvent,
+    ManagedSessionRole, OrderlyShutdown, PublicHostname, QUIC_CLOSE_FLUSH_DURATION, Server,
+    ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname, ServerTunnelConfig,
+    ServiceConfig, SessionMaterial, make_server_tunnel_h3_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use rustls::server::WebPkiClientVerifier;
 use rustls::{ServerConfig, ServerConfig as RustlsServerConfig};
 use serde_json::{Value, json};
 use std::sync::Mutex;
@@ -51,7 +49,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use common::{
     CLIENT_EVENTS_PATH, CLIENT_STATE_PATH, CONTROL_ALPN_H2, ControlMtlsMaterial,
-    generate_control_mtls_material, write_control_ca_and_certs,
+    PinnedSpkiAdmission, generate_control_mtls_material, write_control_ca_and_certs,
 };
 
 const APP_HOSTNAME: &str = "app.example.test";
@@ -197,24 +195,10 @@ impl ManagedClientHarness {
         let control_paths =
             write_control_ca_and_certs(tempdir.path().join("control").as_path(), &material);
 
-        let client_identity = identity_from_cert_pem(&material.client_cert_pem);
+        let client_identity = identity_from_key_pem(&material.client_key_pem);
         let identity_dir = tempdir.path().join("client-identity");
         fs::create_dir_all(&identity_dir).unwrap();
-        fs::write(
-            identity_dir.join(CLIENT_CERT_FILENAME),
-            &material.client_cert_pem,
-        )
-        .unwrap();
-        fs::write(
-            identity_dir.join(CLIENT_KEY_FILENAME),
-            &material.client_key_pem,
-        )
-        .unwrap();
-        fs::write(
-            identity_dir.join(CLIENT_IDENTITY_FILENAME),
-            client_identity.to_string(),
-        )
-        .unwrap();
+        fs::write(identity_dir.join("client.key"), &material.client_key_pem).unwrap();
 
         let certified = generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
         let server_cert_pem = certified.cert.pem();
@@ -233,7 +217,7 @@ impl ManagedClientHarness {
             log_format: runewarp::LogFormat::Text,
             trace_export: None,
             server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
-            identity_directory: identity_dir.clone(),
+            identity_key: identity_dir.join("client.key"),
             services: vec![ServiceConfig {
                 public_hostnames: None,
                 backend_address: backend_addr.to_string(),
@@ -260,7 +244,7 @@ impl ManagedClientHarness {
         let session_material = SessionMaterial {
             control_hostname: "localhost".to_owned(),
             trust: ControlTrust::CaFile(control_paths.ca_cert),
-            identity: ControlRoleIdentityMaterial::from_client_identity_dir(&identity_dir),
+            identity: ControlRoleIdentityMaterial::client(identity_dir.join("client.key")),
         };
         let mut session = ManagedSession::new(
             ControlAddress::parse(&format!("localhost:{}", control.port)).unwrap(),
@@ -749,24 +733,9 @@ async fn managed_client_fatal_worker_exits_the_runtime() {
     let control = ControlFixture::start(&material).await;
     let control_paths =
         write_control_ca_and_certs(tempdir.path().join("control").as_path(), &material);
-    let client_identity = identity_from_cert_pem(&material.client_cert_pem);
     let identity_dir = tempdir.path().join("client-identity");
     fs::create_dir_all(&identity_dir).unwrap();
-    fs::write(
-        identity_dir.join(CLIENT_CERT_FILENAME),
-        &material.client_cert_pem,
-    )
-    .unwrap();
-    fs::write(
-        identity_dir.join(CLIENT_KEY_FILENAME),
-        &material.client_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        identity_dir.join(CLIENT_IDENTITY_FILENAME),
-        client_identity.to_string(),
-    )
-    .unwrap();
+    fs::write(identity_dir.join("client.key"), &material.client_key_pem).unwrap();
 
     let factory: runewarp::AddressWorkerFactory =
         Arc::new(|_address, _control| async { Err("worker exploded".to_owned()) }.boxed());
@@ -779,7 +748,7 @@ async fn managed_client_fatal_worker_exits_the_runtime() {
         SessionMaterial {
             control_hostname: "localhost".to_owned(),
             trust: ControlTrust::CaFile(control_paths.ca_cert),
-            identity: ControlRoleIdentityMaterial::from_client_identity_dir(&identity_dir),
+            identity: ControlRoleIdentityMaterial::client(identity_dir.join("client.key")),
         },
     )
     .unwrap();
@@ -1013,9 +982,10 @@ async fn spawn_tls_backend(
     (addr, task)
 }
 
-fn identity_from_cert_pem(cert_pem: &str) -> ClientIdentity {
-    let cert = CertificateDer::from_pem_slice(cert_pem.as_bytes()).unwrap();
-    client_identity_from_certificate_der(cert.as_ref()).unwrap()
+fn identity_from_key_pem(key_pem: &str) -> ClientIdentity {
+    runewarp::IdentityKey::from_pem(key_pem)
+        .unwrap()
+        .client_identity()
 }
 
 fn snapshot_sse(revision: &str, input: &str) -> String {
@@ -1053,17 +1023,8 @@ fn root_store_with(certificate: &CertificateDer<'static>) -> RootCertStore {
 }
 
 fn build_server_acceptor(material: &ControlMtlsMaterial) -> TlsAcceptor {
-    let ca_certs: Vec<CertificateDer<'static>> =
-        CertificateDer::pem_slice_iter(material.ca_cert_pem.as_bytes())
-            .collect::<Result<_, _>>()
-            .unwrap();
-    let mut roots = RootCertStore::empty();
-    for cert in ca_certs {
-        roots.add(cert).unwrap();
-    }
-    let client_verifier = WebPkiClientVerifier::builder(Arc::new(roots))
-        .build()
-        .unwrap();
+    let client_verifier =
+        PinnedSpkiAdmission::for_keys(&[material.client_key_pem.as_str()]).verifier();
 
     let server_certs: Vec<CertificateDer<'static>> =
         CertificateDer::pem_slice_iter(material.server_cert_pem.as_bytes())

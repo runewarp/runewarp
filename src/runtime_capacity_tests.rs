@@ -70,7 +70,7 @@ async fn configured_budget() -> Result<(), Box<dyn Error>> {
     std::fs::write(
         &config_path,
         format!(
-            "[client]\nserver-address = \"localhost:{port}\"\nmax-visitor-streams = 256\nserver-trust = \"ca-file\"\nserver-ca-file = \"cert/server-ca.crt\"\nidentity-dir = \"identity\"\n[[client.services]]\nbackend-address = \"{backend_address}\"\n"
+            "[client]\nserver-address = \"localhost:{port}\"\nmax-visitor-streams = 256\nserver-trust = \"ca-file\"\nserver-ca-file = \"cert/server-ca.crt\"\nidentity-key = \"client.key\"\n[[client.services]]\nbackend-address = \"{backend_address}\"\n"
         ),
     )?;
     let settings = crate::load_client_config(&config_path)?;

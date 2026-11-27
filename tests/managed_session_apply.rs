@@ -27,10 +27,9 @@ use runewarp::{
     RoleState, ServerManagedInput, SessionMaterial, StateFields, parse_client_input,
     parse_server_input,
 };
+use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::WebPkiClientVerifier;
-use rustls::{RootCertStore, ServerConfig};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use tempfile::tempdir;
@@ -41,8 +40,8 @@ use tokio_rustls::TlsAcceptor;
 
 use common::{
     AcceptingClientAdapter, CLIENT_EVENTS_PATH, CLIENT_STATE_PATH, CONTROL_ALPN_H2,
-    ControlMtlsMaterial, SERVER_EVENTS_PATH, SERVER_STATE_PATH, generate_control_mtls_material,
-    write_control_ca_and_certs,
+    ControlMtlsMaterial, PinnedSpkiAdmission, SERVER_EVENTS_PATH, SERVER_STATE_PATH,
+    generate_control_mtls_material, write_control_ca_and_certs,
 };
 
 #[derive(Clone, Debug)]
@@ -211,15 +210,8 @@ impl ControlFixture {
 }
 
 fn build_server_acceptor(material: &ControlMtlsMaterial) -> TlsAcceptor {
-    let ca_certs: Vec<CertificateDer<'static>> =
-        CertificateDer::pem_slice_iter(material.ca_cert_pem.as_bytes())
-            .collect::<Result<_, _>>()
-            .unwrap();
-    let mut roots = RootCertStore::empty();
-    for cert in ca_certs {
-        roots.add(cert).unwrap();
-    }
-    let client_verifier = WebPkiClientVerifier::builder(roots.into()).build().unwrap();
+    let client_verifier =
+        PinnedSpkiAdmission::for_keys(&[material.client_key_pem.as_str()]).verifier();
     let server_certs: Vec<CertificateDer<'static>> =
         CertificateDer::pem_slice_iter(material.server_cert_pem.as_bytes())
             .collect::<Result<_, _>>()
@@ -407,18 +399,11 @@ impl Drop for SnapshotFeedStream {
     }
 }
 
-fn session_material(
-    ca_cert: &std::path::Path,
-    client_cert: &std::path::Path,
-    client_key: &std::path::Path,
-) -> SessionMaterial {
+fn session_material(ca_cert: &std::path::Path, client_key: &std::path::Path) -> SessionMaterial {
     SessionMaterial {
         control_hostname: "localhost".to_owned(),
         trust: ControlTrust::CaFile(ca_cert.to_path_buf()),
-        identity: ControlRoleIdentityMaterial {
-            cert_path: client_cert.to_path_buf(),
-            key_path: client_key.to_path_buf(),
-        },
+        identity: ControlRoleIdentityMaterial::client(client_key.to_path_buf()),
     }
 }
 
@@ -575,7 +560,7 @@ async fn state_documents_carry_role_facts_and_coalesce_changes_to_one_per_second
         ControlFixture::start(&material, vec![snapshot_sse("srv-42", "{\"tunnels\":[]}")]).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Server,
@@ -654,7 +639,7 @@ async fn apply_acknowledges_revision_on_same_connection_with_exact_payload() {
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -747,7 +732,7 @@ async fn applied_revision_is_not_repeated_without_another_snapshot() {
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -802,7 +787,7 @@ async fn state_acknowledgment_failure_reconnects_and_reacks_equal_snapshot() {
     fixture.set_state_behavior(StateBehavior::FailOnceThenSuccess);
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -897,7 +882,7 @@ async fn state_acknowledgment_timeout_reconnects_session() {
     fixture.set_state_behavior(StateBehavior::HangOnceThenSuccess);
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -980,7 +965,7 @@ async fn repeated_revision_skips_reconciliation_and_is_acknowledged_again() {
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -1055,7 +1040,7 @@ async fn invalid_input_is_not_acknowledged_and_preserves_prior_revision() {
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -1164,7 +1149,7 @@ async fn rollback_to_previously_applied_revision_is_applied() {
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -1257,7 +1242,7 @@ async fn mid_apply_collapses_to_newest() {
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -1400,7 +1385,7 @@ async fn state_acknowledgments_begin_only_after_first_successful_apply() {
     let fixture = ControlFixture::start(&material, Vec::new()).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -1496,7 +1481,7 @@ async fn body_bearing_204_reconnects_session() {
     fixture.set_state_behavior(StateBehavior::BodyBearing204);
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -1568,7 +1553,7 @@ async fn stalled_report_does_not_block_later_snapshot_apply() {
     fixture.set_state_behavior(StateBehavior::HangOnceThenSuccess);
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -1653,7 +1638,7 @@ async fn cardinality_limit_violation_replaces_session() {
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let limits = ManagedSessionLimits {
         max_server_addresses: 1,
         ..ManagedSessionLimits::default()
@@ -1720,7 +1705,7 @@ async fn reporting_coalesces_to_latest_pending_revision() {
     fixture.set_state_behavior(StateBehavior::HoldUntil(release.clone()));
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -1834,7 +1819,7 @@ async fn fragmented_sse_line_limit_replaces_session() {
     let fixture = ControlFixture::start(&material, Vec::new()).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let limits = ManagedSessionLimits {
         max_sse_line_bytes: 8,
         ..ManagedSessionLimits::default()
@@ -1916,7 +1901,7 @@ async fn snapshot_byte_limit_replaces_session() {
     let fixture = ControlFixture::start(&material, vec![oversized]).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let limits = ManagedSessionLimits {
         max_snapshot_bytes: 64,
         max_sse_event_data_bytes: 1024,
@@ -2034,7 +2019,7 @@ async fn applies_export_managed_apply_spans_with_role_revision_and_outcome() {
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -2162,7 +2147,7 @@ async fn shutdown_during_the_rejection_callback_keeps_the_rejected_error_span() 
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -2299,7 +2284,7 @@ async fn server_managed_apply_spans_export_with_the_runtime_generation_resource(
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Server,
@@ -2478,7 +2463,7 @@ async fn reject_one_apply_with_json_logs(export: bool) {
     .await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(&paths.ca_cert, &paths.client_cert, &paths.client_key);
+    let session_material = session_material(&paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Server,

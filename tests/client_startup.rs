@@ -1,8 +1,11 @@
+mod common;
+
+use common::generate_client_identity;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
     ClientConfig, ClientInstancePrep, ClientPublicCertConfig, ClientTlsMode, LogLevel,
     PreparedClient, PublicHostname, Server, ServerAddress, ServerAdmission, ServerAuthorization,
-    ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, generate_client_identity,
+    ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig,
     initialize_manual_client_public_cert, load_client_config, make_server_tunnel_h3_config,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -65,18 +68,8 @@ async fn prepared_client_connects_from_validated_settings() {
     fs::write(tempdir.path().join("server-ca.pem"), server_cert_pem).unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
     fs::write(
@@ -86,7 +79,7 @@ async fn prepared_client_connects_from_validated_settings() {
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-ca.pem"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:443"
@@ -148,18 +141,8 @@ async fn prepared_client_uses_the_configured_server_address_port() {
     fs::write(tempdir.path().join("server-ca.pem"), server_cert_pem).unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
     fs::write(
@@ -170,7 +153,7 @@ async fn prepared_client_uses_the_configured_server_address_port() {
 server-address = "localhost:{}"
 server-trust = "ca-file"
 server-ca-file = "server-ca.pem"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:443"
@@ -240,18 +223,8 @@ async fn prepared_client_rejects_settings_without_services() {
 
     fs::write(tempdir.path().join("server-ca.pem"), server_cert_pem).unwrap();
     fs::write(
-        tempdir.path().join("client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -266,7 +239,7 @@ async fn prepared_client_rejects_settings_without_services() {
         log_format: runewarp::LogFormat::Text,
         trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
-        identity_directory: tempdir.path().to_path_buf(),
+        identity_key: tempdir.path().join("client.key"),
         services: Vec::new(),
         public_cert_config: None,
         control: None,
@@ -306,18 +279,8 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
     let client_identity = generate_client_identity().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -332,7 +295,7 @@ async fn prepared_client_rejects_multi_service_catch_all_settings() {
         log_format: runewarp::LogFormat::Text,
         trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![
             ServiceConfig {
                 public_hostnames: None,
@@ -375,18 +338,8 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
     let client_identity = generate_client_identity().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -401,7 +354,7 @@ async fn prepared_client_rejects_duplicate_service_hostnames_in_direct_settings(
         log_format: runewarp::LogFormat::Text,
         trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("App.Example.Test.")]),
@@ -437,18 +390,8 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
     let client_identity = generate_client_identity().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -467,7 +410,7 @@ async fn prepared_client_rejects_missing_public_cert_material_for_terminating_se
         log_format: runewarp::LogFormat::Text,
         trace_export: None,
         server_trust: runewarp::ClientServerTrust::System,
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:443".to_owned(),
@@ -533,18 +476,8 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
 
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -564,7 +497,7 @@ async fn prepared_client_loads_valid_public_cert_material_for_terminating_servic
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-ca-not-needed.pem"),
         ),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:443".to_owned(),
@@ -664,18 +597,8 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
 
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -694,7 +617,7 @@ async fn prepared_client_accepts_mixed_terminate_and_passthrough_services() {
         log_format: runewarp::LogFormat::Text,
         trace_export: None,
         server_trust: runewarp::ClientServerTrust::System,
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
@@ -775,18 +698,8 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
 
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -811,7 +724,7 @@ async fn acme_client_starts_without_blocking_on_cert_readiness() {
         log_format: runewarp::LogFormat::Text,
         trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:80".to_owned(),
@@ -888,18 +801,8 @@ async fn shared_client_instance_prep_survives_reconnect_style_redials() {
     fs::write(tempdir.path().join("server-ca.pem"), server_cert_pem).unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
     let public_cert_dir = tempdir.path().join("public-cert");
@@ -919,7 +822,7 @@ async fn shared_client_instance_prep_survives_reconnect_style_redials() {
         log_format: runewarp::LogFormat::Text,
         trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:443".to_owned(),
@@ -1030,18 +933,8 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
 
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -1066,7 +959,7 @@ async fn acme_client_only_manages_terminating_service_hostnames() {
         log_format: runewarp::LogFormat::Text,
         trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![
             ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),

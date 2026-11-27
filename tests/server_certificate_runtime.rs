@@ -1,12 +1,12 @@
+mod common;
+
+use common::generate_client_identity;
 use futures_util::future::BoxFuture;
 use runewarp::server_certificate::{
     CertificateSnapshot, CertificateValidation, ChallengeRouteObserver, ChallengeRouteRequest,
     ConsumedChallengeRoute, ServerAcmeOptions, TcpChallengeRoute,
 };
-use runewarp::{
-    PreparedClient, PreparedServer, generate_client_identity, load_client_config,
-    load_server_config,
-};
+use runewarp::{PreparedClient, PreparedServer, load_client_config, load_server_config};
 use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -108,13 +108,7 @@ async fn runtime_case(expire: bool) {
     )
     .unwrap();
     let identity = generate_client_identity().unwrap();
-    fs::write(path.join("client.crt"), identity.certificate_pem).unwrap();
     fs::write(path.join("client.key"), identity.private_key_pem).unwrap();
-    fs::write(
-        path.join("client-identity.txt"),
-        identity.client_identity.to_string(),
-    )
-    .unwrap();
     fs::create_dir(path.join("acme")).unwrap();
     #[cfg(unix)]
     {
@@ -146,7 +140,7 @@ client-identity = "{}"
 server-address = "edge.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-ca.pem"
-identity-dir = "."
+identity-key = "client.key"
 [[client.services]]
 backend-address = "127.0.0.1:1"
 "#,

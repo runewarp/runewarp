@@ -23,7 +23,7 @@ This document describes what Core implements today. Product policy (lifecycle la
 | [`protocol.md`](protocol.md) | Tunnel/QUIC wire behavior and stream lifecycle |
 | [`sse.md`](sse.md) | SSE profile shared by the downlink and the Tunnel event stream |
 | [`security.md`](security.md) | Authentication and revocation boundaries |
-| [`configuration.md`](configuration.md) | `[control]`, identity directories, and validation |
+| [`configuration.md`](configuration.md) | `[control]`, identity keys, and validation |
 | [`usage.md`](usage.md) | Operator workflows and static-first setup |
 | [`CONTEXT.md`](../CONTEXT.md) | Canonical domain vocabulary |
 | [`roadmap.md`](roadmap.md) | Forward-looking work outside this implemented contract |
@@ -61,8 +61,8 @@ Managed mode is enabled when an effective Control address is present after confi
 | Address shape | DNS hostname with optional port; default port `443`; schemes, paths, and IP literals rejected |
 | Trust | `control.trust = "system"` (default) or `"ca-file"` with exclusive `control.ca-file` |
 | Static exclusivity | Managed Server forbids `[[server.tunnels]]`; managed Client forbids `client.server-address`, `client.server-addresses`, and `--server-address` |
-| Server identity | Managed Server requires `server.identity-dir` (or XDG default), distinct from `server.cert-dir` |
-| Client identity | Managed Client reuses `client.identity-dir` for Tunnel and Control mTLS |
+| Server identity | Managed Server requires a valid key at `server.identity-key` (or the XDG default path) |
+| Client identity | Managed Client reuses the `client.identity-key` key for Tunnel and Control mTLS |
 | Mode switch | Static↔managed requires config replacement plus process restart; no in-process switch or static fallback |
 | Restart | Applied input and revision are memory-only; a fresh process waits for a new first snapshot |
 
@@ -72,19 +72,19 @@ Relative Control CA and identity paths resolve from the selected config file. Om
 
 | Plane | Credential | Purpose |
 | --- | --- | --- |
-| Control (Server role) | **Server identity** material in `server.identity-dir` (`server.crt`, `server.key`, `server-identity.txt`) | Authenticates the Server to Control |
-| Control (Client role) | Client identity material in `client.identity-dir` | Authenticates the Client to Control |
+| Control (Server role) | **Server identity** key at `server.identity-key` | Authenticates the Server to Control |
+| Control (Client role) | Client identity key at `client.identity-key` | Authenticates the Client to Control |
 | Control endpoint | `control.trust` / `control.ca-file` | Validates the Control server certificate |
 | Tunnel endpoint | **Server certificate** / Client identity | Unchanged data-path trust; separate from Control |
 
-**Server identity** is not the **Server certificate**. Core validates and loads Server identity material but does not initialize, renew, rotate, or watch it. Core does not overwrite Client identity certificates for managed credentials. Identity and trust material are reloaded for each new Managed-session connection attempt, not per HTTP request.
+**Server identity** is not the **Server certificate**. Core validates and loads the Server identity key but does not initialize, rotate, or watch it. Core builds each role's identity certificate in memory from its key; Control admits it by SPKI fingerprint alone, without CA chain checks. Identity keys and trust material are reloaded for each new Managed-session connection attempt, not per HTTP request.
 
 ## Transport contract
 
 Each Managed session:
 
 1. Dials the Control hostname over TLS with ALPN `h2` only (no HTTP/1.1 fallback).
-2. Presents the role identity certificate and validates Control through the configured trust mode.
+2. Presents a certificate built in memory from the role identity key and validates Control through the configured trust mode.
 3. Opens exactly one role-specific SSE downlink on that connection.
 4. Validates exactly one canonical UUIDv7 `runewarp-session-id` response header before reading snapshots or applying input.
 5. Sends every state document with that exact ID on additional HTTP/2 streams of the same connection.
@@ -327,7 +327,7 @@ Service selection, Services, Local backends, and TLS mode remain Client-local co
 
 | Condition | Outcome |
 | --- | --- |
-| Invalid local config / missing initial identity material / listener bind failure | Exit nonzero at startup |
+| Invalid local config / missing or invalid initial identity key / listener bind failure | Exit nonzero at startup |
 | SSE / invalid session-incarnation header / silence / first-snapshot / malformed or unknown event / connection loss | Close HTTP/2 connection; reconnect in-process |
 | Invalid snapshot input or apply error | `Rejected`; SSE stays open; prior live state retained |
 | State `PUT` failure | Close HTTP/2 connection; reconnect in-process; report the new connection's first snapshot |

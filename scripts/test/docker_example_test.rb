@@ -1,9 +1,16 @@
 # frozen_string_literal: true
 
+require "digest"
+require "openssl"
+
 require_relative "support/test_helper"
 require_relative "../lib/runewarp"
 
 class DockerExampleTest < Minitest::Test
+  CLIENT_KEY = OpenSSL::PKey::EC.generate("prime256v1")
+  CLIENT_KEY_PEM = CLIENT_KEY.private_to_pem
+  CLIENT_IDENTITY = Digest::SHA256.hexdigest(CLIENT_KEY.public_to_der)
+
   def test_readme_describes_prepare_without_a_manual_reproduction_script
     readme = File.read(File.join(REPO_ROOT, "examples", "docker", "README.md"), encoding: "utf-8")
 
@@ -61,9 +68,7 @@ class DockerExampleTest < Minitest::Test
         }.freeze
 
         CLIENT_FILES = {
-          "/tmp/runewarp-data/runewarp/client/identity/client.crt" => "client cert\\n",
-          "/tmp/runewarp-data/runewarp/client/identity/client.key" => "client key\\n",
-          "/tmp/runewarp-data/runewarp/client/identity/client-identity.txt" => "client-identity\\n"
+          "/tmp/runewarp-data/runewarp/client/identity/client.key" => #{CLIENT_KEY_PEM.inspect}
         }.freeze
 
         def container_state_path(example_dir)
@@ -183,7 +188,10 @@ class DockerExampleTest < Minitest::Test
       end
 
       assert_path_exists(File.join(example_dir, "generated", "server", "data", "runewarp", "server", "cert", "server.crt"))
-      assert_path_exists(File.join(example_dir, "generated", "client", "data", "runewarp", "client", "identity", "client.crt"))
+      client_identity_dir = File.join(example_dir, "generated", "client", "data", "runewarp", "client", "identity")
+      assert_equal(["client.key"], Dir.children(client_identity_dir))
+      server_config = File.read(File.join(example_dir, "generated", "server", "config", "runewarp", "config.toml"), encoding: "utf-8")
+      assert_equal("client_identity = \"#{CLIENT_IDENTITY}\"\n", server_config)
       refute_path_exists(File.join(example_dir, "generated", "server", "source-data"))
       refute_path_exists(File.join(example_dir, "generated", "client", "source-data"))
     end

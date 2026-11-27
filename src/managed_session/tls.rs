@@ -1,23 +1,24 @@
 //! Control TLS material loaded once per Managed-session connection.
 
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rustls::ClientConfig;
 use rustls::RootCertStore;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use crate::tls_material::{load_certificate_chain, load_private_key};
-use crate::{CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, ControlTrust};
+use crate::tls_material::load_certificate_chain;
+use crate::{ControlTrust, IdentityKey, IdentityRole};
 
 /// ALPN token for mandatory HTTP/2. HTTP/1.1 is never offered.
 pub(crate) const CONTROL_ALPN_H2: &[u8] = b"h2";
 
-/// Role identity presented to Control over mTLS.
+/// Role identity key presented to Control over mTLS.
+///
+/// The certificate is built in memory from the key on every connection attempt.
 #[derive(Clone, Debug)]
 pub struct ControlRoleIdentityMaterial {
-    pub cert_path: PathBuf,
+    pub role: IdentityRole,
     pub key_path: PathBuf,
 }
 
@@ -100,12 +101,14 @@ pub(crate) fn load_control_tls_material(
     material: &SessionMaterial,
 ) -> Result<ControlTlsMaterial, ControlTlsMaterialError> {
     let roots = load_control_root_store(&material.trust).map_err(ControlTlsMaterialError::Trust)?;
-    let (cert_chain, private_key) = load_identity_files(&material.identity)
+    let credentials = IdentityKey::read(&material.identity.key_path)
+        .map_err(|error| ControlTlsMaterialError::Identity(error.to_string()))?
+        .tls_credentials(material.identity.role)
         .map_err(|error| ControlTlsMaterialError::Identity(error.to_string()))?;
 
     let mut client_config = ClientConfig::builder()
         .with_root_certificates(roots)
-        .with_client_auth_cert(cert_chain, private_key)
+        .with_client_auth_cert(credentials.cert_chain, credentials.private_key)
         .map_err(ControlTlsMaterialError::ClientAuth)?;
     client_config.alpn_protocols = vec![CONTROL_ALPN_H2.to_vec()];
     // Never offer or fall back to HTTP/1.1.
@@ -115,18 +118,6 @@ pub(crate) fn load_control_tls_material(
         client_config: Arc::new(client_config),
         server_name: material.control_hostname.clone(),
     })
-}
-
-fn load_identity_files(
-    identity: &ControlRoleIdentityMaterial,
-) -> Result<
-    (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>),
-    crate::tls_material::TlsMaterialError,
-> {
-    Ok((
-        load_certificate_chain(&identity.cert_path)?,
-        load_private_key(&identity.key_path)?,
-    ))
 }
 
 fn load_control_root_store(trust: &ControlTrust) -> Result<RootCertStore, TrustLoadError> {
@@ -164,17 +155,17 @@ fn load_control_root_store(trust: &ControlTrust) -> Result<RootCertStore, TrustL
 }
 
 impl ControlRoleIdentityMaterial {
-    pub fn from_client_identity_dir(directory: &Path) -> Self {
+    pub fn client(key_path: PathBuf) -> Self {
         Self {
-            cert_path: directory.join(CLIENT_CERT_FILENAME),
-            key_path: directory.join(CLIENT_KEY_FILENAME),
+            role: IdentityRole::Client,
+            key_path,
         }
     }
 
-    pub fn from_server_identity_dir(directory: &Path) -> Self {
+    pub fn server(key_path: PathBuf) -> Self {
         Self {
-            cert_path: directory.join(crate::SERVER_IDENTITY_CERT_FILENAME),
-            key_path: directory.join(crate::SERVER_IDENTITY_KEY_FILENAME),
+            role: IdentityRole::Server,
+            key_path,
         }
     }
 }

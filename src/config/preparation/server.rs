@@ -15,7 +15,7 @@ use crate::config::{
 };
 use crate::{
     ServerHostname, XdgPathError, default_config_path, default_server_acme_state_dir,
-    default_server_cert_material_dir, default_server_identity_material_dir,
+    default_server_cert_material_dir, default_server_identity_key_path,
 };
 use std::env;
 
@@ -49,7 +49,7 @@ pub(crate) struct PreparedServerConfig {
     pub(crate) tunnels: Vec<PreparedServerTunnelConfig>,
     pub(crate) unknown_field_messages: Vec<String>,
     pub(crate) control: crate::config::preparation::control::PreparedControlSection,
-    pub(crate) identity_directory: Option<PreparedValue<PathBuf>>,
+    pub(crate) identity_key: Option<PreparedValue<PathBuf>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,7 +126,7 @@ pub(crate) fn prepare_server_config_from_cli(
 struct ServerPreparationDefaults<'a> {
     default_server_cert_directory: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
     default_server_acme_state_dir: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
-    default_server_identity_directory: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_server_identity_key: &'a dyn Fn() -> Result<PathBuf, XdgPathError>,
 }
 
 fn prepare_raw_server_config(
@@ -145,7 +145,7 @@ fn prepare_raw_server_config(
         &ServerPreparationDefaults {
             default_server_cert_directory: &default_server_cert_material_dir,
             default_server_acme_state_dir: &default_server_acme_state_dir,
-            default_server_identity_directory: &default_server_identity_material_dir,
+            default_server_identity_key: &default_server_identity_key_path,
         },
     )
 }
@@ -208,24 +208,24 @@ fn prepare_raw_server_config_with_defaults(
         tunnels: raw.tunnels.into_iter().map(prepare_server_tunnel).collect(),
         unknown_field_messages,
         control,
-        identity_directory: prepare_server_identity_directory(
-            raw.identity_dir,
+        identity_key: prepare_server_identity_key(
+            raw.identity_key,
             config_dir,
             managed,
-            defaults.default_server_identity_directory,
+            defaults.default_server_identity_key,
         ),
     }
 }
 
-fn prepare_server_identity_directory(
-    identity_dir: Option<PathBuf>,
+fn prepare_server_identity_key(
+    identity_key: Option<PathBuf>,
     config_dir: &Path,
     managed: bool,
-    default_server_identity_directory: &dyn Fn() -> Result<PathBuf, XdgPathError>,
+    default_server_identity_key: &dyn Fn() -> Result<PathBuf, XdgPathError>,
 ) -> Option<PreparedValue<PathBuf>> {
-    match identity_dir {
+    match identity_key {
         Some(directory) => Some(PreparedValue::Ready(resolve_path(config_dir, &directory))),
-        None if managed => Some(resolve_default_path(default_server_identity_directory)),
+        None if managed => Some(resolve_default_path(default_server_identity_key)),
         None => None,
     }
 }
@@ -667,7 +667,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: None,
-                identity_dir: None,
+                identity_key: None,
                 acme: None,
                 public_bind_address: None,
                 public_bind_addresses: None,
@@ -692,9 +692,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             &super::ServerPreparationDefaults {
                 default_server_cert_directory: &|| Ok(default_cert_dir.clone()),
                 default_server_acme_state_dir: &|| Ok(default_acme_state_dir.clone()),
-                default_server_identity_directory: &|| {
-                    Ok(tempdir.path().join("unused-identity-dir"))
-                },
+                default_server_identity_key: &|| Ok(tempdir.path().join("unused-identity-key")),
             },
         );
 
@@ -717,7 +715,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: None,
-                identity_dir: None,
+                identity_key: None,
                 acme: Some(RawServerAcmeConfig {
                     email: Some("admin@example.test".to_owned()),
                     state_dir: None,
@@ -745,9 +743,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             &super::ServerPreparationDefaults {
                 default_server_cert_directory: &|| Ok(tempdir.path().join("unused-cert-dir")),
                 default_server_acme_state_dir: &|| Ok(default_acme_state_dir.clone()),
-                default_server_identity_directory: &|| {
-                    Ok(tempdir.path().join("unused-identity-dir"))
-                },
+                default_server_identity_key: &|| Ok(tempdir.path().join("unused-identity-key")),
             },
         );
 
@@ -779,7 +775,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: None,
-                identity_dir: None,
+                identity_key: None,
                 acme: Some(RawServerAcmeConfig {
                     email: Some("admin@example.test".to_owned()),
                     state_dir: Some(PathBuf::from("acme-state")),
@@ -807,9 +803,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             &super::ServerPreparationDefaults {
                 default_server_cert_directory: &|| Ok(tempdir.path().join("unused-cert-dir")),
                 default_server_acme_state_dir: &|| Ok(tempdir.path().join("unused-acme-state")),
-                default_server_identity_directory: &|| {
-                    Ok(tempdir.path().join("unused-identity-dir"))
-                },
+                default_server_identity_key: &|| Ok(tempdir.path().join("unused-identity-key")),
             },
         );
 
@@ -839,8 +833,8 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     }
 
     #[test]
-    fn server_preparation_defaults_managed_identity_directory()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn server_preparation_defaults_managed_identity_key() -> Result<(), Box<dyn std::error::Error>>
+    {
         let tempdir = tempdir()?;
         let config_path = tempdir.path().join("config.toml");
         let default_identity_dir = tempdir.path().join("xdg-data/server/identity");
@@ -855,7 +849,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: Some(PathBuf::from("server-cert")),
-                identity_dir: None,
+                identity_key: None,
                 acme: None,
                 public_bind_address: None,
                 public_bind_addresses: None,
@@ -873,19 +867,19 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             &super::ServerPreparationDefaults {
                 default_server_cert_directory: &|| Ok(tempdir.path().join("unused-cert-dir")),
                 default_server_acme_state_dir: &|| Ok(tempdir.path().join("unused-acme-state")),
-                default_server_identity_directory: &|| Ok(default_identity_dir.clone()),
+                default_server_identity_key: &|| Ok(default_identity_dir.clone()),
             },
         );
 
         assert_eq!(
-            prepared.identity_directory,
+            prepared.identity_key,
             Some(PreparedValue::Ready(default_identity_dir))
         );
         Ok(())
     }
 
     #[test]
-    fn server_preparation_leaves_static_identity_directory_unset_when_omitted()
+    fn server_preparation_leaves_static_identity_key_unset_when_omitted()
     -> Result<(), Box<dyn std::error::Error>> {
         let tempdir = tempdir()?;
         let config_path = tempdir.path().join("config.toml");
@@ -900,7 +894,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             RawServerConfig {
                 hostname: Some("tunnel.example.test".to_owned()),
                 cert_dir: Some(PathBuf::from("server-cert")),
-                identity_dir: None,
+                identity_key: None,
                 acme: None,
                 public_bind_address: None,
                 public_bind_addresses: None,
@@ -925,13 +919,13 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
             &super::ServerPreparationDefaults {
                 default_server_cert_directory: &|| Ok(tempdir.path().join("unused-cert-dir")),
                 default_server_acme_state_dir: &|| Ok(tempdir.path().join("unused-acme-state")),
-                default_server_identity_directory: &|| {
+                default_server_identity_key: &|| {
                     panic!("static mode should not consult identity defaults")
                 },
             },
         );
 
-        assert_eq!(prepared.identity_directory, None);
+        assert_eq!(prepared.identity_key, None);
         Ok(())
     }
 }

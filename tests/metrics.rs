@@ -1,15 +1,16 @@
 //! Scrape real Server and Client runtimes after Tunnel connect, reject and close.
 
+mod common;
+
 use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use runewarp::{
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientAdmission,
-    ClientConfig, ClientRuntime, ClientTlsMode, LogLevel, OrderlyShutdown, Server, ServerAddress,
-    ServerAdmission, ServerAuthorization, ServerBindConfig, ServerTunnelConfig, ServiceConfig,
-    ShutdownMode,
+    ClientAdmission, ClientConfig, ClientRuntime, ClientTlsMode, LogLevel, OrderlyShutdown, Server,
+    ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerTunnelConfig,
+    ServiceConfig, ShutdownMode,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -91,14 +92,14 @@ async fn eventually(address: SocketAddr, expected: &[(&str, f64)]) -> Result<Str
 struct Fixture {
     hostname: runewarp::ServerHostname,
     cert: rcgen::CertifiedKey<rcgen::KeyPair>,
-    authorized: runewarp::GeneratedClientIdentity,
+    authorized: common::GeneratedClientIdentity,
     authorization: ServerAuthorization,
 }
 
 impl Fixture {
     fn new() -> Result<Self> {
         let hostname: runewarp::ServerHostname = "localhost".try_into().expect("literal hostname");
-        let authorized = runewarp::generate_client_identity()?;
+        let authorized = common::generate_client_identity()?;
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
         let authorization = ServerAuthorization::from_static_tunnels(
             &hostname,
@@ -141,7 +142,7 @@ impl Fixture {
 
     fn quic_client_config(
         &self,
-        identity: &runewarp::GeneratedClientIdentity,
+        identity: &common::GeneratedClientIdentity,
     ) -> Result<quinn::ClientConfig> {
         let mut roots = rustls::RootCertStore::empty();
         roots.add(self.cert.cert.der().clone())?;
@@ -193,20 +194,8 @@ fn client_config_with_backend(
     backend_address: &str,
 ) -> Result<ClientConfig> {
     fs::write(directory.join("server-ca.pem"), fixture.cert.cert.pem())?;
-    let identity_directory = directory.join("client-identity");
-    fs::create_dir(&identity_directory)?;
-    fs::write(
-        identity_directory.join(CLIENT_CERT_FILENAME),
-        &fixture.authorized.certificate_pem,
-    )?;
-    fs::write(
-        identity_directory.join(CLIENT_KEY_FILENAME),
-        &fixture.authorized.private_key_pem,
-    )?;
-    fs::write(
-        identity_directory.join(CLIENT_IDENTITY_FILENAME),
-        fixture.authorized.client_identity.to_string(),
-    )?;
+    let identity_key = directory.join("client.key");
+    fs::write(&identity_key, &fixture.authorized.private_key_pem)?;
     let server_address = ServerAddress::parse(&format!("localhost:{tunnel_port}"))?;
     Ok(ClientConfig {
         max_visitor_streams: 16_384,
@@ -219,7 +208,7 @@ fn client_config_with_backend(
         log_format: runewarp::LogFormat::Text,
         trace_export: None,
         server_trust: runewarp::ClientServerTrust::CaFile(directory.join("server-ca.pem")),
-        identity_directory,
+        identity_key,
         services: vec![ServiceConfig {
             public_hostnames: None,
             backend_address: backend_address.to_owned(),
@@ -298,7 +287,7 @@ async fn scrapes_track_tunnel_connect_reject_and_close_on_both_roles() -> Result
         .await?;
 
         // Reject: an identity no Tunnel authorizes fails the pinned-identity handshake.
-        let stranger = runewarp::generate_client_identity()?;
+        let stranger = common::generate_client_identity()?;
         let mut endpoint = quinn::Endpoint::client(ephemeral())?;
         endpoint.set_default_client_config(fixture.quic_client_config(&stranger)?);
         let _ = timeout(

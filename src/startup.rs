@@ -25,10 +25,9 @@ use crate::tls_material::{
     load_private_key,
 };
 use crate::{
-    CLIENT_CERT_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig, ClientConnectError,
-    ClientIdentity, ClientIdentityAdmission, ClientPublicCertConfig, ClientTlsMode,
-    QuicConfigError, Server, ServerAddress, ServerAuthorization, ServerBindConfig,
-    ServerCertificateConfig, ServerConfig, ServiceConfig,
+    Client, ClientConfig, ClientConnectError, ClientIdentity, ClientIdentityAdmission,
+    ClientPublicCertConfig, ClientTlsMode, QuicConfigError, Server, ServerAddress,
+    ServerAuthorization, ServerBindConfig, ServerCertificateConfig, ServerConfig, ServiceConfig,
     client::TerminationTlsConfigs,
     client::validate_services,
     make_client_tunnel_h3_config, make_server_tunnel_h3_config,
@@ -602,7 +601,7 @@ impl PreparedClient {
         expected_generation: Option<crate::tunnel::ServerRuntimeGeneration>,
     ) -> Result<Self, ClientStartupError> {
         let loaded_roots = load_root_store(&config.server_trust)?;
-        let (cert_chain, private_key) = load_client_identity_material(&config.identity_directory)?;
+        let (cert_chain, private_key) = load_client_identity_material(&config.identity_key)?;
         let quic_client_config =
             make_client_tunnel_h3_config(loaded_roots.roots, cert_chain, private_key)
                 .map_err(ClientStartupError::QuicConfig)?;
@@ -951,7 +950,7 @@ fn load_root_store(
 }
 
 fn load_client_identity_material(
-    identity_directory: &std::path::Path,
+    identity_key: &std::path::Path,
 ) -> Result<
     (
         Vec<CertificateDer<'static>>,
@@ -959,11 +958,19 @@ fn load_client_identity_material(
     ),
     ClientStartupError,
 > {
-    let cert_chain = load_certificate_chain(&identity_directory.join(CLIENT_CERT_FILENAME))
-        .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
-    let private_key = load_private_key(&identity_directory.join(CLIENT_KEY_FILENAME))
-        .map_err(|error| ClientStartupError::TlsMaterial(error.into()))?;
-    Ok((cert_chain, private_key))
+    let credentials = crate::IdentityKey::read(identity_key)
+        .map_err(|error| {
+            ClientStartupError::TlsMaterial(ServerStartupError::InvalidTlsMaterial(
+                error.to_string(),
+            ))
+        })?
+        .tls_credentials(crate::IdentityRole::Client)
+        .map_err(|error| {
+            ClientStartupError::TlsMaterial(ServerStartupError::InvalidTlsMaterial(
+                error.to_string(),
+            ))
+        })?;
+    Ok((credentials.cert_chain, credentials.private_key))
 }
 
 fn load_root_store_with(
@@ -1282,25 +1289,16 @@ mod tests {
     }
 
     #[test]
-    fn client_certificate_and_key_are_reloaded_for_each_attempt() {
+    fn client_identity_key_is_reloaded_for_each_attempt() {
         let tempdir = tempfile::tempdir().unwrap();
-        let identity = crate::generate_client_identity().unwrap();
-        fs::write(
-            tempdir.path().join(crate::CLIENT_CERT_FILENAME),
-            identity.certificate_pem,
-        )
-        .unwrap();
-        fs::write(
-            tempdir.path().join(crate::CLIENT_KEY_FILENAME),
-            identity.private_key_pem,
-        )
-        .unwrap();
+        let key_path = tempdir.path().join("client.key");
+        fs::write(&key_path, crate::IdentityKey::generate().unwrap().to_pem()).unwrap();
 
-        load_client_identity_material(tempdir.path()).unwrap();
-        fs::write(tempdir.path().join(crate::CLIENT_KEY_FILENAME), "not a key").unwrap();
+        load_client_identity_material(&key_path).unwrap();
+        fs::write(&key_path, "not a key").unwrap();
 
         assert!(matches!(
-            load_client_identity_material(tempdir.path()),
+            load_client_identity_material(&key_path),
             Err(ClientStartupError::TlsMaterial(_))
         ));
     }
@@ -1567,7 +1565,7 @@ mod tests {
             log_format: crate::LogFormat::Text,
             trace_export: None,
             server_trust: crate::ClientServerTrust::System,
-            identity_directory: tempdir.path().join("client-identity"),
+            identity_key: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: Some(vec![
                     public_hostname("app.example.test"),
@@ -1620,7 +1618,7 @@ mod tests {
             log_format: crate::LogFormat::Text,
             trace_export: None,
             server_trust: crate::ClientServerTrust::System,
-            identity_directory: tempdir.path().join("client-identity"),
+            identity_key: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: Some(vec![public_hostname(hostname)]),
                 backend_address: "127.0.0.1:8080".to_owned(),
@@ -1724,7 +1722,7 @@ mod tests {
             log_format: crate::LogFormat::Text,
             trace_export: None,
             server_trust: crate::ClientServerTrust::System,
-            identity_directory: tempdir.path().join("client-identity"),
+            identity_key: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:443".to_owned(),
@@ -1810,7 +1808,7 @@ mod tests {
             log_format: crate::LogFormat::Text,
             trace_export: None,
             server_trust: crate::ClientServerTrust::System,
-            identity_directory: tempdir.path().join("client-identity"),
+            identity_key: tempdir.path().join("client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:443".to_owned(),
@@ -1937,7 +1935,7 @@ mod tests {
             log_format: crate::LogFormat::Text,
             trace_export: None,
             server_trust: crate::ClientServerTrust::System,
-            identity_directory: PathBuf::from("/tmp/unused-client-identity"),
+            identity_key: PathBuf::from("/tmp/unused-client-identity"),
             services: vec![ServiceConfig {
                 public_hostnames: Some(vec![public_hostname("app.example.test")]),
                 backend_address: "127.0.0.1:8080".to_owned(),

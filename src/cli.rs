@@ -46,7 +46,7 @@ Examples:
 
 const CLIENT_IDENTITY_LEAF_EXAMPLES: &str = "\
 Examples:
-  runewarp client identity init --dir ./client-identity
+  runewarp client identity init --key ./client.key
   runewarp client identity show";
 
 const CLIENT_PUBLIC_CERT_EXAMPLES: &str = "\
@@ -268,17 +268,17 @@ pub struct ClientIdentityArgs {
 #[derive(Debug, Subcommand)]
 pub enum ClientIdentitySubcommand {
     /// Initialize Client identity.
-    Init(ClientIdentityDirArgs),
+    Init(ClientIdentityKeyArgs),
     /// Rotate Client identity.
-    Rotate(ClientIdentityDirArgs),
+    Rotate(ClientIdentityKeyArgs),
     /// Show the Client identity fingerprint.
-    Show(ClientIdentityDirArgs),
+    Show(ClientIdentityKeyArgs),
 }
 
 #[derive(Debug, Args)]
 #[command(before_help = CLIENT_IDENTITY_HEADER, after_help = CLIENT_IDENTITY_LEAF_EXAMPLES)]
-pub struct ClientIdentityDirArgs {
-    /// Read and write Client identity material in this directory.
-    #[arg(long = "dir", value_name = "DIR")]
-    pub dir: Option<PathBuf>,
+pub struct ClientIdentityKeyArgs {
+    /// Read and write the Client identity key at this path.
+    #[arg(long = "key", value_name = "PATH")]
+    pub key: Option<PathBuf>,
 }

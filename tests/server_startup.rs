@@ -4,10 +4,11 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::generate_client_identity;
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    PreparedClient, PreparedServer, RoleAdapter, generate_client_identity,
-    initialize_manual_server_certificate, load_client_config, load_server_config,
+    PreparedClient, PreparedServer, RoleAdapter, initialize_manual_server_certificate,
+    load_client_config, load_server_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -92,16 +93,8 @@ async fn listeners_share_routes_and_tunnel_pools() -> Result<(), Box<dyn std::er
     )?;
     let identity = generate_client_identity()?;
     fs::write(
-        directory.path().join("client.crt"),
-        &identity.certificate_pem,
-    )?;
-    fs::write(
         directory.path().join("client.key"),
         &identity.private_key_pem,
-    )?;
-    fs::write(
-        directory.path().join("client-identity.txt"),
-        identity.client_identity.to_string(),
     )?;
     let backend_one = spawn_tls_backend(vec!["app.example.test".to_owned()], *b"one!").await;
     let backend_two = spawn_tls_backend(vec!["app.example.test".to_owned()], *b"two!").await;
@@ -148,7 +141,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "."
+identity-key = "client.key"
 [[client.services]]
 backend-address = "{}"
 "#,
@@ -440,7 +433,7 @@ async fn managed_prepared_server_binds_empty_auth_and_defers_readiness_until_fir
         "tunnel.example.test",
     )
     .unwrap();
-    common::write_server_identity_material(&tempdir.path().join("server-identity"));
+    common::write_server_identity_key(&tempdir.path().join("server-identity/server.key"));
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
@@ -451,7 +444,7 @@ trust = "system"
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 public-bind-address = "127.0.0.1:0"
 tunnel-bind-address = "127.0.0.1:0"
 readiness-bind-address = "127.0.0.1:0"
@@ -566,13 +559,7 @@ async fn prepared_server_accepts_an_expired_pinned_client_identity_certificate()
         "test certificate must already be expired"
     );
 
-    fs::write(tempdir.path().join("client.crt"), certificate_pem).unwrap();
     fs::write(tempdir.path().join("client.key"), private_key_pem).unwrap();
-    fs::write(
-        tempdir.path().join("client-identity.txt"),
-        client_identity.to_string(),
-    )
-    .unwrap();
 
     fs::write(
         tempdir.path().join("server.toml"),
@@ -600,7 +587,7 @@ client-identity = "{client_identity}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "."
+identity-key = "client.key"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -651,18 +638,8 @@ async fn prepared_server_drops_public_tls_addressed_to_the_server_hostname() {
 
     let client_identity = generate_client_identity().unwrap();
     fs::write(
-        tempdir.path().join("client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -700,7 +677,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "."
+identity-key = "client.key"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -754,18 +731,8 @@ async fn prepared_server_drops_public_tls_for_unconfigured_public_hostnames() {
 
     let client_identity = generate_client_identity().unwrap();
     fs::write(
-        tempdir.path().join("client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -803,7 +770,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "."
+identity-key = "client.key"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -857,18 +824,8 @@ async fn prepared_client_routes_mirrored_public_hostnames_to_matching_services()
 
     let client_identity = generate_client_identity().unwrap();
     fs::write(
-        tempdir.path().join("client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -901,7 +858,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "."
+identity-key = "client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -961,18 +918,8 @@ async fn prepared_client_rejects_streams_without_a_matching_service() {
 
     let client_identity = generate_client_identity().unwrap();
     fs::write(
-        tempdir.path().join("client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -1008,7 +955,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "."
+identity-key = "client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -1065,36 +1012,16 @@ async fn prepared_server_routes_different_public_hostnames_to_different_tunnels(
     let app_client_identity = generate_client_identity().unwrap();
     fs::create_dir(tempdir.path().join("client-app")).unwrap();
     fs::write(
-        tempdir.path().join("client-app/client.crt"),
-        app_client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-app/client.key"),
         app_client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-app/client-identity.txt"),
-        app_client_identity.client_identity.to_string(),
     )
     .unwrap();
 
     let api_client_identity = generate_client_identity().unwrap();
     fs::create_dir(tempdir.path().join("client-api")).unwrap();
     fs::write(
-        tempdir.path().join("client-api/client.crt"),
-        api_client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-api/client.key"),
         api_client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-api/client-identity.txt"),
-        api_client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -1131,7 +1058,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-app"
+identity-key = "client-app/client.key"
 
 [[client.services]]
 backend-address = "{}"
@@ -1148,7 +1075,7 @@ backend-address = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-api"
+identity-key = "client-api/client.key"
 
 [[client.services]]
 backend-address = "{}"
@@ -1212,36 +1139,16 @@ async fn pooling_same_tunnel_clients_does_not_disrupt_other_tunnels() {
     let app_client_identity = generate_client_identity().unwrap();
     fs::create_dir(tempdir.path().join("client-app")).unwrap();
     fs::write(
-        tempdir.path().join("client-app/client.crt"),
-        app_client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-app/client.key"),
         app_client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-app/client-identity.txt"),
-        app_client_identity.client_identity.to_string(),
     )
     .unwrap();
 
     let api_client_identity = generate_client_identity().unwrap();
     fs::create_dir(tempdir.path().join("client-api")).unwrap();
     fs::write(
-        tempdir.path().join("client-api/client.crt"),
-        api_client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-api/client.key"),
         api_client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-api/client-identity.txt"),
-        api_client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -1279,7 +1186,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-app"
+identity-key = "client-app/client.key"
 
 [[client.services]]
 backend-address = "{}"
@@ -1296,7 +1203,7 @@ backend-address = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-app"
+identity-key = "client-app/client.key"
 
 [[client.services]]
 backend-address = "{}"
@@ -1313,7 +1220,7 @@ backend-address = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-api"
+identity-key = "client-api/client.key"
 
 [[client.services]]
 backend-address = "{}"
@@ -1414,36 +1321,16 @@ async fn different_authorized_client_identities_can_share_the_same_tunnel_pool()
     let first_client_identity = generate_client_identity().unwrap();
     fs::create_dir(tempdir.path().join("client-one")).unwrap();
     fs::write(
-        tempdir.path().join("client-one/client.crt"),
-        first_client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-one/client.key"),
         first_client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-one/client-identity.txt"),
-        first_client_identity.client_identity.to_string(),
     )
     .unwrap();
 
     let second_client_identity = generate_client_identity().unwrap();
     fs::create_dir(tempdir.path().join("client-two")).unwrap();
     fs::write(
-        tempdir.path().join("client-two/client.crt"),
-        second_client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-two/client.key"),
         second_client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-two/client-identity.txt"),
-        second_client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -1476,7 +1363,7 @@ client-identities = ["{}", "{}"]
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-one"
+identity-key = "client-one/client.key"
 
 [[client.services]]
 backend-address = "{}"
@@ -1493,7 +1380,7 @@ backend-address = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-two"
+identity-key = "client-two/client.key"
 
 [[client.services]]
 backend-address = "{}"
@@ -1570,18 +1457,8 @@ async fn prepared_server_rejects_an_untrusted_client_identity_before_serving_pub
     let trusted_client_identity = generate_client_identity().unwrap();
     let untrusted_client_identity = generate_client_identity().unwrap();
     fs::write(
-        tempdir.path().join("client.crt"),
-        untrusted_client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client.key"),
         untrusted_client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity.txt"),
-        untrusted_client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -1612,7 +1489,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "."
+identity-key = "client.key"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -1705,18 +1582,8 @@ async fn prepared_server_loads_cached_acme_certificates_from_state_directory() {
 
     let client_identity = generate_client_identity().unwrap();
     fs::write(
-        tempdir.path().join("client.crt"),
-        client_identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client.key"),
         client_identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity.txt"),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
     fs::write(
@@ -1750,7 +1617,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-ca.pem"
-identity-dir = "."
+identity-key = "client.key"
 
 [[client.services]]
 backend-address = "127.0.0.1:1"

@@ -11,20 +11,18 @@ use tempfile::tempdir;
 #[test]
 fn client_config_api_uses_config_vocabulary() -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    fs::create_dir(&identity_directory)?;
-    fs::write(identity_directory.join("client.crt"), "placeholder")?;
-    fs::write(identity_directory.join("client.key"), "placeholder")?;
+    let identity_key = tempdir.path().join("client-identity");
+    fs::create_dir(&identity_key)?;
     fs::write(
-        identity_directory.join("client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        identity_key.join("client.key"),
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )?;
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
 [client]
 server-address = "Tunnel.Example.Test."
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:8443"
@@ -44,7 +42,7 @@ backend-address = "localhost:8443"
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;

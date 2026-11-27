@@ -6,12 +6,12 @@ use super::preparation::client::{
 };
 pub use super::{
     ClientConfig, ClientPublicCertConfig, ClientTlsMode, ConfigFileError, ServiceConfig,
-    load_client_config, resolve_client_identity_material_dir,
-    resolve_client_identity_material_dir_from_config, resolve_client_public_cert_material_dir,
+    load_client_config, resolve_client_identity_key_path,
+    resolve_client_identity_key_path_from_config, resolve_client_public_cert_material_dir,
     resolve_client_public_cert_material_dir_from_config, resolve_terminating_hostnames_from_config,
 };
 use crate::XdgPathError;
-use crate::{default_client_identity_material_dir, default_client_public_cert_material_dir};
+use crate::{default_client_identity_key_path, default_client_public_cert_material_dir};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClientRuntimeArgs {
@@ -24,14 +24,14 @@ pub struct ClientRuntimeArgs {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientConfigResolutionDefaults {
-    pub identity_directory: PathBuf,
+    pub identity_key: PathBuf,
     pub public_cert_directory: PathBuf,
 }
 
 impl ClientConfigResolutionDefaults {
     pub fn from_xdg() -> Result<Self, XdgPathError> {
         Ok(Self {
-            identity_directory: default_client_identity_material_dir()?,
+            identity_key: default_client_identity_key_path()?,
             public_cert_directory: default_client_public_cert_material_dir()?,
         })
     }
@@ -135,12 +135,12 @@ pub fn resolve_selected_client_config(
     runtime: &ClientRuntimeArgs,
     defaults: &ClientConfigResolutionDefaults,
 ) -> Result<ClientConfig, ClientConfigResolutionError> {
-    let default_identity_directory = || Ok(defaults.identity_directory.clone());
+    let default_identity_key = || Ok(defaults.identity_key.clone());
     let default_public_cert_directory = || Ok(defaults.public_cert_directory.clone());
     let prepared = prepare_selected_client_config(
         selected_config,
         runtime,
-        &default_identity_directory,
+        &default_identity_key,
         &default_public_cert_directory,
     )?;
     validate_resolved_client_config(prepared)

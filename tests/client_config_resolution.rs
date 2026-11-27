@@ -2,7 +2,6 @@ use std::error::Error;
 use std::fs;
 
 use runewarp::{
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
     ClientConfigResolutionDefaults, ClientConfigResolutionError, ClientPublicCertConfig,
     ClientRuntimeArgs, LogLevel, SelectedClientConfig, resolve_selected_client_config,
 };
@@ -12,8 +11,8 @@ use tempfile::tempdir;
 fn effective_static_client_address_lists_are_limited_across_config_and_cli_paths()
 -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
-    let identity_directory = directory.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = directory.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
     let config_path = directory.path().join("client.toml");
     fs::write(
         &config_path,
@@ -25,7 +24,7 @@ fn effective_static_client_address_lists_are_limited_across_config_and_cli_paths
         "[server]\nhostname = \"server.example.test\"\n",
     )?;
     let defaults = ClientConfigResolutionDefaults {
-        identity_directory,
+        identity_key,
         public_cert_directory: directory.path().join("unused-public-cert"),
     };
     for selected in [
@@ -76,11 +75,11 @@ fn effective_static_client_address_lists_are_limited_across_config_and_cli_paths
 fn runtime_server_address_overrides_replace_invalid_file_lists_before_validation()
 -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
-    let identity_directory = directory.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = directory.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
     let path = directory.path().join("client.toml");
     let defaults = ClientConfigResolutionDefaults {
-        identity_directory,
+        identity_key,
         public_cert_directory: directory.path().join("unused-public-cert"),
     };
     let oversized = (0..257)
@@ -131,8 +130,8 @@ fn runtime_server_address_overrides_replace_invalid_file_lists_before_validation
 fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<(), Box<dyn Error>>
 {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
 
     let settings = resolve_selected_client_config(
         SelectedClientConfig::None,
@@ -143,7 +142,7 @@ fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory: identity_directory.clone(),
+            identity_key: identity_key.clone(),
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;
@@ -152,7 +151,7 @@ fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<
     assert_eq!(settings.server_port, 443);
     assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(settings.server_trust, runewarp::ClientServerTrust::System);
-    assert_eq!(settings.identity_directory, identity_directory);
+    assert_eq!(settings.identity_key, identity_key);
     assert_eq!(settings.services.len(), 1);
     assert_eq!(settings.services[0].public_hostnames, None);
     assert_eq!(settings.services[0].backend_address, "localhost:8443");
@@ -163,8 +162,8 @@ fn cli_only_resolution_uses_the_runtime_owned_client_retry_defaults() -> Result<
 fn cli_only_resolution_requires_backend_address_without_a_selected_config()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
 
     let error = resolve_selected_client_config(
         SelectedClientConfig::None,
@@ -175,7 +174,7 @@ fn cli_only_resolution_requires_backend_address_without_a_selected_config()
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )
@@ -202,8 +201,8 @@ fn cli_only_resolution_requires_backend_address_without_a_selected_config()
 fn cli_only_resolution_accepts_repeated_server_address_flags_without_a_selected_config()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
 
     let settings = resolve_selected_client_config(
         SelectedClientConfig::None,
@@ -217,7 +216,7 @@ fn cli_only_resolution_accepts_repeated_server_address_flags_without_a_selected_
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;
@@ -240,8 +239,8 @@ fn cli_only_resolution_accepts_repeated_server_address_flags_without_a_selected_
 fn selected_config_without_a_client_section_can_still_resolve_from_runtime_flags()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
@@ -259,7 +258,7 @@ hostname = "tunnel.example.test"
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;
@@ -277,8 +276,8 @@ hostname = "tunnel.example.test"
 fn server_address_runtime_flag_overrides_a_selected_config_before_validation()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
@@ -297,7 +296,7 @@ log-level = "off"
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;
@@ -315,8 +314,8 @@ log-level = "off"
 fn server_address_runtime_flag_rescues_an_invalid_selected_config_value()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
@@ -336,7 +335,7 @@ server-address = "127.0.0.1:443"
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;
@@ -354,8 +353,8 @@ server-address = "127.0.0.1:443"
 fn repeated_server_address_runtime_flags_replace_either_config_target_shape()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
@@ -379,7 +378,7 @@ backend-address = "backend.internal:443"
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;
@@ -402,8 +401,8 @@ backend-address = "backend.internal:443"
 fn backend_address_runtime_flag_is_rejected_when_selected_config_already_has_services()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
@@ -424,7 +423,7 @@ backend-address = "backend.internal:443"
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )
@@ -445,8 +444,8 @@ backend-address = "backend.internal:443"
 fn malformed_selected_services_are_not_masked_by_backend_address_runtime_flags()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
@@ -467,7 +466,7 @@ public-hostnames = ["app.example.test"]
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )
@@ -487,8 +486,8 @@ public-hostnames = ["app.example.test"]
 #[test]
 fn cli_only_resolution_rejects_ip_literal_server_addresses() -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
 
     let error = resolve_selected_client_config(
         SelectedClientConfig::None,
@@ -499,7 +498,7 @@ fn cli_only_resolution_rejects_ip_literal_server_addresses() -> Result<(), Box<d
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )
@@ -520,9 +519,9 @@ fn cli_only_resolution_rejects_ip_literal_server_addresses() -> Result<(), Box<d
 fn selected_config_uses_the_injected_default_public_cert_dir_for_terminate_mode()
 -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
+    let identity_key = tempdir.path().join("client-identity/client.key");
     let public_cert_directory = tempdir.path().join("xdg-data/client/public-cert");
-    write_identity_material(&identity_directory)?;
+    write_identity_material(&identity_key)?;
     fs::create_dir_all(&public_cert_directory)?;
     fs::write(
         tempdir.path().join("config.toml"),
@@ -541,7 +540,7 @@ tls-mode = "terminate"
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs::default(),
         &ClientConfigResolutionDefaults {
-            identity_directory,
+            identity_key,
             public_cert_directory: public_cert_directory.clone(),
         },
     )?;
@@ -554,12 +553,9 @@ tls-mode = "terminate"
 }
 
 fn write_identity_material(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(path)?;
-    fs::write(path.join(CLIENT_CERT_FILENAME), "placeholder certificate")?;
-    fs::write(path.join(CLIENT_KEY_FILENAME), "placeholder key")?;
-    fs::write(
-        path.join(CLIENT_IDENTITY_FILENAME),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-    )?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, runewarp::IdentityKey::generate()?.to_pem())?;
     Ok(())
 }

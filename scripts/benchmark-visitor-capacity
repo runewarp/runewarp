@@ -136,7 +136,7 @@ def scenario(name, count, batch, connections, slow=False, transfer=False):
 {metrics_line}server-addresses = [{addresses}]
 server-trust = "ca-file"
 server-ca-file = "cert/server-ca.crt"
-identity-dir = "identity"
+identity-key = "client.key"
 [[client.services]]
 backend-address = "{backend_address}"
 ''')

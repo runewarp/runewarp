@@ -579,7 +579,7 @@ fn server_runtime_cli_control_address_overrides_config() -> Result<(), Box<dyn s
         tempdir.path().join("server-cert").as_path(),
         "tunnel.example.test",
     )?;
-    common::write_server_identity_material(tempdir.path().join("server-identity").as_path());
+    common::write_server_identity_key(&tempdir.path().join("server-identity/server.key"));
     fs::write(
         tempdir.path().join("server.toml"),
         r#"
@@ -589,7 +589,7 @@ address = "configured.example.test"
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 public-bind-address = "127.0.0.1:0"
 tunnel-bind-address = "127.0.0.1:0"
 "#,

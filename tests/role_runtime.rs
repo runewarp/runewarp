@@ -26,7 +26,7 @@ async fn client_runtime_tears_down_after_shutdown_signal_failure() {
         log_format: runewarp::LogFormat::Text,
         trace_export: None,
         server_trust: runewarp::ClientServerTrust::System,
-        identity_directory: "/missing/client-identity".into(),
+        identity_key: "/missing/client.key".into(),
         services: vec![ServiceConfig {
             public_hostnames: None,
             backend_address: "127.0.0.1:443".to_owned(),

@@ -19,9 +19,9 @@ Runewarp is pre-1.0. Minor releases may include breaking CLI or configuration ch
 | Config area | Owns |
 | --- | --- |
 | `[control]` | Managed-mode Control endpoint address and Control trust |
-| `[server]` | Public routing, Server identity, and the Server certificate path |
+| `[server]` | Public routing, the Server identity key, and the Server certificate path |
 | `[[server.tunnels]]` | Explicit **Public hostname** authorization and one or more pinned **Client identities** for one **Tunnel** |
-| `[client]` | Tunnel dialing, Server trust, Client identity material, and optional terminate-mode certificate management |
+| `[client]` | Tunnel dialing, Server trust, the Client identity key, and optional terminate-mode certificate management |
 | `[[client.services]]` | Local routing from one or more **Public hostnames** to one **Local backend**, with per-Service TLS mode |
 
 Runewarp keeps routing split cleanly:
@@ -84,11 +84,11 @@ When the matching config key is omitted, Runewarp uses:
 | --- | --- |
 | Runtime config | `$XDG_CONFIG_HOME/runewarp/config.toml` or `~/.config/runewarp/config.toml` |
 | Manual/private-CA Server material | `$XDG_DATA_HOME/runewarp/server/cert/` or `~/.local/share/runewarp/server/cert/` |
-| Client identity material | `$XDG_DATA_HOME/runewarp/client/identity/` or `~/.local/share/runewarp/client/identity/` |
+| Client identity key | `$XDG_DATA_HOME/runewarp/client/identity/client.key` or `~/.local/share/runewarp/client/identity/client.key` |
 | Manual Public hostname certificates | `$XDG_DATA_HOME/runewarp/client/public-cert/` or `~/.local/share/runewarp/client/public-cert/` |
 | Client CA bundle for `server-trust = "ca-file"` | `$XDG_DATA_HOME/runewarp/client/server-ca.crt` or `~/.local/share/runewarp/client/server-ca.crt` |
 | Control CA bundle for `control.trust = "ca-file"` | `$XDG_DATA_HOME/runewarp/control/ca.crt` or `~/.local/share/runewarp/control/ca.crt` |
-| Server identity material (managed mode) | `$XDG_DATA_HOME/runewarp/server/identity/` or `~/.local/share/runewarp/server/identity/` |
+| Server identity key (managed mode) | `$XDG_DATA_HOME/runewarp/server/identity/server.key` or `~/.local/share/runewarp/server/identity/server.key` |
 | Server ACME state | `$XDG_STATE_HOME/runewarp/server/acme/` or `~/.local/state/runewarp/server/acme/` |
 | Client ACME state | `$XDG_STATE_HOME/runewarp/client/acme/` or `~/.local/state/runewarp/client/acme/` |
 
@@ -123,10 +123,10 @@ trust = "system"
 [server]
 hostname = "tunnel.example.com"
 cert-dir = "/etc/runewarp/server-cert"
-identity-dir = "/etc/runewarp/server-identity"
+identity-key = "/etc/runewarp/server-identity/server.key"
 ```
 
-Managed mode requires an effective Control address, allows empty `[[server.tunnels]]`, and requires `server.identity-dir` material distinct from `server.cert-dir`. Authorization comes only from Control-published Server snapshots after process start; the Server stays Unready and admits no Tunnel or Visitor work until the first successful apply. See [`managed.md`](managed.md) for the session wire contract.
+Managed mode requires an effective Control address, allows empty `[[server.tunnels]]`, and requires a valid Server identity key at `server.identity-key`. Authorization comes only from Control-published Server snapshots after process start; the Server stays Unready and admits no Tunnel or Visitor work until the first successful apply. See [`managed.md`](managed.md) for the session wire contract.
 
 ### Managed Client
 
@@ -136,7 +136,7 @@ address = "control.example.com"
 trust = "system"
 
 [client]
-identity-dir = "/etc/runewarp/client"
+identity-key = "/etc/runewarp/client/client.key"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -151,7 +151,7 @@ Managed Client mode omits static Server addresses. Assignment comes only from Co
 server-address = "tunnel.example.com"
 server-trust = "ca-file"
 server-ca-file = "/etc/runewarp/server-ca.crt"
-identity-dir = "/etc/runewarp/client"
+identity-key = "/etc/runewarp/client/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.com", "api.example.com"]
@@ -169,7 +169,7 @@ backend-address = "caddy.local:8443"
 server-address = "tunnel.example.com"
 server-trust = "ca-file"
 server-ca-file = "/etc/runewarp/server-ca.crt"
-identity-dir = "/etc/runewarp/client"
+identity-key = "/etc/runewarp/client/client.key"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -184,7 +184,7 @@ This shape is valid only when there is exactly one Service.
 server-addresses = ["tunnel-a.example.com", "tunnel-b.example.com"]
 server-trust = "ca-file"
 server-ca-file = "/etc/runewarp/server-ca.crt"
-identity-dir = "/etc/runewarp/client"
+identity-key = "/etc/runewarp/client/client.key"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -197,7 +197,7 @@ Use `client.server-address` for the common one-target case. Use `client.server-a
 ```toml
 [client]
 server-address = "tunnel.example.com"
-identity-dir = "/etc/runewarp/client"
+identity-key = "/etc/runewarp/client/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.com"]
@@ -234,7 +234,7 @@ At `info`, Runewarp emits Server runtime startup, readiness, Tunnel connection l
 | --- | --- | --- |
 | `server.hostname` | yes | **Server hostname** for the Runewarp edge itself. Used for TLS validation and ACME. On the runtime `runewarp server` command only, `--hostname` or `RUNEWARP_SERVER_HOSTNAME` may replace this value before validation, with `--hostname` taking precedence. |
 | `server.cert-dir` | no | Directory containing manual/private-CA Server material. Defaults to the XDG Server material path when `[server.acme]` is absent. Mutually exclusive with `[server.acme]`. |
-| `server.identity-dir` | managed only | Directory containing Server identity material for Control authentication. Valid only in managed mode. Defaults to the XDG Server identity path. Must resolve to a different directory than `server.cert-dir`. |
+| `server.identity-key` | managed only | Path to the Server identity key file used to authenticate to Control. Valid only in managed mode. Defaults to `$XDG_DATA_HOME/runewarp/server/identity/server.key`. Any readable path works, including a mounted Kubernetes Secret. |
 | `server.public-bind-address` | no | One literal TCP socket address string for **Visitor** TLS traffic. Mutually exclusive with `server.public-bind-addresses`. Defaults to `"0.0.0.0:443"` when neither key is supplied. |
 | `server.public-bind-addresses` | no | Array of 1 to 8 distinct literal TCP socket addresses for **Visitor** TLS traffic. Mutually exclusive with `server.public-bind-address`. |
 | `server.tunnel-bind-address` | no | One literal UDP socket address string for **Client** **Tunnel connections**. Mutually exclusive with `server.tunnel-bind-addresses`. Defaults to `"0.0.0.0:443"` when neither key is supplied; every listener uses ordinary HTTP/3 with ALPN `h3`. |
@@ -276,7 +276,7 @@ The addresses must belong to the host; add the remaining certificate and Tunnel 
 | `client.server-addresses` | static runtime or config | From 1 to 256 explicit **Server addresses** for static fanout. Mutually exclusive with `client.server-address`. Each entry uses the same `hostname[:port]` rules as the singular field. Repeated `--server-address` flags replace this list before validation. |
 | `client.server-trust` | no | `system` or `ca-file`. Defaults to `system`. |
 | `client.server-ca-file` | no | Exclusive CA bundle for the Server hostname. Valid only when `client.server-trust = "ca-file"`. When omitted in `ca-file` mode, Runewarp uses the XDG default CA bundle path. |
-| `client.identity-dir` | no | Directory containing the Client keypair, certificate, and `client-identity.txt`. Defaults to the XDG Client identity path. |
+| `client.identity-key` | no | Path to the Client identity key file. Defaults to `$XDG_DATA_HOME/runewarp/client/identity/client.key`. Any readable path works, including a mounted Kubernetes Secret. |
 | `client.public-cert-dir` | no | Directory containing manual **Public hostname certificate** material for terminate mode. Mutually exclusive with `[client.acme]`. When any Service uses `tls-mode = "terminate"` and `[client.acme]` is absent, Runewarp uses this directory or, when omitted, the XDG default public-cert path. |
 | `client.acme.email` | with Client ACME | ACME contact address for **Public hostname certificates**. Required when `[client.acme]` is present. |
 | `client.acme.state-dir` | no | Writable path for durable Client ACME state. When omitted, Runewarp uses the XDG default state path and creates it during startup after validation succeeds. |
@@ -306,15 +306,25 @@ When `[server.acme]` is enabled, Runewarp warns at startup for each public bind 
 
 Server ACME state directories must be private to their operator, with mode `0700`; generated material uses `0600`. All owner-capable Server instances on a host share the same stable local lock inode and committed state directory. Older binaries without process-held ownership must stop before the first participating owner imports their legacy cache. The CLI observes the Server hostname on external TCP 443 before issuance and starts unready without a usable validated certificate. It uses a 24-hour minimum remaining certificate lifetime, a one-hour safety margin and five-minute finite recovery. Explicit routed overlap and caller-specific lifetime budgets use the integrated Rust controller interface, not an extra TOML marker. See [Server certificate ownership](server-certificates.md).
 
-### Client identity material
+### Identity keys
 
-`client.identity-dir` holds:
+A Client or Server identity is one private key file. Nothing else is stored on disk. `client.identity-key` and `server.identity-key` name that file.
 
-- `client.crt`
-- `client.key`
-- `client-identity.txt`
+The file must be an unencrypted PKCS#8 PEM file with exactly one `PRIVATE KEY` block holding an ECDSA P-256 key. Runewarp rejects, each with its own error:
 
-`runewarp client identity rotate` changes the key and therefore changes the `client-identity`. Newly initialized and rotated identities use Ed25519 with `digitalSignature` and `clientAuth`; pin-only Tunnel authentication still accepts existing ECDSA P-256 material and certificates without extended key usage when the SPKI fingerprint is authorized. Self-signed Client identity certificates are operationally non-expiring key carriers; Core does not renew them automatically or through a CLI subcommand.
+- SEC1 keys (`EC PRIVATE KEY`). Convert one to PKCS#8 without changing the key or its fingerprint with `openssl pkcs8 -topk8 -nocrypt -in old.key -out client.key`.
+- Ed25519 keys from unreleased builds. Run `runewarp client identity rotate` to replace one with a P-256 key, then update authorization.
+- encrypted keys, other algorithms such as P-384 or RSA, and files with extra PEM blocks. Passphrases, OpenSSH keys and raw base64 keys are not supported.
+
+Config validation requires a readable, valid key at the configured path. A key readable by its group or others logs one warning at startup and still runs, because Kubernetes Secret mounts default to `0644`.
+
+The identity fingerprint (the `client-identity` value) is the SHA-256 of the key's DER SubjectPublicKeyInfo, written as 64 lowercase hex characters. It is the same data as a DANE TLSA `3 1 1` record. Compute it without Runewarp:
+
+```sh
+openssl pkey -in client.key -pubout -outform DER | openssl dgst -sha256
+```
+
+Runewarp builds a certificate in memory from the key whenever a TLS peer needs one. The certificate carries no meaning beyond the public key, so there is nothing to renew. `runewarp client identity rotate` replaces the key and therefore changes the `client-identity`. Runewarp reads the key on each connection attempt, so a replaced key takes effect on the next reconnect without a restart.
 
 ### Terminate-mode certificate material
 
@@ -338,15 +348,9 @@ When managed mode is enabled, Runewarp supports the same exclusive trust modes f
 - `system` uses the system trust store
 - `ca-file` uses only the configured CA bundle and does not combine it with system roots
 
-### Server identity material (managed mode)
+### Server identity key (managed mode)
 
-`server.identity-dir` holds:
-
-- `server.crt`
-- `server.key`
-- `server-identity.txt`
-
-This material authenticates the Server to Control. It is distinct from the **Server certificate** presented on the tunnel endpoint.
+`server.identity-key` follows the same key contract as the Client identity key. Server keys are provisioned outside Runewarp; there is no Server identity CLI. The key authenticates the Server to Control. It is distinct from the **Server certificate** presented on the tunnel endpoint, and its path is independent of `server.cert-dir`.
 
 ### Client-to-server trust
 
@@ -363,9 +367,10 @@ Runewarp supports two Client trust modes:
 - `runewarp client` requires either a selected `[client]` section or the appropriate runtime routing flags when no selected Client config exists or the selected file has no `[client]` section: static mode needs `--server-address` and `--backend-address`; managed CLI-only mode needs `--control-address` and `--backend-address`
 - present `[control]` requires an effective `control.address` after any `--control-address` override
 - managed mode is enabled when an effective Control address is present after config and CLI preparation
-- in managed mode, `[[server.tunnels]]` must be empty, `server.identity-dir` is required (or defaults to the XDG Server identity path), and `client.server-address`, `client.server-addresses`, and `--server-address` are rejected
-- in static mode, `server.identity-dir` is rejected and at least one `[[server.tunnels]]` entry is required
-- `server.identity-dir` must resolve to a different directory than `server.cert-dir`
+- in managed mode, `[[server.tunnels]]` must be empty, a valid key at `server.identity-key` (or the XDG default path) is required, and `client.server-address`, `client.server-addresses`, and `--server-address` are rejected
+- in static mode, `server.identity-key` is rejected and at least one `[[server.tunnels]]` entry is required
+- `client.identity-key` must name a readable, valid identity key
+- `identity-dir` is an unknown field in both `[client]` and `[server]`
 - `server.hostname` must be present unless the runtime `runewarp server --hostname` flag or `RUNEWARP_SERVER_HOSTNAME` supplies it
 - `[server.acme]` and `server.cert-dir` are mutually exclusive; when `[server.acme]` is absent, Runewarp uses the manual/private-CA path with `server.cert-dir` or its default XDG location
 - `runewarp client` must end up with at least one effective **Server address** after any allowed `--server-address` overlay in static mode

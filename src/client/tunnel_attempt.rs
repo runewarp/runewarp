@@ -836,18 +836,8 @@ mod tests {
                 rcgen::generate_simple_self_signed(vec!["tunnel.example.test".to_owned()]).unwrap();
             std::fs::write(directory.path().join("ca.pem"), certificate.cert.pem()).unwrap();
             std::fs::write(
-                directory.path().join("client.crt"),
-                &identity.certificate_pem,
-            )
-            .unwrap();
-            std::fs::write(
                 directory.path().join("client.key"),
                 &identity.private_key_pem,
-            )
-            .unwrap();
-            std::fs::write(
-                directory.path().join("client-identity.txt"),
-                identity.client_identity.to_string(),
             )
             .unwrap();
             std::fs::write(
@@ -857,7 +847,7 @@ mod tests {
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "ca.pem"
-identity-dir = "."
+identity-key = "client.key"
 [[client.services]]
 backend-address = "127.0.0.1:443"
 "#,

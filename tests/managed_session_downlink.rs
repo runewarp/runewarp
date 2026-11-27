@@ -25,11 +25,9 @@ use runewarp::{
     ControlAddress, ControlRoleIdentityMaterial, ControlTrust, ManagedSession, ManagedSessionEvent,
     ManagedSessionRole, SessionMaterial,
 };
+use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::WebPkiClientVerifier;
-use rustls::{RootCertStore, ServerConfig};
-use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
@@ -39,9 +37,9 @@ use tokio_rustls::TlsAcceptor;
 
 use common::{
     AcceptingClientAdapter, AcceptingServerAdapter, CLIENT_EVENTS_PATH, CLIENT_STATE_PATH,
-    CONTROL_ALPN_H2, ControlMtlsMaterial, MANAGED_SESSION_SILENCE_TIMEOUT, SERVER_EVENTS_PATH,
-    SERVER_STATE_PATH, generate_control_client_identity, generate_control_mtls_material,
-    write_control_ca_and_certs,
+    CONTROL_ALPN_H2, ControlMtlsMaterial, MANAGED_SESSION_SILENCE_TIMEOUT, PinnedSpkiAdmission,
+    SERVER_EVENTS_PATH, SERVER_STATE_PATH, generate_control_client_identity,
+    generate_control_mtls_material, write_control_ca_and_certs,
 };
 
 const CLIENT_SNAPSHOT_SSE: &str =
@@ -124,6 +122,7 @@ impl FixtureMetrics {
 
 struct ControlFixture {
     port: u16,
+    admission: PinnedSpkiAdmission,
     metrics: Arc<FixtureMetrics>,
     shutdown: Arc<Notify>,
     task: JoinHandle<()>,
@@ -135,7 +134,8 @@ impl ControlFixture {
             .await
             .unwrap();
         let port = listener.local_addr().unwrap().port();
-        let acceptor = build_server_acceptor(material);
+        let admission = PinnedSpkiAdmission::for_keys(&[material.client_key_pem.as_str()]);
+        let acceptor = build_server_acceptor(material, &admission);
         let metrics = Arc::new(FixtureMetrics::new());
         let behavior = Arc::new(Mutex::new(behavior));
         let shutdown = Arc::new(Notify::new());
@@ -187,6 +187,7 @@ impl ControlFixture {
 
         Self {
             port,
+            admission,
             metrics,
             shutdown,
             task,
@@ -220,21 +221,25 @@ impl SessionHandle {
     }
 }
 
+/// Pinned SPKI fingerprint of a presented identity certificate, as Control records it.
 fn cert_fingerprint(cert: &CertificateDer<'_>) -> String {
-    let digest = Sha256::digest(cert.as_ref());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    runewarp::client_identity_from_certificate_der(cert.as_ref())
+        .unwrap()
+        .to_string()
 }
 
-fn build_server_acceptor(material: &ControlMtlsMaterial) -> TlsAcceptor {
-    let ca_certs: Vec<CertificateDer<'static>> =
-        CertificateDer::pem_slice_iter(material.ca_cert_pem.as_bytes())
-            .collect::<Result<_, _>>()
-            .unwrap();
-    let mut roots = RootCertStore::empty();
-    for cert in ca_certs {
-        roots.add(cert).unwrap();
-    }
-    let client_verifier = WebPkiClientVerifier::builder(roots.into()).build().unwrap();
+fn key_fingerprint(key_pem: &str) -> String {
+    runewarp::IdentityKey::from_pem(key_pem)
+        .unwrap()
+        .client_identity()
+        .to_string()
+}
+
+fn build_server_acceptor(
+    material: &ControlMtlsMaterial,
+    admission: &PinnedSpkiAdmission,
+) -> TlsAcceptor {
+    let client_verifier = admission.verifier();
 
     let server_certs: Vec<CertificateDer<'static>> =
         CertificateDer::pem_slice_iter(material.server_cert_pem.as_bytes())
@@ -491,16 +496,12 @@ impl Drop for CloseAfterFirstByteStream {
 fn session_material(
     control_hostname: &str,
     ca_cert: &std::path::Path,
-    client_cert: &std::path::Path,
     client_key: &std::path::Path,
 ) -> SessionMaterial {
     SessionMaterial {
         control_hostname: control_hostname.to_owned(),
         trust: ControlTrust::CaFile(ca_cert.to_path_buf()),
-        identity: ControlRoleIdentityMaterial {
-            cert_path: client_cert.to_path_buf(),
-            key_path: client_key.to_path_buf(),
-        },
+        identity: ControlRoleIdentityMaterial::client(client_key.to_path_buf()),
     }
 }
 
@@ -598,7 +599,6 @@ fn invalid_initial_tls_material_fails_session_construction() {
     let material = session_material(
         "localhost",
         &dir.path().join("missing-ca.crt"),
-        &dir.path().join("missing-client.crt"),
         &dir.path().join("missing-client.key"),
     );
     let address = ControlAddress::parse("localhost:443").unwrap();
@@ -614,12 +614,7 @@ async fn session_returns_shutdown_result_to_runtime() {
     let material = generate_control_mtls_material("runewarp-client-a");
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session_material = session_material("localhost", &paths.ca_cert, &paths.client_key);
     let address = ControlAddress::parse("localhost:443").unwrap();
     let mut session =
         ManagedSession::new(address, ManagedSessionRole::Client, session_material).unwrap();
@@ -639,12 +634,7 @@ async fn mtls_peer_identity_is_observed_by_control_fixture() {
     let fixture = ControlFixture::start(&material, SseBehavior::SuccessSnapshot).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session = session_material("localhost", &paths.ca_cert, &paths.client_key);
 
     let mut handle = spawn_client_session(fixture.control_address(), session).await;
     tokio::time::timeout(
@@ -657,9 +647,7 @@ async fn mtls_peer_identity_is_observed_by_control_fixture() {
     {
         let fingerprints = fixture.metrics.peer_cert_fingerprints.lock().unwrap();
         assert_eq!(fingerprints.len(), 1);
-        let expected = cert_fingerprint(
-            &CertificateDer::from_pem_slice(material.client_cert_pem.as_bytes()).unwrap(),
-        );
+        let expected = key_fingerprint(&material.client_key_pem);
         assert_eq!(fingerprints[0], expected);
     }
 
@@ -673,12 +661,7 @@ async fn http2_alpn_is_negotiated_on_fixture_and_client() {
     let fixture = ControlFixture::start(&material, SseBehavior::SuccessSnapshot).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session = session_material("localhost", &paths.ca_cert, &paths.client_key);
 
     let mut handle = spawn_client_session(fixture.control_address(), session).await;
     tokio::time::timeout(
@@ -704,12 +687,7 @@ async fn client_role_uses_exact_events_path_without_selectors() {
     let fixture = ControlFixture::start(&material, SseBehavior::SuccessSnapshot).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session = session_material("localhost", &paths.ca_cert, &paths.client_key);
 
     let mut handle = spawn_client_session(fixture.control_address(), session).await;
     tokio::time::timeout(
@@ -753,12 +731,7 @@ async fn server_role_uses_exact_events_path_without_selectors() {
     let fixture = ControlFixture::start(&material, SseBehavior::SuccessSnapshot).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session = session_material("localhost", &paths.ca_cert, &paths.client_key);
 
     let mut handle = spawn_server_session(fixture.control_address(), session).await;
     tokio::time::timeout(
@@ -802,12 +775,7 @@ async fn exactly_one_sse_downlink_opens_per_connection() {
     let fixture = ControlFixture::start(&material, SseBehavior::SuccessSnapshot).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session = session_material("localhost", &paths.ca_cert, &paths.client_key);
 
     let mut handle = spawn_client_session(fixture.control_address(), session).await;
     tokio::time::timeout(
@@ -830,12 +798,7 @@ async fn redirects_are_not_followed_and_fail_the_session() {
     let fixture = ControlFixture::start(&material, SseBehavior::Redirect).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session = session_material("localhost", &paths.ca_cert, &paths.client_key);
 
     let mut handle = spawn_client_session(fixture.control_address(), session).await;
     tokio::time::timeout(
@@ -864,12 +827,7 @@ async fn sse_failure_establishes_a_new_tls_connection() {
     let fixture = ControlFixture::start(&material, SseBehavior::CloseAfterFirstByte).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session = session_material("localhost", &paths.ca_cert, &paths.client_key);
     let metrics = fixture.metrics.clone();
 
     let handle = spawn_client_session(fixture.control_address(), session).await;
@@ -896,12 +854,7 @@ async fn response_header_stall_reconnects_after_first_snapshot_deadline() {
     let fixture = ControlFixture::start(&material, SseBehavior::NeverRespond).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session_material = session_material("localhost", &paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -941,12 +894,7 @@ async fn delayed_headers_and_snapshot_share_one_first_snapshot_deadline() {
     let fixture = ControlFixture::start(&material, SseBehavior::DelayedHeadersThenSnapshot).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session_material = session_material("localhost", &paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -1015,12 +963,7 @@ async fn snapshot_ready_at_first_snapshot_deadline_loses_to_timeout() {
     let fixture = ControlFixture::start(&material, SseBehavior::SnapshotAtDeadline).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session_material = session_material("localhost", &paths.ca_cert, &paths.client_key);
     let mut session = ManagedSession::new(
         fixture.control_address(),
         ManagedSessionRole::Client,
@@ -1073,12 +1016,7 @@ async fn silence_after_snapshot_reconnects_the_session() {
     let fixture = ControlFixture::start(&material, SseBehavior::SuccessSnapshot).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session_material = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session_material = session_material("localhost", &paths.ca_cert, &paths.client_key);
     let mut handle = spawn_client_session(fixture.control_address(), session_material).await;
 
     tokio::time::timeout(
@@ -1128,12 +1066,7 @@ async fn wrong_content_type_is_treated_as_session_failure() {
     let fixture = ControlFixture::start(&material, SseBehavior::WrongContentType).await;
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material);
-    let session = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session = session_material("localhost", &paths.ca_cert, &paths.client_key);
 
     let mut handle = spawn_client_session(fixture.control_address(), session).await;
     tokio::time::timeout(
@@ -1148,19 +1081,14 @@ async fn wrong_content_type_is_treated_as_session_failure() {
 }
 
 #[tokio::test]
-async fn reloading_identity_files_presents_new_client_certificate() {
+async fn replaced_identity_key_reaches_control_after_reconnect() {
     let material_a = generate_control_mtls_material("runewarp-client-a");
-    let (client_b_cert_pem, client_b_key_pem) =
-        generate_control_client_identity(&material_a, "runewarp-client-b");
+    let client_b_key_pem = generate_control_client_identity();
     let fixture = ControlFixture::start(&material_a, SseBehavior::SuccessSnapshot).await;
+    fixture.admission.pin_key(&client_b_key_pem);
     let dir = tempdir().unwrap();
     let paths = write_control_ca_and_certs(dir.path(), &material_a);
-    let session = session_material(
-        "localhost",
-        &paths.ca_cert,
-        &paths.client_cert,
-        &paths.client_key,
-    );
+    let session = session_material("localhost", &paths.ca_cert, &paths.client_key);
 
     let mut handle = spawn_client_session(fixture.control_address(), session).await;
     tokio::time::timeout(
@@ -1175,7 +1103,6 @@ async fn reloading_identity_files_presents_new_client_certificate() {
         fingerprints[0].clone()
     };
 
-    fs::write(&paths.client_cert, &client_b_cert_pem).unwrap();
     fs::write(&paths.client_key, &client_b_key_pem).unwrap();
 
     // Force reconnect so the next handshake reloads identity paths from disk.
@@ -1208,9 +1135,7 @@ async fn reloading_identity_files_presents_new_client_certificate() {
         assert!(fingerprints.len() >= 2);
         assert_ne!(fingerprints[0], fingerprints[1]);
         assert_eq!(fingerprints[0], first_fingerprint);
-        let expected_b = cert_fingerprint(
-            &CertificateDer::from_pem_slice(client_b_cert_pem.as_bytes()).unwrap(),
-        );
+        let expected_b = key_fingerprint(&client_b_key_pem);
         assert_eq!(fingerprints[1], expected_b);
     }
 
@@ -1239,12 +1164,7 @@ async fn invalid_session_incarnations_fail_before_snapshot_or_apply_for_both_rol
                 ControlFixture::start(&material, SseBehavior::SessionHeaders(headers)).await;
             let dir = tempdir().unwrap();
             let paths = write_control_ca_and_certs(dir.path(), &material);
-            let material = session_material(
-                "localhost",
-                &paths.ca_cert,
-                &paths.client_cert,
-                &paths.client_key,
-            );
+            let material = session_material("localhost", &paths.ca_cert, &paths.client_key);
             let mut handle = match role {
                 ManagedSessionRole::Client => {
                     spawn_client_session(fixture.control_address(), material).await

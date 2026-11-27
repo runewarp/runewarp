@@ -1,3 +1,5 @@
+mod common;
+
 use runewarp::tunnel::ClientTunnel;
 use runewarp::{
     OrderlyShutdown, Server, ServerAdmission, ServerAuthorization, ServerBindConfig,
@@ -20,7 +22,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn client_config(
     cert: &rcgen::CertifiedKey<rcgen::KeyPair>,
-    identity: &runewarp::GeneratedClientIdentity,
+    identity: &common::GeneratedClientIdentity,
 ) -> Result<quinn::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(cert.cert.der().clone())?;
@@ -88,7 +90,7 @@ async fn server_connection_logs_correlate_visitors_and_tunnels_across_listeners(
     )?;
     let hostname: runewarp::ServerHostname =
         "tunnel.example.test".try_into().expect("literal hostname");
-    let identity = runewarp::generate_client_identity()?;
+    let identity = common::generate_client_identity()?;
     let cert = rcgen::generate_simple_self_signed(vec!["tunnel.example.test".to_owned()])?;
     let authorization = ServerAuthorization::from_static_tunnels(
         &hostname,
@@ -161,7 +163,7 @@ async fn server_connection_logs_correlate_visitors_and_tunnels_across_listeners(
     let mut rejected = visitor(publics[0], "unknown.example.test").await?;
     let _ = timeout(Duration::from_secs(2), rejected.read(&mut byte)).await?;
     // The same endpoint now exercises failed and unauthorized handshakes before HTTP/3.
-    let unauthorized = runewarp::generate_client_identity()?;
+    let unauthorized = common::generate_client_identity()?;
     let mut bad_endpoint = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
     bad_endpoint.set_default_client_config(client_config(&cert, &unauthorized)?);
     if let Ok(connection) = timeout(

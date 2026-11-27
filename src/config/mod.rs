@@ -22,15 +22,13 @@ use self::preparation::server::{
 };
 use crate::control_address::ControlAddress;
 use crate::server_address::{MAX_CLIENT_SERVER_ADDRESSES, ServerAddress};
-use crate::server_identity::{ServerIdentity, read_server_identity};
+use crate::server_identity::ServerIdentity;
 use crate::tls_material::{
     SERVER_CERT_FILENAME, SERVER_KEY_FILENAME, validate_server_tls_material,
 };
 use crate::{
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientIdentity,
-    ProxyProtocolVersion, PublicHostname, SERVER_CA_FILENAME, SERVER_IDENTITY_CERT_FILENAME,
-    SERVER_IDENTITY_FILENAME, SERVER_IDENTITY_KEY_FILENAME, ServerHostname, TrustedNetwork,
-    XdgPathError,
+    ClientIdentity, IdentityKey, IdentityKeyFileError, ProxyProtocolVersion, PublicHostname,
+    SERVER_CA_FILENAME, ServerHostname, TrustedNetwork, XdgPathError,
 };
 
 pub use self::preparation::material::MaterialDirectoryError;
@@ -48,7 +46,7 @@ pub struct ControlConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerIdentityConfig {
-    pub directory: PathBuf,
+    pub key_path: PathBuf,
     pub identity: ServerIdentity,
 }
 
@@ -150,7 +148,7 @@ pub struct ClientConfig {
     /// Optional OTLP span export; unset exports nothing.
     pub trace_export: Option<crate::TraceExportConfig>,
     pub server_trust: crate::trust::ClientServerTrust,
-    pub identity_directory: PathBuf,
+    pub identity_key: PathBuf,
     pub services: Vec<ServiceConfig>,
     pub public_cert_config: Option<ClientPublicCertConfig>,
     pub control: Option<ControlConfig>,
@@ -376,17 +374,17 @@ pub fn resolve_terminating_hostnames_from_config(
     preparation::client::project_terminating_hostnames(path)
 }
 
-pub fn resolve_client_identity_material_dir_from_config(
+pub fn resolve_client_identity_key_path_from_config(
     path: &Path,
 ) -> Result<Option<PathBuf>, ConfigFileError> {
-    preparation::client::project_client_identity_material_dir(path)
+    preparation::client::project_client_identity_key_path(path)
 }
 
-pub fn resolve_client_identity_material_dir(
+pub fn resolve_client_identity_key_path(
     config: Option<PathBuf>,
     directory: Option<PathBuf>,
 ) -> Result<PathBuf, MaterialDirectoryError> {
-    preparation::client::resolve_client_identity_material_dir(config, directory)
+    preparation::client::resolve_client_identity_key_path(config, directory)
 }
 
 pub fn resolve_client_public_cert_material_dir(
@@ -495,7 +493,7 @@ fn validate_prepared_server_config(
         tunnels,
         unknown_field_messages,
         control,
-        identity_directory,
+        identity_key,
     } = prepared;
     let mut messages = unknown_field_messages;
     messages.extend(control.unknown_field_messages);
@@ -622,27 +620,18 @@ fn validate_prepared_server_config(
     };
 
     let identity = if managed {
-        let identity_directory = identity_directory
-            .and_then(|directory| directory.into_option(&mut messages))
-            .and_then(|directory| {
-                validate_existing_directory_path("server.identity-dir", directory, &mut messages)
-            });
-        if let (Some(identity_directory), Some(cert_directory)) = (
-            identity_directory.as_ref(),
-            certificate_directory(&certificate),
-        ) && paths_refer_to_same_location(identity_directory, &cert_directory)
-        {
-            messages.push(
-                "server.identity-dir must resolve to a different directory than server.cert-dir"
-                    .to_owned(),
-            );
-        }
-        identity_directory.and_then(|directory| {
-            validate_prepared_server_identity_material(directory, &mut messages)
-        })
+        identity_key
+            .and_then(|path| path.into_option(&mut messages))
+            .and_then(|path| {
+                let key = validate_identity_key_file("server.identity-key", &path, &mut messages)?;
+                Some(ServerIdentityConfig {
+                    identity: key.server_identity(),
+                    key_path: path,
+                })
+            })
     } else {
-        if identity_directory.is_some() {
-            messages.push("server.identity-dir may be set only in managed mode".to_owned());
+        if identity_key.is_some() {
+            messages.push("server.identity-key may be set only in managed mode".to_owned());
         }
         None
     };
@@ -708,7 +697,7 @@ pub(crate) fn validate_prepared_client_config(
         log_format,
         trace_export,
         trust,
-        identity_directory,
+        identity_key,
         services,
         manual_public_cert_present,
         manual_public_cert_directory,
@@ -862,31 +851,9 @@ pub(crate) fn validate_prepared_client_config(
             None
         }
     };
-    let identity_directory = identity_directory
-        .into_option(&mut messages)
-        .and_then(|directory| {
-            validate_existing_directory_path("client.identity-dir", directory, &mut messages)
-        });
-    if let Some(identity_directory) = identity_directory.as_deref() {
-        let _ = validate_directory_file(
-            "client.identity-dir",
-            identity_directory,
-            CLIENT_CERT_FILENAME,
-            &mut messages,
-        );
-        let _ = validate_directory_file(
-            "client.identity-dir",
-            identity_directory,
-            CLIENT_KEY_FILENAME,
-            &mut messages,
-        );
-        let _ = validate_directory_file(
-            "client.identity-dir",
-            identity_directory,
-            CLIENT_IDENTITY_FILENAME,
-            &mut messages,
-        );
-    }
+    let identity_key = identity_key.into_option(&mut messages).filter(|path| {
+        validate_identity_key_file("client.identity-key", path, &mut messages).is_some()
+    });
 
     if manual_public_cert_present && acme_present {
         messages.push("[client.acme] and client.public-cert-dir are mutually exclusive".to_owned());
@@ -993,7 +960,7 @@ pub(crate) fn validate_prepared_client_config(
             log_format,
             trace_export,
             server_trust: server_trust.expect("validated client.server-trust"),
-            identity_directory: identity_directory.expect("validated client.identity-dir"),
+            identity_key: identity_key.expect("validated client.identity-key"),
             services,
             public_cert_config,
             control: control_config,
@@ -1367,54 +1334,24 @@ fn validate_prepared_control_trust(
     }
 }
 
-fn validate_prepared_server_identity_material(
-    directory: PathBuf,
+/// Validate that `path` holds a readable identity key that satisfies the key contract.
+fn validate_identity_key_file(
+    field_name: &str,
+    path: &Path,
     messages: &mut Vec<String>,
-) -> Option<ServerIdentityConfig> {
-    let _ = validate_directory_file(
-        "server.identity-dir",
-        &directory,
-        SERVER_IDENTITY_CERT_FILENAME,
-        messages,
-    );
-    let _ = validate_directory_file(
-        "server.identity-dir",
-        &directory,
-        SERVER_IDENTITY_KEY_FILENAME,
-        messages,
-    );
-    let _ = validate_directory_file(
-        "server.identity-dir",
-        &directory,
-        SERVER_IDENTITY_FILENAME,
-        messages,
-    );
-    match read_server_identity(&directory) {
-        Ok(identity) => Some(ServerIdentityConfig {
-            directory,
-            identity,
-        }),
-        Err(error) => {
-            messages.push(format!("server identity material is invalid: {error}"));
+) -> Option<IdentityKey> {
+    match IdentityKey::read(path) {
+        Ok(key) => Some(key),
+        Err(IdentityKeyFileError::Read { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            messages.push(format!("{field_name} file not found: {}", path.display()));
             None
         }
-    }
-}
-
-fn certificate_directory(certificate: &Option<ServerCertificateConfig>) -> Option<PathBuf> {
-    match certificate {
-        Some(ServerCertificateConfig::Manual { directory }) => Some(directory.clone()),
-        Some(ServerCertificateConfig::Acme { .. }) | None => None,
-    }
-}
-
-fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    match (fs::canonicalize(left), fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
+        Err(error) => {
+            messages.push(format!("{field_name} is invalid: {error}"));
+            None
+        }
     }
 }
 
@@ -1754,7 +1691,7 @@ pub(crate) fn collect_server_unknown_field_messages(section_value: &toml::Value)
             "graceful-shutdown-duration",
             "visitor-proxy-protocol",
             "visitor-proxy-trusted-networks",
-            "identity-dir",
+            "identity-key",
             "tunnels",
         ],
         &mut messages,
@@ -1825,7 +1762,7 @@ pub(crate) fn collect_client_unknown_field_messages(section_value: &toml::Value)
             "server-addresses",
             "server-trust",
             "server-ca-file",
-            "identity-dir",
+            "identity-key",
             "public-cert-dir",
             "acme",
             "services",
@@ -1882,7 +1819,7 @@ pub(crate) struct RawControlConfig {
 pub(crate) struct RawServerConfig {
     pub(crate) hostname: Option<String>,
     pub(crate) cert_dir: Option<PathBuf>,
-    pub(crate) identity_dir: Option<PathBuf>,
+    pub(crate) identity_key: Option<PathBuf>,
     pub(crate) acme: Option<RawServerAcmeConfig>,
     pub(crate) public_bind_address: Option<String>,
     pub(crate) public_bind_addresses: Option<Vec<String>>,
@@ -1922,7 +1859,7 @@ pub(crate) struct RawClientConfig {
     pub(crate) server_addresses: Option<Vec<String>>,
     pub(crate) server_trust: Option<String>,
     pub(crate) server_ca_file: Option<PathBuf>,
-    pub(crate) identity_dir: Option<PathBuf>,
+    pub(crate) identity_key: Option<PathBuf>,
     pub(crate) public_cert_dir: Option<PathBuf>,
     pub(crate) acme: Option<RawClientAcmeConfig>,
     #[serde(default)]

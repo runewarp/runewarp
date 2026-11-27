@@ -216,9 +216,15 @@ async fn assert_handshake_rejected(client_identity: &GeneratedClientIdentity) ->
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "rejection timed out"))?;
+    // Setup failures (binding, TLS config, Tunnel establishment) are not rejections: only a QUIC
+    // close carrying a TLS (crypto) error code proves the Server refused the handshake.
+    let error = outcome.expect_err(
+        "the Server must reject non-P-256 identities even when their fingerprint is authorized",
+    );
+    let detail = format!("{error:?}");
     assert!(
-        outcome.is_err(),
-        "the Server must reject non-P-256 identities even when their fingerprint is authorized"
+        detail.contains("ConnectionClosed") && detail.contains("Code::crypto("),
+        "expected a TLS handshake rejection, got: {detail}"
     );
     Ok(())
 }

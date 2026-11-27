@@ -21,6 +21,26 @@ fn error_message(pem: &str) -> String {
         .to_string()
 }
 
+/// Test-only P-256 PKCS#8 key in the layout released Core wrote (with the public key embedded).
+/// The expected fingerprint was computed independently with
+/// `openssl pkey -pubout -outform DER | openssl dgst -sha256`.
+const FIXED_P256_PKCS8_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgh6W4KbH+b4rDzjgs
+thxqiLc4VFEWjKfArxwES0/72vShRANCAASJSfuZrgOtXKUnbZgR6jIatxg+Fiz/
+GO9Bnqm+bk4dvgshzS5AkA9+EExssRcbywLMHQ45bYS26jitCrFB5nV5
+-----END PRIVATE KEY-----
+";
+const FIXED_P256_FINGERPRINT: &str =
+    "49e358eeca58e6867ba91169aefa31f4c9d38115b88a9a294d3e2995e9c178c0";
+
+#[test]
+fn a_fixed_pkcs8_p256_key_keeps_its_independently_computed_fingerprint() {
+    let key = IdentityKey::from_pem(FIXED_P256_PKCS8_KEY).unwrap();
+
+    assert_eq!(key.client_identity().to_string(), FIXED_P256_FINGERPRINT);
+    assert_eq!(key.server_identity().to_string(), FIXED_P256_FINGERPRINT);
+}
+
 #[test]
 fn released_pkcs8_p256_keys_load_and_keep_their_fingerprint() {
     // Released Core (v0.1.0, v0.2.0) wrote rcgen's default P-256 PKCS#8 key.

@@ -88,13 +88,7 @@ fn is_nondefault_config_path(config_path: &Path, default_config_path: Option<&Pa
 }
 
 fn client_identity_messages_missing(messages: &[String]) -> bool {
-    any_message_starts_with(
-        messages,
-        &[
-            "client.identity-dir directory not found:",
-            "client.identity-dir file not found:",
-        ],
-    )
+    any_message_starts_with(messages, &["client.identity-key file not found:"])
 }
 
 fn any_message_starts_with(messages: &[String], prefixes: &[&str]) -> bool {
@@ -130,12 +124,12 @@ mod tests {
         let wrapped =
             super::wrap_client_config_resolution_error(ClientConfigResolutionError::Validation {
                 path: Some(PathBuf::from("custom.toml")),
-                messages: vec!["client.identity-dir file not found: client.pem".to_owned()],
+                messages: vec!["client.identity-key file not found: client.key".to_owned()],
             });
 
         assert_eq!(
             wrapped.to_string(),
-            "invalid client config in custom.toml:\n- client.identity-dir file not found: client.pem\nHint: runewarp client identity init --config custom.toml"
+            "invalid client config in custom.toml:\n- client.identity-key file not found: client.key\nHint: runewarp client identity init --config custom.toml"
         );
     }
 }

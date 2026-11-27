@@ -1,18 +1,23 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PublicKeyData,
 };
 use runewarp::{
-    CLIENT_CERT_LIFETIME_DAYS, ClientIdentity, ClientManagedInput, GeneratedClientIdentity,
-    ManagedSessionLimits, RoleAdapter, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_FILENAME,
-    SERVER_IDENTITY_KEY_FILENAME, ServerIdentity, ServerManagedInput,
+    ClientIdentity, ClientManagedInput, IdentityKey, IdentityRole, ManagedSessionLimits,
+    RoleAdapter, ServerIdentity, ServerManagedInput,
 };
+use rustls::client::danger::HandshakeSignatureValid;
+use rustls::pki_types::{CertificateDer, UnixTime};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use serde_json::Value;
 use time::{Duration, OffsetDateTime};
-use x509_parser::oid_registry::OID_SIG_ED25519;
+use x509_parser::oid_registry::{OID_KEY_TYPE_EC_PUBLIC_KEY, OID_SIG_ECDSA_WITH_SHA256};
 
 /// Wire-contract ALPN for Control fixtures (HTTP/2 only).
 #[allow(dead_code)]
@@ -78,7 +83,7 @@ impl RoleAdapter for AcceptingServerAdapter {
     }
 }
 
-/// PEM material for a private Control CA, server leaf, and client identity leaf.
+/// PEM material for a private Control CA, Control server leaf, and one participant identity key.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct ControlMtlsMaterial {
@@ -86,7 +91,7 @@ pub struct ControlMtlsMaterial {
     pub ca_key_pem: String,
     pub server_cert_pem: String,
     pub server_key_pem: String,
-    pub client_cert_pem: String,
+    /// P-256 PKCS#8 identity key Control admits by pinned SPKI fingerprint.
     pub client_key_pem: String,
 }
 
@@ -97,13 +102,12 @@ pub struct ControlMtlsPaths {
     pub ca_cert: PathBuf,
     pub server_cert: PathBuf,
     pub server_key: PathBuf,
-    pub client_cert: PathBuf,
     pub client_key: PathBuf,
 }
 
-/// Generate a Control CA, a `localhost` server leaf, and a client identity leaf.
+/// Generate a Control CA, a `localhost` server leaf, and a participant identity key.
 #[allow(dead_code)]
-pub fn generate_control_mtls_material(client_common_name: &str) -> ControlMtlsMaterial {
+pub fn generate_control_mtls_material(_client_common_name: &str) -> ControlMtlsMaterial {
     let not_before = OffsetDateTime::now_utc() - Duration::minutes(1);
 
     let ca_key = KeyPair::generate().unwrap();
@@ -116,36 +120,122 @@ pub fn generate_control_mtls_material(client_common_name: &str) -> ControlMtlsMa
     let server_params = control_server_leaf_params("localhost", not_before);
     let server_cert = server_params.signed_by(&server_key, &ca_issuer).unwrap();
 
-    let client_key = KeyPair::generate().unwrap();
-    let client_params = control_client_leaf_params(client_common_name, not_before);
-    let client_cert = client_params.signed_by(&client_key, &ca_issuer).unwrap();
-
     ControlMtlsMaterial {
         ca_cert_pem: ca_cert.pem(),
         ca_key_pem,
         server_cert_pem: server_cert.pem(),
         server_key_pem: server_key.serialize_pem(),
-        client_cert_pem: client_cert.pem(),
-        client_key_pem: client_key.serialize_pem(),
+        client_key_pem: IdentityKey::generate().unwrap().to_pem(),
     }
 }
 
-/// Issue a new client identity leaf signed by an existing Control CA.
+/// Generate a fresh participant identity key PEM.
 #[allow(dead_code)]
-pub fn generate_control_client_identity(
-    ca_material: &ControlMtlsMaterial,
-    client_common_name: &str,
-) -> (String, String) {
-    let not_before = OffsetDateTime::now_utc() - Duration::minutes(1);
-    let ca_key = KeyPair::from_pem(&ca_material.ca_key_pem).unwrap();
-    let ca_params = control_ca_params(not_before);
-    let ca_issuer = Issuer::new(ca_params, ca_key);
+pub fn generate_control_client_identity() -> String {
+    IdentityKey::generate().unwrap().to_pem()
+}
 
-    let client_key = KeyPair::generate().unwrap();
-    let client_params = control_client_leaf_params(client_common_name, not_before);
-    let client_cert = client_params.signed_by(&client_key, &ca_issuer).unwrap();
+/// SHA-256 SPKI fingerprint of an identity key PEM, as Control pins it.
+#[allow(dead_code)]
+pub fn identity_key_fingerprint(key_pem: &str) -> [u8; 32] {
+    *IdentityKey::from_pem(key_pem)
+        .unwrap()
+        .client_identity()
+        .as_bytes()
+}
 
-    (client_cert.pem(), client_key.serialize_pem())
+/// Control-style admission: a peer is admitted only when its leaf SPKI fingerprint is pinned.
+///
+/// Like real Control, no CA chain, validity or extension is checked.
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct PinnedSpkiAdmission {
+    pinned: Arc<Mutex<HashSet<[u8; 32]>>>,
+}
+
+#[allow(dead_code)]
+impl PinnedSpkiAdmission {
+    pub fn for_keys(key_pems: &[&str]) -> Self {
+        let admission = Self::default();
+        for key_pem in key_pems {
+            admission.pin_key(key_pem);
+        }
+        admission
+    }
+
+    pub fn pin_key(&self, key_pem: &str) {
+        self.pinned
+            .lock()
+            .unwrap()
+            .insert(identity_key_fingerprint(key_pem));
+    }
+
+    pub fn verifier(&self) -> Arc<dyn ClientCertVerifier> {
+        Arc::new(PinnedSpkiVerifier {
+            admission: self.clone(),
+            algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        })
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct PinnedSpkiVerifier {
+    admission: PinnedSpkiAdmission,
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl ClientCertVerifier for PinnedSpkiVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        let identity = runewarp::client_identity_from_certificate_der(end_entity.as_ref())
+            .map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+        if self
+            .admission
+            .pinned
+            .lock()
+            .unwrap()
+            .contains(identity.as_bytes())
+        {
+            Ok(ClientCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ECDSA_NISTP256_SHA256]
+    }
 }
 
 #[allow(dead_code)]
@@ -174,13 +264,11 @@ pub fn write_control_ca_and_certs(
         ca_cert: directory.join("ca.crt"),
         server_cert: directory.join("server.crt"),
         server_key: directory.join("server.key"),
-        client_cert: directory.join("client.crt"),
         client_key: directory.join("client.key"),
     };
     fs::write(&paths.ca_cert, &material.ca_cert_pem).unwrap();
     fs::write(&paths.server_cert, &material.server_cert_pem).unwrap();
     fs::write(&paths.server_key, &material.server_key_pem).unwrap();
-    fs::write(&paths.client_cert, &material.client_cert_pem).unwrap();
     fs::write(&paths.client_key, &material.client_key_pem).unwrap();
     paths
 }
@@ -202,65 +290,116 @@ fn control_server_leaf_params(hostname: &str, not_before: OffsetDateTime) -> Cer
     params
 }
 
+/// Test fixture: a generated identity key with its in-memory Client certificate as PEM.
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
-fn control_client_leaf_params(common_name: &str, not_before: OffsetDateTime) -> CertificateParams {
-    let mut params = CertificateParams::new(vec![common_name.to_owned()]).unwrap();
-    params.not_before = not_before;
-    params.not_after = not_before + Duration::days(365);
-    params
-        .distinguished_name
-        .push(DnType::CommonName, common_name.to_owned());
-    params.use_authority_key_identifier_extension = true;
-    params.key_usages.push(KeyUsagePurpose::DigitalSignature);
-    params
-        .extended_key_usages
-        .push(ExtendedKeyUsagePurpose::ClientAuth);
-    params
+pub struct GeneratedClientIdentity {
+    pub private_key_pem: String,
+    pub certificate_pem: String,
+    pub client_identity: ClientIdentity,
 }
 
-/// Asserts the certificate profile used for newly generated Client identities.
+/// Generate an identity key and the in-memory certificate Core builds from it.
+#[allow(dead_code)]
+pub fn generate_client_identity() -> Result<GeneratedClientIdentity, runewarp::IdentityKeyError> {
+    let key = IdentityKey::generate()?;
+    let certificate = key
+        .tls_credentials(IdentityRole::Client)?
+        .cert_chain
+        .remove(0);
+    Ok(GeneratedClientIdentity {
+        private_key_pem: key.to_pem(),
+        certificate_pem: certificate_pem(certificate.as_ref()),
+        client_identity: key.client_identity(),
+    })
+}
+
+/// PEM-encode one DER certificate.
+#[allow(dead_code)]
+pub fn certificate_pem(der: &[u8]) -> String {
+    pem_encode("CERTIFICATE", der)
+}
+
+#[allow(dead_code)]
+fn pem_encode(label: &str, der: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::new();
+    for chunk in der.chunks(3) {
+        let bytes = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let value = u32::from(bytes[0]) << 16 | u32::from(bytes[1]) << 8 | u32::from(bytes[2]);
+        for (index, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if index <= chunk.len() {
+                encoded.push(ALPHABET[(value >> shift & 0x3f) as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    let mut pem = format!("-----BEGIN {label}-----\n");
+    for line in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).unwrap());
+        pem.push('\n');
+    }
+    pem.push_str(&format!("-----END {label}-----\n"));
+    pem
+}
+
+/// Asserts the in-memory certificate profile Core builds from an identity key.
 ///
-/// Covers Ed25519, self-signed subject/issuer, digitalSignature, clientAuth, and the 100-year
-/// validity window. Callers that also need key/fingerprint agreement assert that separately.
+/// Covers ECDSA P-256 with SHA-256, self-signed subject/issuer, digitalSignature, clientAuth and
+/// the fixed 1970-01-01 to 9999-12-31 validity. Callers that also need key/fingerprint agreement
+/// assert that separately.
 #[allow(dead_code)]
 pub fn assert_generated_client_identity_certificate_profile(certificate_der: &[u8]) {
     let (_, parsed) = x509_parser::parse_x509_certificate(certificate_der)
         .expect("parse generated Client identity certificate");
 
     assert_eq!(
-        parsed.signature_algorithm.algorithm, OID_SIG_ED25519,
-        "generated Client identity certificates must be Ed25519"
+        parsed.signature_algorithm.algorithm, OID_SIG_ECDSA_WITH_SHA256,
+        "identity certificates must be signed with ECDSA SHA-256"
     );
     assert_eq!(
-        parsed.tbs_certificate.subject_pki.algorithm.algorithm, OID_SIG_ED25519,
-        "generated Client identity public keys must be Ed25519"
+        parsed.tbs_certificate.subject_pki.algorithm.algorithm, OID_KEY_TYPE_EC_PUBLIC_KEY,
+        "identity public keys must be EC"
     );
     assert_eq!(
         parsed.tbs_certificate.subject, parsed.tbs_certificate.issuer,
-        "generated Client identity certificates must remain self-signed"
+        "identity certificates must remain self-signed"
     );
 
     let key_usage = parsed
         .key_usage()
         .expect("parse key usage")
-        .expect("generated Client identity certificates declare key usage");
+        .expect("identity certificates declare key usage");
     assert!(
         key_usage.value.digital_signature(),
-        "generated Client identity certificates declare digitalSignature"
+        "identity certificates declare digitalSignature"
     );
 
     let extended_key_usage = parsed
         .extended_key_usage()
         .expect("parse extended key usage")
-        .expect("generated Client identity certificates declare extended key usage");
+        .expect("identity certificates declare extended key usage");
     assert!(
         extended_key_usage.value.client_auth,
-        "generated Client identity certificates declare clientAuth"
+        "identity certificates declare clientAuth"
     );
 
-    let lifetime =
-        parsed.validity().not_after.to_datetime() - parsed.validity().not_before.to_datetime();
-    assert_eq!(lifetime.whole_days(), CLIENT_CERT_LIFETIME_DAYS as i64);
+    assert_eq!(parsed.validity().not_before.timestamp(), 0);
+    assert_eq!(
+        parsed.validity().not_after.to_datetime().year(),
+        9999,
+        "identity certificates use the RFC 5280 no-expiry notAfter"
+    );
+    assert_eq!(
+        parsed.validity().not_after.to_datetime().unix_timestamp(),
+        253_402_300_799,
+        "identity certificates expire at 9999-12-31T23:59:59Z"
+    );
 }
 
 /// Builds a deliberately expired self-signed Client identity certificate for the same key.
@@ -297,7 +436,7 @@ pub fn legacy_p256_client_identity_without_eku() -> GeneratedClientIdentity {
     let mut certificate_params =
         CertificateParams::new(vec!["runewarp-client".to_owned()]).unwrap();
     certificate_params.not_before = not_before;
-    certificate_params.not_after = not_before + Duration::days(CLIENT_CERT_LIFETIME_DAYS as i64);
+    certificate_params.not_after = not_before + Duration::days(36_500);
     let certificate = certificate_params.self_signed(&signing_key).unwrap();
     let client_identity =
         ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
@@ -309,61 +448,28 @@ pub fn legacy_p256_client_identity_without_eku() -> GeneratedClientIdentity {
     }
 }
 
-/// Write freshly generated Server identity material for tests.
+/// Write a freshly generated Server identity key to `path` and return its identity.
 #[allow(dead_code)]
-pub fn write_server_identity_material(directory: &Path) -> ServerIdentity {
-    fs::create_dir_all(directory).unwrap();
-    let signing_key = KeyPair::generate().unwrap();
-    let identity =
-        ServerIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
-    let certificate = CertificateParams::new(vec!["runewarp-server-identity".to_owned()])
-        .unwrap()
-        .self_signed(&signing_key)
-        .unwrap();
-    fs::write(
-        directory.join(SERVER_IDENTITY_KEY_FILENAME),
-        signing_key.serialize_pem(),
-    )
-    .unwrap();
-    fs::write(
-        directory.join(SERVER_IDENTITY_CERT_FILENAME),
-        certificate.pem(),
-    )
-    .unwrap();
-    fs::write(
-        directory.join(SERVER_IDENTITY_FILENAME),
-        identity.to_string(),
-    )
-    .unwrap();
-    identity
+pub fn write_server_identity_key(path: &Path) -> ServerIdentity {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let key = IdentityKey::generate().unwrap();
+    fs::write(path, key.to_pem()).unwrap();
+    key.server_identity()
 }
 
-/// Write Control client leaf PEM as Server identity material under `directory`.
-///
-/// The Control fixture verifies peer certificates against the same CA, so managed
-/// Server session tests reuse that leaf as `server.crt` / `server.key`.
+/// Write the Control fixture's participant key as a Server identity key at `path`.
 #[allow(dead_code)]
 pub fn write_control_client_as_server_identity(
-    directory: &Path,
+    path: &Path,
     material: &ControlMtlsMaterial,
 ) -> ServerIdentity {
-    fs::create_dir_all(directory).unwrap();
-    let key = KeyPair::from_pem(&material.client_key_pem).unwrap();
-    let identity = ServerIdentity::from_subject_public_key_info(&key.subject_public_key_info());
-    fs::write(
-        directory.join(SERVER_IDENTITY_KEY_FILENAME),
-        &material.client_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        directory.join(SERVER_IDENTITY_CERT_FILENAME),
-        &material.client_cert_pem,
-    )
-    .unwrap();
-    fs::write(
-        directory.join(SERVER_IDENTITY_FILENAME),
-        identity.to_string(),
-    )
-    .unwrap();
-    identity
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, &material.client_key_pem).unwrap();
+    IdentityKey::from_pem(&material.client_key_pem)
+        .unwrap()
+        .server_identity()
 }

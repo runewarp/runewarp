@@ -7,17 +7,14 @@ use runewarp::config::client::{
     resolve_selected_client_config,
 };
 use runewarp::config::server::{load_server_config, resolve_server_hostname_from_config};
-use runewarp::{
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
-    initialize_manual_server_certificate,
-};
+use runewarp::initialize_manual_server_certificate;
 use tempfile::tempdir;
 
 #[test]
 fn client_config_can_be_resolved_through_the_deep_config_module() -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
-    let identity_directory = tempdir.path().join("client-identity");
-    write_identity_material(&identity_directory)?;
+    let identity_key = tempdir.path().join("client-identity/client.key");
+    write_identity_material(&identity_key)?;
 
     let settings = resolve_selected_client_config(
         SelectedClientConfig::None,
@@ -28,7 +25,7 @@ fn client_config_can_be_resolved_through_the_deep_config_module() -> Result<(), 
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory: identity_directory.clone(),
+            identity_key: identity_key.clone(),
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;
@@ -36,7 +33,7 @@ fn client_config_can_be_resolved_through_the_deep_config_module() -> Result<(), 
     assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
     assert_eq!(settings.log_level, LogLevel::Info);
-    assert_eq!(settings.identity_directory, identity_directory);
+    assert_eq!(settings.identity_key, identity_key);
     assert_eq!(settings.services.len(), 1);
     assert_eq!(settings.services[0].backend_address, "localhost:8443");
     Ok(())
@@ -76,12 +73,9 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 }
 
 fn write_identity_material(path: &std::path::Path) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(path)?;
-    fs::write(path.join(CLIENT_CERT_FILENAME), "placeholder certificate")?;
-    fs::write(path.join(CLIENT_KEY_FILENAME), "placeholder key")?;
-    fs::write(
-        path.join(CLIENT_IDENTITY_FILENAME),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-    )?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, runewarp::IdentityKey::generate()?.to_pem())?;
     Ok(())
 }

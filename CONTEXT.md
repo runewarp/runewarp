@@ -159,19 +159,19 @@ _Avoid_: forwarding the ingress header, global backend emission
 ## Identities, certificates, and trust
 
 **Client identity**:
-The durable pinned public-key identity used by one or more **Client instances** to authenticate to **Server instances** and **Control**. Certificate renewal with the same key preserves the identity; key rotation changes it.
+The durable pinned public-key identity used by one or more **Client instances** to authenticate to **Server instances** and **Control**: the SHA-256 fingerprint of an ECDSA P-256 key's SubjectPublicKeyInfo. It is stored as one key file; key rotation changes it.
 _Avoid_: Certificate, serial number
 
 **Client identity certificate**:
-The certificate that carries and attests a **Client identity** without defining it.
+The self-signed certificate a **Client instance** builds in memory from its key on each connection attempt to carry its **Client identity**. It is never stored and has no meaning beyond the public key.
 _Avoid_: Client identity, Server certificate
 
 **Server identity**:
-The durable pinned public-key identity a **Server** presents to **Control**, distinct from the **Server certificate** used on the **Tunnel listener**. Certificate renewal and process restart preserve it; key rotation changes it.
+The durable pinned public-key identity a **Server** presents to **Control**, distinct from the **Server certificate** used on the **Tunnel listener**. It is stored as one key file; process restart preserves it and key rotation changes it.
 _Avoid_: Server certificate, Server hostname, serial number
 
 **Server identity certificate**:
-The certificate a **Server instance** presents to authenticate its **Server identity** to **Control**. It attests the identity without defining it.
+The self-signed certificate a **Server instance** builds in memory from its key to present its **Server identity** to **Control**. It is never stored and has no meaning beyond the public key.
 _Avoid_: Server certificate, Server identity
 
 **Server certificate**:
@@ -353,7 +353,7 @@ _Avoid_: Crash, Graceful shutdown
 > **Domain expert:** "No. **Visitor PROXY v2 ingress** only supplies the **Canonical Visitor TCP tuple** at the Server. **Backend PROXY v2 emission** is opted in per **Service**."
 >
 > **Dev:** "If two **Client instances** share a key, do they have the same **Client identity**?"
-> **Domain expert:** "Yes. The **Client identity** is the pinned public key. Certificate renewal preserves it; only key rotation changes it."
+> **Domain expert:** "Yes. The **Client identity** is the pinned public key. There is no certificate to renew; only key rotation changes it."
 >
 > **Dev:** "What is the difference between **Withdrawal quiescence** and **Reported quiescence**?"
 > **Domain expert:** "**Withdrawal quiescence** means one Client-withdrawn **Tunnel connection** has no committed **Visitor streams** left. **Reported quiescence** means a **Server instance** in a **Managed drain** reports zero in-flight Visitors in its **Managed state document**."

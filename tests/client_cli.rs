@@ -134,7 +134,7 @@ acme = {}
 
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "cwd-ignored"
+identity-key = "cwd-ignored/client.key"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -149,7 +149,7 @@ acme = {}
 
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "missing-client"
+identity-key = "missing-client/client.key"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -181,7 +181,7 @@ fn client_uses_a_custom_config_path_when_requested() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "missing-client"
+identity-key = "missing-client/client.key"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -206,16 +206,11 @@ fn client_reports_missing_identity_files_with_a_recovery_hint() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder certificate",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("custom.toml"),
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -232,7 +227,6 @@ backend-address = "127.0.0.1:443"
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("client-identity/client.key"));
-    assert!(stderr.contains("client-identity/client-identity.txt"));
     assert!(stderr.contains("runewarp client identity init --config custom.toml"));
 }
 
@@ -273,7 +267,7 @@ server-address = "tunnel.example.test"
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
 
     assert!(stderr.contains("at least one [[client.services]] entry is required"));
-    assert!(!stderr.contains("identity-dir"));
+    assert!(!stderr.contains("identity-key"));
 }
 
 #[test]
@@ -300,7 +294,7 @@ fn client_can_use_runtime_flags_without_a_discovered_config()
 
     let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
 
-    assert!(stderr.contains("client.identity-dir directory not found"));
+    assert!(stderr.contains("client.identity-key file not found"));
     assert!(stderr.contains("runewarp client identity init"));
     assert!(!stderr.contains("failed to read"));
     Ok(())
@@ -318,7 +312,7 @@ fn discovered_config_remains_authoritative_when_runtime_flags_are_present()
         xdg_runewarp_dir.join("config.toml"),
         r#"
 [client]
-identity-dir = "missing-client"
+identity-key = "missing-client/client.key"
 "#,
     )?;
 
@@ -407,7 +401,7 @@ fn configured_identity_dir_still_wins_when_xdg_data_is_unavailable()
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "missing-client"
+identity-key = "missing-client/client.key"
 
 [[client.services]]
 backend-address = "127.0.0.1:443"
@@ -438,7 +432,13 @@ fn client_auto_creates_the_default_acme_state_dir_after_validation_succeeds()
 
     Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .args([
+            "client",
+            "identity",
+            "init",
+            "--key",
+            "client-identity/client.key",
+        ])
         .assert()
         .success();
     fs::write(tempdir.path().join("server-ca.pem"), "not a certificate")?;
@@ -450,7 +450,7 @@ fn client_auto_creates_the_default_acme_state_dir_after_validation_succeeds()
 server-address = "localhost"
 server-trust = "ca-file"
 server-ca-file = "server-ca.pem"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [client.acme]
 email = "admin@example.test"
@@ -483,7 +483,13 @@ fn client_terminate_mode_surfaces_xdg_data_errors_without_claiming_public_cert_d
 
     Command::cargo_bin("runewarp")?
         .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .args([
+            "client",
+            "identity",
+            "init",
+            "--key",
+            "client-identity/client.key",
+        ])
         .assert()
         .success();
 
@@ -492,7 +498,7 @@ fn client_terminate_mode_surfaces_xdg_data_errors_without_claiming_public_cert_d
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -579,7 +585,7 @@ fn client_cli_only_managed_shape_accepts_control_and_backend_without_server_addr
     assert!(!stderr.contains("--server-address is required"));
     assert!(!stderr.contains("--server-address may not be used with --control-address"));
     assert!(
-        stderr.contains("client.identity-dir directory not found"),
+        stderr.contains("client.identity-key file not found"),
         "expected managed CLI-only startup to reach identity material validation, got: {stderr}"
     );
     Ok(())

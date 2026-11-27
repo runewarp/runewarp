@@ -13,7 +13,13 @@ fn write_failing_client_config(dir: &Path, log_format: Option<&str>) {
     Command::cargo_bin("runewarp")
         .unwrap()
         .current_dir(dir)
-        .args(["client", "identity", "init", "--dir", "client-identity"])
+        .args([
+            "client",
+            "identity",
+            "init",
+            "--key",
+            "client-identity/client.key",
+        ])
         .assert()
         .success();
     fs::write(dir.join("server-ca.pem"), "not a certificate").unwrap();
@@ -28,7 +34,7 @@ fn write_failing_client_config(dir: &Path, log_format: Option<&str>) {
 server-address = "localhost"
 server-trust = "ca-file"
 server-ca-file = "server-ca.pem"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]

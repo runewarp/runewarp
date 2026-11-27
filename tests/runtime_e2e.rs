@@ -1,20 +1,21 @@
+mod common;
+
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use common::{GeneratedClientIdentity, generate_client_identity};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, Client, ClientConfig,
-    ClientConfigResolutionDefaults, ClientConnectConfig, ClientInstancePrep,
-    ClientPublicCertConfig, ClientRuntimeArgs, ClientTlsMode, GeneratedClientIdentity, LogLevel,
-    OrderlyShutdown, PreparedClient, PreparedServer, PublicHostname, QUIC_CLOSE_FLUSH_DURATION,
+    Client, ClientConfig, ClientConfigResolutionDefaults, ClientConnectConfig, ClientInstancePrep,
+    ClientPublicCertConfig, ClientRuntimeArgs, ClientTlsMode, LogLevel, OrderlyShutdown,
+    PreparedClient, PreparedServer, PublicHostname, QUIC_CLOSE_FLUSH_DURATION,
     SelectedClientConfig, Server, ServerAddress, ServerAdmission, ServerAuthorization,
     ServerBindConfig, ServerHostname, ServerTunnelConfig, ServiceConfig, ShutdownMode,
-    VisitorTcpAddresses, generate_client_identity, initialize_manual_server_certificate,
-    load_client_config, load_server_config, make_client_tunnel_h3_config,
-    make_server_tunnel_h3_config, make_server_tunnel_h3_config_with_resolver,
-    resolve_selected_client_config,
+    VisitorTcpAddresses, initialize_manual_server_certificate, load_client_config,
+    load_server_config, make_client_tunnel_h3_config, make_server_tunnel_h3_config,
+    make_server_tunnel_h3_config_with_resolver, resolve_selected_client_config,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -154,27 +155,8 @@ async fn forwards_tls_passthrough_end_to_end_with_manual_private_ca_material() {
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     let client_identity = generate_client_identity().unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -209,7 +191,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -256,27 +238,8 @@ async fn trusted_proxy_v2_ingress_reaches_opted_in_passthrough_backend() {
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     let client_identity = generate_client_identity().unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -318,7 +281,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -371,27 +334,8 @@ async fn direct_ingress_synthesizes_proxy_v2_for_opted_in_passthrough_backend() 
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     let client_identity = generate_client_identity().unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -425,7 +369,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -477,25 +421,8 @@ async fn resolver_built_catch_all_settings_forward_end_to_end()
     let client_identity = generate_client_identity()?;
     std::fs::create_dir(tempdir.path().join("client-identity"))?;
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )?;
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )?;
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )?;
 
     let (backend_cert, backend_key) = make_self_signed_cert("app.example.test");
@@ -527,7 +454,7 @@ client-identity = "{}"
 [client]
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 "#,
     )?;
 
@@ -546,7 +473,7 @@ identity-dir = "client-identity"
             log_format: None,
         },
         &ClientConfigResolutionDefaults {
-            identity_directory: tempdir.path().join("unused-default"),
+            identity_key: tempdir.path().join("unused-default"),
             public_cert_directory: tempdir.path().join("unused-public-cert"),
         },
     )?;
@@ -781,18 +708,8 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
     let tempdir = tempdir().unwrap();
     let trusted_client = generate_client_identity().unwrap();
     std::fs::write(
-        tempdir.path().join("client.crt"),
-        &trusted_client.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
         tempdir.path().join("client.key"),
         &trusted_client.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir.path().join("client-identity.txt"),
-        trusted_client.client_identity.to_string(),
     )
     .unwrap();
 
@@ -846,7 +763,7 @@ async fn swapped_server_certificates_only_apply_to_new_tunnel_handshakes() {
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-a.pem"
-identity-dir = "."
+identity-key = "client.key"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -881,7 +798,7 @@ backend-address = "__BACKEND_ADDRESS__"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-b.pem"
-identity-dir = "."
+identity-key = "client.key"
 
 [[client.services]]
 backend-address = "__BACKEND_ADDRESS__"
@@ -1736,10 +1653,7 @@ async fn a_busier_tunnel_pool_member_stops_winning_new_stream_placement() {
 
 #[tokio::test]
 async fn forwards_tls_terminate_end_to_end() {
-    use runewarp::{
-        CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
-        initialize_manual_client_public_cert,
-    };
+    use runewarp::initialize_manual_client_public_cert;
     let tempdir = tempdir().unwrap();
 
     initialize_manual_server_certificate(
@@ -1750,27 +1664,8 @@ async fn forwards_tls_terminate_end_to_end() {
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     let client_identity = generate_client_identity().unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -1816,7 +1711,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 public-cert-dir = "public-cert"
 
 [[client.services]]
@@ -1857,10 +1752,7 @@ tls-mode = "terminate"
 
 #[tokio::test]
 async fn trusted_proxy_v2_ingress_reaches_opted_in_terminate_backend() {
-    use runewarp::{
-        CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
-        initialize_manual_client_public_cert,
-    };
+    use runewarp::initialize_manual_client_public_cert;
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
         tempdir.path().join("server-cert").as_path(),
@@ -1870,27 +1762,8 @@ async fn trusted_proxy_v2_ingress_reaches_opted_in_terminate_backend() {
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     let client_identity = generate_client_identity().unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -1943,7 +1816,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 public-cert-dir = "public-cert"
 
 [[client.services]]
@@ -1993,10 +1866,7 @@ proxy-protocol = "v2"
 ///   - `api.example.test` → Client forwards raw TLS bytes, backend terminates TLS
 #[tokio::test]
 async fn forwards_mixed_tls_terminate_and_passthrough_end_to_end() {
-    use runewarp::{
-        CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
-        initialize_manual_client_public_cert,
-    };
+    use runewarp::initialize_manual_client_public_cert;
     let tempdir = tempdir().unwrap();
 
     initialize_manual_server_certificate(
@@ -2008,27 +1878,8 @@ async fn forwards_mixed_tls_terminate_and_passthrough_end_to_end() {
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     let client_identity = generate_client_identity().unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -2083,7 +1934,7 @@ client-identity = "{}"
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 public-cert-dir = "public-cert"
 
 [[client.services]]
@@ -2160,27 +2011,8 @@ async fn server_forwards_acme_tls_alpn_challenges_for_public_hostnames_to_client
     let client_identity = generate_client_identity().unwrap();
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -2229,7 +2061,7 @@ client-identity = "{}"
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:80".to_owned(),
@@ -2309,27 +2141,8 @@ async fn acme_terminating_client_serves_https_with_cached_certificate() {
     let client_identity = generate_client_identity().unwrap();
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -2404,7 +2217,7 @@ client-identity = "{}"
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: backend_address.to_string(),
@@ -2467,27 +2280,8 @@ async fn shared_client_instance_acme_serves_multi_address_and_reconnect_traffic(
     let client_identity = generate_client_identity().unwrap();
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -2567,7 +2361,7 @@ client-identity = "{}"
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: backend_address.to_string(),
@@ -2696,27 +2490,8 @@ async fn acme_terminating_client_fails_closed_before_cert_is_acquired() {
     let client_identity = generate_client_identity().unwrap();
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -2765,7 +2540,7 @@ client-identity = "{}"
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: "localhost:80".to_owned(),
@@ -2819,27 +2594,8 @@ async fn acme_tls_alpn_challenge_for_public_hostname_does_not_reach_backend() {
     let client_identity = generate_client_identity().unwrap();
     std::fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_CERT_FILENAME),
-        &client_identity.certificate_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_KEY_FILENAME),
+        tempdir.path().join("client-identity").join("client.key"),
         &client_identity.private_key_pem,
-    )
-    .unwrap();
-    std::fs::write(
-        tempdir
-            .path()
-            .join("client-identity")
-            .join(CLIENT_IDENTITY_FILENAME),
-        client_identity.client_identity.to_string(),
     )
     .unwrap();
 
@@ -2912,7 +2668,7 @@ client-identity = "{}"
         server_trust: runewarp::ClientServerTrust::CaFile(
             tempdir.path().join("server-cert/server-ca.crt"),
         ),
-        identity_directory: tempdir.path().join("client-identity"),
+        identity_key: tempdir.path().join("client-identity/client.key"),
         services: vec![ServiceConfig {
             public_hostnames: Some(vec![public_hostname("app.example.test")]),
             backend_address: backend_address.to_string(),
@@ -3825,21 +3581,7 @@ async fn replacement_scenario(leaves: OldRuntimeLeaves) {
 
         let directory = tempdir.path();
         std::fs::write(directory.join("ca.pem"), &tunnel_pem).unwrap();
-        std::fs::write(
-            directory.join(CLIENT_CERT_FILENAME),
-            &identity.certificate_pem,
-        )
-        .unwrap();
-        std::fs::write(
-            directory.join(CLIENT_KEY_FILENAME),
-            &identity.private_key_pem,
-        )
-        .unwrap();
-        std::fs::write(
-            directory.join(CLIENT_IDENTITY_FILENAME),
-            identity.client_identity.to_string(),
-        )
-        .unwrap();
+        std::fs::write(directory.join("client.key"), &identity.private_key_pem).unwrap();
         std::fs::write(
             directory.join("client.toml"),
             format!(
@@ -3848,7 +3590,7 @@ async fn replacement_scenario(leaves: OldRuntimeLeaves) {
 server-address = "localhost:{port}"
 server-trust = "ca-file"
 server-ca-file = "ca.pem"
-identity-dir = "."
+identity-key = "client.key"
 graceful-shutdown-duration = "10s"
 [[client.services]]
 public-hostnames = ["app.example.test"]

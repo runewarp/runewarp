@@ -13,7 +13,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{CertificateError, DigitallySignedStruct, DistinguishedName, SignatureScheme};
 
-use crate::{ClientIdentity, client_identity_from_certificate_der, runtime_log};
+use crate::{ClientIdentity, PeerIdentityError, client_identity_from_certificate_der, runtime_log};
 
 /// Live Client-identity handshake admission consulted by the QUIC verifier.
 pub trait ClientIdentityAdmission: Send + Sync + fmt::Debug {
@@ -202,8 +202,18 @@ impl ClientCertVerifier for PinnedClientCertVerifier {
         _intermediates: &[CertificateDer<'_>],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        let client_identity = client_identity_from_certificate_der(end_entity.as_ref())
-            .map_err(|_| rustls::Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        let client_identity = client_identity_from_certificate_der(end_entity.as_ref()).map_err(
+            |error| match error {
+                PeerIdentityError::ParseCertificate => {
+                    rustls::Error::InvalidCertificate(CertificateError::BadEncoding)
+                }
+                PeerIdentityError::UnsupportedAlgorithm | PeerIdentityError::NonCanonicalPoint => {
+                    rustls::Error::InvalidCertificate(CertificateError::Other(rustls::OtherError(
+                        Arc::new(error),
+                    )))
+                }
+            },
+        )?;
         if self.admission.authorizes_client_identity(&client_identity) {
             Ok(ClientCertVerified::assertion())
         } else {
@@ -222,6 +232,7 @@ impl ClientCertVerifier for PinnedClientCertVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        require_identity_signature_scheme(dss)?;
         verify_tls12_signature(message, cert, dss, &self.supported_algorithms)
     }
 
@@ -231,11 +242,25 @@ impl ClientCertVerifier for PinnedClientCertVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        require_identity_signature_scheme(dss)?;
         verify_tls13_signature(message, cert, dss, &self.supported_algorithms)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.supported_algorithms.supported_schemes()
+        vec![IDENTITY_SIGNATURE_SCHEME]
+    }
+}
+
+/// The only signature scheme accepted from identity keys (ECDSA P-256 with SHA-256).
+const IDENTITY_SIGNATURE_SCHEME: SignatureScheme = SignatureScheme::ECDSA_NISTP256_SHA256;
+
+fn require_identity_signature_scheme(dss: &DigitallySignedStruct) -> Result<(), rustls::Error> {
+    if dss.scheme == IDENTITY_SIGNATURE_SCHEME {
+        Ok(())
+    } else {
+        Err(rustls::Error::PeerMisbehaved(
+            rustls::PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme,
+        ))
     }
 }
 
@@ -246,14 +271,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use rustls::pki_types::CertificateDer;
-    use rustls::pki_types::pem::{Error as PemError, PemObject};
     use rustls::server::danger::ClientCertVerifier;
     use tracing_subscriber::fmt::writer::MakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
 
     use super::{PinnedClientCertVerifier, StaticClientIdentityAdmission, with_handshake_timeout};
-    use crate::generate_client_identity;
+    use crate::{IdentityKey, IdentityRole};
 
     #[tokio::test]
     async fn handshake_timeout_wrapper_returns_the_timeout_error_after_the_deadline() {
@@ -271,9 +294,13 @@ mod tests {
 
     #[test]
     fn unauthorized_client_identity_verification_rate_limits_warn_logs() {
-        let generated_client_identity = generate_client_identity().unwrap();
-        let certificate = client_leaf_certificate(&generated_client_identity).unwrap();
-        let client_identity = generated_client_identity.client_identity.clone();
+        let key = IdentityKey::generate().unwrap();
+        let certificate = key
+            .tls_credentials(IdentityRole::Client)
+            .unwrap()
+            .cert_chain
+            .remove(0);
+        let client_identity = key.client_identity();
         let provider = rustls::crypto::ring::default_provider();
         let verifier = PinnedClientCertVerifier::new(
             Arc::new(StaticClientIdentityAdmission::from_identities(&[])),
@@ -302,6 +329,55 @@ mod tests {
                 .matches("WARN server tunnel connection unauthorized")
                 .count(),
             1
+        );
+    }
+
+    struct CompressedPublicKey(Vec<u8>);
+
+    impl rcgen::PublicKeyData for CompressedPublicKey {
+        fn der_bytes(&self) -> &[u8] {
+            &self.0
+        }
+
+        fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+            &rcgen::PKCS_ECDSA_P256_SHA256
+        }
+    }
+
+    #[test]
+    fn compressed_point_p256_certificates_are_rejected_even_when_pinned() {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let uncompressed = rcgen::PublicKeyData::der_bytes(&key);
+        let mut compressed = vec![2 + (uncompressed[64] & 1)];
+        compressed.extend_from_slice(&uncompressed[1..33]);
+        let compressed = CompressedPublicKey(compressed);
+        let params = rcgen::CertificateParams::new(vec!["runewarp-client".to_owned()]).unwrap();
+        let issuer = rcgen::Issuer::new(params.clone(), &key);
+        let certificate = params.signed_by(&compressed, &issuer).unwrap();
+        let pinned = crate::ClientIdentity::from_subject_public_key_info(
+            &rcgen::PublicKeyData::subject_public_key_info(&compressed),
+        );
+        let verifier = PinnedClientCertVerifier::new(
+            Arc::new(StaticClientIdentityAdmission::from_identities(&[pinned])),
+            rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        );
+
+        let result =
+            verifier.verify_client_cert(certificate.der(), &[], rustls::pki_types::UnixTime::now());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn verifier_advertises_only_the_p256_signature_scheme() {
+        let verifier = PinnedClientCertVerifier::new(
+            Arc::new(StaticClientIdentityAdmission::from_identities(&[])),
+            rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        );
+
+        assert_eq!(
+            verifier.supported_verify_schemes(),
+            [rustls::SignatureScheme::ECDSA_NISTP256_SHA256]
         );
     }
 
@@ -351,18 +427,5 @@ mod tests {
         );
         tracing::subscriber::with_default(subscriber, action);
         buffer.read()
-    }
-
-    fn client_leaf_certificate(
-        generated_client_identity: &crate::GeneratedClientIdentity,
-    ) -> io::Result<CertificateDer<'static>> {
-        match CertificateDer::from_pem_slice(generated_client_identity.certificate_pem.as_bytes()) {
-            Ok(certificate) => Ok(certificate),
-            Err(PemError::NoItemsFound) => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "missing client certificate",
-            )),
-            Err(source) => Err(io::Error::other(source)),
-        }
     }
 }

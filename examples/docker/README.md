@@ -59,7 +59,8 @@ From the repository root:
 - builds the local `runewarp/runewarp:local` image
 - runs `runewarp server cert init --hostname tunnel.example.test` inside a short-lived container with its own writable `XDG_DATA_HOME`
 - runs `runewarp client identity init` inside a short-lived container with its own writable `XDG_DATA_HOME`
-- copies only the runtime certificate, identity, and trust material into the read-only trees under `examples/docker/generated/server` and `examples/docker/generated/client`
+- copies only the runtime certificate material, the single Client identity key, and trust material into the read-only trees under `examples/docker/generated/server` and `examples/docker/generated/client`
+- derives the Client identity fingerprint from the key (SHA-256 of its DER SubjectPublicKeyInfo) and renders it into the Server's `[[server.tunnels]]` entry
 - normalizes those runtime files for the distroless `nonroot` containers used by the example, so the stack boots cleanly on Linux CI without keeping extra staging trees in the repository
 - renders XDG-style runtime config and data trees under `examples/docker/generated/server`, `examples/docker/generated/client`, and `examples/docker/generated/caddy`, so the containers use default config discovery plus default material and trust paths inside the example
 
@@ -70,6 +71,8 @@ To smoke a published image instead, pass `--image-ref`:
 ```bash
 ./scripts/docker-example smoke --image-ref docker.io/runewarp/runewarp:<12-char-commit>
 ```
+
+The helper expects an image that writes a single Client identity key to `runewarp/client/identity.key`. For an image built before that layout, run the example from a checkout of the same commit.
 
 That path reuses the same generated runtime material and Compose stack, but points both Runewarp services at the published image instead of the local build.
 

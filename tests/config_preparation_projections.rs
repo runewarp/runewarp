@@ -8,8 +8,8 @@ use std::error::Error;
 use std::fs;
 
 use runewarp::{
-    is_managed_client_config, resolve_client_identity_material_dir,
-    resolve_client_identity_material_dir_from_config, resolve_client_public_cert_material_dir,
+    is_managed_client_config, resolve_client_identity_key_path,
+    resolve_client_identity_key_path_from_config, resolve_client_public_cert_material_dir,
     resolve_client_public_cert_material_dir_from_config, resolve_server_cert_hostname,
     resolve_server_cert_material_dir, resolve_server_cert_material_dir_from_config,
     resolve_server_hostname_from_config, resolve_terminating_hostnames_from_config,
@@ -103,7 +103,7 @@ hostname = "configured.example.test"
 }
 
 #[test]
-fn client_identity_and_public_cert_dirs_project_relative_paths() -> Result<(), Box<dyn Error>> {
+fn client_identity_key_and_public_cert_dir_project_relative_paths() -> Result<(), Box<dyn Error>> {
     let tempdir = tempdir()?;
     let config_path = tempdir.path().join("config.toml");
     fs::write(
@@ -111,7 +111,7 @@ fn client_identity_and_public_cert_dirs_project_relative_paths() -> Result<(), B
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "configured/identity"
+identity-key = "configured/identity/client.key"
 public-cert-dir = "configured/public-cert"
 
 [[client.services]]
@@ -122,16 +122,16 @@ tls-mode = "terminate"
     )?;
 
     assert_eq!(
-        resolve_client_identity_material_dir_from_config(&config_path)?,
-        Some(tempdir.path().join("configured/identity"))
+        resolve_client_identity_key_path_from_config(&config_path)?,
+        Some(tempdir.path().join("configured/identity/client.key"))
     );
     assert_eq!(
         resolve_client_public_cert_material_dir_from_config(&config_path)?,
         Some(tempdir.path().join("configured/public-cert"))
     );
     assert_eq!(
-        resolve_client_identity_material_dir(Some(config_path.clone()), None)?,
-        tempdir.path().join("configured/identity")
+        resolve_client_identity_key_path(Some(config_path.clone()), None)?,
+        tempdir.path().join("configured/identity/client.key")
     );
     assert_eq!(
         resolve_client_public_cert_material_dir(Some(config_path), None)?,

@@ -70,19 +70,30 @@ Server ACME first boot remains unready until one exclusive owner has working Ser
 
 ### 3. Create the Client identity
 
-Create the Client keypair, certificate, and durable `client-identity`:
+Create the Client identity key:
 
 ```bash
 runewarp client identity init
 ```
 
-Read the generated `client-identity.txt` value and place it into the matching Server `[[server.tunnels]]` entry as either `client-identity` or one entry in `client-identities`.
+This writes one file, `$XDG_DATA_HOME/runewarp/client/identity.key`, with mode `0600`, and prints the `client-identity` fingerprint. Pass `--key <path>` to use another path. Rerunning `init` leaves an existing valid key alone and refuses to overwrite an unreadable or invalid one.
+
+Place the fingerprint into the matching Server `[[server.tunnels]]` entry as either `client-identity` or one entry in `client-identities`.
 
 To print only the fingerprint for scripts:
 
 ```bash
 runewarp client identity show
 ```
+
+The fingerprint is the SHA-256 of the key's DER SubjectPublicKeyInfo, so you can compute it on a machine without Runewarp:
+
+```bash
+key="${XDG_DATA_HOME:-$HOME/.local/share}/runewarp/client/identity.key"
+openssl pkey -in "$key" -pubout -outform DER -out spki.der && openssl dgst -sha256 spki.der
+```
+
+`runewarp client identity rotate` replaces the key in one atomic step and prints the new fingerprint. Update Server authorization with it; a running Client picks the new key up on its next reconnect.
 
 ### 4. If needed, choose the Client certificate path for terminate mode
 

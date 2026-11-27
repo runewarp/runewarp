@@ -1,9 +1,10 @@
+mod common;
+
+use common::generate_client_identity;
 use runewarp::server_certificate::{
     CertificateOwner, CertificateStore, CertificateValidation, ServerAcmeOptions, TcpChallengeRoute,
 };
-use runewarp::{
-    PreparedClient, ServerRuntime, generate_client_identity, load_client_config, load_server_config,
-};
+use runewarp::{PreparedClient, ServerRuntime, load_client_config, load_server_config};
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use rustls_acme::{AccountCache, CertCache};
 use serde_json::{Value, json};
@@ -167,13 +168,7 @@ fn fixture(path: &Path, authority: &ca::Authority) {
     )
     .unwrap();
     let identity = generate_client_identity().unwrap();
-    fs::write(path.join("client.crt"), identity.certificate_pem).unwrap();
     fs::write(path.join("client.key"), identity.private_key_pem).unwrap();
-    fs::write(
-        path.join("client-identity.txt"),
-        identity.client_identity.to_string(),
-    )
-    .unwrap();
     fs::create_dir(path.join("state")).unwrap();
     #[cfg(unix)]
     {
@@ -204,7 +199,7 @@ client-identity = "{}"
 server-address = "edge.example.test"
 server-trust = "ca-file"
 server-ca-file = "root.pem"
-identity-dir = "."
+identity-key = "client.key"
 [[client.services]]
 backend-address = "127.0.0.1:1"
 "#,

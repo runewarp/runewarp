@@ -16,16 +16,17 @@ fn client_config_rejects_empty_server_addresses() -> Result<(), Box<dyn std::err
     let directory = tempdir()?;
     let identity = directory.path().join("identity");
     fs::create_dir(&identity)?;
-    for name in ["client.crt", "client.key", "client-identity.txt"] {
-        fs::write(identity.join(name), "placeholder")?;
-    }
+    fs::write(
+        identity.join("client.key"),
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
+    )?;
     let path = directory.path().join("config.toml");
     fs::write(
         &path,
         r#"
 [client]
 server-addresses = []
-identity-dir = "identity"
+identity-key = "identity/client.key"
 [[client.services]]
 backend-address = "localhost:8443"
 "#,
@@ -46,9 +47,10 @@ fn static_client_config_limits_server_addresses_to_256() -> Result<(), Box<dyn s
     let directory = tempdir()?;
     let identity = directory.path().join("identity");
     fs::create_dir(&identity)?;
-    for name in ["client.crt", "client.key", "client-identity.txt"] {
-        fs::write(identity.join(name), "placeholder")?;
-    }
+    fs::write(
+        identity.join("client.key"),
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
+    )?;
     let path = directory.path().join("config.toml");
     for count in [256, 257] {
         let addresses = (0..count)
@@ -61,7 +63,7 @@ fn static_client_config_limits_server_addresses_to_256() -> Result<(), Box<dyn s
                 r#"
 [client]
 server-addresses = [{addresses}]
-identity-dir = "identity"
+identity-key = "identity/client.key"
 [[client.services]]
 backend-address = "localhost:8443"
 "#
@@ -106,16 +108,18 @@ fn client_service_accepts_proxy_v2_emission() {
     let tempdir = tempdir().unwrap();
     let identity = tempdir.path().join("identity");
     fs::create_dir(&identity).unwrap();
-    for name in ["client.crt", "client.key", "client-identity.txt"] {
-        fs::write(identity.join(name), "placeholder").unwrap();
-    }
+    fs::write(
+        identity.join("client.key"),
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
+    )
+    .unwrap();
     let path = tempdir.path().join("config.toml");
     fs::write(
         &path,
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "identity"
+identity-key = "identity/client.key"
 [[client.services]]
 backend-address = "localhost:8443"
 proxy-protocol = "v2"
@@ -134,16 +138,18 @@ fn client_service_rejects_unsupported_proxy_protocol() {
     let tempdir = tempdir().unwrap();
     let identity = tempdir.path().join("identity");
     fs::create_dir(&identity).unwrap();
-    for name in ["client.crt", "client.key", "client-identity.txt"] {
-        fs::write(identity.join(name), "placeholder").unwrap();
-    }
+    fs::write(
+        identity.join("client.key"),
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
+    )
+    .unwrap();
     let path = tempdir.path().join("config.toml");
     fs::write(
         &path,
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "identity"
+identity-key = "identity/client.key"
 [[client.services]]
 backend-address = "localhost:8443"
 proxy-protocol = "v1"
@@ -160,18 +166,8 @@ fn client_config_accept_exact_match_services_and_default_log_level_to_info() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -179,7 +175,7 @@ fn client_config_accept_exact_match_services_and_default_log_level_to_info() {
         r#"
 [client]
 server-address = "Tunnel.Example.Test."
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test.", "api.example.test"]
@@ -204,22 +200,12 @@ backend-address = "localhost:8443"
 }
 
 #[test]
-fn client_config_accept_server_address_with_default_port_and_flat_identity_dir() {
+fn client_config_accept_server_address_with_default_port_and_identity_key() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -227,7 +213,7 @@ fn client_config_accept_server_address_with_default_port_and_flat_identity_dir()
         r#"
 [client]
 server-address = "Tunnel.Example.Test."
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test.", "api.example.test"]
@@ -241,8 +227,8 @@ backend-address = "localhost:8443"
     assert_eq!(settings.server_hostname.as_str(), "tunnel.example.test");
     assert_eq!(settings.server_port, 443);
     assert_eq!(
-        settings.identity_directory,
-        tempdir.path().join("client-identity")
+        settings.identity_key,
+        tempdir.path().join("client-identity/client.key")
     );
     assert_eq!(settings.log_level, LogLevel::Info);
     assert_eq!(
@@ -259,18 +245,8 @@ fn client_config_accept_server_address_with_an_explicit_port() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -278,7 +254,7 @@ fn client_config_accept_server_address_with_an_explicit_port() {
         r#"
 [client]
 server-address = "Tunnel.Example.Test.:9443"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:8443"
@@ -297,18 +273,8 @@ fn client_config_accept_server_addresses_for_static_fanout() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -316,7 +282,7 @@ fn client_config_accept_server_addresses_for_static_fanout() {
         r#"
 [client]
 server-addresses = ["Tunnel.Example.Test.", "backup.example.test:9443"]
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:8443"
@@ -346,18 +312,8 @@ fn client_config_rejects_mutually_exclusive_server_address_shapes() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -366,7 +322,7 @@ fn client_config_rejects_mutually_exclusive_server_address_shapes() {
 [client]
 server-address = "tunnel.example.test"
 server-addresses = ["backup.example.test"]
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:8443"
@@ -387,18 +343,8 @@ fn client_config_rejects_duplicate_server_addresses() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -406,7 +352,7 @@ fn client_config_rejects_duplicate_server_addresses() {
         r#"
 [client]
 server-addresses = ["Tunnel.Example.Test.", "tunnel.example.test:443"]
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:8443"
@@ -433,18 +379,8 @@ fn client_config_accept_top_level_log_level_values() {
         let tempdir = tempdir().unwrap();
         fs::create_dir(tempdir.path().join("client-identity")).unwrap();
         fs::write(
-            tempdir.path().join("client-identity/client.crt"),
-            "placeholder",
-        )
-        .unwrap();
-        fs::write(
             tempdir.path().join("client-identity/client.key"),
-            "placeholder",
-        )
-        .unwrap();
-        fs::write(
-            tempdir.path().join("client-identity/client-identity.txt"),
-            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            runewarp::IdentityKey::generate().unwrap().to_pem(),
         )
         .unwrap();
         fs::write(
@@ -455,7 +391,7 @@ log-level = "{raw_level}"
 
 [client]
 server-address = "Tunnel.Example.Test."
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:8443"
@@ -475,18 +411,8 @@ fn client_config_reject_legacy_client_logs_as_an_unknown_field() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -494,7 +420,7 @@ fn client_config_reject_legacy_client_logs_as_an_unknown_field() {
         r#"
 [client]
 server-address = "Tunnel.Example.Test."
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 logs = false
 
 [[client.services]]
@@ -515,18 +441,8 @@ fn client_config_reject_ip_literals_in_server_address() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -534,7 +450,7 @@ fn client_config_reject_ip_literals_in_server_address() {
         r#"
 [client]
 server-address = "127.0.0.1:443"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:8443"
@@ -556,18 +472,8 @@ fn client_config_reject_invalid_ports_in_server_address() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -575,7 +481,7 @@ fn client_config_reject_invalid_ports_in_server_address() {
         r#"
 [client]
 server-address = "tunnel.example.test:65536"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:8443"
@@ -599,7 +505,7 @@ fn client_config_report_all_selected_mode_errors_together() {
         tempdir.path().join("config.toml"),
         r#"
 [client]
-identity-dir = "missing-client"
+identity-key = "missing-client/client.key"
 reconnect-interval = 0
 
 [[client.services]]
@@ -616,7 +522,7 @@ backend-address = "127.0.0.1:443"
     let message = error.to_string();
 
     assert!(message.contains("client.server-address or client.server-addresses is required"));
-    assert!(message.contains("client.identity-dir directory not found"));
+    assert!(message.contains("client.identity-key file not found"));
     assert!(message.contains("unknown field `reconnect-interval`"));
     assert!(message.contains(
         "client.services[].public-hostnames may be omitted only when there is exactly one service"
@@ -652,7 +558,7 @@ local-addr = "127.0.0.1:443"
     assert!(message.contains("unknown field `cert-file`"));
     assert!(message.contains("unknown field `key-file`"));
     assert!(message.contains("unknown field `local-addr`"));
-    assert!(message.contains("client.identity-dir directory not found"));
+    assert!(message.contains("unknown field `identity-dir`"));
     assert!(message.contains("client.services[].backend-address is required"));
 }
 
@@ -661,18 +567,8 @@ fn client_config_reject_server_ca_file_without_ca_file_trust_mode() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(tempdir.path().join("server-ca.pem"), "placeholder").unwrap();
@@ -682,7 +578,7 @@ fn client_config_reject_server_ca_file_without_ca_file_trust_mode() {
 [client]
 server-address = "tunnel.example.test"
 server-ca-file = "server-ca.pem"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:8443"
@@ -704,18 +600,8 @@ fn client_config_accept_ca_file_trust_with_an_explicit_server_ca_file() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(tempdir.path().join("server-ca.pem"), "placeholder").unwrap();
@@ -726,7 +612,7 @@ fn client_config_accept_ca_file_trust_with_an_explicit_server_ca_file() {
 server-address = "tunnel.example.test"
 server-trust = "ca-file"
 server-ca-file = "server-ca.pem"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 backend-address = "localhost:8443"
@@ -747,18 +633,8 @@ fn client_config_reject_duplicate_public_hostnames_after_normalization() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -766,7 +642,7 @@ fn client_config_reject_duplicate_public_hostnames_after_normalization() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test."]
@@ -791,18 +667,8 @@ fn client_config_reject_empty_public_hostname_lists() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -810,7 +676,7 @@ fn client_config_reject_empty_public_hostname_lists() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = []
@@ -833,18 +699,8 @@ fn client_config_report_duplicate_hostnames_even_when_another_hostname_is_invali
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -852,7 +708,7 @@ fn client_config_report_duplicate_hostnames_even_when_another_hostname_is_invali
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["App.Example.Test."]
@@ -880,11 +736,9 @@ backend-address = "nginx.local:443"
 
 fn write_base_client_identity(tempdir: &std::path::Path) {
     fs::create_dir(tempdir.join("client-identity")).unwrap();
-    fs::write(tempdir.join("client-identity/client.crt"), "placeholder").unwrap();
-    fs::write(tempdir.join("client-identity/client.key"), "placeholder").unwrap();
     fs::write(
-        tempdir.join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        tempdir.join("client-identity/client.key"),
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
 }
@@ -898,7 +752,7 @@ fn client_config_default_tls_mode_is_passthrough() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -921,7 +775,7 @@ fn client_config_accept_explicit_passthrough_tls_mode() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -945,7 +799,7 @@ fn client_config_reject_unknown_tls_mode_value() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -977,7 +831,7 @@ fn client_config_reject_terminate_on_catch_all_service() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 public-cert-dir = "certs"
 
 [[client.services]]
@@ -1010,7 +864,7 @@ fn client_config_use_the_default_public_cert_dir_for_terminate_mode_when_acme_is
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -1024,7 +878,7 @@ tls-mode = "terminate"
         SelectedClientConfig::Explicit(tempdir.path().join("config.toml")),
         &ClientRuntimeArgs::default(),
         &ClientConfigResolutionDefaults {
-            identity_directory: tempdir.path().join("client-identity"),
+            identity_key: tempdir.path().join("client-identity/client.key"),
             public_cert_directory: default_public_cert_directory.clone(),
         },
     )
@@ -1052,7 +906,7 @@ fn client_config_accept_terminate_with_public_cert_dir() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 public-cert-dir = "certs"
 
 [[client.services]]
@@ -1085,7 +939,7 @@ fn client_config_reject_public_cert_dir_not_found() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 public-cert-dir = "missing-certs"
 
 [[client.services]]
@@ -1116,7 +970,7 @@ fn client_config_reject_public_cert_dir_without_any_terminating_service() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 public-cert-dir = "certs"
 
 [[client.services]]
@@ -1146,7 +1000,7 @@ fn client_config_reject_acme_without_any_terminating_service() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [client.acme]
 email = "admin@example.test"
@@ -1181,7 +1035,7 @@ fn client_config_accept_terminate_with_acme_and_explicit_state_dir() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [client.acme]
 email = "admin@example.test"
@@ -1218,7 +1072,7 @@ fn client_config_reject_acme_without_email() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [client.acme]
 state-dir = "acme-state"
@@ -1248,7 +1102,7 @@ fn client_config_reject_acme_state_dir_not_found() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [client.acme]
 email = "admin@example.test"
@@ -1285,7 +1139,7 @@ fn client_config_reject_both_public_cert_dir_and_acme() {
         r#"
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 public-cert-dir = "certs"
 
 [client.acme]
@@ -1314,18 +1168,8 @@ fn managed_client_config_rejects_static_server_addresses() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -1336,7 +1180,7 @@ address = "control.example.test"
 
 [client]
 server-address = "tunnel.example.test"
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -1359,18 +1203,8 @@ fn managed_client_config_rejects_plural_static_server_addresses() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -1381,7 +1215,7 @@ address = "control.example.test"
 
 [client]
 server-addresses = ["tunnel.example.test", "backup.example.test"]
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -1404,18 +1238,8 @@ fn managed_client_config_loads_without_static_server_addresses() {
     let tempdir = tempdir().unwrap();
     fs::create_dir(tempdir.path().join("client-identity")).unwrap();
     fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
         tempdir.path().join("client-identity/client.key"),
-        "placeholder",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("client-identity/client-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
     )
     .unwrap();
     fs::write(
@@ -1425,7 +1249,7 @@ fn managed_client_config_loads_without_static_server_addresses() {
 address = "control.example.test"
 
 [client]
-identity-dir = "client-identity"
+identity-key = "client-identity/client.key"
 
 [[client.services]]
 public-hostnames = ["app.example.test"]
@@ -1443,11 +1267,13 @@ backend-address = "localhost:8443"
 fn capacity_config(extra: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempdir().unwrap();
     fs::create_dir(directory.path().join("identity")).unwrap();
-    for name in ["client.crt", "client.key", "client-identity.txt"] {
-        fs::write(directory.path().join("identity").join(name), "placeholder").unwrap();
-    }
+    fs::write(
+        directory.path().join("identity").join("client.key"),
+        runewarp::IdentityKey::generate().unwrap().to_pem(),
+    )
+    .unwrap();
     let path = directory.path().join("config.toml");
-    fs::write(&path, format!("[client]\nserver-address = \"tunnel.example.test\"\nidentity-dir = \"identity\"\n{extra}\n[[client.services]]\nbackend-address = \"localhost:8443\"\n")).unwrap();
+    fs::write(&path, format!("[client]\nserver-address = \"tunnel.example.test\"\nidentity-key = \"identity/client.key\"\n{extra}\n[[client.services]]\nbackend-address = \"localhost:8443\"\n")).unwrap();
     (directory, path)
 }
 

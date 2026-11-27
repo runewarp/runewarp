@@ -65,8 +65,8 @@ pub use config::{
     ServerCertHostnameError, ServerCertificateConfig, ServerConfig, ServerConfigResolutionError,
     ServerIdentityConfig, ServerRuntimeArgs, ServerTunnelConfig, ServiceConfig,
     is_managed_client_config, is_managed_selected_client_config, load_client_config,
-    load_server_config, resolve_client_identity_material_dir,
-    resolve_client_identity_material_dir_from_config, resolve_client_public_cert_material_dir,
+    load_server_config, resolve_client_identity_key_path,
+    resolve_client_identity_key_path_from_config, resolve_client_public_cert_material_dir,
     resolve_client_public_cert_material_dir_from_config, resolve_selected_terminating_hostnames,
     resolve_server_cert_hostname, resolve_server_cert_material_dir,
     resolve_server_cert_material_dir_from_config, resolve_server_config_from_cli,
@@ -76,12 +76,13 @@ pub use config::{
 pub use control_address::{ControlAddress, ControlAddressError};
 pub use hostname::{PublicHostname, PublicHostnameError, ServerHostname, ServerHostnameError};
 pub use identity::{
-    CLIENT_CERT_FILENAME, CLIENT_CERT_LIFETIME_DAYS, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME,
-    ClientIdentity, ClientIdentityMaterialError, GeneratedClientIdentity,
-    ParseClientIdentityCertificateError, ParseClientIdentityError,
-    client_identity_from_certificate_der, generate_client_identity, read_client_identity,
-    rotate_client_identity,
+    ClientIdentity, IDENTITY_KEY_FILENAME, IdentityKey, IdentityKeyError, IdentityKeyFileError,
+    IdentityKeyInit, IdentityRole, IdentityTlsCredentials, ParseClientIdentityError,
+    PeerIdentityError, client_identity_from_certificate_der,
+    identity_key_is_group_or_world_readable, init_identity_key, rotate_identity_key,
 };
+#[cfg(test)]
+pub(crate) use identity::{GeneratedClientIdentity, generate_client_identity};
 pub use managed_session::{
     ApplyError, ClientManagedInput, ControlRoleIdentityMaterial, ControlTlsMaterialError,
     InputError, ManagedSession, ManagedSessionEvent, ManagedSessionLimitKind, ManagedSessionLimits,
@@ -90,10 +91,10 @@ pub use managed_session::{
 };
 pub use opaque_control_token::OpaqueControlTokenError;
 pub use paths::{
-    XdgPathError, default_client_acme_state_dir, default_client_identity_material_dir,
+    XdgPathError, default_client_acme_state_dir, default_client_identity_key_path,
     default_client_public_cert_material_dir, default_client_server_ca_path, default_config_path,
     default_control_ca_path, default_server_acme_state_dir, default_server_cert_material_dir,
-    default_server_identity_material_dir,
+    default_server_identity_key_path,
 };
 pub use proxy_protocol::{ProxyProtocolVersion, TrustedNetwork, VisitorTcpAddresses};
 pub use quic::{
@@ -110,11 +111,7 @@ pub use server_cert::{
     renew_manual_server_certificate, rotate_manual_server_certificate_authority,
 };
 pub use server_certificate::CertificateOwner;
-pub use server_identity::{
-    ParseServerIdentityError, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_FILENAME,
-    SERVER_IDENTITY_KEY_FILENAME, ServerIdentity, ServerIdentityMaterialError,
-    read_server_identity,
-};
+pub use server_identity::{ParseServerIdentityError, ServerIdentity, read_server_identity};
 pub use server_runtime::ServerRuntime;
 pub use shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
 pub use startup::{

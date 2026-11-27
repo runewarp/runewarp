@@ -25,18 +25,14 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::generate_simple_self_signed;
 use runewarp::{
-    CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ControlAddress,
-    ControlRoleIdentityMaterial, ControlTrust, GeneratedClientIdentity, ManagedSession,
-    ManagedSessionEvent, ManagedSessionRole, OrderlyShutdown, PreparedClient, PreparedServer,
-    QUIC_CLOSE_FLUSH_DURATION, SERVER_IDENTITY_CERT_FILENAME, SERVER_IDENTITY_KEY_FILENAME,
-    ServerHostname, SessionMaterial, ShutdownMode, generate_client_identity,
-    initialize_manual_server_certificate, load_client_config, load_server_config,
-    make_client_tunnel_h3_config, tunnel::ClientTunnel,
+    ControlAddress, ControlRoleIdentityMaterial, ControlTrust, ManagedSession, ManagedSessionEvent,
+    ManagedSessionRole, OrderlyShutdown, PreparedClient, PreparedServer, QUIC_CLOSE_FLUSH_DURATION,
+    ServerHostname, SessionMaterial, ShutdownMode, initialize_manual_server_certificate,
+    load_client_config, load_server_config, make_client_tunnel_h3_config, tunnel::ClientTunnel,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
-use rustls::server::WebPkiClientVerifier;
 use rustls::{ServerConfig, ServerConfig as RustlsServerConfig};
 use serde_json::{Value, json};
 use std::sync::Mutex;
@@ -49,7 +45,8 @@ use tokio::time::{sleep, timeout};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use common::{
-    CONTROL_ALPN_H2, ControlMtlsMaterial, SERVER_EVENTS_PATH, SERVER_STATE_PATH,
+    CONTROL_ALPN_H2, ControlMtlsMaterial, GeneratedClientIdentity, PinnedSpkiAdmission,
+    SERVER_EVENTS_PATH, SERVER_STATE_PATH, generate_client_identity,
     generate_control_mtls_material, write_control_ca_and_certs,
     write_control_client_as_server_identity,
 };
@@ -235,7 +232,7 @@ impl ManagedServerHarness {
         let control_paths =
             write_control_ca_and_certs(tempdir.path().join("control").as_path(), &material);
         write_control_client_as_server_identity(
-            tempdir.path().join("server-identity").as_path(),
+            &tempdir.path().join("server-identity/server.key"),
             &material,
         );
 
@@ -251,7 +248,7 @@ ca-file = "control/ca.crt"
 [server]
 hostname = "{SERVER_HOSTNAME}"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 readiness-bind-address = "127.0.0.1:0"
 public-bind-address = "127.0.0.1:0"
 tunnel-bind-address = "127.0.0.1:0"
@@ -289,16 +286,9 @@ tunnel-bind-address = "127.0.0.1:0"
         let session_material = SessionMaterial {
             control_hostname: "localhost".to_owned(),
             trust: ControlTrust::CaFile(control_paths.ca_cert),
-            identity: ControlRoleIdentityMaterial {
-                cert_path: tempdir
-                    .path()
-                    .join("server-identity")
-                    .join(SERVER_IDENTITY_CERT_FILENAME),
-                key_path: tempdir
-                    .path()
-                    .join("server-identity")
-                    .join(SERVER_IDENTITY_KEY_FILENAME),
-            },
+            identity: ControlRoleIdentityMaterial::server(
+                tempdir.path().join("server-identity").join("server.key"),
+            ),
         };
         let mut session = ManagedSession::new(
             ControlAddress::parse(&format!("localhost:{}", control.port)).unwrap(),
@@ -1442,21 +1432,7 @@ async fn managed_server_closes_managed_session_immediately_on_fast_shutdown() {
 
 fn write_client_identity_material(directory: &std::path::Path, identity: &GeneratedClientIdentity) {
     fs::create_dir_all(directory).unwrap();
-    fs::write(
-        directory.join(CLIENT_CERT_FILENAME),
-        &identity.certificate_pem,
-    )
-    .unwrap();
-    fs::write(
-        directory.join(CLIENT_KEY_FILENAME),
-        &identity.private_key_pem,
-    )
-    .unwrap();
-    fs::write(
-        directory.join(CLIENT_IDENTITY_FILENAME),
-        identity.client_identity.to_string(),
-    )
-    .unwrap();
+    fs::write(directory.join("client.key"), &identity.private_key_pem).unwrap();
 }
 
 fn write_client_config(
@@ -1473,7 +1449,7 @@ fn write_client_config(
 server-address = "{SERVER_HOSTNAME}"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "{identity_dir}"
+identity-key = "{identity_dir}/client.key"
 
 [[client.services]]
 backend-address = "{backend_addr}"
@@ -1499,7 +1475,7 @@ fn write_dual_hostname_client_config(
 server-address = "{SERVER_HOSTNAME}"
 server-trust = "ca-file"
 server-ca-file = "server-cert/server-ca.crt"
-identity-dir = "{identity_dir}"
+identity-key = "{identity_dir}/client.key"
 
 [[client.services]]
 public-hostnames = ["{APP_HOSTNAME}"]
@@ -1828,15 +1804,8 @@ impl Drop for SnapshotFeedStream {
 }
 
 fn build_server_acceptor(material: &ControlMtlsMaterial) -> TlsAcceptor {
-    let ca_certs: Vec<CertificateDer<'static>> =
-        CertificateDer::pem_slice_iter(material.ca_cert_pem.as_bytes())
-            .collect::<Result<_, _>>()
-            .unwrap();
-    let mut roots = RootCertStore::empty();
-    for cert in ca_certs {
-        roots.add(cert).unwrap();
-    }
-    let client_verifier = WebPkiClientVerifier::builder(roots.into()).build().unwrap();
+    let client_verifier =
+        PinnedSpkiAdmission::for_keys(&[material.client_key_pem.as_str()]).verifier();
     let server_certs: Vec<CertificateDer<'static>> =
         CertificateDer::pem_slice_iter(material.server_cert_pem.as_bytes())
             .collect::<Result<_, _>>()

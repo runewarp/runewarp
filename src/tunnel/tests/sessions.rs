@@ -571,16 +571,10 @@ async fn production_address_worker_reconnects_after_session_close_or_connect_fin
             let directory = tempfile::tempdir().expect("material directory");
             for (name, contents) in [
                 ("ca.pem", fixture.server_certificate_pem.as_str()),
-                ("client.crt", fixture.client_certificate_pem.as_str()),
                 ("client.key", fixture.client_key_pem.as_str()),
             ] {
                 std::fs::write(directory.path().join(name), contents).expect("test material");
             }
-            std::fs::write(
-                directory.path().join("client-identity.txt"),
-                fixture.client_identity.to_string(),
-            )
-            .expect("identity");
             std::fs::write(
                 directory.path().join("config.toml"),
                 format!(
@@ -589,7 +583,7 @@ async fn production_address_worker_reconnects_after_session_close_or_connect_fin
 server-address = "{target}"
 server-trust = "ca-file"
 server-ca-file = "ca.pem"
-identity-dir = "."
+identity-key = "client.key"
 [[client.services]]
 backend-address = "127.0.0.1:443"
 "#

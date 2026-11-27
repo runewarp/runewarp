@@ -123,8 +123,8 @@ Static fanout is limited to 1 to 256 distinct effective Server addresses after C
 
 The Managed-session protocol, endpoints, and Control interoperability checklist are in [`managed.md`](managed.md). Managed mode introduces a separate trust boundary for the Control endpoint:
 
-1. the Server authenticates to Control with **Server identity** material from `server.identity-dir`
-2. the Client authenticates to Control with the same Client identity material used for Tunnel mTLS from `client.identity-dir`
+1. the Server authenticates to Control with the **Server identity** key at `server.identity-key`
+2. the Client authenticates to Control with the same Client identity key it uses for Tunnel mTLS, at `client.identity-key`
 3. the Client and Server validate the Control endpoint through `control.trust = "system"` or through `control.trust = "ca-file"` with an exclusive CA bundle
 4. each **Managed session** requires mutually authenticated TLS with mandatory HTTP/2 ALPN; Core does not follow Control redirects and does not fall back to HTTP/1.1
 5. each peer reports its full **Managed state document** on that same authenticated connection after each successfully handled snapshot and when a reported fact changes, at most once per second. The Server document carries the applied opaque **Revision**, its opaque **Server runtime generation**, whether it is draining, the number of open Tunnel connections per **Tunnel ID**, and its in-flight Visitor count. The Client document carries the revision and, per assigned **Server address**, the generations of its connections carrying credit. Documents carry no Client identities, Public hostnames, Visitor addresses, or other per-Visitor data, and Core sends no periodic heartbeat. A document does not represent **Server readiness** or **Client assignment convergence**. State reporting stays off the downlink reconciliation critical path (one request in flight, one pending) with 5-second request and response deadlines; success requires exact bodyless `204`
@@ -135,23 +135,23 @@ The Managed-session protocol, endpoints, and Control interoperability checklist 
 
 The successful Managed downlink must carry exactly one canonical UUIDv7 `runewarp-session-id`. Core validates it before accepting snapshots and echoes it on every state PUT for that downlink. Control compares the incarnation before report mutation alongside the existing identity, role and source-connection checks. The ID prevents delayed reports from reaching a replacement session when a source tuple is reused; it does not replace mTLS, grant authority, or establish process identity. UUIDv7 reveals its mint time, so the ID is correlation metadata rather than a secret. Both runtime roles and Control require a coordinated compatible upgrade.
 
-Identity and trust material are loaded when establishing each new Managed-session connection. Post-start reload failures remain recoverable in-process through the existing reconnect policy.
+Identity keys and trust material are loaded when establishing each new Managed-session connection. Post-start reload failures remain recoverable in-process through the existing reconnect policy.
 
 ## Certificate and identity lifecycle
 
-### Client identity
+### Participant identities
 
-`runewarp client identity init` creates a Client keypair, an initial self-signed certificate, and `client-identity.txt`.
+A Client identity and a Server identity are each one ECDSA P-256 private key file, stored as unencrypted PKCS#8 PEM. The identity is the pinned public key: the SHA-256 of its DER SubjectPublicKeyInfo (SPKI). There is no CA, no certificate issuance and no renewal. See [ADR 0009](adr/0009-identity-is-a-pinned-public-key.md).
 
-Self-hosted Client identity certificates are operationally non-expiring key carriers:
+- `runewarp client identity init` writes only the key, with mode `0600` whatever the umask. It never overwrites an existing file.
+- Runewarp builds a self-signed certificate in memory from the key for each Tunnel or Control connection attempt. It uses notBefore 1970-01-01, the RFC 5280 no-expiry notAfter `99991231235959Z`, `digitalSignature` key usage and `clientAuth` extended key usage. Its serial is unspecified and its bytes change on every build because ECDSA signatures are randomized; neither carries meaning, and only the SPKI is a compatibility contract.
+- The Server's pinned Client verifier authorizes the exact SPKI fingerprint. It ignores issuer, chain, SAN, validity, revocation, key usage and extended key usage, so no certificate detail can widen access.
+- The verifier accepts only ECDSA P-256 public keys and advertises and accepts only the `ecdsa_secp256r1_sha256` signature scheme. Ed25519, RSA, P-384 and other keys fail the handshake even when their fingerprint is authorized.
+- The canonical SPKI uses the uncompressed point, which Core always derives from the private key, so one key has one fingerprint. The verifier rejects a peer SPKI with a compressed point.
+- A key readable by group or others logs a startup warning but still runs.
+- `runewarp client identity rotate` replaces the key atomically and therefore changes the identity.
 
-- newly initialized and rotated certificates use an **Ed25519** key, a **100-year** validity window, `digitalSignature` key usage, and `clientAuth` extended key usage
-- the Server authorizes the pinned Client identity from the subject public key and does not validate certificate issuer, chain, SAN, validity window, revocation state, key usage, or extended key usage
-- existing ECDSA P-256 identities and certificates without extended key usage remain accepted when their SPKI fingerprint is authorized; Core does not rewrite them
-- existing shorter-lived certificates remain accepted after their encoded expiry; Core does not rewrite them
-- there is no automatic or manual self-signed Client identity certificate renewal
-
-`runewarp client identity rotate` changes the key and therefore changes the identity.
+Control should enforce the same P-256 and uncompressed-SPKI rules when it admits identities.
 
 ### Server certificate
 

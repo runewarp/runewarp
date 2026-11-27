@@ -106,26 +106,8 @@ fn install_logger(role: crate::TraceRole) -> Result<(), Box<dyn Error>> {
 
 pub(crate) fn setup(directory: &Path) -> Result<(), Box<dyn Error>> {
     crate::initialize_manual_server_certificate(&directory.join("cert"), "localhost")?;
-    let identity = crate::generate_client_identity()?;
-    std::fs::create_dir(directory.join("identity"))?;
-    std::fs::write(
-        directory
-            .join("identity")
-            .join(crate::CLIENT_IDENTITY_FILENAME),
-        identity.client_identity.to_string(),
-    )?;
-    for (file, bytes) in [
-        (
-            crate::CLIENT_CERT_FILENAME,
-            identity.certificate_pem.as_bytes(),
-        ),
-        (
-            crate::CLIENT_KEY_FILENAME,
-            identity.private_key_pem.as_bytes(),
-        ),
-    ] {
-        std::fs::write(directory.join("identity").join(file), bytes)?;
-    }
+    let key = crate::IdentityKey::generate()?;
+    std::fs::write(directory.join(crate::IDENTITY_KEY_FILENAME), key.to_pem())?;
     // Concurrent-scrape runs bind each Server's metrics listener on an ephemeral port.
     let metrics = if std::env::var("RUNEWARP_BENCH_METRICS").is_ok_and(|value| value == "1") {
         "metrics-bind-address = \"127.0.0.1:0\"\n"
@@ -136,7 +118,7 @@ pub(crate) fn setup(directory: &Path) -> Result<(), Box<dyn Error>> {
         directory.join("server.toml"),
         format!(
             "[server]\nhostname = \"localhost\"\ncert-dir = \"cert\"\n{metrics}[[server.tunnels]]\npublic-hostnames = [\"app.example.test\"]\nclient-identity = \"{}\"\n",
-            identity.client_identity
+            key.client_identity()
         ),
     )?;
     Ok(())

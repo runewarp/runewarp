@@ -579,7 +579,7 @@ fn server_runtime_cli_control_address_overrides_config() -> Result<(), Box<dyn s
         tempdir.path().join("server-cert").as_path(),
         "tunnel.example.test",
     )?;
-    common::write_server_identity_material(tempdir.path().join("server-identity").as_path());
+    common::write_server_identity_key(&tempdir.path().join("server-identity/server.key"));
     fs::write(
         tempdir.path().join("server.toml"),
         r#"
@@ -589,7 +589,7 @@ address = "configured.example.test"
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 public-bind-address = "127.0.0.1:0"
 tunnel-bind-address = "127.0.0.1:0"
 "#,
@@ -652,4 +652,65 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert!(stderr.contains("credentials are not allowed"), "{stderr}");
     assert!(!stderr.contains("hunter2-marker"), "{stderr}");
     assert!(!stderr.contains("query-marker"), "{stderr}");
+}
+
+#[test]
+fn managed_server_reads_its_identity_key_from_the_xdg_default_path() {
+    let tempdir = tempdir().unwrap();
+    let xdg_config_home = tempdir.path().join("xdg-config");
+    let xdg_data_home = tempdir.path().join("xdg-data");
+    fs::create_dir_all(xdg_config_home.join("runewarp")).unwrap();
+    runewarp::initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    // `[[server.tunnels]]` is invalid in managed mode, so validation always fails and the Server
+    // never starts; the test only observes whether the identity key was found.
+    fs::write(
+        tempdir.path().join("server.toml"),
+        r#"
+[control]
+address = "control.example.test"
+
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+
+[[server.tunnels]]
+public-hostnames = ["app.example.test"]
+client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+"#,
+    )
+    .unwrap();
+    let run = || {
+        let assert = Command::cargo_bin("runewarp")
+            .unwrap()
+            .current_dir(tempdir.path())
+            .env("XDG_CONFIG_HOME", &xdg_config_home)
+            .env("XDG_DATA_HOME", &xdg_data_home)
+            .args(["server", "--config", "server.toml"])
+            .assert()
+            .failure();
+        String::from_utf8(assert.get_output().stderr.clone()).unwrap()
+    };
+
+    // A key left at the pre-#316 directory layout is not read.
+    common::write_server_identity_key(&xdg_data_home.join("runewarp/server/identity/server.key"));
+    let legacy = run();
+    common::write_server_identity_key(&xdg_data_home.join("runewarp/server/identity.key"));
+    let current = run();
+
+    assert!(
+        legacy.contains(&format!(
+            "server.identity-key file not found: {}",
+            xdg_data_home.join("runewarp/server/identity.key").display()
+        )),
+        "{legacy}"
+    );
+    assert!(!current.contains("server.identity-key"), "{current}");
+    assert!(
+        current.contains("may not be configured in managed mode"),
+        "{current}"
+    );
 }

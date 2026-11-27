@@ -21,6 +21,7 @@ impl ClientRuntime {
         local_bind_addr: SocketAddr,
     ) -> Result<Self, crate::ClientStartupError> {
         let settings = Arc::new(settings.clone());
+        crate::identity::warn_if_identity_key_is_shared("client", &settings.identity_key);
         let instance = ClientInstancePrep::prepare(settings.as_ref()).await?;
         // Never fatal: a bind failure logs and the Client runs without metrics.
         let metrics_endpoint = match settings.metrics_bind_address {
@@ -234,9 +235,7 @@ where
     let material = crate::SessionMaterial {
         control_hostname: control.address.hostname().as_str().to_owned(),
         trust: control.trust.clone(),
-        identity: crate::ControlRoleIdentityMaterial::from_client_identity_dir(
-            &settings.identity_directory,
-        ),
+        identity: crate::ControlRoleIdentityMaterial::client(settings.identity_key.clone()),
     };
     let mut session = crate::ManagedSession::new(
         control.address.clone(),
@@ -340,10 +339,10 @@ mod tests {
         AddressController, AddressWorkerControl, wait_for_retry_delay, wait_for_shutdown,
     };
     use crate::{
-        CLIENT_CERT_FILENAME, CLIENT_IDENTITY_FILENAME, CLIENT_KEY_FILENAME, ClientAdmission,
-        ClientConfig, ClientTlsMode, LogLevel, PublicHostname, Server, ServerAddress,
-        ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname, ServerTunnelConfig,
-        ServiceConfig, ShutdownMode, generate_client_identity, make_server_tunnel_h3_config,
+        ClientAdmission, ClientConfig, ClientTlsMode, LogLevel, PublicHostname, Server,
+        ServerAddress, ServerAdmission, ServerAuthorization, ServerBindConfig, ServerHostname,
+        ServerTunnelConfig, ServiceConfig, ShutdownMode, generate_client_identity,
+        make_server_tunnel_h3_config,
     };
 
     use super::{ClientRuntime, ClientSessionCompletion, coordinate_managed_client};
@@ -468,27 +467,9 @@ mod tests {
 
         let tempdir = tempdir()?;
         fs::write(tempdir.path().join("server-ca.pem"), server_cert_pem)?;
-        fs::create_dir(tempdir.path().join("client-identity"))?;
         fs::write(
-            tempdir
-                .path()
-                .join("client-identity")
-                .join(CLIENT_CERT_FILENAME),
-            &client_identity.certificate_pem,
-        )?;
-        fs::write(
-            tempdir
-                .path()
-                .join("client-identity")
-                .join(CLIENT_KEY_FILENAME),
+            tempdir.path().join("client.key"),
             &client_identity.private_key_pem,
-        )?;
-        fs::write(
-            tempdir
-                .path()
-                .join("client-identity")
-                .join(CLIENT_IDENTITY_FILENAME),
-            client_identity.client_identity.to_string(),
         )?;
 
         let unused_udp = std::net::UdpSocket::bind(localhost(0))?;
@@ -510,7 +491,7 @@ mod tests {
             log_format: crate::LogFormat::Text,
             trace_export: None,
             server_trust: crate::ClientServerTrust::CaFile(tempdir.path().join("server-ca.pem")),
-            identity_directory: tempdir.path().join("client-identity"),
+            identity_key: tempdir.path().join("client.key"),
             services: vec![ServiceConfig {
                 public_hostnames: None,
                 backend_address: backend_address.to_string(),
@@ -652,11 +633,11 @@ mod capacity_tests {
     async fn static_and_managed_runtimes_share_the_configured_instance_budget() {
         for managed in [false, true] {
             let directory = tempfile::tempdir().expect("directory");
-            std::fs::create_dir(directory.path().join("identity")).expect("identity directory");
-            for name in ["client.crt", "client.key", "client-identity.txt"] {
-                std::fs::write(directory.path().join("identity").join(name), "placeholder")
-                    .expect("material");
-            }
+            std::fs::write(
+                directory.path().join("client.key"),
+                crate::IdentityKey::generate().expect("key").to_pem(),
+            )
+            .expect("identity key");
             let path = directory.path().join("config.toml");
             let admission = if managed {
                 "[control]\naddress = \"control.example.test\"\n"
@@ -668,7 +649,7 @@ mod capacity_tests {
             } else {
                 "server-address = \"tunnel.example.test\"\n"
             };
-            std::fs::write(&path, format!("{admission}[client]\n{address}max-visitor-streams = 512\nidentity-dir = \"identity\"\n[[client.services]]\nbackend-address = \"localhost:8443\"\n")).expect("config");
+            std::fs::write(&path, format!("{admission}[client]\n{address}max-visitor-streams = 512\nidentity-key = \"client.key\"\n[[client.services]]\nbackend-address = \"localhost:8443\"\n")).expect("config");
             let settings = crate::load_client_config(&path).expect("valid settings");
             let runtime =
                 ClientRuntime::prepare(&settings, "127.0.0.1:0".parse().expect("address"))

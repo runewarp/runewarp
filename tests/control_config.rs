@@ -16,7 +16,7 @@ fn write_managed_server_material(
     identity_dir: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     initialize_manual_server_certificate(&base.join(cert_dir), "tunnel.example.test")?;
-    common::write_server_identity_material(&base.join(identity_dir));
+    common::write_server_identity_key(&base.join(identity_dir).join("server.key"));
     Ok(())
 }
 
@@ -34,7 +34,7 @@ trust = "system"
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 "#,
     )
     .unwrap();
@@ -48,8 +48,14 @@ identity-dir = "server-identity"
     assert_eq!(control.address.to_string(), "control.example.test");
     assert_eq!(control.trust, ControlTrust::System);
     let identity = settings.identity.expect("managed server identity config");
-    assert_eq!(identity.directory, tempdir.path().join("server-identity"));
-    assert!(!identity.identity.to_string().is_empty());
+    assert_eq!(
+        identity.key_path,
+        tempdir.path().join("server-identity/server.key")
+    );
+    assert_eq!(
+        identity.identity,
+        runewarp::read_server_identity(&identity.key_path).unwrap()
+    );
     assert_eq!(
         settings.certificate,
         ServerCertificateConfig::Manual {
@@ -72,7 +78,7 @@ unexpected = true
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 "#,
     )
     .unwrap();
@@ -103,7 +109,7 @@ address = "{address}"
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 "#
             ),
         )
@@ -131,7 +137,7 @@ address = "control.example.test"
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -149,7 +155,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
 }
 
 #[test]
-fn static_server_rejects_identity_dir() {
+fn static_server_rejects_identity_key() {
     let tempdir = tempdir().unwrap();
     initialize_manual_server_certificate(
         tempdir.path().join("server-cert").as_path(),
@@ -162,7 +168,7 @@ fn static_server_rejects_identity_dir() {
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 
 [[server.tunnels]]
 public-hostnames = ["app.example.test"]
@@ -175,92 +181,14 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     assert!(
         error
             .to_string()
-            .contains("server.identity-dir may be set only in managed mode")
+            .contains("server.identity-key may be set only in managed mode")
     );
 }
 
 #[test]
-fn identity_dir_and_cert_dir_must_differ() {
+fn server_identity_dir_is_rejected_as_unknown() {
     let tempdir = tempdir().unwrap();
-    initialize_manual_server_certificate(
-        tempdir.path().join("server-cert").as_path(),
-        "tunnel.example.test",
-    )
-    .unwrap();
-    fs::write(
-        tempdir.path().join("config.toml"),
-        r#"
-[control]
-address = "control.example.test"
-
-[server]
-hostname = "tunnel.example.test"
-cert-dir = "server-cert"
-identity-dir = "server-cert"
-"#,
-    )
-    .unwrap();
-
-    let error = load_server_config(&tempdir.path().join("config.toml")).unwrap_err();
-    assert!(error.to_string().contains(
-        "server.identity-dir must resolve to a different directory than server.cert-dir"
-    ));
-}
-
-#[test]
-fn identity_key_fingerprint_mismatch_is_rejected() {
-    let tempdir = tempdir().unwrap();
-    initialize_manual_server_certificate(
-        tempdir.path().join("server-cert").as_path(),
-        "tunnel.example.test",
-    )
-    .unwrap();
-    let identity_dir = tempdir.path().join("server-identity");
-    common::write_server_identity_material(&identity_dir);
-    fs::write(
-        identity_dir.join("server-identity.txt"),
-        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
-    )
-    .unwrap();
-
-    fs::write(
-        tempdir.path().join("config.toml"),
-        r#"
-[control]
-address = "control.example.test"
-
-[server]
-hostname = "tunnel.example.test"
-cert-dir = "server-cert"
-identity-dir = "server-identity"
-"#,
-    )
-    .unwrap();
-
-    let error = load_server_config(&tempdir.path().join("config.toml")).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("server identity material is invalid")
-    );
-}
-
-#[test]
-fn identity_fingerprint_file_parse_failure_is_distinct_from_certificate_parse() {
-    let tempdir = tempdir().unwrap();
-    initialize_manual_server_certificate(
-        tempdir.path().join("server-cert").as_path(),
-        "tunnel.example.test",
-    )
-    .unwrap();
-    let identity_dir = tempdir.path().join("server-identity");
-    common::write_server_identity_material(&identity_dir);
-    fs::write(
-        identity_dir.join("server-identity.txt"),
-        "not-a-fingerprint",
-    )
-    .unwrap();
-
+    write_managed_server_material(tempdir.path(), "server-cert", "server-identity").unwrap();
     fs::write(
         tempdir.path().join("config.toml"),
         r#"
@@ -279,12 +207,76 @@ identity-dir = "server-identity"
         .unwrap_err()
         .to_string();
     assert!(
-        message.contains("failed to parse a server identity fingerprint"),
-        "expected fingerprint parse error, got: {message}"
+        message.contains("unknown field `identity-dir`"),
+        "{message}"
     );
+}
+
+#[test]
+fn server_identity_key_inside_the_cert_dir_is_accepted() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    common::write_server_identity_key(&tempdir.path().join("server-cert/identity.key"));
+    fs::write(
+        tempdir.path().join("config.toml"),
+        r#"
+[control]
+address = "control.example.test"
+
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+identity-key = "server-cert/identity.key"
+"#,
+    )
+    .unwrap();
+
+    load_server_config(&tempdir.path().join("config.toml")).unwrap();
+}
+
+#[test]
+fn managed_server_rejects_missing_or_invalid_identity_keys() {
+    let tempdir = tempdir().unwrap();
+    initialize_manual_server_certificate(
+        tempdir.path().join("server-cert").as_path(),
+        "tunnel.example.test",
+    )
+    .unwrap();
+    let config = tempdir.path().join("config.toml");
+    fs::write(
+        &config,
+        r#"
+[control]
+address = "control.example.test"
+
+[server]
+hostname = "tunnel.example.test"
+cert-dir = "server-cert"
+identity-key = "server-identity/server.key"
+"#,
+    )
+    .unwrap();
+
+    let missing = load_server_config(&config).unwrap_err().to_string();
     assert!(
-        !message.contains("failed to parse a server identity certificate"),
-        "fingerprint parse should not be reported as a certificate parse: {message}"
+        missing.contains("server.identity-key file not found"),
+        "{missing}"
+    );
+
+    fs::create_dir_all(tempdir.path().join("server-identity")).unwrap();
+    fs::write(
+        tempdir.path().join("server-identity/server.key"),
+        "not a key",
+    )
+    .unwrap();
+    let invalid = load_server_config(&config).unwrap_err().to_string();
+    assert!(
+        invalid.contains("server.identity-key is invalid"),
+        "{invalid}"
     );
 }
 
@@ -305,7 +297,7 @@ ca-file = "trust/control-ca.pem"
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 "#,
     )
     .unwrap();
@@ -333,7 +325,7 @@ ca-file = "trust/control-ca.pem"
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 "#,
     )
     .unwrap();
@@ -359,7 +351,7 @@ trust = "system"
 [server]
 hostname = "tunnel.example.test"
 cert-dir = "server-cert"
-identity-dir = "server-identity"
+identity-key = "server-identity/server.key"
 "#,
     )
     .unwrap();

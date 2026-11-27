@@ -93,12 +93,11 @@ impl ServerRuntime {
             let identity = config.identity.as_ref().ok_or_else(|| {
                 io::Error::other("managed Server admission requires Server identity")
             })?;
+            crate::identity::warn_if_identity_key_is_shared("server", &identity.key_path);
             let material = SessionMaterial {
                 control_hostname: control.address.hostname().as_str().to_owned(),
                 trust: control.trust.clone(),
-                identity: ControlRoleIdentityMaterial::from_server_identity_dir(
-                    &identity.directory,
-                ),
+                identity: ControlRoleIdentityMaterial::server(identity.key_path.clone()),
             };
             Some(Box::new(ManagedSession::new(
                 control.address.clone(),

@@ -1,656 +1,457 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command as ProcessCommand;
 
 use assert_cmd::Command;
-use rcgen::{KeyPair, PublicKeyData};
-use runewarp::{ClientIdentity, client_identity_from_certificate_der};
-use rustls::pki_types::CertificateDer;
-use rustls::pki_types::pem::PemObject;
+use rcgen::{KeyPair, PKCS_ED25519};
+use runewarp::IdentityKey;
 use tempfile::tempdir;
-use time::OffsetDateTime;
 
-mod common;
+fn runewarp(directory: &Path) -> Command {
+    let mut command = Command::cargo_bin("runewarp").unwrap();
+    command.current_dir(directory);
+    command
+}
 
-use common::assert_generated_client_identity_certificate_profile;
+fn stdout_of(command: &mut Command) -> String {
+    let assert = command.assert().success();
+    String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+}
+
+fn stderr_of_failure(command: &mut Command) -> String {
+    let assert = command.assert().failure();
+    String::from_utf8(assert.get_output().stderr.clone()).unwrap()
+}
+
+fn fingerprint_of(path: &Path) -> String {
+    IdentityKey::read(path)
+        .unwrap()
+        .client_identity()
+        .to_string()
+}
+
+/// The documented operator recipe: SHA-256 over the DER SubjectPublicKeyInfo.
+fn openssl_fingerprint(path: &Path) -> String {
+    let public_key = ProcessCommand::new("openssl")
+        .args(["pkey", "-in"])
+        .arg(path)
+        .args(["-pubout", "-outform", "DER"])
+        .output()
+        .expect("openssl must be installed to check the documented fingerprint recipe");
+    assert!(public_key.status.success(), "openssl pkey failed");
+    let mut digest = ProcessCommand::new("openssl")
+        .args(["dgst", "-sha256", "-r"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(digest.stdin.as_mut().unwrap(), &public_key.stdout).unwrap();
+    let output = digest.wait_with_output().unwrap();
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
 
 #[test]
-fn client_identity_init_writes_identity_artifacts_to_the_requested_directory() {
+fn init_writes_only_an_owner_only_key_and_prints_its_fingerprint() {
     let tempdir = tempdir().unwrap();
 
-    Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
+    let stdout = stdout_of(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "init",
+        "--key",
+        "identity/client.key",
+    ]));
 
-    assert_exists(tempdir.path().join("client-identity/client.key").as_path());
-    assert_exists(tempdir.path().join("client-identity/client.crt").as_path());
-    assert_exists(
-        tempdir
-            .path()
-            .join("client-identity/client-identity.txt")
-            .as_path(),
+    let key_path = tempdir.path().join("identity/client.key");
+    let entries = fs::read_dir(tempdir.path().join("identity"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(entries, ["client.key"]);
+    #[cfg(unix)]
+    assert_eq!(mode_of(&key_path), 0o600);
+    let fingerprint = fingerprint_of(&key_path);
+    assert_eq!(
+        stdout,
+        format!("Client identity initialized: {fingerprint}\nIdentity key: identity/client.key\n")
     );
 }
 
 #[test]
-fn client_identity_init_uses_the_xdg_default_directory_when_dir_is_omitted() {
+fn init_uses_the_xdg_default_key_path_when_key_is_omitted() {
     let tempdir = tempdir().unwrap();
     let xdg_config_home = tempdir.path().join("xdg-config");
     let xdg_data_home = tempdir.path().join("xdg-data");
     fs::create_dir_all(xdg_config_home.join("runewarp")).unwrap();
 
-    Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
+    runewarp(tempdir.path())
         .env("XDG_CONFIG_HOME", &xdg_config_home)
         .env("XDG_DATA_HOME", &xdg_data_home)
         .args(["client", "identity", "init"])
         .assert()
         .success();
 
-    assert_exists(
-        xdg_data_home
-            .join("runewarp/client/identity/client.key")
-            .as_path(),
-    );
-    assert_exists(
-        xdg_data_home
-            .join("runewarp/client/identity/client.crt")
-            .as_path(),
-    );
-    assert_exists(
-        xdg_data_home
-            .join("runewarp/client/identity/client-identity.txt")
-            .as_path(),
-    );
+    assert!(xdg_data_home.join("runewarp/client/identity.key").is_file());
 }
 
 #[test]
-fn client_identity_init_uses_the_configured_material_dir_when_config_is_provided() {
+fn init_uses_the_configured_identity_key_before_or_after_the_leaf_subcommand() {
     let tempdir = tempdir().unwrap();
-    let configured_dir = tempdir.path().join("configured/client-identity");
-    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
     fs::write(
-        tempdir.path().join("client.toml"),
-        r#"
-[client]
-identity-dir = "configured/client-identity"
-"#,
+        tempdir.path().join("custom.toml"),
+        "[client]\nidentity-key = \"configured/client.key\"\n",
     )
     .unwrap();
 
-    Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--config", "client.toml"])
+    runewarp(tempdir.path())
+        .args(["client", "identity", "init", "--config", "custom.toml"])
         .assert()
         .success();
-
-    assert_exists(configured_dir.join("client.key").as_path());
-    assert_exists(configured_dir.join("client.crt").as_path());
-    assert_exists(configured_dir.join("client-identity.txt").as_path());
-}
-
-#[test]
-fn client_identity_init_accepts_config_before_the_leaf_subcommand() {
-    let tempdir = tempdir().unwrap();
-    let configured_dir = tempdir.path().join("configured/client-identity");
-    fs::create_dir_all(tempdir.path().join("configured")).unwrap();
-    fs::write(
-        tempdir.path().join("client.toml"),
-        r#"
-[client]
-identity-dir = "configured/client-identity"
-"#,
-    )
-    .unwrap();
-
-    Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "--config", "client.toml", "init"])
+    let first = fs::read(tempdir.path().join("configured/client.key")).unwrap();
+    runewarp(tempdir.path())
+        .args(["client", "--config", "custom.toml", "identity", "init"])
         .assert()
         .success();
-
-    assert_exists(configured_dir.join("client.key").as_path());
-    assert_exists(configured_dir.join("client.crt").as_path());
-    assert_exists(configured_dir.join("client-identity.txt").as_path());
-}
-
-#[test]
-fn client_identity_init_rejects_the_legacy_identity_directory_key_in_config() {
-    let tempdir = tempdir().unwrap();
-    let xdg_data_home = tempdir.path().join("xdg-data");
-    fs::write(
-        tempdir.path().join("client.toml"),
-        r#"
-[client]
-identity-directory = "legacy/client-identity"
-"#,
-    )
-    .unwrap();
-
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .env("XDG_DATA_HOME", &xdg_data_home)
-        .args(["client", "identity", "init", "--config", "client.toml"])
-        .assert()
-        .failure();
-
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-
-    assert!(stderr.contains("unknown field `identity-directory`"));
-    assert!(
-        !xdg_data_home
-            .join("runewarp/client/identity/client.key")
-            .exists()
-    );
-}
-
-#[test]
-fn client_identity_init_writes_pem_artifacts_and_a_client_identity() {
-    let tempdir = tempdir().unwrap();
-
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
-
-    let private_key =
-        fs::read_to_string(tempdir.path().join("client-identity/client.key")).unwrap();
-    let certificate =
-        fs::read_to_string(tempdir.path().join("client-identity/client.crt")).unwrap();
-    let client_identity =
-        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-
-    assert!(private_key.starts_with("-----BEGIN PRIVATE KEY-----"));
-    assert!(certificate.starts_with("-----BEGIN CERTIFICATE-----"));
-    assert_eq!(client_identity.trim().len(), 64);
-    assert!(
-        client_identity
-            .trim()
-            .chars()
-            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
-    );
-    assert!(stdout.contains(&format!(
-        "Client identity initialized: {}",
-        client_identity.trim()
-    )));
-    assert!(stdout.contains("Identity directory: client-identity"));
-    assert!(!stdout.contains("Certificate lifetime:"));
-    assert!(!stdout.contains("Renewal target:"));
-    assert!(!stdout.contains("Issued at (UTC):"));
-    assert!(!stdout.contains("Renew after (UTC):"));
-    assert!(!stdout.contains("Expires at (UTC):"));
-
-    let certificate_der =
-        CertificateDer::from_pem_slice(certificate.as_bytes()).expect("generated certificate");
-    let (_, parsed) = x509_parser::parse_x509_certificate(certificate_der.as_ref()).unwrap();
-    let lifetime =
-        parsed.validity().not_after.to_datetime() - parsed.validity().not_before.to_datetime();
-    assert_eq!(lifetime.whole_days(), 36_500);
-}
-
-#[test]
-fn client_identity_init_leaves_complete_expired_material_unchanged() {
-    let tempdir = tempdir().unwrap();
-    let directory = tempdir.path().join("client-identity");
-    fs::create_dir_all(&directory).unwrap();
-    write_expired_client_identity(&directory);
-
-    let original_private_key = fs::read(directory.join("client.key")).unwrap();
-    let original_certificate = fs::read(directory.join("client.crt")).unwrap();
-    let original_identity = fs::read_to_string(directory.join("client-identity.txt")).unwrap();
-    let certificate_der = CertificateDer::from_pem_slice(original_certificate.as_slice())
-        .expect("expired certificate");
-    let (_, parsed) = x509_parser::parse_x509_certificate(certificate_der.as_ref()).unwrap();
-    assert!(
-        parsed.validity().not_after.to_datetime() < OffsetDateTime::now_utc(),
-        "test certificate must already be expired"
-    );
-
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
-
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
     assert_eq!(
-        fs::read(directory.join("client.key")).unwrap(),
-        original_private_key
+        fs::read(tempdir.path().join("configured/client.key")).unwrap(),
+        first
     );
-    assert_eq!(
-        fs::read(directory.join("client.crt")).unwrap(),
-        original_certificate
-    );
-    assert_eq!(
-        fs::read_to_string(directory.join("client-identity.txt")).unwrap(),
-        original_identity
-    );
-    assert!(stdout.contains(&format!(
+}
+
+#[test]
+fn init_leaves_an_existing_valid_key_unchanged() {
+    let tempdir = tempdir().unwrap();
+    let key_path = tempdir.path().join("client.key");
+    // A released (v0.2.0) P-256 PKCS#8 key keeps its identity.
+    let released = KeyPair::generate().unwrap().serialize_pem();
+    fs::write(&key_path, &released).unwrap();
+
+    let stdout = stdout_of(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "init",
+        "--key",
+        "client.key",
+    ]));
+
+    assert_eq!(fs::read_to_string(&key_path).unwrap(), released);
+    assert!(stdout.starts_with(&format!(
         "Client identity already exists: {}",
-        original_identity.trim()
+        fingerprint_of(&key_path)
     )));
-    assert!(stdout.contains("Identity directory: client-identity"));
-    assert!(!stdout.contains("Expires at (UTC):"));
 }
 
 #[test]
-fn client_identity_init_succeeds_when_identity_artifacts_already_exist() {
+fn init_refuses_to_overwrite_an_invalid_key() {
+    let tempdir = tempdir().unwrap();
+    let key_path = tempdir.path().join("client.key");
+    fs::write(&key_path, "not a key").unwrap();
+
+    let stderr = stderr_of_failure(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "init",
+        "--key",
+        "client.key",
+    ]));
+
+    assert!(
+        stderr.contains("refusing to overwrite existing identity key"),
+        "{stderr}"
+    );
+    assert_eq!(fs::read_to_string(&key_path).unwrap(), "not a key");
+}
+
+#[test]
+fn legacy_certificate_and_fingerprint_files_are_ignored() {
+    let tempdir = tempdir().unwrap();
+    let identity = tempdir.path().join("identity");
+    fs::create_dir(&identity).unwrap();
+    fs::write(
+        identity.join("client.key"),
+        IdentityKey::generate().unwrap().to_pem(),
+    )
+    .unwrap();
+    fs::write(identity.join("client.crt"), "stale certificate").unwrap();
+    fs::write(identity.join("client-identity.txt"), "stale fingerprint").unwrap();
+
+    let show = stdout_of(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "show",
+        "--key",
+        "identity/client.key",
+    ]));
+    runewarp(tempdir.path())
+        .args(["client", "identity", "init", "--key", "identity/client.key"])
+        .assert()
+        .success();
+
+    assert_eq!(show.trim(), fingerprint_of(&identity.join("client.key")));
+    assert_eq!(
+        fs::read_to_string(identity.join("client.crt")).unwrap(),
+        "stale certificate"
+    );
+    assert_eq!(
+        fs::read_to_string(identity.join("client-identity.txt")).unwrap(),
+        "stale fingerprint"
+    );
+}
+
+#[test]
+fn show_prints_the_fingerprint_from_the_openssl_recipe() {
+    let tempdir = tempdir().unwrap();
+    runewarp(tempdir.path())
+        .args(["client", "identity", "init", "--key", "client.key"])
+        .assert()
+        .success();
+
+    let stdout = stdout_of(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "show",
+        "--key",
+        "client.key",
+    ]));
+
+    assert_eq!(
+        stdout,
+        format!(
+            "{}\n",
+            openssl_fingerprint(&tempdir.path().join("client.key"))
+        )
+    );
+}
+
+#[test]
+fn show_explains_how_to_convert_a_sec1_key() {
+    let tempdir = tempdir().unwrap();
+    fs::write(
+        tempdir.path().join("client.key"),
+        "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIA==\n-----END EC PRIVATE KEY-----\n",
+    )
+    .unwrap();
+
+    let stderr = stderr_of_failure(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "show",
+        "--key",
+        "client.key",
+    ]));
+
+    assert!(stderr.contains("openssl pkcs8 -topk8 -nocrypt"), "{stderr}");
+}
+
+#[test]
+fn rotate_installs_a_new_owner_only_key_and_prints_its_fingerprint() {
+    let tempdir = tempdir().unwrap();
+    let key_path = tempdir.path().join("client.key");
+    runewarp(tempdir.path())
+        .args(["client", "identity", "init", "--key", "client.key"])
+        .assert()
+        .success();
+    let before = fingerprint_of(&key_path);
+
+    let stdout = stdout_of(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "rotate",
+        "--key",
+        "client.key",
+    ]));
+
+    let after = fingerprint_of(&key_path);
+    assert_ne!(before, after);
+    assert_eq!(
+        stdout,
+        format!("Client identity rotated: {after}\nIdentity key: client.key\n")
+    );
+    #[cfg(unix)]
+    assert_eq!(mode_of(&key_path), 0o600);
+    let leftovers = fs::read_dir(tempdir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(leftovers, ["client.key"]);
+}
+
+#[test]
+fn rotate_replaces_an_unsupported_ed25519_key() {
+    let tempdir = tempdir().unwrap();
+    let key_path = tempdir.path().join("client.key");
+    fs::write(
+        &key_path,
+        KeyPair::generate_for(&PKCS_ED25519)
+            .unwrap()
+            .serialize_pem(),
+    )
+    .unwrap();
+
+    let show = stderr_of_failure(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "show",
+        "--key",
+        "client.key",
+    ]));
+    assert!(show.contains("runewarp client identity rotate"), "{show}");
+
+    runewarp(tempdir.path())
+        .args(["client", "identity", "rotate", "--key", "client.key"])
+        .assert()
+        .success();
+
+    IdentityKey::read(&key_path).unwrap();
+}
+
+#[test]
+fn rotate_requires_an_existing_key() {
     let tempdir = tempdir().unwrap();
 
-    Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
+    let stderr = stderr_of_failure(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "rotate",
+        "--key",
+        "client.key",
+    ]));
 
-    Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
+    assert!(stderr.contains("runewarp client identity init"), "{stderr}");
+    assert!(!tempdir.path().join("client.key").exists());
 }
 
 #[test]
-fn client_identity_init_matches_the_generated_certificate_subject_public_key_info() {
+fn identity_commands_reject_runtime_routing_flags() {
     let tempdir = tempdir().unwrap();
 
-    Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
-
-    let certificate_pem = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
-    let private_key_pem =
-        fs::read_to_string(tempdir.path().join("client-identity/client.key")).unwrap();
-    let certificate =
-        CertificateDer::from_pem_slice(&certificate_pem).expect("generated certificate");
-    let stored_identity =
-        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
-    let signing_key = KeyPair::from_pem(&private_key_pem).expect("generated private key");
-
-    let derived_identity = client_identity_from_certificate_der(certificate.as_ref())
-        .expect("derive client identity from certificate");
-    let key_identity =
-        ClientIdentity::from_subject_public_key_info(&signing_key.subject_public_key_info());
-
-    assert_eq!(stored_identity.trim(), derived_identity.to_string());
-    assert_eq!(stored_identity.trim(), key_identity.to_string());
-    assert_generated_client_identity_certificate_profile(certificate.as_ref());
-}
-
-#[test]
-fn client_identity_init_rejects_runtime_routing_flags() -> Result<(), Box<dyn std::error::Error>> {
-    let tempdir = tempdir()?;
-
-    let assert = Command::cargo_bin("runewarp")?
-        .current_dir(tempdir.path())
-        .args([
-            "client",
-            "--server-address",
-            "tunnel.example.test",
-            "--backend-address",
-            "localhost:443",
-            "identity",
-            "init",
-        ])
-        .assert()
-        .failure();
-
-    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
+    let stderr = stderr_of_failure(runewarp(tempdir.path()).args([
+        "client",
+        "--server-address",
+        "tunnel.example.test",
+        "--backend-address",
+        "localhost:443",
+        "identity",
+        "init",
+    ]));
 
     assert!(stderr.contains("runewarp client identity"));
     assert!(stderr.contains("--server-address"));
     assert!(stderr.contains("--backend-address"));
-    Ok(())
 }
 
 #[test]
-fn client_identity_renew_is_rejected_as_an_unknown_subcommand() {
+fn renew_is_rejected_as_an_unknown_subcommand() {
     let tempdir = tempdir().unwrap();
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "renew", "--dir", "client-identity"])
-        .assert()
-        .failure();
-
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let stderr = stderr_of_failure(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "renew",
+        "--key",
+        "client.key",
+    ]));
 
     assert!(stderr.contains("unrecognized subcommand"));
     assert!(stderr.contains("renew"));
 }
 
 #[test]
-fn client_identity_rotate_replaces_the_key_and_client_identity() {
+fn init_help_shows_the_key_flag_and_dir_is_rejected() {
     let tempdir = tempdir().unwrap();
 
-    Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
+    let help = stdout_of(runewarp(tempdir.path()).args(["client", "identity", "init", "--help"]));
+    let stderr = stderr_of_failure(runewarp(tempdir.path()).args([
+        "client",
+        "identity",
+        "init",
+        "--dir",
+        "client-identity",
+    ]));
 
-    let original_private_key = fs::read(tempdir.path().join("client-identity/client.key")).unwrap();
-    let original_certificate = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
-    let original_identity =
-        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
-
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "rotate", "--dir", "client-identity"])
-        .assert()
-        .success();
-
-    let rotated_private_key = fs::read(tempdir.path().join("client-identity/client.key")).unwrap();
-    let rotated_certificate = fs::read(tempdir.path().join("client-identity/client.crt")).unwrap();
-    let rotated_identity =
-        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt")).unwrap();
-    let rotated_certificate_der =
-        CertificateDer::from_pem_slice(&rotated_certificate).expect("rotated certificate");
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-
-    assert_ne!(rotated_private_key, original_private_key);
-    assert_ne!(rotated_certificate, original_certificate);
-    assert_ne!(rotated_identity, original_identity);
-    assert_eq!(
-        client_identity_from_certificate_der(rotated_certificate_der.as_ref())
-            .unwrap()
-            .to_string(),
-        rotated_identity.trim(),
-    );
-    assert_generated_client_identity_certificate_profile(rotated_certificate_der.as_ref());
-    assert!(stdout.contains(&format!(
-        "Client identity rotated: {}",
-        rotated_identity.trim()
-    )));
-    assert!(stdout.contains("Identity directory: client-identity"));
-    assert!(!stdout.contains("Certificate lifetime:"));
-    assert!(!stdout.contains("Expires at (UTC):"));
+    assert!(help.contains("--key <PATH>"));
+    assert!(help.contains("runewarp client identity init --key ./client.key"));
+    assert!(stderr.contains("unexpected argument '--dir'"));
 }
 
 #[test]
-fn client_identity_show_prints_only_the_fingerprint() -> Result<(), Box<dyn std::error::Error>> {
-    let tempdir = tempdir()?;
-
-    Command::cargo_bin("runewarp")?
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
-
-    let expected_identity =
-        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt"))?;
-
-    let assert = Command::cargo_bin("runewarp")?
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "show", "--dir", "client-identity"])
-        .assert()
-        .success();
-
-    assert_eq!(
-        String::from_utf8(assert.get_output().stdout.clone())?,
-        format!("{}\n", expected_identity.trim())
-    );
-    assert!(assert.get_output().stderr.is_empty());
-    Ok(())
-}
-
-#[test]
-fn client_identity_init_is_idempotent_when_material_already_exists()
--> Result<(), Box<dyn std::error::Error>> {
-    let tempdir = tempdir()?;
-
-    Command::cargo_bin("runewarp")?
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
-
-    let original_identity =
-        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt"))?;
-
-    let assert = Command::cargo_bin("runewarp")?
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
-
-    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
-    let current_identity =
-        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt"))?;
-
-    assert_eq!(current_identity, original_identity);
-    assert!(stdout.contains("Client identity already exists"));
-    assert!(stdout.contains("Identity directory: client-identity"));
-    assert!(!stdout.contains("Issued at (UTC):"));
-    assert!(!stdout.contains("Renew after (UTC):"));
-    assert!(!stdout.contains("Expires at (UTC):"));
-    assert!(!stdout.contains("Certificate lifetime:"));
-    assert!(!stdout.contains("os error"));
-    Ok(())
-}
-
-#[test]
-fn client_identity_init_reports_repair_guidance_for_partial_material()
--> Result<(), Box<dyn std::error::Error>> {
-    let tempdir = tempdir()?;
-    fs::create_dir_all(tempdir.path().join("client-identity"))?;
-    fs::write(
-        tempdir.path().join("client-identity/client.crt"),
-        "placeholder certificate",
-    )?;
-
-    let assert = Command::cargo_bin("runewarp")?
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .failure();
-
-    let stderr = String::from_utf8(assert.get_output().stderr.clone())?;
-
-    assert!(stderr.contains("incomplete or inconsistent"));
-    assert!(stderr.contains("runewarp client identity init"));
-    assert!(stderr.contains("client-identity/client.crt"));
-    assert!(!stderr.contains("os error"));
-    Ok(())
-}
-
-#[test]
-fn client_identity_init_reports_identity_and_directory_only()
--> Result<(), Box<dyn std::error::Error>> {
-    let tempdir = tempdir()?;
-
-    let assert = Command::cargo_bin("runewarp")?
-        .current_dir(tempdir.path())
-        .args(["client", "identity", "init", "--dir", "client-identity"])
-        .assert()
-        .success();
-
-    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
-    let client_identity =
-        fs::read_to_string(tempdir.path().join("client-identity/client-identity.txt"))?;
-
-    assert!(stdout.contains(&format!(
-        "Client identity initialized: {}",
-        client_identity.trim()
-    )));
-    assert!(stdout.contains("Identity directory: client-identity"));
-    assert!(!stdout.contains("Issued at (UTC):"));
-    assert!(!stdout.contains("Renew after (UTC):"));
-    assert!(!stdout.contains("Expires at (UTC):"));
-    assert!(!stdout.contains("Certificate lifetime:"));
-    assert!(!stdout.contains("Renewal target:"));
-    Ok(())
-}
-
-#[test]
-fn client_identity_show_help_keeps_runewarp_branding_and_examples()
--> Result<(), Box<dyn std::error::Error>> {
-    let assert = Command::cargo_bin("runewarp")?
-        .args(["client", "identity", "show", "--help"])
-        .assert()
-        .success();
-
-    let stdout = String::from_utf8(assert.get_output().stdout.clone())?;
-
-    assert!(stdout.starts_with("Runewarp Client Identity"));
-    assert!(stdout.contains("Examples:"));
-    assert!(stdout.contains("runewarp client identity show"));
-    assert!(!stdout.contains("Config defaults:"));
-    Ok(())
-}
-
-fn assert_exists(path: &Path) {
-    assert!(
-        path.exists(),
-        "expected {} to exist after `runewarp client identity init`",
-        path.display()
-    );
-}
-
-fn write_expired_client_identity(directory: &Path) {
-    let (client_identity, certificate_pem, private_key_pem) =
-        common::expired_client_identity_material();
-
-    fs::write(directory.join("client.key"), private_key_pem).unwrap();
-    fs::write(directory.join("client.crt"), certificate_pem).unwrap();
-    fs::write(
-        directory.join("client-identity.txt"),
-        client_identity.to_string(),
-    )
-    .unwrap();
-}
-
-#[test]
-fn client_identity_init_help_shows_the_new_dir_flag() {
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
-        .args(["client", "identity", "init", "--help"])
-        .assert()
-        .success();
-
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-
-    assert!(stdout.contains("Usage:"));
-    assert!(stdout.contains("runewarp client identity init"));
-    assert!(stdout.contains("--dir"));
-    assert!(!stdout.contains("--directory"));
-}
-
-#[test]
-fn client_identity_help_shows_the_config_flag() {
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
-        .args(["client", "identity", "--help"])
-        .assert()
-        .success();
-
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-
-    assert!(stdout.contains("Usage:"));
-    assert!(stdout.contains("runewarp client identity"));
-    assert!(stdout.contains("--config"));
-}
-
-#[test]
-fn client_identity_init_rejects_the_removed_directory_flag() {
+fn identity_help_keeps_runewarp_branding_and_the_config_flag() {
     let tempdir = tempdir().unwrap();
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args([
-            "client",
-            "identity",
-            "init",
-            "--directory",
-            "client-identity",
-        ])
-        .assert()
-        .failure();
+    let group = stdout_of(runewarp(tempdir.path()).args(["client", "identity", "--help"]));
+    let show = stdout_of(runewarp(tempdir.path()).args(["client", "identity", "show", "--help"]));
 
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-
-    assert!(stderr.contains("unexpected argument '--directory'"));
-    assert!(stderr.contains("--dir"));
+    assert!(group.contains("--config"));
+    assert!(show.starts_with("Runewarp Client Identity"));
+    assert!(show.contains("runewarp client identity show"));
+    assert!(!show.contains("Config defaults:"));
 }
 
 #[test]
-fn client_identity_init_rejects_managed_config_without_explicit_dir() {
+fn managed_configs_require_an_explicit_key_for_init_and_rotate() {
     let tempdir = tempdir().unwrap();
     fs::write(
         tempdir.path().join("managed-client.toml"),
-        r#"
-[control]
-address = "control.example.test"
-
-[client]
-identity-dir = "client-identity"
-"#,
+        "[control]\naddress = \"control.example.test\"\n",
     )
     .unwrap();
 
-    let assert = Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
+    let stderr = stderr_of_failure(runewarp(tempdir.path()).args([
+        "client",
+        "--config",
+        "managed-client.toml",
+        "identity",
+        "init",
+    ]));
+    runewarp(tempdir.path())
         .args([
             "client",
             "--config",
             "managed-client.toml",
             "identity",
             "init",
-        ])
-        .assert()
-        .failure();
-
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    assert!(stderr.contains("client identity init and rotate are not supported for managed-mode"));
-}
-
-#[test]
-fn client_identity_init_still_works_with_explicit_dir_in_managed_config() {
-    let tempdir = tempdir().unwrap();
-    fs::write(
-        tempdir.path().join("managed-client.toml"),
-        r#"
-[control]
-address = "control.example.test"
-"#,
-    )
-    .unwrap();
-
-    Command::cargo_bin("runewarp")
-        .unwrap()
-        .current_dir(tempdir.path())
-        .args([
-            "client",
-            "--config",
-            "managed-client.toml",
-            "identity",
-            "init",
-            "--dir",
-            "client-identity",
+            "--key",
+            "client.key",
         ])
         .assert()
         .success();
 
-    assert!(tempdir.path().join("client-identity/client.key").is_file());
+    assert!(stderr.contains("not supported for managed-mode configs without --key"));
+    assert!(tempdir.path().join("client.key").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn init_and_rotate_create_owner_only_keys_under_a_restrictive_umask() {
+    let tempdir = tempdir().unwrap();
+    let binary = assert_cmd::cargo::cargo_bin("runewarp");
+    for subcommand in ["init", "rotate"] {
+        let status = ProcessCommand::new("sh")
+            .current_dir(tempdir.path())
+            .arg("-c")
+            .arg("umask 0777 && exec \"$0\" client identity \"$1\" --key client.key")
+            .arg(&binary)
+            .arg(subcommand)
+            .status()
+            .unwrap();
+
+        assert!(
+            status.success(),
+            "`{subcommand}` must succeed under umask 0777"
+        );
+        assert_eq!(mode_of(&tempdir.path().join("client.key")), 0o600);
+        IdentityKey::read(&tempdir.path().join("client.key")).unwrap();
+    }
 }

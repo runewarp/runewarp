@@ -107,10 +107,7 @@ fn install_logger(role: crate::TraceRole) -> Result<(), Box<dyn Error>> {
 pub(crate) fn setup(directory: &Path) -> Result<(), Box<dyn Error>> {
     crate::initialize_manual_server_certificate(&directory.join("cert"), "localhost")?;
     let key = crate::IdentityKey::generate()?;
-    std::fs::write(
-        directory.join(crate::CLIENT_IDENTITY_KEY_FILENAME),
-        key.to_pem(),
-    )?;
+    std::fs::write(directory.join(crate::IDENTITY_KEY_FILENAME), key.to_pem())?;
     // Concurrent-scrape runs bind each Server's metrics listener on an ephemeral port.
     let metrics = if std::env::var("RUNEWARP_BENCH_METRICS").is_ok_and(|value| value == "1") {
         "metrics-bind-address = \"127.0.0.1:0\"\n"

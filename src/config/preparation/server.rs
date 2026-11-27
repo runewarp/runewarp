@@ -837,7 +837,7 @@ client-identity = "00112233445566778899aabbccddeeff00112233445566778899aabbccdde
     {
         let tempdir = tempdir()?;
         let config_path = tempdir.path().join("config.toml");
-        let default_identity_dir = tempdir.path().join("xdg-data/server/identity");
+        let default_identity_dir = tempdir.path().join("xdg-data/server/identity.key");
 
         let prepared = super::prepare_raw_server_config_with_defaults(
             &config_path,

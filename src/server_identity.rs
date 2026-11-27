@@ -7,9 +7,6 @@ use crate::identity::{
     spki_fingerprint, write_lowercase_hex,
 };
 
-/// Default Server identity key filename inside the XDG data directory.
-pub const SERVER_IDENTITY_KEY_FILENAME: &str = "server.key";
-
 /// Stable pinned-public-key Server identity used to authenticate to Control.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ServerIdentity([u8; 32]);

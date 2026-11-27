@@ -68,7 +68,7 @@ class DockerExampleTest < Minitest::Test
         }.freeze
 
         CLIENT_FILES = {
-          "/tmp/runewarp-data/runewarp/client/identity/client.key" => #{CLIENT_KEY_PEM.inspect}
+          "/tmp/runewarp-data/runewarp/client/identity.key" => #{CLIENT_KEY_PEM.inspect}
         }.freeze
 
         def container_state_path(example_dir)
@@ -188,8 +188,8 @@ class DockerExampleTest < Minitest::Test
       end
 
       assert_path_exists(File.join(example_dir, "generated", "server", "data", "runewarp", "server", "cert", "server.crt"))
-      client_identity_dir = File.join(example_dir, "generated", "client", "data", "runewarp", "client", "identity")
-      assert_equal(["client.key"], Dir.children(client_identity_dir))
+      client_data_dir = File.join(example_dir, "generated", "client", "data", "runewarp", "client")
+      assert_equal(["identity.key", "server-ca.crt"], Dir.children(client_data_dir).sort)
       server_config = File.read(File.join(example_dir, "generated", "server", "config", "runewarp", "config.toml"), encoding: "utf-8")
       assert_equal("client_identity = \"#{CLIENT_IDENTITY}\"\n", server_config)
       refute_path_exists(File.join(example_dir, "generated", "server", "source-data"))

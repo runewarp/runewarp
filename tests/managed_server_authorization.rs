@@ -27,9 +27,8 @@ use rcgen::generate_simple_self_signed;
 use runewarp::{
     ControlAddress, ControlRoleIdentityMaterial, ControlTrust, ManagedSession, ManagedSessionEvent,
     ManagedSessionRole, OrderlyShutdown, PreparedClient, PreparedServer, QUIC_CLOSE_FLUSH_DURATION,
-    SERVER_IDENTITY_KEY_FILENAME, ServerHostname, SessionMaterial, ShutdownMode,
-    initialize_manual_server_certificate, load_client_config, load_server_config,
-    make_client_tunnel_h3_config, tunnel::ClientTunnel,
+    ServerHostname, SessionMaterial, ShutdownMode, initialize_manual_server_certificate,
+    load_client_config, load_server_config, make_client_tunnel_h3_config, tunnel::ClientTunnel,
 };
 use rustls::RootCertStore;
 use rustls::pki_types::pem::PemObject;
@@ -288,10 +287,7 @@ tunnel-bind-address = "127.0.0.1:0"
             control_hostname: "localhost".to_owned(),
             trust: ControlTrust::CaFile(control_paths.ca_cert),
             identity: ControlRoleIdentityMaterial::server(
-                tempdir
-                    .path()
-                    .join("server-identity")
-                    .join(SERVER_IDENTITY_KEY_FILENAME),
+                tempdir.path().join("server-identity").join("server.key"),
             ),
         };
         let mut session = ManagedSession::new(

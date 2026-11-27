@@ -73,7 +73,7 @@ module Runewarp
       "server.key",
       "server-ca.crt"
     ].freeze
-    CLIENT_RUNTIME_FILES = ["client.key"].freeze
+    CLIENT_RUNTIME_FILES = ["identity.key"].freeze
 
     def layout(example_dir)
       generated_dir = File.join(example_dir, "generated")
@@ -85,7 +85,7 @@ module Runewarp
         generated_dir: generated_dir,
         server_runtime_dir: File.join(server_service_dir, "data", "runewarp", "server", "cert"),
         server_config_path: File.join(server_service_dir, "config", "runewarp", "config.toml"),
-        client_runtime_dir: File.join(client_service_dir, "data", "runewarp", "client", "identity"),
+        client_runtime_dir: File.join(client_service_dir, "data", "runewarp", "client"),
         client_trust_path: File.join(client_service_dir, "data", "runewarp", "client", "server-ca.crt"),
         client_config_path: File.join(client_service_dir, "config", "runewarp", "config.toml"),
         caddy_data_dir: File.join(caddy_service_dir, "data"),
@@ -180,7 +180,7 @@ module Runewarp
       run_runewarp_in_temp_container(image_tag, "client", "identity", "init") do |container_id|
         install_container_files(
           container_id,
-          "#{CONTAINER_XDG_DATA_HOME}/runewarp/client/identity",
+          "#{CONTAINER_XDG_DATA_HOME}/runewarp/client",
           paths[:client_runtime_dir],
           CLIENT_RUNTIME_FILES
         )
@@ -191,7 +191,7 @@ module Runewarp
       Core.section("Rendering Docker example configuration")
       Core.install_readonly_copy(File.join(paths[:server_runtime_dir], "server-ca.crt"), paths[:client_trust_path])
 
-      client_identity = client_identity_fingerprint(File.join(paths[:client_runtime_dir], "client.key"))
+      client_identity = client_identity_fingerprint(File.join(paths[:client_runtime_dir], "identity.key"))
       server_template = File.read(File.join(example_dir, "server", "config.toml.template"), encoding: "utf-8")
       File.write(paths[:server_config_path], server_template.gsub("__CLIENT_IDENTITY__", client_identity), encoding: "utf-8")
       FileUtils.cp(File.join(example_dir, "client", "config.toml.template"), paths[:client_config_path])

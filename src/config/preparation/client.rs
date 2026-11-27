@@ -773,7 +773,7 @@ hostname = "tunnel.example.test"
     -> Result<(), Box<dyn std::error::Error>> {
         let tempdir = tempdir()?;
         let config_path = tempdir.path().join("config.toml");
-        let identity_key = tempdir.path().join("xdg-data/client/identity");
+        let identity_key = tempdir.path().join("xdg-data/client/identity.key");
         let server_ca_path = tempdir.path().join("xdg-data/client/server-ca.crt");
         let public_cert_directory = tempdir.path().join("xdg-data/client/public-cert");
         let acme_state_dir = tempdir.path().join("xdg-state/client/acme");

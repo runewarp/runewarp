@@ -76,7 +76,7 @@ Create the Client identity key:
 runewarp client identity init
 ```
 
-This writes one file, `$XDG_DATA_HOME/runewarp/client/identity/client.key`, with mode `0600`, and prints the `client-identity` fingerprint. Pass `--key <path>` to use another path. Rerunning `init` leaves an existing valid key alone and refuses to overwrite an unreadable or invalid one.
+This writes one file, `$XDG_DATA_HOME/runewarp/client/identity.key`, with mode `0600`, and prints the `client-identity` fingerprint. Pass `--key <path>` to use another path. Rerunning `init` leaves an existing valid key alone and refuses to overwrite an unreadable or invalid one.
 
 Place the fingerprint into the matching Server `[[server.tunnels]]` entry as either `client-identity` or one entry in `client-identities`.
 
@@ -89,7 +89,7 @@ runewarp client identity show
 The fingerprint is the SHA-256 of the key's DER SubjectPublicKeyInfo, so you can compute it on a machine without Runewarp:
 
 ```bash
-openssl pkey -in client.key -pubout -outform DER | openssl dgst -sha256
+openssl pkey -in identity.key -pubout -outform DER | openssl dgst -sha256
 ```
 
 `runewarp client identity rotate` replaces the key in one atomic step and prints the new fingerprint. Update Server authorization with it; a running Client picks the new key up on its next reconnect.

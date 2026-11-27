@@ -76,9 +76,9 @@ pub use config::{
 pub use control_address::{ControlAddress, ControlAddressError};
 pub use hostname::{PublicHostname, PublicHostnameError, ServerHostname, ServerHostnameError};
 pub use identity::{
-    CLIENT_IDENTITY_KEY_FILENAME, ClientIdentity, IdentityKey, IdentityKeyError,
-    IdentityKeyFileError, IdentityKeyInit, IdentityRole, IdentityTlsCredentials,
-    ParseClientIdentityError, PeerIdentityError, client_identity_from_certificate_der,
+    ClientIdentity, IDENTITY_KEY_FILENAME, IdentityKey, IdentityKeyError, IdentityKeyFileError,
+    IdentityKeyInit, IdentityRole, IdentityTlsCredentials, ParseClientIdentityError,
+    PeerIdentityError, client_identity_from_certificate_der,
     identity_key_is_group_or_world_readable, init_identity_key, rotate_identity_key,
 };
 #[cfg(test)]
@@ -111,9 +111,7 @@ pub use server_cert::{
     renew_manual_server_certificate, rotate_manual_server_certificate_authority,
 };
 pub use server_certificate::CertificateOwner;
-pub use server_identity::{
-    ParseServerIdentityError, SERVER_IDENTITY_KEY_FILENAME, ServerIdentity, read_server_identity,
-};
+pub use server_identity::{ParseServerIdentityError, ServerIdentity, read_server_identity};
 pub use server_runtime::ServerRuntime;
 pub use shutdown::{OrderlyShutdown, ShutdownMode, ShutdownTransition};
 pub use startup::{

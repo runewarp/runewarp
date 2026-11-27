@@ -21,10 +21,9 @@ async fn runtimes_export_handshake_connect_and_visitor_spans() -> Result<(), Box
     let logs = JsonLogs::install(captured.provider());
     let directory = tempfile::tempdir()?;
     setup(directory.path())?;
-    let identity =
-        crate::IdentityKey::read(&directory.path().join(crate::CLIENT_IDENTITY_KEY_FILENAME))?
-            .client_identity()
-            .to_string();
+    let identity = crate::IdentityKey::read(&directory.path().join(crate::IDENTITY_KEY_FILENAME))?
+        .client_identity()
+        .to_string();
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let backend_address = listener.local_addr()?;
     let backend = tokio::spawn(async move {
@@ -54,7 +53,7 @@ async fn runtimes_export_handshake_connect_and_visitor_spans() -> Result<(), Box
     std::fs::write(
         &config_path,
         format!(
-            "[client]\nserver-address = \"localhost:{port}\"\nserver-trust = \"ca-file\"\nserver-ca-file = \"cert/server-ca.crt\"\nidentity-key = \"client.key\"\n[[client.services]]\nbackend-address = \"{backend_address}\"\n"
+            "[client]\nserver-address = \"localhost:{port}\"\nserver-trust = \"ca-file\"\nserver-ca-file = \"cert/server-ca.crt\"\nidentity-key = \"identity.key\"\n[[client.services]]\nbackend-address = \"{backend_address}\"\n"
         ),
     )?;
     let settings = crate::load_client_config(&config_path)?;

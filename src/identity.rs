@@ -24,8 +24,8 @@ use x509_parser::parse_x509_certificate;
 
 use crate::cert_file_ops;
 
-/// Default Client identity key filename inside the XDG data directory.
-pub const CLIENT_IDENTITY_KEY_FILENAME: &str = "client.key";
+/// Default identity key filename inside each role's XDG data directory.
+pub const IDENTITY_KEY_FILENAME: &str = "identity.key";
 
 const IDENTITY_KEY_MODE: u32 = 0o600;
 const PKCS8_PEM_LABEL: &str = "PRIVATE KEY";

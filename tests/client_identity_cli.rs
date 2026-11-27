@@ -102,11 +102,7 @@ fn init_uses_the_xdg_default_key_path_when_key_is_omitted() {
         .assert()
         .success();
 
-    assert!(
-        xdg_data_home
-            .join("runewarp/client/identity/client.key")
-            .is_file()
-    );
+    assert!(xdg_data_home.join("runewarp/client/identity.key").is_file());
 }
 
 #[test]

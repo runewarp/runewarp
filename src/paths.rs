@@ -57,12 +57,11 @@ pub fn default_config_path() -> Result<PathBuf, XdgPathError> {
     Ok(runewarp_dir(XdgDirectory::Config)?.join("config.toml"))
 }
 
-/// Default Client identity key, at the same path released Core used for `client.key`.
+/// Default Client identity key.
 pub fn default_client_identity_key_path() -> Result<PathBuf, XdgPathError> {
     Ok(runewarp_dir(XdgDirectory::Data)?
         .join("client")
-        .join("identity")
-        .join(crate::CLIENT_IDENTITY_KEY_FILENAME))
+        .join(crate::IDENTITY_KEY_FILENAME))
 }
 
 pub fn default_client_server_ca_path() -> Result<PathBuf, XdgPathError> {
@@ -81,8 +80,7 @@ pub fn default_server_cert_material_dir() -> Result<PathBuf, XdgPathError> {
 pub fn default_server_identity_key_path() -> Result<PathBuf, XdgPathError> {
     Ok(runewarp_dir(XdgDirectory::Data)?
         .join("server")
-        .join("identity")
-        .join(crate::SERVER_IDENTITY_KEY_FILENAME))
+        .join(crate::IDENTITY_KEY_FILENAME))
 }
 
 pub fn default_control_ca_path() -> Result<PathBuf, XdgPathError> {

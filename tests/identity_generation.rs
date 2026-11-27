@@ -135,3 +135,22 @@ fn in_memory_certificates_pin_the_key_spki_for_both_roles() {
         );
     }
 }
+
+#[test]
+fn p521_keys_that_ring_cannot_load_get_the_algorithm_error() {
+    let output = std::process::Command::new("openssl")
+        .args([
+            "genpkey",
+            "-algorithm",
+            "EC",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-521",
+        ])
+        .output()
+        .expect("openssl must be installed to build the P-521 key fixture");
+    assert!(output.status.success());
+
+    let message = error_message(std::str::from_utf8(&output.stdout).unwrap());
+
+    assert!(message.contains("ECDSA P-256"), "{message}");
+}

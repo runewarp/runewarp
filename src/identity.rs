@@ -151,6 +151,9 @@ impl IdentityKey {
         }
         let pkcs8 = PrivatePkcs8KeyDer::from_pem_slice(pem.as_bytes())
             .map_err(|_| IdentityKeyError::InvalidPkcs8)?;
+        // Classify by the PKCS#8 algorithm identifier first, so keys the signer backend cannot
+        // load (such as P-521) still get the algorithm error rather than a format error.
+        check_pkcs8_algorithm(pkcs8.secret_pkcs8_der())?;
         let key_pair = KeyPair::try_from(&PrivateKeyDer::Pkcs8(pkcs8))
             .map_err(|_| IdentityKeyError::InvalidPkcs8)?;
         if key_pair.algorithm() == &PKCS_ECDSA_P256_SHA256 {
@@ -194,7 +197,8 @@ impl IdentityKey {
 
     /// Build an in-memory self-signed certificate for `role` and pair it with the private key.
     ///
-    /// The certificate's serial, signature and bytes are not stable. Only its SPKI is meaningful.
+    /// The certificate's serial is unspecified and its signature and bytes change on every build.
+    /// Only its SPKI is meaningful.
     pub fn tls_credentials(
         &self,
         role: IdentityRole,
@@ -235,6 +239,34 @@ impl IdentityKey {
             key_pair,
             subject_public_key_info,
         }
+    }
+}
+
+/// Accept only an `id-ecPublicKey` PKCS#8 key on the P-256 curve.
+fn check_pkcs8_algorithm(der: &[u8]) -> Result<(), IdentityKeyError> {
+    use x509_parser::asn1_rs::{FromDer, Sequence};
+    use x509_parser::oid_registry::OID_SIG_ED25519;
+    use x509_parser::x509::AlgorithmIdentifier;
+
+    let (_, private_key_info) =
+        Sequence::from_der(der).map_err(|_| IdentityKeyError::InvalidPkcs8)?;
+    let (rest, _version) = u32::from_der(private_key_info.content.as_ref())
+        .map_err(|_| IdentityKeyError::InvalidPkcs8)?;
+    let (_, algorithm) =
+        AlgorithmIdentifier::from_der(rest).map_err(|_| IdentityKeyError::InvalidPkcs8)?;
+    if algorithm.algorithm == OID_SIG_ED25519 {
+        return Err(IdentityKeyError::Ed25519);
+    }
+    let is_p256 = algorithm.algorithm == OID_KEY_TYPE_EC_PUBLIC_KEY
+        && algorithm
+            .parameters
+            .as_ref()
+            .and_then(|parameters| parameters.as_oid().ok())
+            .is_some_and(|curve| curve == OID_EC_P256);
+    if is_p256 {
+        Ok(())
+    } else {
+        Err(IdentityKeyError::UnsupportedAlgorithm)
     }
 }
 

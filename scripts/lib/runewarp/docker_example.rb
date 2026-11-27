@@ -73,7 +73,8 @@ module Runewarp
       "server.key",
       "server-ca.crt"
     ].freeze
-    CLIENT_RUNTIME_FILES = ["identity.key"].freeze
+    CLIENT_IDENTITY_KEY_FILE = "identity.key"
+    CLIENT_RUNTIME_FILES = [CLIENT_IDENTITY_KEY_FILE].freeze
 
     def layout(example_dir)
       generated_dir = File.join(example_dir, "generated")
@@ -191,7 +192,7 @@ module Runewarp
       Core.section("Rendering Docker example configuration")
       Core.install_readonly_copy(File.join(paths[:server_runtime_dir], "server-ca.crt"), paths[:client_trust_path])
 
-      client_identity = client_identity_fingerprint(File.join(paths[:client_runtime_dir], "identity.key"))
+      client_identity = client_identity_fingerprint(File.join(paths[:client_runtime_dir], CLIENT_IDENTITY_KEY_FILE))
       server_template = File.read(File.join(example_dir, "server", "config.toml.template"), encoding: "utf-8")
       File.write(paths[:server_config_path], server_template.gsub("__CLIENT_IDENTITY__", client_identity), encoding: "utf-8")
       FileUtils.cp(File.join(example_dir, "client", "config.toml.template"), paths[:client_config_path])

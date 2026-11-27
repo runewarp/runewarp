@@ -89,7 +89,8 @@ runewarp client identity show
 The fingerprint is the SHA-256 of the key's DER SubjectPublicKeyInfo, so you can compute it on a machine without Runewarp:
 
 ```bash
-openssl pkey -in identity.key -pubout -outform DER | openssl dgst -sha256
+key="${XDG_DATA_HOME:-$HOME/.local/share}/runewarp/client/identity.key"
+openssl pkey -in "$key" -pubout -outform DER -out spki.der && openssl dgst -sha256 spki.der
 ```
 
 `runewarp client identity rotate` replaces the key in one atomic step and prints the new fingerprint. Update Server authorization with it; a running Client picks the new key up on its next reconnect.

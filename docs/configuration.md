@@ -318,11 +318,13 @@ The file must be an unencrypted PKCS#8 PEM file with exactly one `PRIVATE KEY` b
 
 Config validation requires a readable, valid key at the configured path. A key readable by its group or others logs one warning at startup and still runs, because Kubernetes Secret mounts default to `0644`.
 
-The identity fingerprint (the `client-identity` value) is the SHA-256 of the key's DER SubjectPublicKeyInfo, written as 64 lowercase hex characters. It is the same data as a DANE TLSA `3 1 1` record. Compute it without Runewarp:
+The identity fingerprint (the `client-identity` value) is the SHA-256 of the key's DER SubjectPublicKeyInfo, written as 64 lowercase hex characters. It is the same data as a DANE TLSA `3 1 1` record. Compute it without Runewarp, replacing `identity.key` with the key's path:
 
 ```sh
-openssl pkey -in identity.key -pubout -outform DER | openssl dgst -sha256
+openssl pkey -in identity.key -pubout -outform DER -out spki.der && openssl dgst -sha256 spki.der
 ```
+
+The two steps run separately so a missing or unreadable key fails instead of hashing empty input.
 
 Runewarp builds a certificate in memory from the key whenever a TLS peer needs one. The certificate carries no meaning beyond the public key, so there is nothing to renew. `runewarp client identity rotate` replaces the key and therefore changes the `client-identity`. Runewarp reads the key on each connection attempt, so a replaced key takes effect on the next reconnect without a restart.
 

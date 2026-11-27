@@ -69,7 +69,15 @@ fn open_new_file_with_mode(path: &Path, mode: u32) -> io::Result<std::fs::File> 
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(mode);
-    options.open(path)
+    let file = options.open(path)?;
+    // `mode` above is filtered by the umask; set it on the descriptor so the result never depends
+    // on it (a restrictive umask must not leave an unreadable file).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+    Ok(file)
 }
 
 #[cfg(test)]

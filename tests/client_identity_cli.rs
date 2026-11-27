@@ -435,3 +435,27 @@ fn managed_configs_require_an_explicit_key_for_init_and_rotate() {
     assert!(stderr.contains("not supported for managed-mode configs without --key"));
     assert!(tempdir.path().join("client.key").is_file());
 }
+
+#[cfg(unix)]
+#[test]
+fn init_and_rotate_create_owner_only_keys_under_a_restrictive_umask() {
+    let tempdir = tempdir().unwrap();
+    let binary = assert_cmd::cargo::cargo_bin("runewarp");
+    for subcommand in ["init", "rotate"] {
+        let status = ProcessCommand::new("sh")
+            .current_dir(tempdir.path())
+            .arg("-c")
+            .arg("umask 0777 && exec \"$0\" client identity \"$1\" --key client.key")
+            .arg(&binary)
+            .arg(subcommand)
+            .status()
+            .unwrap();
+
+        assert!(
+            status.success(),
+            "`{subcommand}` must succeed under umask 0777"
+        );
+        assert_eq!(mode_of(&tempdir.path().join("client.key")), 0o600);
+        IdentityKey::read(&tempdir.path().join("client.key")).unwrap();
+    }
+}

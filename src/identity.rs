@@ -282,8 +282,8 @@ impl fmt::Display for IdentityKeyError {
             ),
             Self::InvalidPkcs8 => formatter.write_str("identity key is not a valid PKCS#8 key"),
             Self::Ed25519 => formatter.write_str(
-                "identity key is Ed25519, which is no longer supported; run \
-                 `runewarp client identity rotate` to replace it with an ECDSA P-256 key",
+                "identity key is Ed25519, which is no longer supported; replace it with an ECDSA \
+                 P-256 key (for a Client, run `runewarp client identity rotate --key <path>`)",
             ),
             Self::UnsupportedAlgorithm => {
                 formatter.write_str("identity key must be ECDSA P-256 (prime256v1)")
@@ -450,7 +450,7 @@ pub fn rotate_identity_key(path: &Path) -> Result<ClientIdentity, IdentityKeyFil
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(IdentityKey::read(path)?.client_identity())
+    Ok(key.client_identity())
 }
 
 /// Whether the key file grants read access to its group or others.

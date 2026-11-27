@@ -310,7 +310,7 @@ Server ACME state directories must be private to their operator, with mode `0700
 
 A Client or Server identity is one private key file. Nothing else is stored on disk. `client.identity-key` and `server.identity-key` name that file.
 
-The file must be an unencrypted PKCS#8 PEM file with exactly one `PRIVATE KEY` block holding an ECDSA P-256 key. Runewarp rejects, each with its own error:
+The file must be an unencrypted PKCS#8 PEM file with exactly one `PRIVATE KEY` block holding an ECDSA P-256 key. The key must embed its public key with the uncompressed point, as OpenSSL writes by default. Runewarp rejects, each with its own error:
 
 - SEC1 keys (`EC PRIVATE KEY`). Convert one to PKCS#8 without changing the key or its fingerprint with `openssl pkcs8 -topk8 -nocrypt -in old.key -out client.key`.
 - Ed25519 keys from unreleased builds. Replace a Client key with `runewarp client identity rotate --key <path>`; `--key` is required for managed-mode configs. Replace a Server key by provisioning a new P-256 key at `server.identity-key`. Then update authorization with the new fingerprint.

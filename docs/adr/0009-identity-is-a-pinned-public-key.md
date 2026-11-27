@@ -13,7 +13,7 @@ This is a hard break. Older identity directories, `identity-dir`, stored certifi
 
 ## Consequences
 
-- The certificate's serial, validity and extensions are not trust inputs. Its bytes change on every build; only SPKI continuity is a compatibility contract.
+- The certificate's serial, validity and extensions are not trust inputs. Its serial is unspecified and its bytes change on every build; only SPKI continuity is a compatibility contract.
 - Participant identities stay distinct from Visitor credentials, so Visitor authentication can choose its own trust model.
 - User logins may manage identity bindings, but machine keys keep their own identity and keep working without user sessions. Any future binding expiry needs its own decision on enforcement and offline behaviour.
 - Hardware-backed keys or new algorithms extend `identity-key` and the algorithm allowlist. The fingerprint scheme stays the same.

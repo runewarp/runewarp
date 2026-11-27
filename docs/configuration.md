@@ -313,7 +313,7 @@ A Client or Server identity is one private key file. Nothing else is stored on d
 The file must be an unencrypted PKCS#8 PEM file with exactly one `PRIVATE KEY` block holding an ECDSA P-256 key. Runewarp rejects, each with its own error:
 
 - SEC1 keys (`EC PRIVATE KEY`). Convert one to PKCS#8 without changing the key or its fingerprint with `openssl pkcs8 -topk8 -nocrypt -in old.key -out client.key`.
-- Ed25519 keys from unreleased builds. Run `runewarp client identity rotate` to replace one with a P-256 key, then update authorization.
+- Ed25519 keys from unreleased builds. Replace a Client key with `runewarp client identity rotate --key <path>`; `--key` is required for managed-mode configs. Replace a Server key by provisioning a new P-256 key at `server.identity-key`. Then update authorization with the new fingerprint.
 - encrypted keys, other algorithms such as P-384 or RSA, and files with extra PEM blocks. Passphrases, OpenSSH keys and raw base64 keys are not supported.
 
 Config validation requires a readable, valid key at the configured path. A key readable by its group or others logs one warning at startup and still runs, because Kubernetes Secret mounts default to `0644`.

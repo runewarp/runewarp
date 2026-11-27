@@ -10,7 +10,7 @@ Runewarp welcomes focused changes to the open-source Client, Server, protocols, 
 
 ## Validate changes
 
-Run the full Rust checks before committing:
+Run the full Rust checks before committing. The test suite needs the `openssl` command on `PATH`: identity tests use it to check the documented fingerprint recipe and to build an RSA key fixture.
 
 ```bash
 cargo fmt --check
